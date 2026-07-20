@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: flashnode
+  namespace: flashml
+spec:
+  template:
+    spec:
+      containers:
+        - name: agent
+          env:
+            - name: FLASHNODE_ENVIRONMENT
+              value: cloud
+            - name: FLASHNODE_POOL
+              value: standard-cloud

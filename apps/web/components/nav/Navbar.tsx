@@ -5,9 +5,10 @@ import { usePathname } from "next/navigation";
 import { Lightning } from "@phosphor-icons/react";
 
 const navLinks = [
-  { href: "/launch", label: "Launch Job" },
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/visualize", label: "Visualize" },
+  { href: "/nodes", label: "Nodes" },
+  { href: "/jobs", label: "Jobs" },
+  { href: "/submit", label: "Submit" },
+  { href: "/integration", label: "Integration" },
 ];
 
 export function Navbar() {

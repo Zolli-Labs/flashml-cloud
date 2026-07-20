@@ -1,0 +1,36 @@
+# Simple Log Service collection for FlashML pods on ACK.
+# Prerequisite: the ACK Logtail component (logtail-ds + alibaba-log-controller)
+# installed via the cluster's add-on management. This CR then routes stdout
+# from the flashml namespace into ${SLS_PROJECT}/${SLS_LOGSTORE}.
+#
+# All FlashML services log single-line JSON with job_id / node_id /
+# runtime_execution_id / service fields, so SLS queries correlate 1:1 with
+# FlashML Cloud jobs (e.g.  * | where job_id = 'ffba53b1fec0').
+apiVersion: log.alibabacloud.com/v1alpha1
+kind: AliyunLogConfig
+metadata:
+  name: flashml-stdout
+  namespace: flashml
+spec:
+  # Set to your SLS project (defaults to the cluster-bound project when omitted).
+  # project: flashml-poc
+  logstore: flashml-jobs
+  logtailConfig:
+    inputType: plugin
+    configName: flashml-stdout
+    inputDetail:
+      plugin:
+        inputs:
+          - type: service_docker_stdout
+            detail:
+              Stdout: true
+              Stderr: true
+              IncludeK8sLabel:
+                io.kubernetes.pod.namespace: flashml
+        processors:
+          - type: processor_json
+            detail:
+              SourceKey: content
+              KeepSource: true
+              ExpandDepth: 1
+              ExpandConnector: ""

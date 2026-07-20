@@ -1,0 +1,14 @@
+# Local (Kind) deployment profile.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+  - minio.yaml
+# Local images come from the kind-registry (see scripts/local/registry.sh).
+images:
+  - name: flashml/runtime
+    newName: localhost:5001/flashml/runtime
+  - name: flashml/cloud-api
+    newName: localhost:5001/flashml/cloud-api
+  - name: flashml/node
+    newName: localhost:5001/flashml/node

@@ -1,0 +1,29 @@
+# Rendered by scripts/alibaba/render.sh. OSS/ACR/sandbox wiring is deployment
+# configuration — it never appears in the public JobSpec.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flashruntime
+  namespace: flashml
+spec:
+  template:
+    spec:
+      containers:
+        - name: flashruntime
+          env:
+            - name: FLASHML_PROFILE
+              value: alibaba-ack
+            - name: FLASHML_IMAGE_REGISTRY_PREFIX
+              value: "${ACR_REGISTRY}/${ACR_NAMESPACE}/"
+            - name: FLASHML_ARTIFACT_BACKEND
+              value: oss
+            - name: FLASHML_ARTIFACT_ENDPOINT
+              value: "${OSS_ENDPOINT}"
+            - name: FLASHML_ARTIFACT_BUCKET
+              value: "${OSS_BUCKET}"
+            - name: FLASHML_STANDARD_NODE_SELECTOR
+              value: "${FLASHML_STANDARD_NODE_SELECTOR}"
+            - name: FLASHML_SANDBOX_NODE_SELECTOR
+              value: "${FLASHML_SANDBOX_NODE_SELECTOR}"
+            - name: FLASHML_RUNTIME_CLASS
+              value: "${FLASHML_RUNTIME_CLASS}"

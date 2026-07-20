@@ -1,0 +1,108 @@
+# FlashRuntime API: owns jobs/events/artifacts, creates RayJob CRs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flashruntime
+  namespace: flashml
+---
+# Narrow RBAC: manage RayJobs + read pods/logs in the flashml namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flashruntime
+  namespace: flashml
+rules:
+  - apiGroups: ["ray.io"]
+    resources: ["rayjobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flashruntime
+  namespace: flashml
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flashruntime
+subjects:
+  - kind: ServiceAccount
+    name: flashruntime
+    namespace: flashml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flashruntime
+  namespace: flashml
+  labels:
+    app: flashruntime
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flashruntime
+  template:
+    metadata:
+      labels:
+        app: flashruntime
+    spec:
+      serviceAccountName: flashruntime
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: flashruntime
+          image: flashml/runtime:poc-v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8100
+          env:
+            - name: FLASHML_PROFILE
+              value: local
+            - name: FLASHML_NAMESPACE
+              value: flashml
+            - name: FLASHML_IMAGE_REGISTRY_PREFIX
+              value: "localhost:5001/"
+            - name: FLASHML_LEDGER_PATH
+              value: /data/flashruntime.db
+            - name: FLASHML_ARTIFACT_BACKEND
+              value: minio
+            - name: FLASHML_ARTIFACT_ENDPOINT
+              value: minio.flashml.svc.cluster.local:9000
+            - name: FLASHML_ARTIFACT_BUCKET
+              value: flashml-artifacts
+            - name: FLASHML_ARTIFACT_SECURE
+              value: "false"
+            - name: FLASHML_ARTIFACT_CREDENTIALS_SECRET
+              value: flashml-artifact-credentials
+          envFrom:
+            - secretRef:
+                name: flashml-artifact-credentials
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8100 }
+            initialDelaySeconds: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flashruntime
+  namespace: flashml
+spec:
+  selector:
+    app: flashruntime
+  ports:
+    - port: 8100
+      targetPort: 8100

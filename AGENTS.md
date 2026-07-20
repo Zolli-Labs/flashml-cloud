@@ -32,11 +32,43 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
 
 ## Current state (July 2026)
 
-- `apps/web/` — Next.js dashboard seeded from the FlashML prototype (dark
-  tech design system, training visualizations). Rebuild pages around jobs,
-  nodes, recovery timelines, and credits; keep the design system.
-- `apps/api/`, `services/*` — planned (FastAPI, Postgres, Redis). See
-  README for the target structure.
+- `apps/api/` — FastAPI control plane (:8000): node registry + heartbeats
+  (SQLite), job submission/status/events proxied to FlashRuntime, Alibaba
+  integration panel. Tests: `pytest` (7). Postgres/Redis remain the target
+  for post-POC state (see hard rule 3 — SQLite is POC-scale only).
+- `apps/web/` — POC pages `/nodes`, `/jobs`, `/jobs/[id]`, `/submit`,
+  `/integration` on the existing dark design system (`lib/poc-api.ts` client;
+  legacy prototype pages retained). `npm run dev` + NEXT_PUBLIC_CLOUD_API.
+- `infra/` — kustomize base + local (Kind/MinIO/registry) + alibaba
+  (ACK/ACR/OSS/SLS/sandbox) profiles; `scripts/local`, `scripts/alibaba`.
+  Workspace-root Makefile drives everything (`poc-local-*`, `poc-ack-*`).
+
+## Near-term direction (workspace `PROGRESS.md` is the authoritative log)
+
+This repo stays a **thin business wrapper** — coordination (leases, task
+expansion, checkpoints, recovery) lives in FlashRuntime; if this API dies
+mid-job, running leases must keep working.
+
+**Status note (July 2026):** the local milestone was delivered entirely in
+FlashRuntime's *self-hosted profile* — the runtime service itself now hosts
+the minimal node registry, join codes, local artifacts, and a built-in
+dashboard at its `GET /`. This repo's job is unchanged but its integration
+target moved: the POC-era `apps/api` proxies the old job surface only and
+does **not** yet front the lease coordinator, checkpoint endpoints, or
+device nodes.
+
+What lands here next:
+- **Stage 5 (Alibaba, next up):** ECS-first deployment — one small ECS runs
+  coordinator + this API + web via compose (images in ACR); artifacts to
+  OSS; this API mints short-lived STS upload creds (RAM role); logs to SLS.
+  Re-point `apps/web` + `apps/api` at the current runtime surface (leases,
+  nodes, checkpoints, artifacts) and layer business auth over the runtime's
+  join codes. `poc-ack-*` profiles return with the ACK pool.
+- **Stage 6 (cloud half):** SQLite → ApsaraDB RDS PostgreSQL (hard rule 3
+  finally honored); SSE event streaming replaces 2-second polling; ACK node
+  pool as the Mode B execution pool alongside device nodes.
+- **Stage 8:** metrics page computed from the ledger (goodput, MTTD, MTTR,
+  lost work, cost per completed job) — every needed event already exists.
 
 ## Dev workflow
 

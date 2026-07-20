@@ -1,0 +1,99 @@
+# FlashNode agent: one per compute node (DaemonSet).
+# Security contract: outbound-only, non-root, no privileged mode, no
+# container-runtime socket, no workload execution in the Kubernetes profile.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flashnode
+  namespace: flashml
+---
+# Narrowest useful RBAC: read Node objects (allocatable + labels). No writes;
+# FlashNode reports upstream instead of mutating cluster state.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flashnode-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flashnode-node-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flashnode-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: flashnode
+    namespace: flashml
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: flashnode
+  namespace: flashml
+  labels:
+    app: flashnode
+spec:
+  selector:
+    matchLabels:
+      app: flashnode
+  template:
+    metadata:
+      labels:
+        app: flashnode
+    spec:
+      serviceAccountName: flashnode
+      # Compute nodes only — never the control plane (see kind-cluster.yaml).
+      nodeSelector:
+        flashml.dev/compute: "true"
+      # The stable node ID lives on the *node* filesystem so it survives pod
+      # restarts. The init container narrowly chowns that one directory to
+      # the agent's non-root uid; the agent itself never runs as root.
+      initContainers:
+        - name: init-state-dir
+          image: busybox:1.36.1
+          command: ["sh", "-c", "mkdir -p /var/lib/flashnode && chown 10001:10001 /var/lib/flashnode"]
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/flashnode
+      containers:
+        - name: agent
+          image: flashml/node:poc-v1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FLASHNODE_CLOUD_URL
+              value: http://flashml-cloud-api.flashml.svc.cluster.local:8000
+            - name: FLASHNODE_HEARTBEAT_SECONDS
+              value: "10"
+            - name: FLASHNODE_ENVIRONMENT
+              value: local
+            - name: FLASHNODE_STATE_DIR
+              value: /var/lib/flashnode
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/flashnode
+      terminationGracePeriodSeconds: 15
+      volumes:
+        - name: state
+          hostPath:
+            path: /var/lib/flashnode
+            type: DirectoryOrCreate
