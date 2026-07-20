@@ -152,6 +152,29 @@ repos (main untouched; nothing pushed — no remotes were configured).
   The restart-survival test (`tests/test_leases_sqlite.py`) is the
   conformance suite — run it against the new store.
 
+## 6b. Designed interfaces for all future work (added post-handoff, same session)
+
+By user request, every not-yet-built part now carries its **complete
+designed interface** — full ABCs with typed inputs/outputs, semantics,
+error behavior, and per-method notes — plus contract tests
+(`tests/test_interfaces.py` in both repos) proving importability, ABC
+enforcement, and a conforming dummy. Implement *against* these; don't
+redesign them casually (changing a contract = red test + note first).
+
+| Interface | Where | Contract in one line |
+|---|---|---|
+| `StrategyCompiler` → `LaunchSpec` | `flashruntime/strategies/` | pure, deterministic plan→config; env preflight belongs to launchers; registry via `register_compiler`/`compiler_for` |
+| `Launcher`/`LaunchHandle`/`LaunchState` | `flashruntime/launchers/` | start + watch, never retry (recovery is the coordinator's); `healthy()` is the only env preflight |
+| `WorkloadRecipe` | `flashruntime/recipes/` | expand/validate_params/validate_output/reduce/checkpointable — bundles today's three hand-wired touchpoints; migrate existing expansions here without wire changes |
+| `PlacementPolicy` + `FifoPlacement` | `flashruntime/scheduler/` | eligible/score/choose template; Fifo = today's exact behavior (wiring it is a pure refactor); R9 |
+| `ManifestStore` + in-memory ref | `flashruntime/checkpoint/store.py` | the R1 persistence seam; migration steps written in the module docstring — copy SqliteLeaseStore's tested upsert |
+| `Profiler`/`ProfileResult`/`ProfileCache` | `flashruntime/profiling/` | four isolation invariants; results born `basis="profiled"`; skip policy lives in the planner |
+| `ResourceProvider`/`Offer`/`AcquiredCapacity` | `flashruntime/providers/` | offers/acquire/release; idempotent release is the cost-safety anchor; providers quoted-not-trusted |
+| `flash.run(plan)` | `flashruntime/__init__.py` | raises NotImplementedError; the intended 3-step pipeline is in its docstring |
+| `AdmissionProbe`/`run_admission` | `flashnode/benchmark/` | budgeted, failure-isolated raw measurements; standard probe names listed |
+| `TelemetryCollector`/`TelemetrySample` | `flashnode/telemetry/` | machine-only observation; needs additive NodeHeartbeat.telemetry protocol field (noted) |
+| `HostPolicy`/`load_host_policy` | `flashnode/config/` | **concrete**: conservative defaults, fail-closed loading, owner can only narrow allowlists; wiring points listed |
+
 ## 7. Where everything lives (one-screen recap)
 
 `HANDBOOK.md` (architecture bible) · `PROGRESS.md` (status + log + logging

@@ -86,6 +86,30 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-19 — Complete designed interfaces for all future-work parts (both repos)
+What/why: by user request, every not-yet-built component now has its final
+interface surface with full input/output contracts and explanatory notes —
+flashruntime: StrategyCompiler+LaunchSpec (strategies/), Launcher/
+LaunchHandle/LaunchState (launchers/), WorkloadRecipe (recipes/),
+PlacementPolicy + concrete FifoPlacement matching today's exact claim
+behavior (scheduler/), ManifestStore seam + in-memory ref with the R1
+migration steps written in-module (checkpoint/store.py), Profiler/
+ProfileResult/ProfileCache with the four isolation invariants
+(profiling/), ResourceProvider/Offer/AcquiredCapacity (providers/), and
+flash.run() raising NotImplementedError with the designed pipeline in its
+docstring; flashnode: AdmissionProbe + run_admission (budgeted,
+failure-isolated), TelemetryCollector/TelemetrySample (machine-only;
+NodeHeartbeat protocol addition noted), and concrete HostPolicy +
+load_host_policy (conservative defaults, fail-closed, owner-narrows-only).
+AGENTS rule 7 amended (designed interfaces ≠ empty scaffolding); HANDOFF
+gained §6b interface table; flashnode missing-list updated.
+How verified: TDD — 15 contract tests written first and watched red
+(ModuleNotFound), then green; suites: flashruntime 119, flashnode 33,
+e2e 3, all green.
+Next: implementers start from the contract tests' dummy examples; first
+consumers per SPRINT_PLAN (metrics Day 1; ManifestStore Day 3; recipes
+Days 8–10).
+
 ### 2026-07-19 — Handoff: cleanup, HANDOFF.md, all work committed (workspace-wide)
 What/why: session-end handoff (model changeover). Wrote `HANDOFF.md` — the
 builder's exit notes: ranked risks (credentials, open artifact PUT,
