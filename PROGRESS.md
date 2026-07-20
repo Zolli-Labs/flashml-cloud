@@ -86,6 +86,23 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-19 — Handoff: cleanup, HANDOFF.md, all work committed (workspace-wide)
+What/why: session-end handoff (model changeover). Wrote `HANDOFF.md` — the
+builder's exit notes: ranked risks (credentials, open artifact PUT,
+in-memory manifests, disk pressure, single-writer assumption), hard-won
+gotchas (colima $HOME mounts, repo-dir shadowing, Thread._stop, stale
+editables, conftest scoping, env-scrub vs PYTHONPATH), judgment calls to
+revisit consciously, small-debt list, and per-sprint-item tips. Cleaned:
+root .DS_Store/.pytest_cache, scheduler scaffold docstring → R9, *.db
+gitignored. **Secured all work in git**: each product repo committed on
+branch `local-milestone-2026-07` (main untouched, nothing pushed — no
+remotes); workspace root `git init`'d (docs + e2e + Makefile committed,
+product repos gitignored as independent repos).
+How verified: all working trees clean (0 changes ×4); suites green —
+flashruntime 109, flashnode 28, e2e 3.
+Next: first session of the new agent → HANDOFF.md §1 (confirm branches
+with the user, decide merge-to-main, then SPRINT_PLAN Day 1).
+
 ### 2026-07-19 — Documentation system: HANDBOOK + SPRINT_PLAN + logging protocol + archive (workspace-wide)
 What/why: PM-level doc overhaul so any future agent can onboard from one
 place. New `HANDBOOK.md` (product thesis, per-component breakdown, as-built

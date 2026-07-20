@@ -20,6 +20,10 @@ Workspace document map (read in this order when starting work):
                               breakdown, as-built local architecture, cloud
                               target, implementation recipes, edge-case
                               register, research register (R1–R10), DoD.
+- HANDOFF.md                — READ SECOND: the builder's exit notes —
+                              ranked risks, hard-won gotchas, judgment
+                              calls, per-sprint-item tips, git-branch state
+                              (all work on local-milestone-2026-07).
 - PROGRESS.md               — AUTHORITATIVE status: stage checklist, dated
                               work log, and the LOGGING PROTOCOL every
                               agent must follow.
