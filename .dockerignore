@@ -1,0 +1,9 @@
+# Workspace-root build context (flashnode and cloud-api images).
+**/.venv
+**/.git
+**/.pytest_cache
+**/__pycache__
+**/*.egg-info
+**/node_modules
+**/.next
+**/docs

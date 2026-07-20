@@ -1,0 +1,11 @@
+# the three product repos are their own git repositories
+flashruntime/
+flashnode/
+flashml-cloud/
+# local state and venvs
+e2e/.venv/
+.local-state/
+__pycache__/
+.pytest_cache/
+.DS_Store
+.env.alibaba
