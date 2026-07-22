@@ -86,6 +86,39 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-21 — Final-review fix wave: command-workloads hardening (flashruntime)
+What/why: whole-branch review fix list applied on `local-milestone-2026-07`.
+Security fix F1: the legacy `hyperparameter_search`/`sharded_kmeans` expansions
+in `service/modea.py` were dropping the isolation stamp, so a `sandboxed` job
+leased to non-sandbox nodes — now stamped like the command recipe. Robustness:
+F2 literal/positional braces (`{}`/`{0}`) in argv → ValueError (422) not
+IndexError (500); F3 `latest_valid_manifest` guards manifest-read AND per-part
+re-hash with `except (OSError, ValueError)` (a `manifest.json` that is a
+directory no longer crashes the restore scan); F4 fan-out trials get per-trial
+job ids `local-NNN` so each has its own `FLASHML_CKPT_DIR` (no cross-trial
+weight restore) while the non-fanout path keeps `local` (resume depends on it).
+Docs: strategies `LaunchSpec.files` docstring reconciled to the real output-dir
+target (F5); guide notes GPU DDP is a later slice, CPU/gloo is the proven path
+(F6); guide warns that reusing one `output_dir` across DIFFERENT workloads can
+restore foreign weights (F4).
+How verified: TDD (failing test first per behavior change). Covering suite
+32 passed; full `pytest` **183 passed, 4 deselected** (was 176 at task-11); the
+kill-and-resume e2e (`test_kill_and_resume_reproduces_uninterrupted_result`)
+still green — F4 left the non-fanout path untouched.
+Gotchas: F4's non-fanout job id MUST stay `"local"` or the resume e2e breaks
+(`<out>/local/ckpt` is the shared tree a resubmit restores from). F2 keeps the
+"placeholder" wording so the pre-existing KeyError test still matches.
+Next: flashnode argv runner so command jobs execute remotely.
+Parking lot (accepted debt from this review): (a) no placement-failure
+event/reason is surfaced for an unplaceable sandboxed task — it just sits
+PENDING (204 on claim); revisit with the flashnode argv runner + a protocol
+event addition. (b) The legacy `hyperparameter_search`/`sharded_kmeans`
+expansions remain hand-coded fallback branches (now isolation-stamped), NOT
+migrated onto the `WorkloadRecipe` registry the `command` type uses. (c)
+`flash.submit` is `submit(workload, output_dir=None)` only — no provider/wait
+params, and `run.artifacts` are plain `Path`s (not artifact records/URIs);
+remote providers + async submit are spec §10.
+
 ### 2026-07-21 — Bring-your-own-code: command workloads + flash.submit (flashruntime)
 What/why: FlashRuntime can now *operate* a user's own training repo without a
 rewrite — the framework-neutral path ADR-0003 promised. Shipped Tasks 1–11 of
