@@ -86,6 +86,32 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-21 — Bring-your-own-code: command workloads + flash.submit (flashruntime)
+What/why: FlashRuntime can now *operate* a user's own training repo without a
+rewrite — the framework-neutral path ADR-0003 promised. Shipped Tasks 1–11 of
+the command-workloads plan: `workloads/command.py` (`CommandWorkload`/`argv()`/
+`to_jobspec()`), first concrete launcher (`launchers/local.py`), strategy
+compiler (`strategies/command.py`), and service recipe (`recipes/command.py`);
+`flash.submit(workload) → Run` (synchronous local compile→launch→wait→collect);
+thin `integrations/` adapters (sklearn sweep, pytorch DDP, HF Trainer callback,
+no framework imports at module level) + the 7-fn in-script `flashruntime.torch`
+helper (prepare/checkpoint/log_metrics/…, wraps torch's own DDP and stops);
+fail-closed sandbox placement for service-side command tasks.
+How verified: TDD throughout; flashruntime suite 176 passed, 4 integration
+deselected (was 109 at the local milestone, 125 at this branch's start) —
+incl. 4 real bring-your-code e2e tests in `tests/test_examples_e2e.py`
+(sklearn sweep, 2-proc CPU-gloo DDP ×2 scripts, kill-at-60 → resume bit-exact).
+`docs/test_documentation.py` green. Docs: new `docs/guides/bring-your-code.md`,
+README pointer, flashruntime AGENTS "Current state" bullet.
+Gotchas: `CommandWorkload.source` is a `Source` model, not a bare string
+(pydantic rejects `source="…"`). Service-side command *execution* is
+expansion+lease only — running the `argv` payload needs flashnode's argv
+runner tier (cross-repo, versioned; the recipe defines the coordinator half).
+Next: flashnode argv runner so command jobs actually execute remotely.
+Parking lot (spec §10): `flash.run(StrategyPlan)` wiring, remote providers
+(RunPod) + `git_revision` source packaging, multi-node DDP rendezvous, async
+`flash.submit`. Spec: `flashruntime/docs/superpowers/specs/2026-07-21-command-workloads-design.md`.
+
 ### 2026-07-19 — Complete designed interfaces for all future-work parts (both repos)
 What/why: by user request, every not-yet-built component now has its final
 interface surface with full input/output contracts and explanatory notes —
