@@ -86,6 +86,36 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-23 — Deploy-ready milestone: 0.1.0 assembled + shipped on-branch (flashruntime — deploy-ready T1–T13)
+What/why: closed the deploy-ready plan that turns the local runtime into a
+publishable 0.1.0. Shipped across T1–T13: bring-your-own-code SDK
+(`flash.submit(CommandWorkload)`) + `flashruntime submit`/`submit-spec` CLI;
+sklearn/pytorch/HF adapters + optional `flashruntime.torch`; automatic
+`max_restarts` recovery (classify/decide, one-call kill-and-resume); live run
+viewer on `--watch`; PyTorch-style docs site (built/served at `/docs`/Pages-
+ready); honest benchmark suite + measured M4 baseline; CI matrix + test-gated
+PyPI trusted publishing + secrets audit; real-GPU validation; prototype engine
+removed. T13 itself: README rewritten around the real story (install → 60-sec
+run → one-call fault tolerance → viewer → docs → honest benchmark teaser → GPU
+line) + AGENTS "Current state"/"Status vs. plan" refresh.
+How verified: full suite **237 passed, 1 skipped (CUDA-gated), 9 deselected**
+(was 183 at the command-workloads close, 109 at the local milestone).
+`scripts/build_docs.py --check` OK; `scripts/audit_secrets.sh` CLEAN (worktree
++ history). Real-GPU e2e: 2×RTX 4090 (RunPod), nccl DDP + GPU kill-and-resume,
+**$0.0725** total (detail in the 2026-07-23 Task-12 entry below). Docs moved
+with code: `flashruntime/README.md` front sections + `flashruntime/AGENTS.md`
+updated in this same slice.
+Gotchas: AGENTS "scheduler is the only scaffold package" was stale — scheduler
+now holds real `PlacementPolicy`/`FifoPlacement`/`IsolationAwarePlacement`;
+corrected. Recovery is wired in the SDK (`flash.submit`) path only, not the
+coordinator — kept honest in the missing-list. `flashruntime.torch` is a
+package (`torch/`), not `torch.py`.
+Next: multi-node DDP rendezvous (`nnodes>1` raises today); flashnode argv
+runner so service-side command jobs execute remotely. Parking lot — launch-day
+HUMAN steps (not code): create the PyPI project for Trusted Publishing, enable
+GitHub Pages, set `main` branch protection; then tag `v0.1.0` to fire the
+release pipeline.
+
 ### 2026-07-23 — RunPod real-GPU validation: nccl DDP + GPU resume proven (flashruntime — deploy-ready Task 12)
 What/why: the CUDA paths (nccl DDP, per-rank device placement, GPU
 kill-and-resume) were implemented but only unit-tested on CPU via a pure
