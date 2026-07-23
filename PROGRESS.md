@@ -86,6 +86,32 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-23 — RunPod real-GPU validation: nccl DDP + GPU resume proven (flashruntime — deploy-ready Task 12)
+What/why: the CUDA paths (nccl DDP, per-rank device placement, GPU
+kill-and-resume) were implemented but only unit-tested on CPU via a pure
+device-selection helper. Rented one 2-GPU RunPod community box and ran them
+for real, cloud-free, with a hard money cap.
+How verified: `scripts/runpod_gpu_e2e.py` (dry-run `--plan-only` first, then
+the real run) on **2×NVIDIA GeForce RTX 4090**, torch 2.7.1+cu128, CUDA 12.8.
+`tests/test_gpu_e2e.py` → 2 passed: 2-proc nccl completes (metrics
+`backend=nccl`, `device=cuda:0`); crash@step-40 resumes from the step-40
+checkpoint onto the uninterrupted loss (`resumed_from==40`). GPU benchmarks
+loop_overhead + recovery_economics both green (recovery: 40 steps not
+recomputed). Pod terminated (HTTP 204); post-run list = 0 labeled pods. Two
+runs, **$0.0725 total** (~3.5 min each, well under the $1 cap). flashruntime
+locally **236 passed, 1 skipped** (the GPU test, CUDA-gated), 9 deselected.
+Gotchas: the real-GPU run FOUND a genuine bug the CPU/gloo suite structurally
+cannot — `ft.prepare` placed the model on cuda but the training loop left
+batches on cpu → "two devices, cuda:0 and cpu" in cross_entropy (hit at the
+first matmul). Fix: the example moves each batch to `ft.device()` (a no-op on
+CPU, so the CPU e2e stays bit-identical). Also added `ft.device()`/`ft.backend()`
+accessors + device/backend keys in the example metrics so the GPU test can
+assert them. Harness gotcha: `| tee` masked the remote exit code (first run
+falsely reported SUCCESS over 2 failed tests) — fixed with `set -o pipefail`.
+Next: Stage-8 ledger metrics (MTTD/MTTR/goodput/lost-work). Parking lot:
+RunPod 3090 community stock was too low to allocate (fell through to 4090);
+multi-node GPU rendezvous stays a later slice.
+
 ### 2026-07-21 — Final-review fix wave: command-workloads hardening (flashruntime)
 What/why: whole-branch review fix list applied on `local-milestone-2026-07`.
 Security fix F1: the legacy `hyperparameter_search`/`sharded_kmeans` expansions
