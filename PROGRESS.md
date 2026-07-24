@@ -86,6 +86,36 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-23 — Run-monitor flow map + KPI dashboard shipped in the viewer (flashruntime)
+What/why: the live run viewer showed topology/loss/checkpoints/recovery but
+no resource or process-level view. Spec'd and built layout A: a KPI strip
+(state/elapsed/step/steps-per-sec/step latency/cpu/memory/gpu/restarts/
+verified checkpoints) plus a machine → worker → rank process flow map with
+a click-in detail panel, backed by real telemetry instead of just heartbeat
+presence. Spec:
+`flashruntime/docs/superpowers/specs/2026-07-23-run-monitor-flowmap-design.md`;
+plan: `flashruntime/docs/superpowers/plans/2026-07-23-run-monitor-flowmap.md`.
+New `flashruntime/monitor/` package (`ResourceSampler`): optional-psutil
+machine + process-tree telemetry, degrading to stdlib-only sampling when
+psutil isn't installed (new `[monitor]` extra, `psutil>=5.9`). `flash.submit`
+starts a sampler beside every launched attempt. `flashruntime.torch` gained
+per-rank heartbeat files (throttled, best-effort) so the viewer can place
+ranks under workers under machines without guessing. `viewer/state.py`
+enriches snapshots with telemetry tails + rank heartbeats + monitor samples;
+the new shared `viewer/flowmap.py` component (CSS/JS strings, zero-CDN)
+renders the flow map and KPI tiles, reused by the layout-A run page.
+How verified: full suite **264 passed, 1 skipped (CUDA-gated), 9 deselected**
+(up from 237 at the 0.1.0 deploy-ready milestone). Component escaping
+policy re-checked after the KPI-tile-color bug (color values were going
+through unescaped into the tile HTML — fixed and covered).
+Gotchas: monitor sampling must stay best-effort and non-blocking — a stalled
+psutil call must never stall the training loop it's sampling beside;
+`ResourceSampler` runs off the hot path. Rank heartbeat files are throttled
+writes, not a synchronization primitive — the viewer treats a missing/stale
+heartbeat as "unknown", never as a hard failure signal.
+Next: wire the flow map's resource charts into the Stage-8 ledger metrics
+work so goodput/MTTD/MTTR reuse the same telemetry tails.
+
 ### 2026-07-23 — Deploy-ready milestone: 0.1.0 assembled + shipped on-branch (flashruntime — deploy-ready T1–T13)
 What/why: closed the deploy-ready plan that turns the local runtime into a
 publishable 0.1.0. Shipped across T1–T13: bring-your-own-code SDK
