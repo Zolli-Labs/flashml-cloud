@@ -86,6 +86,41 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-24 — Resilience showcase: 6 fault-injection benchmarks + grouped baseline (flashruntime — resilience-showcase S1–S6/T6)
+What/why: the benchmark suite measured performance overheads but never the
+fault-tolerance guarantees themselves. Added six resilience scenarios that
+COUNT/time from real failure injection (never assert): S1 `fault_recovery_matrix`
+(5 fault types → typed recovery), S2 `checkpoint_integrity` (`kill -9` in the
+write window vs naive `torch.save`), S3 `crash_storm` (goodput under a storm of
+crash-armed trials), S4 `submit_latency` + S5 `fanout_throughput` (perf), S6
+`lease_recovery_latency` (real coordinator over sockets → MTTD/MTTR). Registry
+now 11 scenarios; rows carry a `section` field; `report.render_document` groups
+them into a "Performance" + "Resilience" table (T6). Refreshed the full measured
+baseline (`baseline-Phongs-MacBook-Air-1731.json`, Apple M4, `--all --repeats 5`,
+all 11 scenarios, ~4 min wall) + benchmarks.md Resilience intro + README teaser.
+How verified: flashruntime full suite **297 passed, 1 skipped (CUDA-gated), 20
+deselected** (was 264 at the flow-map entry; +33 across S1–S6 unit/pure-fn tests
+and T6's +3 grouped-render tests; the long chaos loops sit behind `bench_stress`).
+`scripts/build_docs.py --check` OK (grouped tables render from the committed
+JSON); `scripts/audit_secrets.sh` CLEAN. Measured headlines: fault matrix **5/5**
+handled (0 manual interventions), checkpoint integrity **5/5** survived under
+`kill -9` (naive `torch.save` **5/5** corrupted, EOFError×5), crash-storm
+**16/16** auto-resumed (goodput lower-bound 0.8, 0 manual), dead-worker MTTD
+**3.0 s** / MTTR **~3 ms**. flashruntime commit `6e20a41` (branch
+`local-milestone-2026-07`, not pushed).
+Gotchas: **PRODUCT BUG found by S6 (pre-existing, routed to follow-ups):** the
+lease stores key tasks by `task_id` ALONE (`InMemoryLeaseStore.add` and the
+`SqliteLeaseStore` PRIMARY KEY) — two jobs each expanding to `trial-000` collide
+with a 500 (`task trial-000 already exists`). Never hit before because existing
+tests submit one job per coordinator. S6 worked around it (one job of N+1 tasks);
+real fix = composite **`(job_id, task_id)`** keying in both stores. All other
+review findings are deferred Minors (cosmetic/coverage), catalogued in
+`flashruntime/.superpowers/sdd/progress.md` (per-task roll-up, lines ~84–93).
+Next: fix the `(job_id, task_id)` lease-store keying so independent jobs coexist
+on one coordinator. Parking lot: these MTTD/MTTR/goodput numbers are the first
+measured slice of the Stage-8 ledger-metrics debt — fold them into ledger-derived
+aggregates rather than re-measuring ad hoc.
+
 ### 2026-07-23 — Run-monitor flow map + KPI dashboard shipped in the viewer (flashruntime)
 What/why: the live run viewer showed topology/loss/checkpoints/recovery but
 no resource or process-level view. Spec'd and built layout A: a KPI strip
