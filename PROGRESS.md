@@ -86,6 +86,34 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-24 — Final-review fix wave: republish benchmarks from fresh N=20 baseline (flashruntime — resilience-showcase correction)
+What/why: the signing audit found the resilience showcase's headline "crash-storm
+**16/16** auto-resumed" (entry below) OVERSTATED — only HALF the 16 trials are
+crash-armed; the storm completes 16/16 but exactly **8** crashed trials auto-resume
+(the other 8 run clean). **Correction:** the honest line is "16-trial storm, half
+crash-armed: 16/16 completed, all 8 crashed trials auto-resumed, 0 manual". Also:
+README perf numbers traced to a since-deleted `--repeats 5` baseline; relabelled
+fault-matrix case (c) `hang+external SIGKILL → mid-run external SIGKILL` (the kill
+fires ~step 2, before the hang); fixed the fault-matrix `tr_note` to report the MEAN
+across repeats; hardened S6 with `FLASHML_JOIN_CODE=""`. Republished every number from
+ONE fresh `--all --repeats 20` run (baseline copied from the emitted output, never
+hand-edited).
+How verified: flashruntime full suite **297 passed, 1 skipped, 20 deselected**;
+`scripts/build_docs.py --check` OK (grouped tables render the new JSON);
+`scripts/audit_secrets.sh` CLEAN. New measured headlines: fault matrix **5/5** handled
+(0 manual), checkpoint integrity **20/20** survived `kill -9` (naive `torch.save`
+**20/20** corrupted, EOFError×20), crash-storm **16/16** completed / **8** crashed
+trials auto-resumed (goodput lower-bound 0.8, 0 manual), launch overhead **+0.04 s**,
+checkpoint cost **−1.2 ms** (p90 6.2 ms, noise floor), dead-worker MTTD **3.05 s** /
+MTTR **~3.5 ms**. flashruntime commit `d00c023` (branch `local-milestone-2026-07`, not pushed).
+Gotcha: the first `--repeats 20` run died on `recovery_economics` with `os.killpg →
+PermissionError (Operation not permitted)` in torchrun's elastic-agent SIGTERM teardown —
+the sandbox blocking process-group signalling during the mid-run kill/resume flow; the one
+allowed re-run with the sandbox disabled completed clean (all legs resumed from step 40).
+Next: the Stage-8 ledger-metrics debt still stands (fold MTTD/MTTR/goodput into
+ledger-derived aggregates). Parking lot: report.py's "reproduce with --repeats 5" hint is
+now off by the N used for the committed baseline — cosmetic, left for a later doc pass.
+
 ### 2026-07-24 — Resilience showcase: 6 fault-injection benchmarks + grouped baseline (flashruntime — resilience-showcase S1–S6/T6)
 What/why: the benchmark suite measured performance overheads but never the
 fault-tolerance guarantees themselves. Added six resilience scenarios that
