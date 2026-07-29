@@ -86,6 +86,66 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-29 — Volunteer compute pool: argv runner tier + composite lease key (flashruntime + flashnode — slices A/E of the multi-machine decomposition)
+What/why: any machine can now join the pool as an untrusted volunteer via
+`flashnode work --runner argv --coordinator <URL>` and execute a submitting
+user's arbitrary command — previously a joined node could only run
+`python -m <module>` from a fixed allowlist. `ArgvDockerRunner` +
+`harden_args()` run the task's pinned image + argv with `--network none`,
+`--read-only`, a `noexec,nosuid` `/tmp` tmpfs, non-root `--user`,
+`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit`,
+`--cpus`/`--memory` (`--memory-swap` pinned equal — otherwise the cap is
+swap-bypassable), and `--ulimit nofile`; only the bound workdir (`/work`) is
+writable, and a wall-clock timeout `docker kill`s the named container
+directly (not just the local docker client). The coordinator gates this with
+a new fail-closed `argv_capable` field and requires it alongside
+`sandbox_capable` before leasing a command task; `CommandRecipe` refuses
+`isolation.tier != "sandboxed"` for command jobs and rejects the
+`allowFallback` waiver, so a submitter can never downgrade their own
+isolation (only a coordinator operator can, via
+`FLASHML_ALLOW_UNSANDBOXED_ARGV=1`, for a trusted fleet). Alongside this,
+the lease key became composite `(job_id, task_id)` (both lease stores, with
+an in-place SQLite migration from the old single-column PK) since a
+volunteer pool is multi-job by definition and `CommandRecipe.expand()` names
+tasks positionally (`task-000` in every job).
+How verified: flashruntime **317 passed, 1 skipped, 20 deselected**;
+flashnode **60 passed, 1 skipped**; `scripts/build_docs.py --check` OK
+(new `docs/guides/donate-a-machine.md` + updated
+`docs/guides/bring-your-code.md`/`docs/site/guides/jobspec-and-isolation.md`);
+`scripts/audit_secrets.sh` CLEAN. Real-docker integration tests
+(`tests/integration/test_argv_runner_docker.py` — network-off, read-only
+rootfs, inputs-staging) exist and are written to prove the flags are
+enforced by a live daemon, not just constructed correctly, but they
+**auto-skip** in this environment (no Docker daemon available) — so what's
+actually verified here is that `ArgvDockerRunner` builds the correct argv
+for every case (missing/empty argv, non-allowlisted image, bad env key, the
+`--memory`/`--memory-swap` pairing) and refuses before ever invoking
+`subprocess`, not that dockerd enforces them. No volunteer-kill run was
+observed either, for the same reason; the existing lease-expiry recovery
+path is unchanged and was already proven (kill-a-machine sweep, earlier
+entries) — it needs no new proof for the argv path specifically, just a
+real-Docker re-run once a daemon is available.
+Gotchas: (a) the composite `(job_id, task_id)` lease key fixed a **second,
+silent** bug in `claim()`'s policy path — matching a chosen `TaskSpec` back
+to a pending record by `task_id` alone picked the WRONG record whenever two
+jobs both had a pending `task-000` (now matched on both fields); (b)
+`argv_capable` belongs on `NodeRegistration`, not `NodeCapabilities` —
+`NodeCapabilities` carries only hardware facts (cpu/memory/gpus/os/arch),
+while argv-capability is a *runner posture* the agent chooses at startup,
+same shape as the existing `sandbox_capable`; (c) a node needs **both**
+`argv_capable` and `sandbox_capable` to be leased a command task — a node
+running the module `DockerRunner` is genuinely sandbox-capable but cannot
+execute argv, so overloading `sandbox_capable` would let the coordinator
+place a command task on a node certain to fail it. This is why `--runner
+argv` sets `argv_capable=True` AND implies `sandbox_capable=True` in
+`discover()`, while `--runner docker` sets only `sandbox_capable` on its own.
+Next: slice B — per-node Ed25519 identity, replacing the one shared
+`FLASHNODE_JOIN_CODE` for all volunteers (no revocation today). Parking lot:
+slice C (result verification — a lying volunteer node is currently
+believed), slice D (GPU capability probing), and running the real-Docker
+integration suite + a live volunteer-kill re-run once a Docker daemon is
+available in the dev environment.
+
 ### 2026-07-24 — Final-review fix wave: republish benchmarks from fresh N=20 baseline (flashruntime — resilience-showcase correction)
 What/why: the signing audit found the resilience showcase's headline "crash-storm
 **16/16** auto-resumed" (entry below) OVERSTATED — only HALF the 16 trials are
