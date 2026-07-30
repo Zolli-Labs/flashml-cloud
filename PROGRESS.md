@@ -86,6 +86,77 @@ every slice ends with a runnable demo — cut scope, never the demo.
 
 <!-- newest first -->
 
+### 2026-07-29 — Final-review fix wave + deferred follow-ups for the volunteer pool (flashruntime + flashnode)
+What/why: the whole-branch review of the volunteer argv slice found 12 issues,
+two High, both invisible to task-scoped review because they lived in the *seams
+between* tasks. **F1:** making `argv_capable` imply `sandbox_capable` (itself the
+fix for an earlier silent-idle-node bug) widened placement the other way — an
+argv-only node became eligible for **module** tasks it cannot run, so
+`ArgvDockerRunner` rejected the payload, the attempt failed, the loop re-claimed
+within `poll_seconds`, and all four `maxTaskAttempts` burned in seconds, failing
+somebody else's job. One volunteer joining a coordinator also running
+`hyperparameter_search` would kill that sweep. Fixed with a `module_capable`
+field + gate of the **opposite polarity** to the argv gate: argv fails *closed*
+(safety), module fails *open* (availability) — every already-deployed agent
+registers without the field, so a fail-closed default would silently cut the
+whole fleet off from module work. The field comment and `PlacementPolicy`
+docstring now warn against "harmonizing" them. **F2:** `donate-a-machine.md`
+promised the coordinator filters tasks by the volunteer's image allowlist; no
+code does that, so the claim was deleted and replaced with the truth (the agent
+enforces it locally, so a non-allowlisted image is claimed and then fails on the
+node). Also fixed: the timeout container-kill existed only in `ArgvDockerRunner`
+while `DockerRunner` still leaked a live container for up to 900 s (name builder
+now shared in `hardening.py`); a missing `docker` binary raised an uncaught
+`FileNotFoundError` that killed the agent (startup refusal + `OSError` wrapped);
+`ExecutorLoop` uploaded with `iterdir()` while the runner capped with `rglob()`,
+so `out/<subdir>/*` was silently dropped yet still committed (now recursive,
+with only a root-level `metrics.json` able to set the commit hash); bumped to
+0.2.0 with the flashnode pin tightened to `>=0.2`, since the released 0.1.0
+wheel lacks `argv_capable` and pydantic drops unknown kwargs silently — a node
+on it would idle forever.
+How verified: flashruntime **323 passed, 1 skipped, 20 deselected**; flashnode
+**73 passed, 1 skipped, 4 deselected**; `scripts/build_docs.py --check` OK;
+`scripts/audit_secrets.sh` CLEAN. Scoped re-review verdicted all 9 fixes
+ADDRESSED, no new breakage. Polarity checked directly: a node omitting
+`module_capable` stays eligible for module tasks (back-compat), `--runner argv`
+does not, and the argv gate stays fail-closed.
+Gotchas: (a) a controller-written chain check passed while F1 was live because
+it only ever fed the node a *command* task — verification authored by whoever
+ordered the change inherits that person's blind spot; (b) four plan briefs had
+defects in their test scaffolding, worst being integration tests using pytest
+`tmp_path`, which on colima bind-mounts as an EMPTY directory, so the two tests
+proving `--network none` and `--read-only` would have gone green proving nothing.
+Next: slice B — per-node Ed25519 identity replacing the shared join code.
+**Deferred follow-ups from the review (recorded here so they survive):**
+1. **Artifact/checkpoint `PUT` is unauthenticated and not lease-scoped**
+   (`service/modea.py` `PUT /artifacts/{key}`, `service/checkpoints.py`) — any
+   registered volunteer can overwrite *another job's* commit artifact or
+   checkpoint manifest, and the sha256 check is no defense because the attacker
+   supplies both file and hash. Scope PUT keys to the caller's live lease
+   prefix. **Do this with slice B.**
+2. `/leases/claim` returns 204 for both "queue empty" and "permanently
+   ineligible", and the agent logs neither — both silent-idle bugs in this slice
+   presented exactly that way. An event on "pending tasks exist, none eligible
+   for this node" would have caught them on first run.
+3. `/work` is an unquotaed host bind mount and `max_output_bytes` is checked
+   only *after* the run, so a job can fill a volunteer's disk before the cap is
+   consulted. A sampling check during the run would make the cap real.
+4. No cooperative cancel: `execute_one` blocks in `runner.run()`, so a lost
+   lease is noticed only after the container exits — up to 3600 s of a
+   volunteer's CPU burned for a result that is discarded.
+5. `harden_args` uses `os.getuid()`, so an agent run as root yields
+   `--user 0:0` — container root. Refuse or warn at startup.
+6. `CommandRecipe.validate_output` is never called from production code despite
+   `recipes/__init__.py` documenting it as commit-time validation — nothing
+   checks `metrics.json` is even valid JSON. Pre-existing dead contract.
+7. **The sandbox is not kernel-verified.** The four real-daemon integration
+   tests are committed but SKIP (no Docker in this environment). Run
+   `pytest tests/integration/ -m integration -v` in flashnode once Docker is up;
+   until then the hardening is proven only by constructed-argv assertions.
+8. A cross-repo chain test (workspace `e2e/`) would pin the task-seam
+   integration that per-repo unit tests structurally cannot; a working script
+   from this run is worth promoting.
+
 ### 2026-07-29 — Volunteer compute pool: argv runner tier + composite lease key (flashruntime + flashnode — slices A/E of the multi-machine decomposition)
 What/why: any machine can now join the pool as an untrusted volunteer via
 `flashnode work --runner argv --coordinator <URL>` and execute a submitting
