@@ -117,6 +117,25 @@ browser away and back through `/auth/callback`.
 
 ## Run it locally
 
+`npm run dev` on its own is NOT enough. Every page after sign-in calls the
+cloud API, and the cloud API refuses to start without a coordinator behind
+it — so the console renders, sign-in works, and then every screen shows
+"Failed to fetch", which looks like an app bug and is not one.
+
+From the repo root:
+
+```bash
+./scripts/dev.sh          # coordinator (:8100) + cloud API (:8000)
+./scripts/dev.sh --all    # ...plus the web console on :3000
+```
+
+It reads `SUPABASE_URL` and `DATABASE_URL` from the gitignored root `.env`,
+points the coordinator's ledger and artifact store at `.local-state/dev`
+(the defaults are `/data/...`, which is right for the Render disk and
+unwritable on a laptop), and mints a throwaway operator token per run so no
+credential outlives the process.
+
+
 ```bash
 cd apps/web
 npm install
