@@ -1,7 +1,14 @@
 # FlashML Cloud — Render Blueprint (M1 deployed POC)
 #
-# Three services. Create once with: Render dashboard -> New -> Blueprint ->
-# point at this repo. Render reads this file and provisions everything.
+# Three services from ONE repo. Create once with: Render dashboard -> New ->
+# Blueprint -> point at this repo. Render reads this file and provisions
+# everything.
+#
+# MONOREPO: flashruntime/, flashnode/ and flashml-cloud/ live here as git
+# subtrees with their history intact. `git subtree split --prefix=flashruntime`
+# detaches one back into its own repo when flashruntime/flashnode go public.
+# The single repo is what lets the API install flashruntime from a relative
+# path instead of authenticating to a private GitHub repo mid-build.
 #
 # WHY A BLUEPRINT AND NOT THE DASHBOARD/API: the coordinator must be a
 # PRIVATE service with a persistent disk. Render's MCP tooling can only
@@ -40,8 +47,7 @@ services:
   - type: pserv
     name: flashml-coordinator
     runtime: python
-    repo: https://github.com/Zolli-Labs/flashruntime
-    branch: main
+    rootDir: flashruntime
     plan: starter          # free tier has no private services and no disks
     region: oregon
     buildCommand: pip install -e ".[service]"
@@ -81,18 +87,17 @@ services:
   - type: web
     name: flashml-api
     runtime: python
-    repo: https://github.com/Zolli-Labs/flashml-cloud
-    branch: main
-    rootDir: apps/api
+    rootDir: flashml-cloud/apps/api
     plan: starter          # must not sleep: a suspended API strands every agent
     region: oregon
-    # flashruntime is installed from the BRANCH, not PyPI. The published
-    # wheel predates the federated-averaging driver this API runs in-process,
-    # so a PyPI install would import a flashruntime without `build_round` and
-    # fail at the first federated job.
+    # flashruntime comes from THIS repo, three directories up — no network,
+    # no PyPI, no credentials. The published wheel predates the
+    # federated-averaging driver this API runs in-process (no `build_round`),
+    # and the repo is private, so neither PyPI nor `pip install git+https://`
+    # would work here. Installing it FIRST means `pip install -e .` sees
+    # flashruntime already satisfied and never reaches for PyPI.
     buildCommand: >-
-      pip install "flashruntime[service] @ git+https://github.com/Zolli-Labs/flashruntime@main"
-      && pip install -e .
+      pip install -e ../../../flashruntime[service] && pip install -e .
     startCommand: uvicorn flashml_cloud_api.app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
     envVars:
@@ -129,9 +134,7 @@ services:
   - type: web
     name: flashml-web
     runtime: node
-    repo: https://github.com/Zolli-Labs/flashml-cloud
-    branch: main
-    rootDir: apps/web
+    rootDir: flashml-cloud/apps/web
     plan: free             # may sleep; only the API and coordinator must not
     region: oregon
     buildCommand: npm ci && npm run build
