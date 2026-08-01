@@ -16,7 +16,42 @@ function isPublicPath(pathname: string): boolean {
   return false;
 }
 
+// Supabase does not always send the browser where we asked. `emailRedirectTo`
+// is honoured only when that exact URL is in the project's Redirect URLs
+// allowlist; otherwise Auth falls back to the project's Site URL, which is a
+// bare origin with no path. The magic link then lands on `/` as
+// `/?code=<uuid>` — a page with no exchange logic — and sign-in appears to do
+// nothing whatsoever. Nothing is logged, in the browser or on the server: the
+// code simply sits in the address bar unredeemed.
+//
+// Rather than let working sign-in depend on a dashboard field matching a
+// deploy URL, catch the code wherever it lands and forward it to the route
+// that knows what to do with it. The allowlist should still be configured
+// (apps/web/README.md), but this makes getting it wrong a tidiness problem
+// rather than an outage — including on the day the deployed URL changes and
+// nobody remembers this setting exists.
+function forwardAuthCode(request: NextRequest): NextResponse | null {
+  const { pathname, searchParams } = request.nextUrl;
+  // Already where it belongs; redirecting again would loop.
+  if (pathname === "/auth/callback") return null;
+  if (!searchParams.has("code")) return null;
+
+  const target = request.nextUrl.clone();
+  target.pathname = "/auth/callback";
+  // Preserve intent: a code that landed on /machines should still finish at
+  // /machines rather than the callback's default.
+  if (!target.searchParams.has("next") && pathname !== "/") {
+    target.searchParams.set("next", pathname);
+  }
+  return NextResponse.redirect(target);
+}
+
 export async function middleware(request: NextRequest) {
+  // Before the session check: this runs for signed-out visitors, which is
+  // precisely who is completing a sign-in.
+  const forwarded = forwardAuthCode(request);
+  if (forwarded) return forwarded;
+
   let response = NextResponse.next({ request });
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
