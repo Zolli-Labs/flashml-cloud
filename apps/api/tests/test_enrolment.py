@@ -5,20 +5,21 @@ A device-flow test against a mock proves very little — the properties
 that matter (exactly-once redemption, revocation taking effect
 immediately, node_id impersonation being refused) are properties of the
 database's transactional behaviour as much as of the Python. So every
-test in this file that touches state runs against the real Supabase
-project (`yualksqjjvlfscbbsygq`), never a mock or an in-memory stand-in.
+test in this file that touches state runs against a real, freshly
+migrated Postgres — never a mock or an in-memory stand-in.
 
-Wiring: set TEST_DATABASE_URL (or DATABASE_URL) to a Postgres connection
-string for that project. If neither is set, every test that needs the
-database is individually skipped via the `db` fixture below, with an
-explicit reason — not silently faked. (See
-docs/superpowers/plans/.task-3-report.md for why this repo's sandbox
-could not wire that connection up automatically, and for the equivalent
-verification performed directly against the real project instead.)
+Wiring: by default these run against a session-scoped ephemeral local
+Postgres (see the `postgres_dsn` fixture in conftest.py) that this
+process starts, migrates, and tears down itself — no cloud credentials
+needed, and the real Supabase project is never touched by this file. Set
+TEST_DATABASE_URL (or DATABASE_URL) to point these at a different
+Postgres instead (e.g. to deliberately test against Supabase). If this
+machine has no local `initdb`/`pg_ctl`, the fixture skips naming the
+missing binary rather than silently mocking anything.
 
 Isolation: every row created here uses a node_id/email namespaced with a
-per-run random marker, so concurrent runs and the rest of the project's
-data never collide. The `test_user`/`test_user2` fixtures create a real
+per-run random marker, so concurrent runs and the rest of the database's
+data never collide. The `owner`/`other_owner` fixtures create a real
 auth.users row (profiles.id is a foreign key to it) and delete everything
 they created — auth.users, profiles, machines, device_codes — on
 teardown, in FK-safe order.
@@ -40,15 +41,7 @@ from flashml_cloud_api.enrolment import (
     NodeAlreadyEnrolled,
 )
 
-DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
 RUN_MARKER = uuid.uuid4().hex[:12]
-
-_SKIP_REASON = (
-    "No TEST_DATABASE_URL/DATABASE_URL configured in this environment — "
-    "this test needs a real Postgres connection to Supabase project "
-    "yualksqjjvlfscbbsygq. Skipped, not mocked; see "
-    "docs/superpowers/plans/.task-3-report.md."
-)
 
 
 def _node_id(name: str) -> str:
@@ -56,10 +49,9 @@ def _node_id(name: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def db():
-    if not DATABASE_URL:
-        pytest.skip(_SKIP_REASON)
-    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5)
+def db(postgres_dsn):
+    database_url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL") or postgres_dsn
+    conn = psycopg.connect(database_url, row_factory=dict_row, connect_timeout=5)
     conn.autocommit = True
     try:
         yield conn
@@ -67,25 +59,56 @@ def db():
         conn.close()
 
 
+_FULL_AUTH_USER_COLUMNS = (
+    "instance_id", "aud", "role", "email", "encrypted_password",
+    "email_confirmed_at", "created_at", "updated_at",
+    "raw_app_meta_data", "raw_user_meta_data", "is_sso_user", "is_anonymous",
+)
+
+
 def _make_test_user(db, tag: str) -> str:
     """Insert a real auth.users row (the FK profiles.id requires) plus
-    its profiles row, and return the new user id."""
+    its profiles row, and return the new user id.
+
+    Against real Supabase, auth.users has the full set of NOT-NULL
+    columns below; against the local ephemeral fixture (conftest.py's
+    `postgres_dsn`) it is a one-column stand-in (`id uuid primary key`),
+    since only the FK target matters for this schema. Introspect which
+    columns actually exist rather than hardcoding one shape."""
     user_id = str(uuid.uuid4())
     email = f"test-{RUN_MARKER}-{tag}@example.invalid"
     with db.cursor() as cur:
         cur.execute(
-            """
-            insert into auth.users
-                (id, instance_id, aud, role, email, encrypted_password,
-                 email_confirmed_at, created_at, updated_at,
-                 raw_app_meta_data, raw_user_meta_data, is_sso_user, is_anonymous)
-            values
-                (%s, '00000000-0000-0000-0000-000000000000', 'authenticated',
-                 'authenticated', %s, '', now(), now(), now(), '{}'::jsonb,
-                 '{}'::jsonb, false, false)
-            """,
-            (user_id, email),
+            "select column_name from information_schema.columns"
+            " where table_schema = 'auth' and table_name = 'users'"
         )
+        existing = {row["column_name"] for row in cur.fetchall()}
+        extra = [c for c in _FULL_AUTH_USER_COLUMNS if c in existing]
+
+        if not extra:
+            cur.execute("insert into auth.users (id) values (%s)", (user_id,))
+        else:
+            values_sql = {
+                "instance_id": "'00000000-0000-0000-0000-000000000000'",
+                "aud": "'authenticated'",
+                "role": "'authenticated'",
+                "email": "%s",
+                "encrypted_password": "''",
+                "email_confirmed_at": "now()",
+                "created_at": "now()",
+                "updated_at": "now()",
+                "raw_app_meta_data": "'{}'::jsonb",
+                "raw_user_meta_data": "'{}'::jsonb",
+                "is_sso_user": "false",
+                "is_anonymous": "false",
+            }
+            columns_sql = ", ".join(["id", *extra])
+            placeholders_sql = ", ".join(["%s", *(values_sql[c] for c in extra)])
+            params = [user_id] + ([email] if "email" in extra else [])
+            cur.execute(
+                f"insert into auth.users ({columns_sql}) values ({placeholders_sql})",
+                params,
+            )
         cur.execute(
             "insert into public.profiles (id, display_name) values (%s, %s)",
             (user_id, f"test-{RUN_MARKER}-{tag}"),
