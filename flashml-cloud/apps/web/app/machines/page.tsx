@@ -143,10 +143,20 @@ function EmptyState() {
             Run these on the machine you want to add:
           </p>
         </div>
-        <div className="w-full max-w-sm rounded-lg border border-border/60 bg-surface-elevated/60 text-left font-mono text-xs overflow-x-auto">
-          <div className="px-3.5 py-2.5 border-b border-border/60">
+        {/* BOTH packages, explicitly. This used to read `pip install
+            flashnode`, which fails for everyone with "No solution found":
+            flashnode declares `flashruntime>=0.2`, pip resolves that from
+            PyPI, and neither package is published there. Naming both as git
+            URLs is what actually installs today. Verified in a clean venv
+            against the public repos.
+
+            When both are on PyPI this collapses back to two short words —
+            until then, a command that looks tidier than it is costs a
+            volunteer their first ten minutes. */}
+        <div className="w-full max-w-md rounded-lg border border-border/60 bg-surface-elevated/60 text-left font-mono text-xs overflow-x-auto">
+          <div className="px-3.5 py-2.5 border-b border-border/60 whitespace-pre">
             <span className="text-muted-foreground select-none">$ </span>
-            pip install flashnode
+            {'pip install \\\n    "flashruntime @ git+https://github.com/Zolli-Labs/flashruntime" \\\n    "flashnode @ git+https://github.com/Zolli-Labs/flashnode"'}
           </div>
           <div className="px-3.5 py-2.5">
             <span className="text-muted-foreground select-none">$ </span>
@@ -154,9 +164,10 @@ function EmptyState() {
           </div>
         </div>
         <p className="text-xs text-muted-foreground max-w-sm">
-          That command prints a short code — enter it at{" "}
-          <span className="font-mono text-foreground">/activate</span> from
-          any signed-in browser, including your phone, to approve it.
+          Needs Python 3.10+ and Docker Desktop running. The second command
+          prints a short code — enter it at{" "}
+          <span className="font-mono text-foreground">/activate</span> from any
+          signed-in browser, including your phone, to approve it.
         </p>
       </CardContent>
     </Card>
