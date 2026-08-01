@@ -1,7 +1,5 @@
-# the three product repos are their own git repositories
-flashruntime/
-flashnode/
-flashml-cloud/
+# monorepo: the three product trees live here as subtrees, not ignored.
+# `git subtree split --prefix=<dir>` detaches any of them with history intact.
 # local state and venvs
 e2e/.venv/
 .local-state/
@@ -9,3 +7,7 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 .env.alibaba
+**/.venv/
+**/node_modules/
+**/.next/
+**/.superpowers/
