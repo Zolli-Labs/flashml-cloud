@@ -67,3 +67,24 @@ def test_token_hash_is_stable_and_one_way():
     assert hash_machine_token(t) == hash_machine_token(t)
     assert t not in hash_machine_token(t)
     assert len(hash_machine_token(t)) == 64
+
+
+def test_token_without_exp_is_rejected():
+    """PyJWT validates exp only if present — a token omitting it would
+    otherwise never expire."""
+    tok = jwt.encode({"sub": "u", "aud": "authenticated"}, SECRET, algorithm="HS256")
+    with pytest.raises(AuthError):
+        verify_supabase_jwt(tok, S)
+
+
+def test_token_without_sub_is_rejected():
+    tok = jwt.encode({"aud": "authenticated", "exp": time.time() + 60},
+                     SECRET, algorithm="HS256")
+    with pytest.raises(AuthError):
+        verify_supabase_jwt(tok, S)
+
+
+def test_token_without_aud_is_rejected():
+    tok = jwt.encode({"sub": "u", "exp": time.time() + 60}, SECRET, algorithm="HS256")
+    with pytest.raises(AuthError):
+        verify_supabase_jwt(tok, S)

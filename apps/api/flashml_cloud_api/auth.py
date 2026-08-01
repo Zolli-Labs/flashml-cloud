@@ -38,6 +38,7 @@ def verify_supabase_jwt(token: str | None, settings: Settings) -> str:
             settings.supabase_jwt_secret,
             algorithms=["HS256"],
             audience="authenticated",
+            options={"require": ["exp", "sub", "aud"]},
         )
     except jwt.PyJWTError as exc:
         raise AuthError(f"invalid token: {exc}") from exc
