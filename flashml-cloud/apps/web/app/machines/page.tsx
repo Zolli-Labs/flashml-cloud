@@ -163,12 +163,37 @@ function EmptyState() {
             flashnode login --coordinator {base}
           </div>
         </div>
-        <p className="text-xs text-muted-foreground max-w-sm">
-          Needs Python 3.10+ and Docker Desktop running. The second command
-          prints a short code — enter it at{" "}
-          <span className="font-mono text-foreground">/activate</span> from any
-          signed-in browser, including your phone, to approve it.
-        </p>
+        {/* Git is called out because pip shells out to the `git` binary for
+            a git+https:// install. macOS generally has it via the Xcode
+            command line tools; Windows generally does not, and
+            "Cannot find command 'git'" arrives before the volunteer has done
+            anything — reading as our installer being broken rather than a
+            missing prerequisite. One line here, and it disappears entirely
+            the day both packages are on PyPI. */}
+        <div className="w-full max-w-md space-y-2 text-xs text-muted-foreground">
+          <p className="font-medium text-foreground">Before you start</p>
+          <ul className="space-y-1 text-left">
+            <li>Python 3.10 or newer</li>
+            <li>
+              Git —{" "}
+              <a
+                href="https://git-scm.com/download/win"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary underline underline-offset-2 hover:no-underline"
+              >
+                Windows usually needs this installed
+              </a>
+              ; macOS already has it
+            </li>
+            <li>Docker Desktop, installed and running</li>
+          </ul>
+          <p className="pt-1 text-left">
+            The second command prints a short code — enter it at{" "}
+            <span className="font-mono text-foreground">/activate</span> from
+            any signed-in browser, including your phone, to approve it.
+          </p>
+        </div>
       </CardContent>
     </Card>
   );
