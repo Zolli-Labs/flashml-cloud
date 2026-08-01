@@ -108,13 +108,16 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       enabled** — a manual step in the Supabase dashboard (Authentication →
       Providers → Google), not inferable from this repo; must be done by
       hand before any real sign-in works.
-- [ ] **Plan 4 — GitHub repo → job + preflight** — `flashml.yaml`, curated
-      images, static import/network checks at submit time.
-- [ ] **Plan 5 — web app** — rebuilt against the real API (the current
-      `apps/web/lib/api.ts` still targets a legacy coordinator).
-- [ ] **Plan 6 — Windows hosts** — `hardening.py:60`'s `os.getuid()` is
-      platform-conditional; curated images must declare a non-root `USER`
-      first, or dropping the flag silently means container root.
+- [x] **Plan 4 — GitHub repo → job + preflight** ✅ (2026-08-01) repo tarball
+      staged as an artifact:// input into a curated pinned image; static ast
+      preflight; contract proven end to end by e2e/test_repo_job_contract.py.
+- [x] **Plan 5 — web app** ✅ (2026-08-01) Supabase Google auth, /activate
+      (phone-first), /machines, /submit with verbatim preflight findings,
+      /jobs with federated round history. Stale lib/api.ts and five prototype
+      pages deleted; no service-role key in the bundle.
+- [x] **Plan 6 — Windows hosts** ✅ (2026-08-01) images declare USER
+      10001:10001 FIRST, then --user became platform-conditional; unknown
+      platforms raise. Constructed-argv-verified, NOT execution-verified.
 - [ ] **Plan 7 — deploy + acceptance** — Render services, curated images to
       GHCR, and the §10 run-through, whose real test is a friend completing
       signup → enroll → contribute unaided.
@@ -122,6 +125,69 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 ## Entries
 
 <!-- newest first -->
+
+### 2026-08-01 — Repo→job, web app, Windows hosts, and federated averaging in the deployed path (M1 Plans 4–6; all repos)
+What/why: three plans plus the gap that closing them exposed. **Plan 4** turns a
+GitHub URL into a running job: the API fetches the tarball, runs static
+preflight, stages it as an `artifact://` input, and compiles a `CommandRecipe`
+JobSpec — **no image build** (D5), because the code is staged into a curated
+pinned image at `/work/inputs/`, the contract `bring-your-code.md` already
+specifies. **Plan 5** rewires the Next.js app onto the real API with Supabase
+auth. **Plan 6** unblocks Windows hosts. Then the gap: `run_fedavg` was called
+only by tests, the local demo, and e2e — **the cloud API never invoked it**, so
+the deployable product did distributed *sweeps*, not collaborative training.
+`mode: federated` now makes the API drive the round loop in-process (spec
+§5.4.5), persisting each completed round.
+How verified: flashruntime **545 passed**, flashnode **125 passed, 1 skipped**,
+cloud API **329 passed**, workspace e2e **53 passed** — zero skips anywhere.
+`e2e/test_repo_job_contract.py` proves the repo→job contract end to end and was
+verified to fail all 5 of its tests with the recipe forwarding reverted.
+Supabase project `flashml-poc` (`yualksqjjvlfscbbsygq`) holds six tables, RLS
+enabled on every one with **zero policies** — the deny-all was confirmed live:
+`service_role` sees a seeded row, `anon` and `authenticated` both see **zero**.
+Gotchas: (a) **the cross-repo seam bit twice more.** flashnode staged the repo
+tarball as a *file* and never unpacked it, so the compiled argv
+`/work/inputs/code/<entrypoint>` named a path that could not exist — every task
+would have failed "file not found" and burned four attempts, exactly like the
+allowlist outage. Fixing that revealed a *second* identical failure: GitHub
+wraps every repo in `owner-name-<sha>/`, leaving the argv one directory too
+high. Both invisible to per-repo tests; both now pinned by contract and parity
+tests in `e2e/`, which is the only place that can import both sides. **This is
+the third and fourth instance of the same seam class** — a test spanning the
+boundary is the only thing that has ever caught it. (b) Unpacking an
+attacker-supplied tarball on a *volunteer's* machine needed its own zip-slip,
+escaping-symlink and decompression-bomb defences; the parity test comparing
+both extractors against one attack corpus immediately found that the cloud API
+returned **500 on a `./` member**, had no member-count cap, and accepted
+contained hardlinks — asymmetries invisible from either side alone.
+(c) `Path(dest) / "/etc/evil.txt"` **silently discards the left operand**, so a
+naive join-then-check misses absolute-path zip-slip; resolve-then-`relative_to`
+catches both forms. (d) An input *name* becomes a host directory name — an
+input called `../../.ssh` escaped the workdir. Archive-content hardening cannot
+catch that; the attack was in the metadata. (e) **Windows: the crash is one
+line but the trap is the fix.** Omitting `--user` is only safe because the
+curated images now declare `USER 10001:10001`; without that every Windows host
+would run strangers' code as container root **and every test would still
+pass**, since nothing asserted the effective user. Task order was therefore a
+safety property, not a preference. (f) The in-API driver **crosses
+`flashml-cloud/CLAUDE.md` hard rule 2** (imports restricted to
+`flashruntime.protocol`). Confined to one module, documented, and enforced by
+an AST allow-list test — but the rule itself is **not yet amended**; that is a
+human decision, and spec §5.4.5 already sanctions the architecture.
+Next: M1 Plan 7 — Render deploy and the §10 acceptance run. **Blocked on two
+things the repo cannot supply:** the Render MCP tools need a Claude Code
+restart to become callable, and Google OAuth must be enabled by hand in the
+Supabase dashboard (callback
+`https://yualksqjjvlfscbbsygq.supabase.co/auth/v1/callback`) — a step that
+exists in no code and fails at sign-in with a provider error resembling a code
+bug. Parking lot, all still true: **result verification is unbuilt — a host can
+lie about its results and be believed** (M3); Windows is
+**constructed-argv-verified, not execution-verified** (every test fakes the
+platform; the acceptance run is what changes that); no GPU support (M1.5);
+capability-aware placement is M2; `e2e/test_fedavg_loop.py::
+test_fedavg_survives_a_closed_laptop` is timing-sensitive and flaked twice
+under three-way agent load while passing 4/4 idle — if it fails during
+acceptance, widen the round deadline before suspecting the driver.
 
 ### 2026-08-01 — flashnode unpacks archive inputs safely (flashnode + e2e; cross-repo blocker)
 What/why: the API compiles repo jobs as `python /work/inputs/code/<entrypoint>`
