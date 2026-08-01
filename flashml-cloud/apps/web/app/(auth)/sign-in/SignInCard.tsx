@@ -88,7 +88,7 @@ export function SignInCard() {
     setPending(null);
 
     if (authError) {
-      setError(readableAuthError(authError.message));
+      setError(readableAuthError(authError.message, "signup"));
       return;
     }
 
@@ -130,7 +130,7 @@ export function SignInCard() {
     });
     setPending(null);
     if (authError) {
-      setError(readableAuthError(authError.message));
+      setError(readableAuthError(authError.message, "magic"));
       return;
     }
     setSentTo(trimmed);
@@ -337,21 +337,41 @@ export function SignInCard() {
 }
 
 /**
- * Supabase's raw messages are written for developers reading a network tab,
- * not for someone who just mistyped their password. Translate the ones that
- * have an obvious next action; pass anything unrecognised through rather
+ * Supabase's raw messages are written for a developer reading a network
+ * tab, not for someone who just mistyped their password. Translate the ones
+ * with an obvious next action; pass anything unrecognised through rather
  * than swallowing a message that might be the only clue.
+ *
+ * `context` matters for the rate-limit case, which is the one most likely
+ * to be misread. See the note there.
  */
-function readableAuthError(message: string): string {
+function readableAuthError(
+  message: string,
+  context: "signin" | "signup" | "magic" = "signin"
+): string {
   const m = message.toLowerCase();
   if (m.includes("invalid login credentials")) {
     return "That email and password don't match an account. Check both, or create an account below.";
   }
   if (m.includes("email not confirmed")) {
-    return "Confirm your email first — open the link we sent when you signed up.";
+    return "This account still needs its email confirmed. Open the confirmation link, or ask the admin to turn off email confirmation for this deployment.";
   }
   if (m.includes("rate limit") || m.includes("too many requests")) {
-    return "Too many attempts for now. Wait a minute, then try again — signing in with a password avoids this entirely.";
+    // The trap: Supabase's email quota is per PROJECT, not per address, and
+    // it is about two messages an hour on the built-in SMTP. So the obvious
+    // recovery — "try a different email" — fails identically, which reads
+    // as the app being broken rather than throttled. Say whose limit it is.
+    //
+    // Signup only touches that quota because "Confirm email" is on. With it
+    // off (Authentication -> Sign In / Providers -> Email) signup sends no
+    // email at all and this branch becomes unreachable for signup.
+    if (context === "signup") {
+      return "This deployment's email quota is used up. It's shared across every account, so a different address won't help — wait about an hour, or turn off email confirmation in the Supabase dashboard to remove email from signup entirely.";
+    }
+    if (context === "magic") {
+      return "This deployment's email quota is used up — it's shared across every account, so a different address won't help. Sign in with a password instead; that sends no email.";
+    }
+    return "Too many attempts just now. Wait a minute and try again.";
   }
   if (m.includes("password should be")) {
     return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
