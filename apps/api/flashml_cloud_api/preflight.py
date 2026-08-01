@@ -138,7 +138,7 @@ class Finding:
         return {"level": self.level, "code": self.code, "message": self.message}
 
 
-def _safe(value: object, limit: int = 120) -> str:
+def safe_text(value: object, limit: int = 120) -> str:
     """Render repo-controlled text fit for an HTTP response and a log line.
 
     Control characters — above all CR and LF — become ``?``, and the result
@@ -151,6 +151,12 @@ def _safe(value: object, limit: int = 120) -> str:
     if len(text) > limit:
         text = text[:limit] + "..."
     return text
+
+
+#: Internal alias. The same rule applies to anything repo-derived that
+#: reaches a response, including a ``RepoError`` message quoting a tar
+#: member's name, which is why the endpoint imports the public spelling.
+_safe = safe_text
 
 
 # ---------------------------------------------------------------------------

@@ -41,22 +41,31 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+import tempfile
+import uuid
+
 import httpx
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
+from starlette.concurrency import run_in_threadpool
 
 from flashruntime.protocol.v1alpha1 import JobSpec, NodeHeartbeat, NodeRegistration
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
+from flashml_cloud_api import repo as repomod
 from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
     AuthError,
     verify_supabase_jwt,
 )
+from flashml_cloud_api.compile import CompileError, compile_to_jobspec
 from flashml_cloud_api.db import Machine
+from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
+from flashml_cloud_api.images import UnknownImage, resolve_image
+from flashml_cloud_api.preflight import preflight, safe_text
 from flashml_cloud_api.settings import Settings
 from flashml_cloud_api.store import NodeStore
 
@@ -105,6 +114,113 @@ MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
 #: memory — a cost the coordinator's own 413 does not prevent, because it
 #: only applies after the bytes have already arrived here.
 DEFAULT_MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+
+#: Caps for the GitHub-repo path. The wire cap bounds what this process
+#: buffers from codeload; the extracted cap bounds what a decompression
+#: bomb can write to disk (``extract_safely`` enforces it incrementally,
+#: mid-extraction, because a bomb is small on the wire).
+MAX_REPO_TARBALL_BYTES = 32 * 1024 * 1024
+MAX_REPO_EXTRACTED_BYTES = 128 * 1024 * 1024
+
+#: A flashml.yaml is a few hundred bytes. This cap exists so a repo cannot
+#: hand the YAML parser a gigabyte.
+MAX_CONFIG_BYTES = 256 * 1024
+
+#: The config file, in the two spellings people actually use.
+CONFIG_FILENAMES = ("flashml.yaml", "flashml.yml")
+
+#: GitHub's own limits, tightened. These values are interpolated into the
+#: codeload URL, so anything outside a conservative alphabet — a slash, a
+#: ``..``, a ``@``, a control character — is refused rather than escaped:
+#: the request that carries them is made by this server, not the browser.
+_GH_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+_GH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+_GH_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+
+_GH_PREFIXES = (
+    "https://github.com/",
+    "http://github.com/",
+    "git@github.com:",
+    "ssh://git@github.com/",
+    "github.com/",
+)
+
+
+def _parse_repo_ref(value: Any, ref: Any) -> tuple[str, str, str]:
+    """``(owner, name, ref)`` from whatever the caller wrote, or 400.
+
+    Accepts a browser-pasted URL as well as a bare ``owner/name``, because
+    pasting the URL out of the address bar is what people will actually do.
+    Everything that comes back is regex-validated: these three strings end
+    up in a URL this server fetches.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail="repo is required")
+    text = value.strip()
+    for prefix in _GH_PREFIXES:
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
+            break
+    text = text.split("?", 1)[0].split("#", 1)[0]
+    text = text.strip("/")
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+
+    parts = text.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise HTTPException(
+            status_code=400,
+            detail="repo must be a GitHub URL or 'owner/name'",
+        )
+    owner, name = parts
+    if not _GH_OWNER_RE.match(owner) or not _GH_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="invalid GitHub owner or repo name")
+
+    ref_value = "main" if ref is None else ref
+    if not isinstance(ref_value, str) or not ref_value.strip():
+        raise HTTPException(status_code=400, detail="invalid ref")
+    ref_value = ref_value.strip()
+    if not _GH_REF_RE.match(ref_value) or ".." in ref_value or ref_value.endswith("/"):
+        raise HTTPException(status_code=400, detail="invalid ref")
+    return owner, name, ref_value
+
+
+def _fetch_and_extract(
+    fetch_repo: Callable[[str, str, str], bytes],
+    owner: str,
+    name: str,
+    ref: str,
+    dest: Path,
+) -> tuple[bytes, Path]:
+    """Fetch and unpack a repo. Blocking on purpose — the caller runs it in
+    a worker thread so a 32 MB tarball does not stall the event loop for
+    every other request in the process."""
+    tar_bytes = fetch_repo(owner, name, ref)
+    if len(tar_bytes) > MAX_REPO_TARBALL_BYTES:
+        raise repomod.RepoError(
+            f"repo tarball is {len(tar_bytes)} bytes, over the "
+            f"{MAX_REPO_TARBALL_BYTES} byte limit"
+        )
+    root = repomod.extract_safely(tar_bytes, dest, MAX_REPO_EXTRACTED_BYTES)
+    return tar_bytes, root
+
+
+def _read_config_text(repo_root: Path) -> str:
+    """The repo's flashml.yaml as text, or a 400 naming what is missing."""
+    for filename in CONFIG_FILENAMES:
+        path = repo_root / filename
+        if not path.is_file():
+            continue
+        if path.stat().st_size > MAX_CONFIG_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{filename} is larger than {MAX_CONFIG_BYTES} bytes",
+            )
+        return path.read_bytes().decode("utf-8", errors="replace")
+    raise HTTPException(
+        status_code=400,
+        detail="repo has no flashml.yaml at its root — add one to describe the job",
+    )
 
 
 def _clean_media_type(value: str | None, default: str) -> str:
@@ -360,6 +476,7 @@ def create_cloud_app(
     settings: Settings,
     connect: Callable[[], psycopg.Connection] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    fetch_repo: Callable[[str, str, str], bytes] | None = None,
 ) -> FastAPI:
     """The public door. Agents and browsers both arrive here; nothing else
     is exposed to the internet.
@@ -368,6 +485,9 @@ def create_cloud_app(
     so tests can point it at an ephemeral Postgres). ``transport`` is an
     httpx transport for the coordinator hop, injected so tests can record
     exactly what leaves this process without needing a live coordinator.
+    ``fetch_repo`` is the GitHub tarball fetch, injected for the same
+    reason: the from-repo tests build their fixture tarballs in-process and
+    never reach codeload.
 
     On ``settings.require_auth``: it governs *startup validation of the
     environment*, not whether requests are authenticated. There is no open
@@ -377,6 +497,9 @@ def create_cloud_app(
     """
     connect = connect or (lambda: dbmod.connect(settings))
     coordinator = CoordinatorClient(settings, transport=transport)
+    fetch_repo = fetch_repo or (
+        lambda owner, name, ref: repomod.fetch_repo_tarball(owner, name, ref)
+    )
     max_upload_bytes = int(
         os.environ.get("FLASHML_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)
     )
@@ -671,6 +794,144 @@ def create_cloud_app(
             status=str(job.get("state") or "PENDING"),
         )
         return _passthrough(r)
+
+    @app.post("/v1alpha1/jobs/from-repo", status_code=201, tags=["browser"])
+    async def submit_job_from_repo(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Paste a GitHub repo, get a job — or get told exactly what is
+        wrong with it, all of it, in one answer.
+
+        The order below is the whole point of the endpoint. Fetch, extract,
+        parse, **preflight**, and only then touch the coordinator: a repo
+        with an error finding must not upload an artifact, must not submit,
+        and must not leave a ``jobs`` row behind. Findings come back
+        *together*, never one per round trip, because a user fixing four
+        problems should need one more submit, not four.
+        """
+        raw = await request.body()
+        if len(raw) > MAX_JSON_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="request body too large")
+        payload = await _json_object(request)
+        owner, name, ref = _parse_repo_ref(payload.get("repo"), payload.get("ref"))
+
+        with tempfile.TemporaryDirectory(prefix="flashml-repo-") as tmpdir:
+            dest = Path(tmpdir) / "src"
+            try:
+                # Blocking network + tar work, off the event loop.
+                tar_bytes, repo_root = await run_in_threadpool(
+                    _fetch_and_extract, fetch_repo, owner, name, ref, dest
+                )
+            except repomod.RepoError as exc:
+                # The message can quote a tar member's name, which is
+                # attacker-chosen: sanitise before it reaches a response or
+                # a log line.
+                raise HTTPException(
+                    status_code=400, detail=safe_text(exc, 300)
+                ) from None
+
+            config_text = _read_config_text(repo_root)
+            try:
+                config = parse_flashml_yaml(config_text)
+            except ConfigError as exc:
+                raise HTTPException(
+                    status_code=400, detail=safe_text(exc, 500)
+                ) from None
+
+            try:
+                image = resolve_image(config.image)
+            except UnknownImage as exc:
+                raise HTTPException(
+                    status_code=400, detail=safe_text(exc, 300)
+                ) from None
+
+            findings = await run_in_threadpool(preflight, config, repo_root, image)
+
+        rendered = [f.as_dict() for f in findings]
+        if any(f.level == "error" for f in findings):
+            # Refused here, before a single byte leaves this process. No
+            # artifact upload, no coordinator submission, no jobs row.
+            return Response(
+                content=json.dumps(
+                    {
+                        "detail": "preflight found problems that would make this "
+                                  "job fail on a volunteer node",
+                        "findings": rendered,
+                    }
+                ),
+                status_code=400,
+                media_type="application/json",
+            )
+
+        # An unguessable key, and deliberately not derived from the user id
+        # or the repo name: it is a public-ish artifact namespace, and a
+        # predictable key would let one user overwrite another's staged code
+        # between compile and claim.
+        code_key = f"uploads/{uuid.uuid4().hex}/code.tar.gz"
+        code_uri = f"artifact://{code_key}"
+
+        try:
+            # Compiled *before* the upload: a config this module cannot
+            # compile should not leave a multi-megabyte orphan behind in the
+            # artifact store.
+            spec = compile_to_jobspec(config, image, code_uri, config.name)
+        except CompileError as exc:
+            raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
+
+        upload = await coordinator.forward(
+            "PUT",
+            f"/v1alpha1/artifacts/{code_key}",
+            content=tar_bytes,
+            media_type="application/gzip",
+        )
+        if upload.status_code >= 300:
+            log.error(
+                json.dumps({"text": "staging the repo artifact failed",
+                            "status": upload.status_code})
+            )
+            raise HTTPException(status_code=502, detail="could not stage the repo")
+
+        r = await coordinator.forward(
+            "POST",
+            "/v1alpha1/jobs",
+            content=json.dumps(spec).encode(),
+            media_type="application/json",
+        )
+        if r.status_code >= 300:
+            return _passthrough(r)
+        try:
+            job = r.json()
+        except ValueError:
+            return _passthrough(r)
+        job_id = job.get("job_id") if isinstance(job, dict) else None
+        if not job_id:
+            log.error(json.dumps({"text": "job accepted with no job_id in response"}))
+            raise HTTPException(status_code=502, detail="coordinator returned no job id")
+
+        dbmod.insert_job(
+            db,
+            job_id=job_id,
+            # From the verified JWT, always. The body has no say in this,
+            # and there is no branch here that could give it one.
+            owner_id=user_id,
+            name=spec["metadata"]["name"],
+            source={
+                "type": "github",
+                "owner": owner,
+                "repo": name,
+                "ref": ref,
+                "code_artifact": code_uri,
+            },
+            spec=spec,
+            status=str(job.get("state") or "PENDING"),
+        )
+        return Response(
+            content=json.dumps({**job, "findings": rendered}),
+            status_code=201,
+            media_type="application/json",
+        )
 
     @app.get("/v1alpha1/jobs", tags=["browser"])
     async def list_jobs_route(
