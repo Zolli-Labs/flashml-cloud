@@ -282,6 +282,43 @@ export function cancelJob(jobId: string): Promise<JobRecord> {
   );
 }
 
+/** The relative key a result artifact's `uri` maps to under
+ * `/v1alpha1/jobs/{jobId}/artifacts/{key}` — the only artifact route a
+ * browser may call (`apps/api/flashml_cloud_api/compile.py` sets every
+ * job's `outputPrefix` to `artifact://jobs/{job_id}/`). Returns `null` for
+ * a `uri` that isn't under this job's output prefix — e.g. the staged
+ * input-code upload from `/from-repo`, which is not a result and has no
+ * browser-readable route. Never guessed: it is a straight strip of the
+ * prefix the API itself defines. */
+export function jobArtifactKey(jobId: string, uri: string): string | null {
+  const prefix = `artifact://jobs/${jobId}/`;
+  return uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
+}
+
+/** Fetches a result artifact's bytes with the caller's JWT attached, for a
+ * browser-triggered download — the route requires auth, so a plain `<a
+ * href>` cannot reach it. */
+export async function fetchJobArtifact(
+  jobId: string,
+  key: string
+): Promise<Blob> {
+  const auth = await authHeader();
+  const res = await fetch(
+    `${cloudApiBase()}/v1alpha1/jobs/${encodeURIComponent(jobId)}/artifacts/${key
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/")}`,
+    { headers: auth }
+  );
+  if (res.status === 401) throw new NotAuthenticated();
+  if (res.status === 404) throw new NotFound("artifact not found");
+  if (!res.ok) {
+    const { detail } = await parseErrorBody(res);
+    throw new ApiError(res.status, detail ?? `${res.status} ${res.statusText}`);
+  }
+  return res.blob();
+}
+
 /** `POST /v1alpha1/jobs` — the plain path, no repo/preflight involved. */
 export function submitJob(spec: unknown): Promise<JobRecord> {
   return request<JobRecord>("/v1alpha1/jobs", {
