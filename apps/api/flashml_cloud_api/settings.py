@@ -19,6 +19,14 @@ class Settings:
     coordinator_operator_token: str
     require_auth: bool
     database_url: str = ""
+    #: Public base URL of the browser console, used to build the
+    #: `verification_uri` a machine prints during device-code enrolment.
+    #: Deliberately NOT in the require_auth missing-secret check: an empty
+    #: value degrades to a relative path (a human can still find the page
+    #: from whatever host they are on), which is a cosmetic problem, not a
+    #: security one, and refusing to boot over it would take the whole API
+    #: down for a display string.
+    console_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -39,6 +47,7 @@ class Settings:
         # signing secret. db.connect() raises its own clear error when this
         # is absent and a connection is actually requested.
         database_url = os.environ.get("DATABASE_URL", "")
+        console_url = os.environ.get("FLASHML_CONSOLE_URL", "")
 
         settings = cls(
             supabase_url=supabase_url,
@@ -48,6 +57,7 @@ class Settings:
             coordinator_operator_token=coordinator_operator_token,
             require_auth=require_auth,
             database_url=database_url,
+            console_url=console_url,
         )
 
         if require_auth:

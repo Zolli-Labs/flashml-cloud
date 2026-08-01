@@ -58,6 +58,40 @@ class Machine:
 
 
 # ---------------------------------------------------------------------------
+# profiles
+# ---------------------------------------------------------------------------
+
+def upsert_profile(
+    db: psycopg.Connection, user_id: str, display_name: str | None = None
+) -> dict[str, Any]:
+    """Create-or-fetch the profile row for a verified Supabase user.
+
+    ``user_id`` must come from a verified JWT ``sub`` — never from a body.
+    The ``do update`` (rather than ``do nothing``) is what guarantees a row
+    comes back on the second and every subsequent call; ``do nothing``
+    returns no row on conflict and would make a returning user look absent.
+    display_name is only ever *filled in*, never overwritten with null, so
+    a later token without the claim cannot blank a name the user set.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.profiles (id, display_name)
+            values (%s, %s)
+            on conflict (id) do update
+               set display_name = coalesce(excluded.display_name,
+                                           public.profiles.display_name)
+            returning id, display_name, github_login, is_host, is_developer,
+                      created_at
+            """,
+            (user_id, display_name),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return row
+
+
+# ---------------------------------------------------------------------------
 # device_codes
 # ---------------------------------------------------------------------------
 
@@ -215,6 +249,33 @@ def fetch_machine_for_owner(
             (machine_id, owner_id),
         )
         return cur.fetchone()
+
+
+#: The columns of ``public.machines`` that may ever leave the API. Spelled
+#: out rather than ``select *`` on purpose: ``token_hash`` lives in the same
+#: table, and a ``select *`` feeding a JSON response is exactly how a
+#: credential digest ends up in a browser. Adding a column to the schema
+#: must not silently add it to the API's output.
+MACHINE_PUBLIC_COLUMNS = (
+    "id", "node_id", "name", "platform", "capabilities", "status",
+    "token_prefix", "last_seen_at", "created_at", "revoked_at",
+)
+
+
+def list_machines_for_owner(
+    db: psycopg.Connection, owner_id: str
+) -> list[dict[str, Any]]:
+    """Every machine belonging to owner_id, and nothing else. The owner
+    filter is in the SQL, not applied afterwards in Python — omitting it
+    would be a missing argument, not a missing ``if``."""
+    columns = ", ".join(MACHINE_PUBLIC_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"select {columns} from public.machines "
+            "where owner_id = %s order by created_at",
+            (owner_id,),
+        )
+        return list(cur.fetchall())
 
 
 def revoke_machine_row(
