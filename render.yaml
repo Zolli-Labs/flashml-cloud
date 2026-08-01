@@ -137,7 +137,12 @@ services:
     buildCommand: npm ci && npm run build
     startCommand: npm run start -- -p $PORT
     envVars:
-      - key: NEXT_PUBLIC_API_BASE
+      # Must be NEXT_PUBLIC_CLOUD_API, not NEXT_PUBLIC_API_BASE: that is the
+      # only var name `apps/web/lib/cloud-api.ts` (`cloudApiBase()`) reads.
+      # Render's `fromService: {property: host}` returns a bare hostname
+      # (e.g. `flashml-api.onrender.com`, no scheme) — cloud-api.ts
+      # normalizes that with `https://` at read time.
+      - key: NEXT_PUBLIC_CLOUD_API
         fromService:
           type: web
           name: flashml-api

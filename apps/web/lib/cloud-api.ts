@@ -27,11 +27,30 @@
 
 import { createBrowserSupabaseClient } from "./supabase";
 
+/** Prepends `https://` when `url` has no scheme. Render's Blueprint
+ * (`render.yaml`) resolves `NEXT_PUBLIC_CLOUD_API` via
+ * `fromService: {type: web, property: host}`, which returns a bare
+ * hostname like `flashml-api.onrender.com` — never a scheme. Handed
+ * straight to `fetch()`, a scheme-less string is a *relative* path, so
+ * every call would resolve against this site's own origin
+ * (`flashml-web.onrender.com/flashml-api.onrender.com/...`) instead of the
+ * API — the site still loads, since this file is never touched by a health
+ * check, and every request then 404s. https, not http: this is a public,
+ * browser-facing origin, unlike an internal Render private-service
+ * hostport. An already-scheme'd value (including `http://localhost:...`
+ * for local dev) and an empty value pass through unchanged. */
+function withDefaultScheme(url: string): string {
+  if (!url || url.includes("://")) {
+    return url;
+  }
+  return `https://${url}`;
+}
+
 /** The cloud API's base URL. A function, not a module-level constant, so
  * it is read fresh on every call rather than captured once at import time
  * (and so tests can override `NEXT_PUBLIC_CLOUD_API` per-case). */
 export function cloudApiBase(): string {
-  return process.env.NEXT_PUBLIC_CLOUD_API ?? "http://localhost:8000";
+  return withDefaultScheme(process.env.NEXT_PUBLIC_CLOUD_API ?? "http://localhost:8000");
 }
 
 export class NotAuthenticated extends Error {

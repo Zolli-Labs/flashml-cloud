@@ -10,6 +10,25 @@ import os
 from dataclasses import dataclass
 
 
+def _with_default_scheme(url: str, scheme: str) -> str:
+    """Prepend ``scheme://`` to `url` when it has none.
+
+    Render's Blueprint ``fromService: {property: hostport}`` returns a bare
+    ``host:port`` (e.g. ``flashml-coordinator:10000``) for COORDINATOR_URL —
+    never a scheme, because a private-service hostport isn't a URL as far as
+    Render is concerned. Passed straight to httpx that raises
+    ``UnsupportedProtocol`` on every outbound call (register, claim,
+    complete, artifact upload) even though ``/healthz`` looks fine, since it
+    never touches the coordinator. This is the single place that value
+    enters the process, so this is where it gets normalized rather than at
+    each call site. An already-scheme'd value (``http://`` or ``https://``)
+    and an empty value both pass through unchanged.
+    """
+    if not url or "://" in url:
+        return url
+    return f"{scheme}://{url}"
+
+
 @dataclass
 class Settings:
     supabase_url: str
@@ -37,7 +56,12 @@ class Settings:
         supabase_url = os.environ.get("SUPABASE_URL", "")
         supabase_jwt_secret = os.environ.get("SUPABASE_JWT_SECRET", "")
         supabase_service_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
-        coordinator_url = os.environ.get("COORDINATOR_URL", "")
+        # http, not https: Render private-service traffic (COORDINATOR_URL
+        # above) is plain HTTP on the internal network, which does not
+        # terminate TLS — forcing https would fail the handshake outright.
+        coordinator_url = _with_default_scheme(
+            os.environ.get("COORDINATOR_URL", ""), "http"
+        )
         coordinator_operator_token = os.environ.get("COORDINATOR_OPERATOR_TOKEN", "")
         # Standard libpq connection string/URI for the Postgres database
         # (see flashml_cloud_api.db). Not included in the require_auth

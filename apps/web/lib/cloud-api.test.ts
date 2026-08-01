@@ -159,4 +159,44 @@ describe("cloud-api", () => {
     delete process.env.NEXT_PUBLIC_CLOUD_API;
     expect(cloudApiBase()).toBe("http://localhost:8000");
   });
+
+  // Render's Blueprint (`render.yaml`) resolves NEXT_PUBLIC_CLOUD_API via
+  // `fromService: {property: host}`, which returns a bare hostname like
+  // `flashml-api.onrender.com` — never a scheme. Handed to fetch() as-is,
+  // that reads as a relative path: the site loads (this code path is never
+  // exercised by a health check) and every request 404s against
+  // `flashml-web.onrender.com/flashml-api.onrender.com/...`. These pin the
+  // fix at the level that matters: the actual URL fetch() is called with.
+  describe("scheme normalization for NEXT_PUBLIC_CLOUD_API", () => {
+    it("prepends https:// to a scheme-less host and sends the request there", async () => {
+      vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "flashml-api.onrender.com");
+      expect(cloudApiBase()).toBe("https://flashml-api.onrender.com");
+
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+      await listMachines();
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe("https://flashml-api.onrender.com/v1alpha1/machines");
+    });
+
+    it("leaves an explicit http://localhost base unchanged, so local dev keeps working", async () => {
+      vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "http://localhost:8000");
+      expect(cloudApiBase()).toBe("http://localhost:8000");
+
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+      await listMachines();
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://localhost:8000/v1alpha1/machines");
+    });
+
+    it("leaves an explicit https:// base unchanged", () => {
+      vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "https://cloud.example.com");
+      expect(cloudApiBase()).toBe("https://cloud.example.com");
+    });
+  });
 });
