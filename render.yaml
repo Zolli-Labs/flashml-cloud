@@ -132,8 +132,26 @@ services:
       # older project that still signs symmetrically.
       - key: SUPABASE_JWT_SECRET
         sync: false
-      - key: SUPABASE_SERVICE_KEY
-        sync: false
+      # SUPABASE_SERVICE_KEY IS DELIBERATELY NOT DECLARED HERE.
+      #
+      # No code path reads it. The API reaches Postgres directly over libpq
+      # (DATABASE_URL, below) and verifies tokens against the JWKS — it never
+      # calls PostgREST or the Auth Admin API, which are the only consumers a
+      # service-role key has. It is the one credential that bypasses every RLS
+      # policy and every owner-scoped query in db.py, so putting it into a
+      # service with no use for it is pure downside. If a Storage or Admin-API
+      # caller ever lands, add it back here AND to the required list in
+      # settings.from_env at the same time.
+      #
+      # REQUIRED. Standard libpq URI. Use Supabase's SESSION POOLER string
+      # (`...pooler.supabase.com:5432`, user `postgres.<project-ref>`), not
+      # "Direct connection": direct is IPv6-only on current projects and
+      # Render's outbound network may not route it, which surfaces as a
+      # connection failure well after a deploy that otherwise looks healthy.
+      # Avoid the TRANSACTION pooler (:6543) — psycopg uses prepared
+      # statements by default and transaction mode breaks them intermittently.
+      # Percent-encode any special character in the password (`@` -> %40,
+      # `#` -> %23, `/` -> %2F, `:` -> %3A) or the URI parses wrong.
       - key: DATABASE_URL
         sync: false
       - key: PYTHON_VERSION

@@ -437,6 +437,43 @@ the transport.
 
 ---
 
+## D15 — The API does not hold a Supabase service-role key
+
+**Decided:** `SUPABASE_SERVICE_KEY` is neither required at boot nor declared in
+`render.yaml`. The deployed API holds no credential capable of bypassing RLS.
+
+**Why:** it was required, and nothing read it. The API reaches Postgres directly
+over libpq (`db.connect`, `DATABASE_URL`) and verifies browser tokens against the
+project JWKS (D14's ES256 fix). PostgREST and the Auth Admin API — the only two
+consumers a service-role key has — are never called. Outside `settings.py` the
+name appeared solely in test fixtures, one of which already called it
+`"service-key-not-used-here"`.
+
+A mandatory-but-unread secret is worse than a merely useless one. It is the
+single credential that bypasses every RLS policy (D13's deny-all schema) and
+every owner-scoped query in `db.py`, and requiring it at startup pressured
+whoever deployed the API into copying it into one more system — env vars, a
+password manager, a chat window — for no functional gain. The blast radius of a
+leak is total: read and write of every user's jobs, machines, and results.
+
+**Cost:** a future Supabase Storage or Admin-API caller must add the key back in
+two places at once (the required list in `settings.from_env` and `render.yaml`).
+The field stays on `Settings` as that seam, so the change is additive.
+
+**Also settled here:** `DATABASE_URL` must be Supabase's **session pooler**
+string. The direct connection is IPv6-only on current projects and Render's
+outbound network may not route it — a failure that appears well after a deploy
+that otherwise looks healthy. The transaction pooler (`:6543`) is wrong for a
+different reason: psycopg uses prepared statements by default and transaction
+mode breaks them intermittently, which is worse than breaking outright.
+
+**Revisit when:** something genuinely needs server-side Supabase API access —
+artifact storage moving off the coordinator's disk into Supabase Storage is the
+likely trigger. At that point scope it: a Storage-only key, not service-role, if
+Supabase offers one by then.
+
+---
+
 ## Open questions carried into execution
 
 1. **Demo dataset** — MNIST (~11 MB) or CIFAR-10 (~170 MB) baked into

@@ -10,7 +10,7 @@ coordinator (which runs as a Render private service with no public URL — see
 | --- | --- | --- |
 | `SUPABASE_URL` | **yes** (when auth is on) | Project URL, e.g. `https://<ref>.supabase.co`. The API derives the JWKS endpoint from it and verifies every browser token against the public key published there. |
 | `SUPABASE_JWT_SECRET` | **no** — legacy | The old shared HS256 secret. Modern projects do not have one. See below. |
-| `SUPABASE_SERVICE_KEY` | **yes** | Service-role key. Server-side only — it bypasses every ownership check, so it must never reach the browser or a `NEXT_PUBLIC_*` var. |
+| `SUPABASE_SERVICE_KEY` | **no** — unused | Service-role key. **Nothing reads it**; leave it unset. See below. |
 | `COORDINATOR_URL` | **yes** | Internal hostname of the coordinator. A bare `host:port` (what Render's `fromService: {property: hostport}` yields) is normalized to `http://host:port` at read time. |
 | `COORDINATOR_OPERATOR_TOKEN` | **yes** | Unscoped operator credential for the coordinator. Anyone holding it can act as any machine — which is why the coordinator is private. |
 | `DATABASE_URL` | for anything DB-backed | libpq connection string for Postgres. |
@@ -20,6 +20,23 @@ coordinator (which runs as a Render private service with no public URL — see
 Missing a required value while auth is on raises at startup. That is
 deliberate: an API that boots green and then 401s or, worse, runs open, is
 far harder to notice than one that refuses to start.
+
+### Why the service-role key is not required
+
+No code path reads it. The API reaches Postgres directly over libpq
+(`db.connect`, `DATABASE_URL`) and verifies browser tokens against the
+project JWKS. It never calls PostgREST or the Auth Admin API — the only
+two consumers a service-role key has. Grep confirms it: outside
+`settings.py` the name appears only in test fixtures.
+
+It used to be in the required list, which was actively harmful. That key
+bypasses every RLS policy and every owner-scoped query in `db.py`, so
+demanding it at boot pressured whoever deployed the API into copying the
+single most dangerous credential in the project into a service with no
+use for it. The field stays on `Settings` as the seam for a future
+Storage or Admin-API caller; whoever adds that caller should add the key
+back to the required list in `settings.from_env` and to `render.yaml` in
+the same change.
 
 ## How Supabase tokens are verified — asymmetric ES256, no shared secret
 

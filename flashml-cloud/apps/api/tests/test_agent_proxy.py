@@ -778,11 +778,34 @@ def test_create_app_refuses_to_start_with_half_an_environment(monkeypatch):
 
     with pytest.raises(RuntimeError) as exc:
         create_app()
-    assert "SUPABASE_SERVICE_KEY" in str(exc.value)
     assert "COORDINATOR_OPERATOR_TOKEN" in str(exc.value)
     # ...but NOT the JWT secret: it is legacy and optional now that the
     # project signs ES256 and tokens are verified against its JWKS.
     assert "SUPABASE_JWT_SECRET" not in str(exc.value)
+    # ...and NOT the service-role key, which no code path reads. See the
+    # comment in settings.from_env: requiring it would push the one
+    # credential that bypasses every RLS policy into a deploy that has no
+    # use for it.
+    assert "SUPABASE_SERVICE_KEY" not in str(exc.value)
+
+
+def test_create_app_starts_without_a_service_role_key(monkeypatch):
+    """The service-role key is not a boot requirement.
+
+    Nothing in the API reads it: Postgres is reached over libpq and tokens
+    are verified against the JWKS. A deploy should not have to hold a
+    full-bypass credential it never uses.
+    """
+    from flashml_cloud_api.app import create_app
+
+    monkeypatch.setenv("SUPABASE_URL", "https://yualksqjjvlfscbbsygq.supabase.co")
+    monkeypatch.setenv("COORDINATOR_URL", COORDINATOR_URL)
+    monkeypatch.setenv("COORDINATOR_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+
+    app = create_app()
+    assert "/v1alpha1/me" in {r.path for r in app.routes}
 
 
 def test_create_app_starts_without_a_jwt_secret(monkeypatch):

@@ -107,8 +107,21 @@ class Settings:
                     # list. It is legacy and optional; SUPABASE_URL is what
                     # verification actually needs now, and it must still be
                     # a hard startup failure.
+                    #
+                    # SUPABASE_SERVICE_KEY is deliberately absent too, for a
+                    # different reason: NOTHING READS IT. The API reaches
+                    # Postgres directly over libpq (db.connect, DATABASE_URL)
+                    # and verifies browser tokens against the project JWKS —
+                    # it never calls PostgREST or the Auth Admin API, which
+                    # are the only things a service-role key is for. Making a
+                    # never-used credential mandatory pressures whoever
+                    # deploys this into copying the one key that bypasses
+                    # every RLS policy and every ownership check in db.py
+                    # into one more system, for nothing. The field stays on
+                    # Settings as the seam for a future Storage/Admin-API
+                    # caller; the day something actually reads it, add it
+                    # back here.
                     ("SUPABASE_URL", supabase_url),
-                    ("SUPABASE_SERVICE_KEY", supabase_service_key),
                     ("COORDINATOR_URL", coordinator_url),
                     ("COORDINATOR_OPERATOR_TOKEN", coordinator_operator_token),
                 )

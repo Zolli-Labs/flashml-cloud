@@ -67,7 +67,9 @@ Env: `FLASHML_REQUIRE_NODE_AUTH=1`, `FLASHML_OPERATOR_TOKENS` (one token for the
 
 ### Task 4: Deploy the API (public)
 
-`flashml-api` as a public web service. Env: `SUPABASE_URL`, `SUPABASE_JWT_SECRET`, `SUPABASE_SERVICE_KEY`, `COORDINATOR_URL` (the private hostname), `COORDINATOR_OPERATOR_TOKEN`, `REQUIRE_AUTH=1`.
+`flashml-api` as a public web service. Env: `SUPABASE_URL`, `DATABASE_URL` (Supabase **session pooler** — the direct connection is IPv6-only and Render may not route it), `COORDINATOR_URL` (the private hostname), `COORDINATOR_OPERATOR_TOKEN`, `REQUIRE_AUTH=1`.
+
+`SUPABASE_SERVICE_KEY` is **not** set and is not required: no code path reads it, and it is the one credential that bypasses every RLS policy and every owner-scoped query. `SUPABASE_JWT_SECRET` stays blank too — this project signs ES256 and tokens verify against the JWKS.
 
 Verify: `/healthz` responds publicly; an unauthenticated agent route returns **401**; a request with a valid machine token reaches the coordinator (confirmed via coordinator logs); and the operator token appears in **no** response body, header, or log line.
 
