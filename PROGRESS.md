@@ -122,8 +122,8 @@ on volunteer nodes, where `--network none` means ranks can never rendezvous.
 sample-weighted delta mean; `fedavg_worker` is the per-shard task; a new
 `federated_averaging` workload type expands one job per round. This is the
 prerequisite for the deployed multi-user POC (`M1_DECISIONS.md` D6).
-How verified: flashruntime **377 passed**, flashnode **75 passed, 1 skipped,
-4 deselected**, workspace e2e **5 passed**. Convergence against a REAL
+How verified: flashruntime **417 passed**, flashnode **75 passed, 1 skipped,
+4 deselected**, workspace e2e **7 passed**. Convergence against a REAL
 coordinator over real HTTP (real expansion, leases, artifact storage,
 commit-time sha256): loss `0.5361 → 0.3781 → 0.2548 → 0.1757` over 4 rounds,
 2/2 participants. **Falsification check** — with `apply_delta` monkeypatched to
@@ -166,12 +166,32 @@ baseline only reproduces with the venv on `PATH`
 (`PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest`); otherwise `LocalLauncher`
 spawns a bare `python` that does not resolve and an unrelated test fails
 spuriously.
+(e) **The whole-branch review found three Criticals that per-task reviews
+structurally could not**, because each saw only its own diff. Two were
+demonstrated, not theorised: `reduce_deltas` validated only the *total* sample
+count, so a node reporting `samples = -999` beside an honest peer produced a
+weight of **999001.0** where the correct step was 1.0 (~10⁶× amplification from
+one integer); and Python's `json` parses `NaN`/`Infinity`, so a single
+non-finite delta NaN'd the model permanently while the run reported success —
+which needs no attacker, just a diverging lr on one shard. A third: quorum
+counted artifact keys by filename *suffix*, so one worker writing
+`out/a/metrics.json` + `out/b/metrics.json` minted multiple participants from
+one lease, and attempts the coordinator had **rejected** were aggregated anyway
+(uploads precede commit acceptance). All fixed; validation now lives in
+`fedavg_weights` on both the write AND read paths — the first fix covered only
+the write side, and a scoped re-review caught that `resume_state` and
+`blob_to_state` still admitted NaN. Honest arithmetic is unchanged: the demo
+reports byte-identical numbers before and after. See `M1_DECISIONS.md` D11/D12.
 Next: M1 Plan 2 — per-machine agent identity (device-flow tokens replacing the
 shared join code) and lease-scoped artifact writes, which together close
-`HANDOFF.md` risk #2 before anything faces the internet. Parking lot: this
-proves *collaborative* training, not *faster* — over home links with a small
-model it will usually be slower than one machine, and the docs say so;
-capability-proportional shard sizing and admission probes are M2.
+`HANDOFF.md` risk #2. **Nothing may face the public internet before it lands:**
+artifact `PUT` is still unauthenticated and the authoritative global model sits
+at a predictable key in a volunteer-writable namespace — both deliberately left
+to Plan 2 rather than half-fixed here. Parking lot: this proves *collaborative*
+training, not *faster* — over home links with a small model it will usually be
+slower than one machine, and the docs say so; capability-proportional shard
+sizing and admission probes are M2; abandoned shards are never cancelled, so a
+quorum round leaves a zombie task per round (needs cooperative cancel, M3).
 
 ### 2026-07-29 — Final-review fix wave + deferred follow-ups for the volunteer pool (flashruntime + flashnode)
 What/why: the whole-branch review of the volunteer argv slice found 12 issues,
