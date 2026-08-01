@@ -3,7 +3,8 @@
 **Date:** 2026-07-31
 **Scope:** flashml-cloud (primary), flashruntime, flashnode
 **Milestone:** M1 of 3 (see §2)
-**Status:** design approved through §5 (topology, data model, auth); §6–§10 written for review
+**Status:** design approved. Revised 2026-07-31 to move Windows hosts and the
+federated-averaging driver into M1, per the owner's minimum acceptance bar (§10).
 
 ---
 
@@ -63,18 +64,21 @@ cooperative cancel, disk quotas.
 - GitHub repo → `flashml.yaml` → job, with preflight validation.
 - `flashnode login` device flow; per-machine tokens; revocation.
 - Artifact/checkpoint `PUT` scoped to the caller's live lease.
-- Worker platforms: **macOS and Linux**.
+- Worker platforms: **macOS, Linux, and Windows**.
+- **A federated-averaging driver** so one PyTorch model trains across several
+  volunteer machines over the internet (§5.4).
 
 ### 2.2 Explicitly deferred
 
 | Item | Milestone | Why |
 |---|---|---|
-| Windows hosts | M1.5 | `executor/hardening.py:60` calls `os.getuid()`/`os.getgid()`, which do not exist in Python on Windows. Small fix, but needs a real Windows box to verify. |
 | GPU hosts | M1.5 | `inventory/capabilities.py:99` hardcodes `gpus=[]`; no `--gpus` passthrough in either runner; no GPU placement gate. Needs NVIDIA hardware to verify — `scripts/runpod_gpu_e2e.py` can rent one for under $1. |
+| Capability-proportional shard sizing | M2 | M1 uses equal shards with a round quorum (§5.4.3), which handles uneven hardware adequately without admission probes. |
 | Custom image builds | M2+ | Needs a build host with Docker, a registry, and node allowlist propagation. The curated image set covers the POC. |
 | Private GitHub repos | M1.5 | Public repos need no GitHub OAuth at all. Private repos need a linked GitHub identity. |
 | Alibaba deployment | later | See §1.1. |
 | Phone as a *worker* | out of scope | The sandbox is Docker. iOS cannot run a container daemon; Android cannot without root. Phones are first-class **clients** in M1. |
+| Domain `zolliai.com` | later | Not purchased yet. M1 uses the Render-provided subdomain; nothing in the design depends on the hostname. |
 | Multi-GPU DDP across volunteers | out of scope | `--network none` means ranks cannot rendezvous, and home links are orders of magnitude too slow for per-step gradient exchange. See §9.1. |
 
 ---
@@ -290,6 +294,96 @@ prove absence.
 This is the "tell users their code isn't supported" requirement, and it fires
 before a job ever reaches a volunteer's machine.
 
+### 5.4 Distributed training: the federated-averaging recipe
+
+This is the headline acceptance criterion: submit PyTorch code, and have **one
+model** trained across several volunteer machines over the internet.
+
+#### 5.4.1 Why this shape and not DDP
+
+Per-step DDP gradient exchange cannot be relayed over the internet — 50–200 ms
+round trips against hundreds of steps per second means communication cost
+exceeds compute by orders of magnitude. It is also structurally impossible here:
+`--network none` means ranks cannot rendezvous at all, which
+`docs/guides/bring-your-code.md` already records ("`mode: "coordinated"` is not
+available on volunteer nodes").
+
+The workable form exchanges **every N steps instead of every step**: each worker
+trains locally for a few hundred steps and sends only the accumulated weight
+delta; a driver averages the deltas and broadcasts the next round's weights.
+Communication drops 100–500×, which home links and NAT tolerate.
+
+#### 5.4.2 Reusing the proven driver pattern
+
+`flashml_workloads/kmeans_driver.py` already implements exactly this control
+flow: submit one job per round → poll to `SUCCEEDED` → collect the round's
+`metrics.json` artifacts → reduce → submit the next round. Its docstring states
+the principle: "pipelines are jobs chained by a driver, not a new execution
+mode." The recovery properties come along unchanged — a dead worker costs one
+shard retry, and a dead driver resumes from the last completed round.
+
+`fedavg_driver` is that loop with `reduce` replaced:
+
+| K-means (proven) | FedAvg (new) |
+|---|---|
+| upload shard CSVs once | upload round weights each round |
+| task: assign points → partial sums | task: load weights, train K local steps → weight delta |
+| reduce: sums/counts → new centroids | reduce: weighted mean of deltas → new weights |
+| next iteration | next round |
+
+The per-worker task follows `flashml_workloads/sgd_trainer.py`'s contract
+(`--spec spec.json --out OUTDIR`, inputs staged at `/work/inputs/`, results to
+`/work/out/`), with torch replacing stdlib arithmetic.
+
+#### 5.4.3 Stragglers: round quorum
+
+`kmeans_driver` requires every shard (`if len(partials) != len(shard_uris):
+raise`). FedAvg must not: a Windows laptop on home wifi would otherwise stall
+every round for everyone.
+
+The driver instead aggregates once **`min_participants` of `N`** deltas have
+arrived, or a round deadline passes — standard FedAvg partial participation.
+Late deltas are discarded, not applied to a later round, so averaging stays
+correct. This is the cheap answer to heterogeneous hardware and it is why M1
+does **not** need M2's admission probes: uneven machines degrade participation
+rate rather than blocking progress.
+
+#### 5.4.4 Data placement
+
+Shipping a dataset per task per round would dominate the transfer budget. M1
+supports two modes:
+
+- **Baked-in** (the demo path): a small dataset ships inside the curated
+  `flashml-pytorch-cpu` image; each task receives a shard *index* and selects its
+  slice. Downloaded once per host, then free forever.
+- **Input artifact**: user data staged at `/work/inputs/` as today. Suitable for
+  small datasets; the UI warns above a size threshold.
+
+#### 5.4.5 Where the driver runs
+
+The driver is a control loop, not a training process, so it runs **inside
+`flashml-api`** as a background task keyed to the job — not on a volunteer
+machine. This keeps round aggregation off untrusted hardware, which matters
+because until M3 lands a node's reported results are believed. Driver progress
+(round number, participants, current loss) is written to the `jobs` row for the
+UI to read.
+
+### 5.5 Windows hosts
+
+Two concrete changes, both in flashnode:
+
+1. `executor/hardening.py:60` builds `--user {os.getuid()}:{os.getgid()}`;
+   neither function exists in Python on Windows. The flag becomes
+   platform-conditional — omitted on Windows, where Docker Desktop does not map
+   host uids and the image's own non-root `USER` applies instead. The curated
+   images must therefore **declare a non-root `USER`**, so dropping the flag does
+   not silently mean container root.
+2. The `-v {workdir}:/work` bind mount needs Windows path translation
+   (`C:\Users\…` → the form Docker Desktop accepts).
+
+`FLASHNODE_WORKDIR` must default to a path under the user profile, for the same
+reason it exists on macOS: Docker Desktop only shares specific host directories.
+
 ---
 
 ## 6. Security changes required by this milestone
@@ -339,6 +433,9 @@ opening host registration beyond an invite list should be gated on M3.
 | Preflight fails | Job is never created; all problems itemized at once |
 | No eligible node | Job stays PENDING; UI states what capability is missing (§6.3) |
 | Node dies mid-task | Existing lease expiry → requeue. Proven; unchanged |
+| Node drops mid-round (lid closed) | Round aggregates on quorum (§5.4.3); the job does not stall. The machine rejoins on next claim without operator action |
+| Fewer than `min_participants` online | Round waits, job stays RUNNING, UI states how many machines are needed and how many are online |
+| Driver crashes mid-run | Restarts from the last completed round's weights artifact; rounds are idempotent |
 | Coordinator restarts | Durable SQLite leases on the Render disk. Proven; unchanged |
 | Agent token revoked | 401; agent exits with a message naming the machine |
 | Supabase unavailable | API returns 503 for product operations; the coordinator keeps running so in-flight work completes and commits |
@@ -360,6 +457,15 @@ a regression, not a tradeoff.
   is the proof that §6.1 landed).
 - Preflight: each check in §5.3 fires on a crafted repo fixture.
 - `flashml.yaml` → `JobSpec` compilation, including sweep expansion arity.
+- FedAvg reduce: averaging hand-built deltas yields the expected weights; a
+  round with fewer than `min_participants` does not aggregate; a late delta
+  arriving after aggregation is discarded rather than applied to the next round.
+- FedAvg driver resume: a driver restarted mid-run continues from the last
+  completed round, not from round 0.
+- `harden_args` on Windows: omits `--user`, and the argv is asserted against a
+  fixture so the flag cannot silently return. Paired with a test that the
+  curated images declare a non-root `USER` — dropping the flag is only safe
+  because of that.
 
 **Integration**
 
@@ -437,27 +543,46 @@ claiming a lease. On-demand capacity rental is not a product feature today.
 
 ## 10. Definition of done
 
+**The minimum bar, in the owner's words:** *submit a PyTorch job; friends on Macs
+and Windows machines connect as hosts; the model trains distributed across them
+over the network.*
+
 M1 is complete when, on the deployed system:
 
-1. A public HTTPS URL loads on a phone and a laptop, and Google sign-in works on both.
-2. A Mac and a Linux machine are enrolled via `flashnode login`, approved from a
-   phone browser, and appear as online in the web UI.
-3. A public GitHub repo with a `flashml.yaml` sweep is submitted from the browser
-   and expands to multiple tasks distributed across **both** machines.
-4. Killing one machine mid-run requeues its tasks, and the job still completes.
-5. Metrics and artifacts are visible in the browser afterwards.
-6. Revoking a machine stops it receiving work within one claim interval.
-7. A crafted upload to a key outside the caller's live lease returns 403, proven
+1. A public HTTPS URL (Render subdomain) loads on a phone and a laptop, and
+   Google sign-in works on both.
+2. **A Mac and a Windows machine** are enrolled via `flashnode login`, approved
+   from a phone browser, and show as online in the web UI. Linux is expected to
+   work and is tested, but Mac + Windows is the bar, because that is what the
+   testers own.
+3. A public GitHub repo containing **PyTorch training code** with a `flashml.yaml`
+   is submitted from the browser.
+4. **The model trains across both machines via the federated-averaging driver**:
+   several rounds complete, each with contributions from more than one machine,
+   and the loss decreases monotonically across rounds. The job view names which
+   machine contributed to which round.
+5. Closing the lid on one machine mid-round does not stall the job — the round
+   completes on quorum, and the machine rejoins later without manual steps.
+6. Final weights and metrics are downloadable from the browser.
+7. Revoking a machine stops it receiving work within one claim interval.
+8. A crafted upload to a key outside the caller's live lease returns 403, proven
    by a test.
-8. Preflight rejects a repo importing a package absent from its chosen image,
+9. Preflight rejects a repo importing a package absent from its chosen image,
    with a message naming the package.
-9. A second person, not the developer, completes steps 1–3 unaided from written
-   instructions.
-10. Existing suites green (flashruntime ≥323, flashnode ≥73), and the flashnode
+10. **A friend — not the developer — completes signup → enroll their machine →
+    see their machine contribute to a round, unaided, from written instructions.**
+11. Existing suites green (flashruntime ≥323, flashnode ≥73), and the flashnode
     Docker integration tests **run rather than skip**.
 
-Item 9 is the real test. The rest can be satisfied by someone who already knows
-where the sharp edges are.
+Items 4 and 10 are the real tests. The rest can be satisfied by someone who
+already knows where the sharp edges are.
+
+**Honest limits of this bar.** Item 4 proves *collaborative* training, not that
+it is faster than one machine — over home links with small models it will
+usually be slower than local training, and the spec does not claim otherwise.
+What it proves is that the loop is real: independent machines, owned by
+different people, on different operating systems, jointly improving one model
+with fault tolerance. Speedup is a scale-and-scheduling question for M2.
 
 ---
 
@@ -467,8 +592,12 @@ where the sharp edges are.
    sleep — a suspended coordinator drops heartbeats and expires live leases.
    Confirm the credit covers two non-sleeping instances plus a persistent disk
    on the coordinator. `flashml-web` may run on a sleeping tier.
-2. **Domain.** `zolliai.com` is named in the flashml-cloud README. Use it, or a
-   Render subdomain for M1?
-3. **Host invite gating.** §6.4 argues open host signup should wait for M3
+2. **Host invite gating.** §6.4 argues open host signup should wait for M3
    (result verification). M1 could gate host enrollment behind an invite code
-   while developer signup stays open. Decide before launch.
+   while developer signup stays open. Decide before launch. *(Note: the M1
+   testers are the owner's friends, so an invite gate costs nothing now and
+   removes the "a stranger lies about results" exposure entirely.)*
+3. **Demo dataset.** Which small dataset ships baked into
+   `flashml-pytorch-cpu` for §5.4.4 — MNIST (~11 MB, keeps the image small) or
+   CIFAR-10 (~170 MB, a more convincing demo but a slower first pull for every
+   host)?
