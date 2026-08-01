@@ -184,8 +184,18 @@ Postgres directly. machines stores token_hash, never a raw token."
   - `new_machine_token() -> str` — `secrets.token_urlsafe(32)` with an `fmk_` prefix
   - `AuthError(Exception)`
 
-Verification must check **signature, expiry, and audience**. A token that is
-merely well-formed is not a credential.
+Verification must check **signature, expiry, and audience** — and must
+**require** those claims to be present, not merely validate them when they
+happen to appear. PyJWT validates `exp` only *if it exists*, so a forged token
+that simply omits the claim never expires; the same reasoning applies to `aud`
+(audience check skipped) and `sub` (a `None` user id flows downstream). Pass
+`options={"require": ["exp", "sub", "aud"]}`.
+
+This was found by running the finished module rather than reading it: the
+original eight tests covered `alg=none`, a wrong secret, an *expired* token, a
+wrong audience, and junk input — but not a **missing** claim, and the
+implementation accepted it. A token that is merely well-formed is not a
+credential, and neither is one whose lifetime is optional.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -262,7 +272,7 @@ def test_token_hash_is_stable_and_one_way():
     assert len(hash_machine_token(t)) == 64
 ```
 
-- [ ] **Step 2–5:** run (fails on import), implement, re-run to 8 passed, commit.
+- [ ] **Step 2–5:** run (fails on import), implement, re-run to 11 passed, commit.
 
 Add `pyjwt>=2.8` and `psycopg[binary]>=3.1` to `apps/api/pyproject.toml`
 dependencies. Implementation notes that matter:
