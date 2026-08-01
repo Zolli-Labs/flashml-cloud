@@ -29,6 +29,14 @@ Workspace document map (read in this order when starting work):
                               agent must follow.
 - SPRINT_PLAN.md            — the next two weeks, day by day, with demos
                               and acceptance criteria.
+- M1_DECISIONS.md           — the M1 (deployed multi-user POC) decision
+                              record: what was decided, why, what it costs,
+                              and what would make us revisit. Read before
+                              re-opening any M1 design choice. Companion to
+                              flashml-cloud/docs/superpowers/specs/
+                              2026-07-31-deployed-multi-user-poc-design.md.
+                              NOTE: M1 ships on Supabase + Render; Alibaba
+                              is deferred, not abandoned (see D1).
 - PLAN_2WEEKS.md            — the original staged plan; local half complete
                               (status banner at top). Still the Alibaba
                               (Stage 5) runbook detail.
