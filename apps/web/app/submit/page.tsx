@@ -1,153 +1,266 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  ArrowRight,
+  GithubLogo,
+  Warning,
+  XCircle,
+} from "@phosphor-icons/react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { submitJob } from "@/lib/poc-api";
+import {
+  ApiError,
+  NotAuthenticated,
+  PreflightRejected,
+  submitFromRepo,
+  type PreflightFinding,
+  type SubmitFromRepoResult,
+} from "@/lib/cloud-api";
 
-const defaults = {
-  samples: 150000,
-  dimensions: 24,
-  clusters: 6,
-  shards: 36,
-  iterations: 12,
-  seed: 42,
-};
+type Status = "idle" | "submitting" | "rejected" | "submitted" | "error";
 
 export default function SubmitPage() {
   const router = useRouter();
-  const [params, setParams] = useState(defaults);
-  const [environment, setEnvironment] = useState<"auto" | "local" | "alibaba-ack">("auto");
-  const [isolation, setIsolation] = useState<"standard" | "sandboxed">("standard");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [repo, setRepo] = useState("");
+  const [ref, setRef] = useState("");
+  const [status, setStatus] = useState<Status>("idle");
+  const [findings, setFindings] = useState<PreflightFinding[]>([]);
+  const [result, setResult] = useState<SubmitFromRepoResult | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function onSubmit() {
-    setBusy(true);
-    setError(null);
+  const canSubmit = repo.trim().length > 0 && status !== "submitting";
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setStatus("submitting");
+    setErrorMessage(null);
+
     try {
-      const job = await submitJob({
-        apiVersion: "flashml.dev/v1alpha1",
-        kind: "Job",
-        metadata: { name: "distributed-kmeans-demo" },
-        spec: {
-          execution: { backend: "ray", environment },
-          image: { repository: "flashml/kmeans", tag: "poc-v1" },
-          workload: {
-            type: "sharded_kmeans",
-            parameters: { ...params, task_delay_seconds: 0.4 },
-          },
-          resources: {
-            minimumWorkers: 2,
-            maximumWorkers: 3,
-            cpuPerTask: 1,
-            memoryPerTask: "512Mi",
-          },
-          placement: { pool: "any", architectures: ["amd64", "arm64"] },
-          isolation: { tier: isolation, allowFallback: false },
-          retryPolicy: { maxTaskAttempts: 4, retryWorkerLoss: true },
-          artifacts: { outputPrefix: "artifact://jobs/{job_id}/" },
-        },
-      });
-      router.push(`/jobs/${job.job_id}`);
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
-      setBusy(false);
+      const job = await submitFromRepo(repo.trim(), ref.trim() || undefined);
+      setResult(job);
+      setFindings(job.findings ?? []);
+      setStatus("submitted");
+    } catch (err) {
+      if (err instanceof NotAuthenticated) {
+        router.push("/sign-in?next=/submit");
+        return;
+      }
+      if (err instanceof PreflightRejected) {
+        // Preflight already ran every check before refusing — this is the
+        // *complete* set of findings for this repo, not just the first one
+        // hit. An error anywhere in the set means the API refused the
+        // whole submission (nothing was queued, nothing uploaded), so
+        // there is nothing to "submit anyway" here: the repo has to change.
+        setFindings(err.findings);
+        setResult(null);
+        setStatus("rejected");
+        return;
+      }
+      setStatus("error");
+      setErrorMessage(
+        err instanceof ApiError
+          ? err.detail
+          : err instanceof Error
+          ? err.message
+          : "Something went wrong submitting this repo."
+      );
     }
   }
 
-  const fields: { key: keyof typeof defaults; label: string }[] = [
-    { key: "samples", label: "Samples" },
-    { key: "dimensions", label: "Dimensions" },
-    { key: "clusters", label: "Clusters (k)" },
-    { key: "shards", label: "Shards" },
-    { key: "iterations", label: "Iterations" },
-    { key: "seed", label: "Seed" },
-  ];
+  function resetToForm() {
+    setStatus("idle");
+    setFindings([]);
+    setResult(null);
+    setErrorMessage(null);
+  }
+
+  // Once submitted, the job already exists — the API's from-repo endpoint
+  // only ever refuses (400, nothing queued) when preflight finds an error;
+  // a warning never blocks it (preflight.py: "a warning is advice that does
+  // not block"). So there is no separate confirmation round trip for
+  // warnings-only findings to gate. What this screen gives the user instead
+  // is the honest version of "submit anyway": the warnings are shown in
+  // full, up front, and the person has to read them and click through to
+  // the job rather than being silently redirected as if nothing was flagged.
+  if (status === "submitted" && result) {
+    return (
+      <main className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold font-mono">Job submitted</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {result.spec.metadata.name} · {result.job_id}
+          </p>
+        </div>
+
+        {findings.length > 0 && (
+          <Card className="border-amber-400/30">
+            <CardHeader>
+              <CardTitle className="text-sm font-mono text-amber-400">
+                Preflight noted {findings.length} warning
+                {findings.length === 1 ? "" : "s"}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <FindingsList findings={findings} />
+            </CardContent>
+          </Card>
+        )}
+
+        <Button
+          size="lg"
+          className="w-full"
+          onClick={() => router.push(`/jobs/${result.job_id}`)}
+        >
+          View job <ArrowRight className="w-4 h-4" data-icon="inline-end" />
+        </Button>
+      </main>
+    );
+  }
 
   return (
     <main className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold font-mono">Submit Job</h1>
+        <h1 className="text-2xl font-bold font-mono">Submit a repo</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Distributed K-Means template — executed by FlashRuntime on Ray/KubeRay
+          Paste a public GitHub repo with a <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">flashml.yaml</code> at its
+          root. We stage the code, run it through preflight, and hand it to
+          the next available machine.
         </p>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm font-mono">Workload parameters</CardTitle>
+          <CardTitle className="text-sm font-mono flex items-center gap-2">
+            <GithubLogo className="w-4 h-4" />
+            Repository
+          </CardTitle>
         </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-4">
-          {fields.map(({ key, label }) => (
-            <div key={key} className="space-y-1.5">
-              <Label className="text-xs uppercase tracking-wide">{label}</Label>
+        <CardContent className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="repo">GitHub URL or owner/name</Label>
               <Input
-                type="number"
-                value={params[key]}
-                onChange={(e) =>
-                  setParams({ ...params, [key]: Number(e.target.value) })
-                }
+                id="repo"
+                name="repo"
+                type="text"
+                inputMode="url"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="https://github.com/acme/trainer"
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+                disabled={status === "submitting"}
                 className="font-mono"
               />
             </div>
-          ))}
-        </CardContent>
-      </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-mono">Placement</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <Label className="text-xs uppercase tracking-wide">Environment</Label>
-            <select
-              value={environment}
-              onChange={(e) => setEnvironment(e.target.value as typeof environment)}
-              className="w-full h-9 rounded-md border border-input bg-transparent px-3 text-sm font-mono"
-            >
-              <option value="auto">auto</option>
-              <option value="local">Local (Kind)</option>
-              <option value="alibaba-ack">Alibaba ACK</option>
-            </select>
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs uppercase tracking-wide">Isolation</Label>
-            <select
-              value={isolation}
-              onChange={(e) => setIsolation(e.target.value as typeof isolation)}
-              className="w-full h-9 rounded-md border border-input bg-transparent px-3 text-sm font-mono"
-            >
-              <option value="standard">standard container</option>
-              <option value="sandboxed">sandboxed (ACK secure pool)</option>
-            </select>
-            {isolation === "sandboxed" && (
-              <p className="text-[11px] text-amber-400">
-                Rejected in the local profile — requires a compatible ACK secure
-                node pool.
+            <div className="space-y-1.5">
+              <Label htmlFor="ref">Branch</Label>
+              <Input
+                id="ref"
+                name="ref"
+                type="text"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="main"
+                value={ref}
+                onChange={(e) => setRef(e.target.value)}
+                disabled={status === "submitting"}
+                className="font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                Defaults to <span className="font-mono">main</span> if left blank.
               </p>
-            )}
-          </div>
+            </div>
+
+            {status === "error" && errorMessage ? (
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
+                <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
+                <span>{errorMessage}</span>
+              </div>
+            ) : null}
+
+            <Button
+              type="submit"
+              size="lg"
+              className="w-full"
+              disabled={!canSubmit}
+            >
+              {status === "submitting" ? "Running preflight…" : "Submit"}
+            </Button>
+          </form>
         </CardContent>
       </Card>
 
-      {error && (
-        <Card className="border-red-500/30">
-          <CardContent className="py-3 text-sm font-mono text-red-400">{error}</CardContent>
+      {status === "rejected" && (
+        <Card className="border-destructive/30">
+          <CardHeader>
+            <CardTitle className="text-sm font-mono text-destructive flex items-center gap-2">
+              <XCircle className="w-4 h-4" weight="fill" />
+              Preflight found problems with this job
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Nothing was queued. Fix the items below in the repo and submit
+              again.
+            </p>
+            <FindingsList findings={findings} />
+            <Button type="button" variant="ghost" size="sm" onClick={resetToForm}>
+              Edit and try again
+            </Button>
+          </CardContent>
         </Card>
       )}
-
-      <Button
-        onClick={onSubmit}
-        disabled={busy}
-        className="w-full bg-cyan/10 text-cyan border border-cyan/30 hover:bg-cyan/20"
-      >
-        {busy ? "submitting…" : "Submit distributed K-Means"}
-      </Button>
     </main>
+  );
+}
+
+function FindingsList({ findings }: { findings: PreflightFinding[] }) {
+  return (
+    <ul className="space-y-2.5">
+      {findings.map((f, i) => (
+        <li
+          key={i}
+          className={`flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm ${
+            f.level === "error"
+              ? "border-destructive/30 bg-destructive/10"
+              : "border-amber-400/30 bg-amber-400/10"
+          }`}
+        >
+          {f.level === "error" ? (
+            <XCircle
+              className="w-4 h-4 shrink-0 mt-0.5 text-destructive"
+              weight="fill"
+            />
+          ) : (
+            <Warning
+              className="w-4 h-4 shrink-0 mt-0.5 text-amber-400"
+              weight="fill"
+            />
+          )}
+          <div className="min-w-0">
+            <div
+              className={`font-mono text-[10px] uppercase tracking-wide ${
+                f.level === "error" ? "text-destructive" : "text-amber-400"
+              }`}
+            >
+              {f.level} · {f.code}
+            </div>
+            {/* Quoted verbatim — the API's message already names the
+                offending package and which curated image would provide it.
+                Paraphrasing here would throw that specificity away. */}
+            <p className="text-foreground/90">{f.message}</p>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
