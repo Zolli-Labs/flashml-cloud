@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Lightning } from "@phosphor-icons/react";
+import { UserMenu } from "./UserMenu";
 
 const navLinks = [
-  { href: "/nodes", label: "Nodes" },
+  { href: "/machines", label: "Machines" },
   { href: "/jobs", label: "Jobs" },
   { href: "/submit", label: "Submit" },
-  { href: "/integration", label: "Integration" },
+  { href: "/activate", label: "Activate" },
 ];
 
 export function Navbar() {
@@ -31,8 +32,10 @@ export function Navbar() {
           </span>
         </Link>
 
-        {/* Nav Links */}
-        <nav className="flex items-center gap-1">
+        {/* Nav Links — hidden below md: at phone widths there is only
+            room for the logo and account control, and this app is
+            phone-first (the /activate screen exists to be used on one). */}
+        <nav className="hidden md:flex items-center gap-1">
           {navLinks.map((link) => {
             const active = pathname === link.href;
             return (
@@ -53,13 +56,14 @@ export function Navbar() {
           })}
         </nav>
 
-        <div className="hidden md:flex items-center gap-3">
+        <div className="flex items-center gap-3">
           <Link
             href="/launch"
-            className="px-4 py-1.5 rounded-md bg-cyan text-background text-sm font-semibold hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
+            className="hidden md:inline-flex px-4 py-1.5 rounded-md bg-cyan text-background text-sm font-semibold hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
           >
             Launch Training
           </Link>
+          <UserMenu />
         </div>
       </div>
     </header>
