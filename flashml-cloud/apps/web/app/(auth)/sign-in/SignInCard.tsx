@@ -9,23 +9,31 @@ import { Label } from "@/components/ui/label";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
 import { GoogleMark } from "./GoogleMark";
 
-type Pending = "password" | "magic" | "google" | null;
+type Pending = "password" | "google" | null;
 type Mode = "signin" | "signup";
 
 /**
- * Password is the primary path; the magic link is the fallback.
+ * Email and password only. This flow sends no email at all.
  *
- * It used to be the other way round, which does not survive a real signup
- * day: Supabase's built-in SMTP is rate limited to a handful of messages an
- * hour on the free tier, and it is shared across the whole project. With
- * magic links as the only way in, the fourth friend to try signing up — or
- * the same friend signing in on their phone after their laptop — simply
- * cannot get in, and the error they see is a generic rate-limit message
- * that looks like the site is broken.
+ * The magic link is deliberately gone rather than kept as a fallback.
+ * Supabase's built-in SMTP allows roughly two messages an hour PER PROJECT,
+ * shared across every account, and the failure it produces is uniquely
+ * misleading: the obvious recovery — try another address — hits the same
+ * quota and fails identically, so it reads as the site being broken rather
+ * than throttled. Verified in this project's auth log as
+ * `over_email_send_rate_limit` on /signup for four different addresses in
+ * under three minutes.
  *
- * A password costs zero emails per sign-in, forever. The only email in the
- * whole flow is the one confirmation at signup, and that disappears too if
- * "Confirm email" is off in the dashboard.
+ * Password auth costs zero emails, always. Nothing here can be rate limited
+ * by an email quota, so nothing here needs a custom SMTP provider to work
+ * for more than a handful of people.
+ *
+ * DASHBOARD PREREQUISITE: "Confirm email" must be OFF (Authentication ->
+ * Sign In / Providers -> Email). With it on, Supabase still sends a
+ * confirmation at signup and the account cannot be used until it is opened
+ * — which reintroduces the exact dependency this removes. The signup path
+ * below detects that state and says so plainly rather than showing a
+ * "check your email" screen for a message the quota may have eaten.
  */
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -35,14 +43,12 @@ export function SignInCard() {
   const [pending, setPending] = useState<Pending>(null);
   const [error, setError] = useState<string | null>(searchParams.get("error"));
   const [notice, setNotice] = useState<string | null>(null);
+  const [needsConfirmation, setNeedsConfirmation] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [revealed, setRevealed] = useState(false);
-  const [sentTo, setSentTo] = useState<string | null>(null);
 
   const next = searchParams.get("next") || "/machines";
-  const redirectTo = () =>
-    `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
   function reset() {
     setError(null);
@@ -73,9 +79,9 @@ export function SignInCard() {
         setError(readableAuthError(authError.message));
         return;
       }
-      // A full reload rather than a router push: the session lives in
-      // cookies the middleware reads on the server, and a client-side
-      // navigation would render the next page against the stale request.
+      // A full reload, not a router push: the session lives in cookies the
+      // middleware reads server-side, and a client navigation would render
+      // the next page against the request that had no session on it.
       window.location.assign(next);
       return;
     }
@@ -83,7 +89,6 @@ export function SignInCard() {
     const { data, error: authError } = await supabase.auth.signUp({
       email: trimmed,
       password,
-      options: { emailRedirectTo: redirectTo() },
     });
     setPending(null);
 
@@ -92,48 +97,27 @@ export function SignInCard() {
       return;
     }
 
-    // Supabase deliberately returns a success-shaped response when the
-    // address is already registered, so an attacker cannot enumerate users
-    // by watching for a different error. The tell is an empty `identities`
-    // array. Without this branch the person sees "check your email", waits
-    // for a message that never arrives, and concludes signup is broken —
-    // when in fact they already have an account.
+    // Supabase returns a success-shaped response for an ALREADY REGISTERED
+    // address on purpose, so users cannot be enumerated by watching for a
+    // different error. The tell is an empty `identities` array. Untreated,
+    // the person is told to check their email, waits for a message that was
+    // never sent, and concludes signup is broken — when they simply already
+    // have an account.
     if (data.user && data.user.identities?.length === 0) {
       setMode("signin");
       setNotice("That email is already registered. Sign in with your password.");
       return;
     }
 
-    // Session present => email confirmation is off in the dashboard, and
-    // they are already signed in.
     if (data.session) {
       window.location.assign(next);
       return;
     }
 
-    setSentTo(trimmed);
-  }
-
-  async function sendMagicLink() {
-    const trimmed = email.trim();
-    if (!trimmed) {
-      setError("Enter your email address first.");
-      return;
-    }
-    if (pending) return;
-    setPending("magic");
-    reset();
-    const supabase = createBrowserSupabaseClient();
-    const { error: authError } = await supabase.auth.signInWithOtp({
-      email: trimmed,
-      options: { emailRedirectTo: redirectTo() },
-    });
-    setPending(null);
-    if (authError) {
-      setError(readableAuthError(authError.message, "magic"));
-      return;
-    }
-    setSentTo(trimmed);
+    // No session and a real new user => "Confirm email" is still on. This is
+    // a deployment misconfiguration, not something the person signing up can
+    // fix, so name it instead of pretending an email is on its way.
+    setNeedsConfirmation(true);
   }
 
   async function signInWithGoogle() {
@@ -143,37 +127,42 @@ export function SignInCard() {
     const supabase = createBrowserSupabaseClient();
     const { error: authError } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: redirectTo() },
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`,
+      },
     });
     if (authError) {
-      // A provider error here, rather than a redirect to Google, almost
-      // always means Google sign-in is not enabled in the Supabase
-      // dashboard yet. Say that plainly instead of surfacing a raw
-      // provider error.
-      setError("Google sign-in isn't set up yet — use your email and password.");
+      // A provider error here, rather than a redirect to Google, means
+      // Google is not enabled in the Supabase dashboard. Confirmed in this
+      // project's auth log as `provider is not enabled` on /authorize.
+      setError("Google sign-in isn't enabled for this deployment — use your email and password.");
       setPending(null);
     }
     // On success the browser navigates to Google; nothing left to render.
   }
 
-  if (sentTo) {
+  if (needsConfirmation) {
     return (
       <section className="glass w-full max-w-sm rounded-xl p-7 rise">
-        <h1 className="text-xl font-semibold">Check your email</h1>
+        <h1 className="text-xl font-semibold tracking-tight">
+          Account created, but not usable yet
+        </h1>
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          A sign-in link is on its way to{" "}
-          <span className="font-medium text-foreground break-all">{sentTo}</span>.
-          Open it on this device — it signs you in right here, in this browser.
+          This deployment still requires email confirmation, so the account
+          can&apos;t sign in until a confirmation link is opened.
         </p>
-        <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
-          Nothing after a minute? Check spam. Links are rate limited, so if
-          you have requested several, the later ones may be delayed.
+        <p className="mt-4 text-sm leading-relaxed text-muted-foreground">
+          If you run this deployment: turn off{" "}
+          <span className="font-medium text-foreground">Confirm email</span> in
+          Supabase under Authentication → Sign In / Providers → Email, then
+          sign in normally. No email is involved once it is off.
         </p>
         <button
           type="button"
           className="mt-5 text-sm font-medium text-primary underline underline-offset-4 hover:no-underline"
           onClick={() => {
-            setSentTo(null);
+            setNeedsConfirmation(false);
+            setMode("signin");
             reset();
           }}
         >
@@ -225,11 +214,13 @@ export function SignInCard() {
               id="password"
               name="password"
               type={revealed ? "text" : "password"}
-              // Tells password managers whether to offer to save a new
+              // Tells a password manager whether to offer to save a new
               // credential or fill an existing one. Getting this wrong is
-              // why so many sign-up forms fail to trigger the save prompt.
+              // why so many sign-up forms never trigger the save prompt.
               autoComplete={signingUp ? "new-password" : "current-password"}
-              placeholder={signingUp ? `At least ${MIN_PASSWORD_LENGTH} characters` : "••••••••"}
+              placeholder={
+                signingUp ? `At least ${MIN_PASSWORD_LENGTH} characters` : "••••••••"
+              }
               required
               minLength={signingUp ? MIN_PASSWORD_LENGTH : undefined}
               value={password}
@@ -250,6 +241,12 @@ export function SignInCard() {
               )}
             </button>
           </div>
+          {signingUp ? (
+            <p className="text-xs text-muted-foreground">
+              There is no password reset in this deployment yet — that would
+              need email. Save it somewhere.
+            </p>
+          ) : null}
         </div>
 
         <Button
@@ -295,28 +292,17 @@ export function SignInCard() {
         <span className="h-px flex-1 bg-border" />
       </div>
 
-      <div className="flex flex-col gap-3">
-        <Button
-          type="button"
-          variant="outline"
-          size="lg"
-          className="interactive h-11 w-full gap-2.5"
-          disabled={pending !== null}
-          onClick={signInWithGoogle}
-        >
-          <GoogleMark className="h-4 w-4" />
-          {pending === "google" ? "Redirecting…" : "Continue with Google"}
-        </Button>
-
-        <button
-          type="button"
-          onClick={sendMagicLink}
-          disabled={pending !== null}
-          className="text-center text-sm text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-        >
-          {pending === "magic" ? "Sending…" : "Email me a sign-in link instead"}
-        </button>
-      </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="lg"
+        className="interactive h-11 w-full gap-2.5"
+        disabled={pending !== null}
+        onClick={signInWithGoogle}
+      >
+        <GoogleMark className="h-4 w-4" />
+        {pending === "google" ? "Redirecting…" : "Continue with Google"}
+      </Button>
 
       <p className="mt-7 border-t border-border pt-5 text-center text-sm text-muted-foreground">
         {signingUp ? "Already have an account?" : "No account yet?"}{" "}
@@ -341,37 +327,26 @@ export function SignInCard() {
  * tab, not for someone who just mistyped their password. Translate the ones
  * with an obvious next action; pass anything unrecognised through rather
  * than swallowing a message that might be the only clue.
- *
- * `context` matters for the rate-limit case, which is the one most likely
- * to be misread. See the note there.
  */
 function readableAuthError(
   message: string,
-  context: "signin" | "signup" | "magic" = "signin"
+  context: "signin" | "signup" = "signin"
 ): string {
   const m = message.toLowerCase();
   if (m.includes("invalid login credentials")) {
     return "That email and password don't match an account. Check both, or create an account below.";
   }
   if (m.includes("email not confirmed")) {
-    return "This account still needs its email confirmed. Open the confirmation link, or ask the admin to turn off email confirmation for this deployment.";
+    return "This account was created while email confirmation was still on. Turn off Confirm email in the Supabase dashboard (Authentication → Sign In / Providers → Email) and try again.";
   }
   if (m.includes("rate limit") || m.includes("too many requests")) {
-    // The trap: Supabase's email quota is per PROJECT, not per address, and
-    // it is about two messages an hour on the built-in SMTP. So the obvious
-    // recovery — "try a different email" — fails identically, which reads
-    // as the app being broken rather than throttled. Say whose limit it is.
-    //
-    // Signup only touches that quota because "Confirm email" is on. With it
-    // off (Authentication -> Sign In / Providers -> Email) signup sends no
-    // email at all and this branch becomes unreachable for signup.
+    // Should now be unreachable via email quota — nothing here sends mail.
+    // If it fires, it is Supabase's per-IP request limit (30 per 5 minutes
+    // on the auth endpoints), which genuinely is about this client.
     if (context === "signup") {
-      return "This deployment's email quota is used up. It's shared across every account, so a different address won't help — wait about an hour, or turn off email confirmation in the Supabase dashboard to remove email from signup entirely.";
+      return "Too many sign-up attempts from this network. Wait a few minutes and try again. If the message mentions email, turn off Confirm email in the Supabase dashboard — this form otherwise sends none.";
     }
-    if (context === "magic") {
-      return "This deployment's email quota is used up — it's shared across every account, so a different address won't help. Sign in with a password instead; that sends no email.";
-    }
-    return "Too many attempts just now. Wait a minute and try again.";
+    return "Too many attempts from this network. Wait a few minutes and try again.";
   }
   if (m.includes("password should be")) {
     return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;

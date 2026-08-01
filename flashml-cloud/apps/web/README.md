@@ -36,19 +36,39 @@ Nothing else is read from `process.env` in browser-reachable code. If you
 find yourself adding a new `NEXT_PUBLIC_*` variable, ask whether the value
 is safe for every visitor to read in devtools — it will be.
 
-## Sign-in: email works today, Google needs one-time setup
+## Sign-in: email + password. This app sends no email.
 
 `/sign-in` offers two paths:
 
-- **Email magic link** (`supabase.auth.signInWithOtp`) — works out of the
-  box against any Supabase project with email auth enabled, which is the
-  default. No password storage, no extra provider config. This is the path
-  the acceptance run (a friend signing in on their phone) actually uses
-  today.
+- **Email and password** (`signInWithPassword` / `signUp`) — the primary
+  path, and the one the acceptance run uses. It sends no email, ever.
 - **Google OAuth** — requires the one-time dashboard setup below. Until
-  that's done, clicking "Continue with Google" shows "Google sign-in isn't
-  set up for this deployment yet — use email above" instead of a raw
-  Supabase provider error or a silent no-op.
+  that's done, clicking "Continue with Google" shows a plain-language
+  message instead of a raw Supabase provider error or a silent no-op.
+
+### Why the magic link was removed
+
+It was the primary path and it does not survive a real signup day.
+Supabase's built-in SMTP allows roughly **two messages an hour per
+project** — shared across every account, not per address. This project's
+auth log recorded `over_email_send_rate_limit` on `/signup` for four
+different addresses inside three minutes.
+
+The failure is uniquely misleading: the obvious recovery, trying a
+different email, hits the same quota and fails identically, so it reads as
+the site being broken rather than throttled. Raising the limit requires
+running custom SMTP, which is not worth standing up for a POC.
+
+**Required dashboard setting: turn "Confirm email" OFF** (Authentication →
+Sign In / Providers → Email). Leave it on and Supabase still sends a
+confirmation at signup, reintroducing the same dependency and leaving new
+accounts unusable. `SignInCard` detects that state and names the toggle
+rather than showing a "check your email" screen for a message the quota may
+have eaten.
+
+Consequence worth knowing: **there is no password reset**, because that
+needs email. The sign-up form says so. Add custom SMTP before anyone
+outside the test group has an account worth recovering.
 
 ## Manual step: enable Google sign-in (do this once per Supabase project)
 
@@ -92,9 +112,8 @@ work until these steps are done.
 
 Until all three are done, clicking "Continue with Google" shows the
 graceful fallback message described above. Note that step 3's redirect URL
-allow-list is shared with the email magic-link flow (both send the browser
-back to this app's own `/auth/callback`), so it's worth setting up even
-before Google is fully wired.
+allow-list matters for Google, which is the only flow that still sends the
+browser away and back through `/auth/callback`.
 
 ## Run it locally
 
@@ -123,11 +142,11 @@ npm test        # vitest — lib/cloud-api.test.ts
 
 `middleware.ts` refreshes the Supabase session on every request and
 redirects signed-out visitors away from private routes to `/sign-in`.
-`/sign-in` (`app/(auth)/sign-in/SignInCard.tsx`) offers an email field
-("Continue with email") and a "Continue with Google" button. Email calls
-`supabase.auth.signInWithOtp`, which emails a magic link and shows a "check
-your email" confirmation naming the address it went to; clicking that link
-lands back here. Google calls `supabase.auth.signInWithOAuth`, sending the
+`/sign-in` (`app/(auth)/sign-in/SignInCard.tsx`) offers an email/password
+form that toggles between sign-in and sign-up, plus a "Continue with
+Google" button. The password path calls `signInWithPassword` or `signUp`
+and, on success, does a full page load to `?next=` so the server sees the
+session cookies the middleware reads. Google calls `supabase.auth.signInWithOAuth`, sending the
 browser to Google and then to Supabase's fixed callback URL above — if
 Google isn't configured, this call returns a provider error inline instead
 of redirecting, which the button catches and turns into a plain-language
@@ -142,7 +161,7 @@ exchanges the auth code for a session (setting cookies) and redirects to
 
 | Route | What it does |
 |---|---|
-| `/sign-in` | Email magic-link sign-in (working today), with Google as a secondary option that degrades gracefully if unconfigured. |
+| `/sign-in` | Email + password sign-in and sign-up. Sends no email. Google is a secondary option that degrades gracefully if unconfigured. |
 | `/activate` | Enter a device code (from `flashnode login`) and approve a machine. Phone-first. |
 | `/machines` | The caller's machines: online state, last seen, revoke. |
 | `/submit` | Paste a GitHub repo + branch, run it through the API's preflight, submit. Renders every preflight finding (level/code/message, quoted verbatim). An error finding blocks the submission entirely; a warning never blocks server-side, so it's surfaced on the post-submit screen instead of gating a second click. |
