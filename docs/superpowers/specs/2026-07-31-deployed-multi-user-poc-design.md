@@ -368,6 +368,14 @@ because until M3 lands a node's reported results are believed. Driver progress
 (round number, participants, current loss) is written to the `jobs` row for the
 UI to read.
 
+**Repo boundary:** `fedavg_driver` itself belongs in **flashruntime**
+(`flashml_workloads/`, beside `kmeans_driver`), not in flashml-cloud.
+`CLAUDE.md`'s boundary principle requires the open runtime to stay genuinely
+useful without the cloud, and federated averaging is a runtime capability, not
+a commercial one — a self-hosted user running `flashml serve` should get it too.
+flashml-cloud only *invokes* it as a hosted background task and renders its
+progress. Nothing about the driver may depend on Supabase or the cloud schema.
+
 ### 5.5 Windows hosts
 
 Two concrete changes, both in flashnode:
