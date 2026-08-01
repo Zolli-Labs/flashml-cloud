@@ -56,7 +56,16 @@ services:
       FLASHML_OPERATOR_TOKENS="flashml-api:$OPERATOR_TOKEN"
       uvicorn flashruntime.service.app:app
       --host 0.0.0.0 --port $PORT --workers 1
-    healthCheckPath: /healthz
+    # NO healthCheckPath HERE. Render rejects the blueprint outright with
+    # "pserv service type cannot have a health check path" — a private
+    # service has no ingress for the probe to arrive on, so there is nothing
+    # to health-check from Render's side. The coordinator DOES serve
+    # /healthz; it is simply only reachable from flashml-api, which is the
+    # whole point of `pserv`. Liveness is therefore observed through the API
+    # (whose own /healthz is checked below) and the deploy logs, not by
+    # Render probing this service. Do not "fix" this by switching to
+    # `type: web` to get the health check back — that would undo Plans 2
+    # and 3, as the header comment explains.
     disk:
       # leases.db and locally-hosted artifacts live here. Without a disk, a
       # restart loses every in-flight lease and every committed artifact.
