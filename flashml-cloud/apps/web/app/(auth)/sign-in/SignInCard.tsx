@@ -339,13 +339,21 @@ function readableAuthError(
   if (m.includes("email not confirmed")) {
     return "This account was created while email confirmation was still on. Turn off Confirm email in the Supabase dashboard (Authentication → Sign In / Providers → Email) and try again.";
   }
+  // Check the EMAIL quota before the generic rate limit. Supabase's message
+  // for it is "email rate limit exceeded", which matches the generic branch
+  // too — and the generic advice ("wait a few minutes, try again") is
+  // actively wrong here. Waiting does not help within the hour, and
+  // retrying cannot succeed at all: when the confirmation email fails to
+  // send, Supabase ROLLS THE SIGNUP BACK, so no account is created however
+  // many times you try. Verified against this project: four signup attempts
+  // logged, zero rows in auth.users.
+  if (m.includes("email rate limit") || m.includes("over_email_send_rate_limit")) {
+    return "This deployment still has email confirmation switched on, and its email quota (about two an hour, shared by the whole project) is spent — so signup cannot complete and no account is being created. Turn off Confirm email in Supabase under Authentication → Sign In / Providers → Email, then try again. It works immediately after that; there is nothing to wait for.";
+  }
   if (m.includes("rate limit") || m.includes("too many requests")) {
-    // Should now be unreachable via email quota — nothing here sends mail.
-    // If it fires, it is Supabase's per-IP request limit (30 per 5 minutes
-    // on the auth endpoints), which genuinely is about this client.
-    if (context === "signup") {
-      return "Too many sign-up attempts from this network. Wait a few minutes and try again. If the message mentions email, turn off Confirm email in the Supabase dashboard — this form otherwise sends none.";
-    }
+    // Supabase's per-IP limit on the auth endpoints, 30 per 5 minutes.
+    // Unlike the email quota this one genuinely is about this client, and
+    // waiting genuinely does clear it.
     return "Too many attempts from this network. Wait a few minutes and try again.";
   }
   if (m.includes("password should be")) {
