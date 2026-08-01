@@ -20,6 +20,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 
 from flashml_cloud_api.settings import Settings
 
@@ -295,3 +296,68 @@ def revoke_machine_row(
             (machine_id, owner_id),
         )
         return cur.fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# jobs
+# ---------------------------------------------------------------------------
+
+def insert_job(
+    db: psycopg.Connection,
+    *,
+    job_id: str,
+    owner_id: str,
+    name: str | None,
+    source: dict[str, Any] | None,
+    spec: dict[str, Any] | None,
+    status: str,
+) -> None:
+    """Record a job as owned by ``owner_id``.
+
+    ``owner_id`` must come from a verified JWT ``sub`` — never from the
+    request body. This row is the *only* place ownership is recorded:
+    every subsequent read, cancel, or artifact fetch for this job_id
+    consults it before ever forwarding to the coordinator, so a job the
+    coordinator knows about but this table doesn't is simply invisible to
+    every caller, including its nominal owner.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.jobs (id, owner_id, name, source, spec, status)
+            values (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                job_id,
+                owner_id,
+                name,
+                Json(source) if source is not None else None,
+                Json(spec) if spec is not None else None,
+                status,
+            ),
+        )
+
+
+def fetch_job_for_owner(
+    db: psycopg.Connection, job_id: str, owner_id: str
+) -> dict[str, Any] | None:
+    """Owner-scoped read: returns None if job_id does not exist *or*
+    belongs to someone else. Callers must not distinguish those two cases
+    in a response — a 403 for "exists but not yours" would confirm to a
+    guesser that the id is real; a 404 for both cases is the whole point."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select * from public.jobs where id = %s and owner_id = %s",
+            (job_id, owner_id),
+        )
+        return cur.fetchone()
+
+
+def list_job_ids_for_owner(db: psycopg.Connection, owner_id: str) -> set[str]:
+    """Every job id belonging to owner_id, and nothing else. Used to filter
+    the coordinator's (unscoped, operator-token) job list down to exactly
+    the caller's own jobs — the coordinator has no notion of accounts, so
+    this table is the only place that scoping can happen."""
+    with db.cursor() as cur:
+        cur.execute("select id from public.jobs where owner_id = %s", (owner_id,))
+        return {row["id"] for row in cur.fetchall()}

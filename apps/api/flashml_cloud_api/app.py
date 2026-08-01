@@ -175,21 +175,30 @@ class CoordinatorClient:
         method: str,
         path: str,
         *,
-        on_behalf_of: str,
+        on_behalf_of: str | None = None,
         content: bytes | None = None,
         query: str = "",
         media_type: str | None = None,
     ) -> httpx.Response:
-        if not valid_node_id(on_behalf_of):
-            # Unreachable from a well-formed enrolment; if it ever is
-            # reached, refusing beats emitting an attacker-shaped header.
-            log.error(json.dumps({"text": "refusing to delegate: malformed node_id"}))
-            raise HTTPException(status_code=500, detail="internal identity error")
+        """Forward one request to the coordinator with the operator token.
 
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            DELEGATION_HEADER: on_behalf_of,
-        }
+        ``on_behalf_of`` is the node identity to delegate as — required for
+        every agent (machine-token) route, where lease scoping depends on
+        it. It is ``None`` for the browser-facing job routes: job
+        submission/list/cancel are plain operator-token operations with no
+        node identity to assert, and sending an empty or made-up header
+        value there would be worse than sending none.
+        """
+        headers = {"Authorization": f"Bearer {self._token}"}
+        if on_behalf_of is not None:
+            if not valid_node_id(on_behalf_of):
+                # Unreachable from a well-formed enrolment; if it ever is
+                # reached, refusing beats emitting an attacker-shaped header.
+                log.error(
+                    json.dumps({"text": "refusing to delegate: malformed node_id"})
+                )
+                raise HTTPException(status_code=500, detail="internal identity error")
+            headers[DELEGATION_HEADER] = on_behalf_of
         if media_type:
             headers["Content-Type"] = media_type
 
@@ -604,6 +613,136 @@ def create_cloud_app(
             # would confirm to a guesser that the id is real.
             raise HTTPException(status_code=404, detail="unknown machine")
         return {"machine_id": machine_id, "status": "revoked"}
+
+    # -- browser-facing: job ownership --------------------------------------
+    #
+    # A developer submits a job with a Supabase JWT; the row this writes is
+    # the *only* record of who owns it — the coordinator has no accounts
+    # and forwards every job route unscoped behind the operator token. So
+    # every read, cancel, and artifact fetch below consults this table
+    # *before* ever forwarding, and refuses with 404 (never 403 — a 403
+    # would confirm the id exists) rather than let ownership be decided by
+    # whatever the coordinator happens to answer.
+
+    @app.post("/v1alpha1/jobs", status_code=201, tags=["browser"])
+    async def submit_job(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        raw = await request.body()
+        if len(raw) > MAX_JSON_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="request body too large")
+        payload = await _json_object(request)
+        # owner_id is never accepted from the body — whatever the caller
+        # put there (if anything) is simply not forwarded or looked at.
+        payload.pop("owner_id", None)
+        r = await coordinator.forward(
+            "POST",
+            "/v1alpha1/jobs",
+            content=json.dumps(payload).encode(),
+            media_type="application/json",
+        )
+        if r.status_code >= 300:
+            return _passthrough(r)
+        try:
+            job = r.json()
+        except ValueError:
+            return _passthrough(r)
+        job_id = job.get("job_id") if isinstance(job, dict) else None
+        if not job_id:
+            # The coordinator accepted the job but did not hand back an id
+            # to own it by. Nothing safe to record; refuse rather than
+            # silently create an unowned job no one can ever list or cancel
+            # through this API.
+            log.error(json.dumps({"text": "job accepted with no job_id in response"}))
+            raise HTTPException(status_code=502, detail="coordinator returned no job id")
+        spec = job.get("spec") if isinstance(job.get("spec"), dict) else None
+        name = None
+        if spec and isinstance(spec.get("metadata"), dict):
+            name = spec["metadata"].get("name")
+        dbmod.insert_job(
+            db,
+            job_id=job_id,
+            owner_id=user_id,
+            name=name,
+            source=None,
+            spec=spec,
+            status=str(job.get("state") or "PENDING"),
+        )
+        return _passthrough(r)
+
+    @app.get("/v1alpha1/jobs", tags=["browser"])
+    async def list_jobs_route(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        owned = dbmod.list_job_ids_for_owner(db, user_id)
+        if not owned:
+            # Nothing to scope down to; skip the coordinator round trip
+            # rather than fetch a list of jobs we would only throw away.
+            return []
+        r = await coordinator.forward("GET", "/v1alpha1/jobs")
+        if r.status_code >= 300:
+            return _passthrough(r)
+        try:
+            jobs = r.json()
+        except ValueError:
+            return _passthrough(r)
+        if not isinstance(jobs, list):
+            return _passthrough(r)
+        # The coordinator has no notion of accounts and returns every job
+        # unscoped behind the operator token; this table is the only place
+        # the owner filter can be applied.
+        return [j for j in jobs if isinstance(j, dict) and j.get("job_id") in owned]
+
+    @app.get("/v1alpha1/jobs/{job_id}", tags=["browser"])
+    async def get_job_route(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+            # Not found and not yours look identical: a 403 here would
+            # confirm to a guesser that the id exists.
+            raise HTTPException(status_code=404, detail="unknown job")
+        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}")
+        return _passthrough(r)
+
+    @app.post("/v1alpha1/jobs/{job_id}/cancel", tags=["browser"])
+    async def cancel_job_route(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+            # Ownership is checked *before* the coordinator is ever
+            # contacted: cancelling a job you don't own must not reach the
+            # coordinator at all, let alone actually cancel it.
+            raise HTTPException(status_code=404, detail="unknown job")
+        r = await coordinator.forward("POST", f"/v1alpha1/jobs/{_seg(job_id)}/cancel")
+        return _passthrough(r)
+
+    @app.get("/v1alpha1/jobs/{job_id}/artifacts/{key:path}", tags=["browser"])
+    async def get_job_artifact(
+        job_id: str,
+        key: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The one deliberate residual the Task 5 report flagged: agent
+        artifact reads stay open at the coordinator (an agent legitimately
+        reads inputs for the task it holds), but a *browser* must only be
+        able to read artifacts under a job it owns. Ownership is checked
+        here, against this table, before the key is ever forwarded — same
+        404-not-403 rule as the rest of this block.
+        """
+        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        full_key = _artifact_key(f"{_seg(job_id)}/{key}")
+        coordinator_key = f"jobs/{full_key}"
+        r = await coordinator.forward("GET", f"/v1alpha1/artifacts/{coordinator_key}")
+        return _passthrough(r)
 
     # -- agent-facing: machine token, forwarded with delegation ------------
     #
