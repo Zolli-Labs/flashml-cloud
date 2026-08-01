@@ -18,6 +18,7 @@ class Settings:
     coordinator_url: str
     coordinator_operator_token: str
     require_auth: bool
+    database_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -30,6 +31,14 @@ class Settings:
         supabase_service_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
         coordinator_url = os.environ.get("COORDINATOR_URL", "")
         coordinator_operator_token = os.environ.get("COORDINATOR_OPERATOR_TOKEN", "")
+        # Standard libpq connection string/URI for the Postgres database
+        # (see flashml_cloud_api.db). Not included in the require_auth
+        # missing-secret check below: browser/machine auth can be verified
+        # without a DB connection (e.g. in unit tests), so a deploy that is
+        # only missing this should not be treated the same as one missing a
+        # signing secret. db.connect() raises its own clear error when this
+        # is absent and a connection is actually requested.
+        database_url = os.environ.get("DATABASE_URL", "")
 
         settings = cls(
             supabase_url=supabase_url,
@@ -38,6 +47,7 @@ class Settings:
             coordinator_url=coordinator_url,
             coordinator_operator_token=coordinator_operator_token,
             require_auth=require_auth,
+            database_url=database_url,
         )
 
         if require_auth:
