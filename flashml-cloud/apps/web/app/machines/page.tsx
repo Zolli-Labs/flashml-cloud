@@ -6,6 +6,7 @@ import { ArrowClockwise, Plus, Warning } from "@phosphor-icons/react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { MachineCard } from "@/components/machines/MachineCard";
+import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import {
   NotAuthenticated,
   cloudApiBase,
@@ -132,69 +133,21 @@ function EmptyState() {
   const base = cloudApiBase();
   return (
     <Card>
-      <CardContent className="flex flex-col items-center text-center gap-4 py-10">
-        <div className="flex items-center justify-center w-12 h-12 rounded-full bg-cyan/10 border border-cyan/30">
-          <Plus className="w-6 h-6 text-cyan" weight="bold" />
-        </div>
-        <div className="space-y-1">
-          <h2 className="font-semibold text-foreground">No machines yet</h2>
-          <p className="text-sm text-muted-foreground max-w-sm">
-            Enroll a machine to start contributing compute to your jobs.
-            Run these on the machine you want to add:
+      <CardContent className="flex flex-col items-center gap-5 py-10">
+        <div className="flex flex-col items-center gap-2 text-center">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-border bg-white/[0.04]">
+            <Plus className="h-5 w-5 text-primary" weight="bold" />
+          </div>
+          <h2 className="text-base font-semibold text-foreground">
+            No machines yet
+          </h2>
+          <p className="max-w-sm text-sm text-muted-foreground">
+            Run these on the machine you want to lend. It can be this one.
           </p>
         </div>
-        {/* BOTH packages, explicitly. This used to read `pip install
-            flashnode`, which fails for everyone with "No solution found":
-            flashnode declares `flashruntime>=0.2`, pip resolves that from
-            PyPI, and neither package is published there. Naming both as git
-            URLs is what actually installs today. Verified in a clean venv
-            against the public repos.
-
-            When both are on PyPI this collapses back to two short words —
-            until then, a command that looks tidier than it is costs a
-            volunteer their first ten minutes. */}
-        <div className="w-full max-w-md rounded-lg border border-border/60 bg-surface-elevated/60 text-left font-mono text-xs overflow-x-auto">
-          <div className="px-3.5 py-2.5 border-b border-border/60 whitespace-pre">
-            <span className="text-muted-foreground select-none">$ </span>
-            {'pip install \\\n    "flashruntime @ git+https://github.com/Zolli-Labs/flashruntime" \\\n    "flashnode @ git+https://github.com/Zolli-Labs/flashnode"'}
-          </div>
-          <div className="px-3.5 py-2.5">
-            <span className="text-muted-foreground select-none">$ </span>
-            flashnode login --coordinator {base}
-          </div>
-        </div>
-        {/* Git is called out because pip shells out to the `git` binary for
-            a git+https:// install. macOS generally has it via the Xcode
-            command line tools; Windows generally does not, and
-            "Cannot find command 'git'" arrives before the volunteer has done
-            anything — reading as our installer being broken rather than a
-            missing prerequisite. One line here, and it disappears entirely
-            the day both packages are on PyPI. */}
-        <div className="w-full max-w-md space-y-2 text-xs text-muted-foreground">
-          <p className="font-medium text-foreground">Before you start</p>
-          <ul className="space-y-1 text-left">
-            <li>Python 3.10 or newer</li>
-            <li>
-              Git —{" "}
-              <a
-                href="https://git-scm.com/download/win"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-primary underline underline-offset-2 hover:no-underline"
-              >
-                Windows usually needs this installed
-              </a>
-              ; macOS already has it
-            </li>
-            <li>Docker Desktop, installed and running</li>
-          </ul>
-          <p className="pt-1 text-left">
-            The second command prints a short code — enter it at{" "}
-            <span className="font-mono text-foreground">/activate</span> from
-            any signed-in browser, including your phone, to approve it.
-          </p>
-        </div>
+        <EnrolInstructions base={base} />
       </CardContent>
     </Card>
   );
 }
+

@@ -93,7 +93,7 @@ export function SignInCard() {
     setPending(null);
 
     if (authError) {
-      setError(readableAuthError(authError.message, "signup"));
+      setError(readableAuthError(authError.message));
       return;
     }
 
@@ -328,10 +328,7 @@ export function SignInCard() {
  * with an obvious next action; pass anything unrecognised through rather
  * than swallowing a message that might be the only clue.
  */
-function readableAuthError(
-  message: string,
-  context: "signin" | "signup" = "signin"
-): string {
+function readableAuthError(message: string): string {
   const m = message.toLowerCase();
   if (m.includes("invalid login credentials")) {
     return "That email and password don't match an account. Check both, or create an account below.";
