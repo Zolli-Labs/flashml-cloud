@@ -88,6 +88,50 @@ def coordinator(tmp_path: Path):
             proc.kill()
 
 
+@pytest.fixture()
+def secured_coordinator(tmp_path: Path):
+    """Sibling of `coordinator`: same real-uvicorn-subprocess profile, but
+    with node/operator token enforcement turned on — the configuration an
+    operator uses before putting the coordinator on a public address.
+
+    Does not touch the `coordinator` fixture above: existing e2e tests keep
+    exercising the open (no-auth) profile unmodified.
+    """
+    port = _free_port()
+    env = {
+        **os.environ,
+        "FLASHML_ENABLE_KUBERAY": "0",
+        "FLASHML_SERVICE_AUTOINIT": "1",
+        "FLASHML_LEDGER_PATH": str(tmp_path / "ledger.db"),
+        "FLASHML_LOCAL_ARTIFACTS_DIR": str(tmp_path / "artifacts"),
+        "FLASHML_NODE_TOKENS": "node-a:tok-a,node-b:tok-b",
+        "FLASHML_OPERATOR_TOKENS": "driver:op-tok",
+    }
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-m", "uvicorn", "flashruntime.service.app:app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
+        env=env,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                with urllib.request.urlopen(f"{base}/healthz", timeout=1):
+                    break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("secured coordinator did not become healthy in 20s")
+                time.sleep(0.2)
+        yield Coordinator(base, proc)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def make_dataset_csv(n: int = 240, features: int = 6, seed: int = 7) -> bytes:
     """Deterministic, linearly separable two-class dataset — pure stdlib, so
     the harness itself needs no ML dependencies. Headerless CSV, label last."""
