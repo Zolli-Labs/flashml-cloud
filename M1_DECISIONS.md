@@ -276,6 +276,81 @@ Supabase and Render work.
 
 ---
 
+---
+
+## D11 — Untrusted-input validation belongs in the reduce path, not the caller
+
+**Decided (2026-07-31, after the Plan 1 whole-branch review):** `fedavg_weights`
+validates every value that crosses the volunteer boundary — per-contribution
+sample counts must be `> 0`, and all weight/delta values must be finite —
+raising typed errors rather than computing on bad input.
+
+**Why:** the whole-branch review found three Critical defects that per-task
+reviews structurally could not, because each saw only its own diff. Two were
+demonstrated, not theorised:
+
+| Defect | Demonstrated effect |
+|---|---|
+| `reduce_deltas` validated only the *total* sample count | A node reporting `samples = -999` beside an honest peer produced a weight of **999001.0** where the correct step was **1.0** — a ~10⁶× amplification from a single integer, no lie about the delta needed |
+| Python's `json` parses `NaN`/`Infinity` | One non-finite delta made every weight NaN, every later round trained from NaN, and `run_fedavg` reported **success** throughout |
+
+The NaN case needs no attacker at all: a learning rate that diverges on one
+shard does it. That is what moved this from "harden later" to "fix now".
+
+A third — quorum counting artifact keys by filename *suffix* rather than the
+round's expected task set — let one worker mint multiple "participants" from a
+single lease (flashnode uploads output trees recursively), and aggregated
+attempts the coordinator had **rejected**, since uploads happen before commit
+acceptance.
+
+**Cost:** the reduce path now rejects inputs it previously averaged. Honest
+arithmetic is unchanged — the demo reports byte-identical numbers before and
+after (`0.5361 → 0.1757`), which is how we know the fix did not alter results.
+
+**Revisit when:** result verification (M3) lands. That addresses a *different*
+threat — a node that lies plausibly — and does not subsume these, which are
+about inputs that are malformed rather than dishonest.
+
+**Deliberately NOT fixed here, because [[poc-stack-supabase-render-not-alibaba]]
+Plan 2 addresses them properly:** artifact `PUT` is unauthenticated and not
+lease-scoped, and the authoritative global model sits at a predictable key
+(`jobs/{job_id}/round-{r:03d}/weights.json`) inside a volunteer-writable
+namespace. A partial fix now would duplicate Plan 2's work and create a false
+sense of coverage. **Nothing may face the public internet before Plan 2 lands.**
+
+---
+
+## D12 — Cross-repo seams need a test that imports both sides
+
+**Decided:** invariants spanning flashruntime and flashnode are pinned in the
+workspace `e2e/` suite, which may import both, rather than mirrored by hand in
+either repo.
+
+**Why:** `fedavg_worker` was added to the coordinator's `ALLOWED_TASK_MODULES`
+but not to flashnode's `DEFAULT_ALLOWED_MODULES`. Each list was correct in
+isolation, both suites were green, and even the flashruntime convergence test
+passed — because it drives a hand-rolled urllib agent that does not enforce
+flashnode's allowlist. A *real* agent refused every task, burned all four
+attempts per shard, and the job FAILED. Federated averaging was completely
+non-functional on genuine agents while everything reported green.
+
+This is the failure the 2026-07-29 entry predicted, and structurally the same
+shape as the `argv_capable`/`module_capable` polarity bug: a seam *between*
+components where each side is individually defensible.
+
+`flashnode/tests/test_allowlist_drift.py` can only mirror the list by hand —
+`flashnode/AGENTS.md` scopes its flashruntime dependency to the `protocol`
+package. So the live guard is `e2e/test_allowlist_parity.py`, which imports both
+allowlists and asserts `ALLOWED_TASK_MODULES <= DEFAULT_ALLOWED_MODULES` (that
+direction: the coordinator dispatching something the agent refuses is the
+outage; the reverse is harmless).
+
+**How to apply:** when adding anything that must agree across repos — a workload
+module, a capability field, a wire constant — add the parity assertion to `e2e/`
+in the same change. A mirrored copy is not a guard.
+
+---
+
 ## Open questions carried into execution
 
 1. **Demo dataset** — MNIST (~11 MB) or CIFAR-10 (~170 MB) baked into
