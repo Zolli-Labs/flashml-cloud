@@ -214,33 +214,35 @@ def test_both_extractors_agree_on_the_content_root(tmp_path, side):
     assert (root / "train.py").is_file()
 
 
-# -- documented, asserted divergences ---------------------------------------
+# -- formerly divergent, now closed -----------------------------------------
 #
-# The two guards are not identical, and pretending they are would be its own
-# kind of drift. Each divergence below is asserted in the safe direction:
-# flashnode, the one running on a stranger's machine, is the stricter side.
-# If someone ever relaxes it, this fails.
+# These three started life as *documented divergences*: cases flashnode
+# refused and the API did not, asserted in the safe direction (flashnode, the
+# one running on a stranger's machine, being the stricter side) and recorded
+# as the weaker side's known gaps. The API has since grown all three, so they
+# are now ordinary parity assertions — and they must stay parity assertions:
+# a refusal removed from either side fails here.
 
-def test_flashnode_is_stricter_about_member_count(tmp_path):
-    """flashnode caps member count; the API has no such cap. Empty files
-    cost inodes, not bytes, so a byte cap alone does not bound them."""
+def test_both_extractors_cap_member_count(tmp_path):
+    """Empty files cost inodes, not bytes, so a byte cap alone does not
+    bound them. Was: flashnode-only."""
     data = _tar(BENIGN + [_file(f"{TOP}/f{i}", b"") for i in range(60)])
 
+    src = tmp_path / "input.bin"
+    src.write_bytes(data)
     with pytest.raises(ArchiveError):
-        src = tmp_path / "input.bin"
-        src.write_bytes(data)
         extract_archive_safely(src, tmp_path / "fn", MAX_BYTES, max_members=10)
 
-    # The API accepts it — recorded, not asserted as desirable. It is the
-    # weaker of the two, and this is the line to delete when it grows a cap.
-    extract_safely(data, tmp_path / "api", MAX_BYTES)
+    with pytest.raises(RepoError):
+        extract_safely(data, tmp_path / "api", MAX_BYTES, max_members=10)
 
 
-def test_flashnode_is_stricter_about_contained_hardlinks(tmp_path):
-    """A hard link whose target stays inside the destination is accepted
-    (and skipped) by the API but refused outright by flashnode: nothing in
-    a code archive needs one, and a refused member cannot be an alias for a
-    file something else is about to rewrite."""
+def test_both_extractors_refuse_contained_hardlinks(tmp_path):
+    """A hard link whose target stays *inside* the destination is still
+    refused by both: nothing in a code archive needs one, and a member that
+    is an alias for a file something else is about to rewrite is not worth
+    tolerating for zero legitimate use. Was: flashnode-only (the API
+    accepted and silently skipped it)."""
     data = _tar(BENIGN + [_special(f"{TOP}/alias", tarfile.LNKTYPE, f"{TOP}/train.py")])
 
     src = tmp_path / "input.bin"
@@ -248,16 +250,22 @@ def test_flashnode_is_stricter_about_contained_hardlinks(tmp_path):
     with pytest.raises(ArchiveError):
         extract_archive_safely(src, tmp_path / "fn", MAX_BYTES, MAX_MEMBERS)
 
-    extract_safely(data, tmp_path / "api", MAX_BYTES)
+    with pytest.raises(RepoError):
+        extract_safely(data, tmp_path / "api", MAX_BYTES)
 
 
-def test_flashnode_survives_the_bare_root_member_that_crashes_the_api(tmp_path):
+def test_the_bare_root_member_is_a_clean_refusal_on_both_sides(tmp_path):
     """GNU tar emits a ``./`` member for the archive root. Its path has zero
-    components, so ``PurePosixPath(name).parts[0]`` raises IndexError —
-    which is not a ``RepoError``, so the API turns a malformed upload into a
+    components, so ``PurePosixPath(name).parts[0]`` used to raise IndexError
+    in the API — not a ``RepoError``, so a malformed upload came back as a
     500 instead of a 400. Not a containment break, but a crash a submitter
-    controls. flashnode must not share it; asserted here so that fixing the
-    API side does not silently regress this one.
+    controls.
+
+    flashnode never shared the crash: it treats such a member as having no
+    top level and extracts the rest. The API now refuses the archive
+    outright (GitHub never produces one). Different verdicts, both clean —
+    what this asserts is that neither side raises something its caller does
+    not know how to turn into a user-facing error.
     """
     data = _tar([_dir("."), _file("./train.py", b"print(1)\n")])
 
@@ -266,5 +274,5 @@ def test_flashnode_survives_the_bare_root_member_that_crashes_the_api(tmp_path):
     root = extract_archive_safely(src, tmp_path / "fn", MAX_BYTES, MAX_MEMBERS)
     assert (root / "train.py").is_file()
 
-    with pytest.raises((RepoError, IndexError)):
+    with pytest.raises(RepoError):
         extract_safely(data, tmp_path / "api", MAX_BYTES)
