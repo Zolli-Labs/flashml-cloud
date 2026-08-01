@@ -41,7 +41,7 @@ services:
     name: flashml-coordinator
     runtime: python
     repo: https://github.com/Zolli-Labs/flashruntime
-    branch: m1-agent-identity
+    branch: main
     plan: starter          # free tier has no private services and no disks
     region: oregon
     buildCommand: pip install -e ".[service]"
@@ -82,7 +82,7 @@ services:
     name: flashml-api
     runtime: python
     repo: https://github.com/Zolli-Labs/flashml-cloud
-    branch: local-milestone-2026-07
+    branch: main
     rootDir: apps/api
     plan: starter          # must not sleep: a suspended API strands every agent
     region: oregon
@@ -91,7 +91,7 @@ services:
     # so a PyPI install would import a flashruntime without `build_round` and
     # fail at the first federated job.
     buildCommand: >-
-      pip install "flashruntime[service] @ git+https://github.com/Zolli-Labs/flashruntime@m1-agent-identity"
+      pip install "flashruntime[service] @ git+https://github.com/Zolli-Labs/flashruntime@main"
       && pip install -e .
     startCommand: uvicorn flashml_cloud_api.app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
@@ -130,7 +130,7 @@ services:
     name: flashml-web
     runtime: node
     repo: https://github.com/Zolli-Labs/flashml-cloud
-    branch: local-milestone-2026-07
+    branch: main
     rootDir: apps/web
     plan: free             # may sleep; only the API and coordinator must not
     region: oregon
