@@ -80,3 +80,65 @@ def test_python_slim_does_not_claim_third_party_packages():
 def test_each_curated_image_has_a_description():
     for alias, image in CURATED.items():
         assert isinstance(image.description, str) and image.description.strip()
+
+
+# --- the reference must name something that actually exists ----------------
+#
+# Every reference in CURATED was previously wrong in a different way, and no
+# test noticed because each one was a plausible-looking string: python-slim
+# and pytorch-cpu named upstream bases that declare no non-root USER, and
+# sklearn named `docker.io/library/flashml-sklearn`, which can never exist
+# because docker.io/library is Docker's official-images namespace. These
+# tests pin the properties that would have caught all three.
+
+
+def _workflow_text() -> str:
+    """The publish workflow, read from the repo root."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4]
+    path = root / ".github" / "workflows" / "images.yml"
+    assert path.is_file(), f"expected the image publish workflow at {path}"
+    return path.read_text()
+
+
+def test_image_tag_matches_the_publish_workflow():
+    """A bump in one place and not the other points the API at a tag nobody
+    published — a failure that only shows up as an image-pull error on a
+    volunteer's machine, far from the change that caused it."""
+    from flashml_cloud_api.images import IMAGE_TAG
+
+    assert f'IMAGE_TAG: "{IMAGE_TAG}"' in _workflow_text(), (
+        f"images.py pins {IMAGE_TAG!r}; .github/workflows/images.yml publishes "
+        "a different tag"
+    )
+
+
+def test_every_alias_has_a_dockerfile_that_gets_built():
+    """An alias the workflow does not build resolves to a reference that will
+    never exist in the registry."""
+    from pathlib import Path
+
+    from flashml_cloud_api.images import CURATED
+
+    root = Path(__file__).resolve().parents[4]
+    workflow = _workflow_text()
+    for alias in CURATED:
+        assert (root / "flashml-cloud" / "images" / alias / "Dockerfile").is_file(), (
+            f"alias {alias!r} has no Dockerfile"
+        )
+        assert alias in workflow, f"alias {alias!r} is never built by the workflow"
+
+
+def test_references_live_in_our_own_namespace():
+    """Not an upstream base. Upstream images declare no non-root USER, which
+    is the precondition flashnode relies on when it omits --user on Windows.
+    """
+    from flashml_cloud_api.images import CURATED, IMAGE_TAG, REGISTRY_PREFIX
+
+    for alias, image in CURATED.items():
+        assert image.reference.startswith(REGISTRY_PREFIX), (
+            f"{alias} resolves to {image.reference!r}, outside our namespace"
+        )
+        assert "docker.io" not in image.reference
+        assert image.reference.endswith(f":{IMAGE_TAG}")

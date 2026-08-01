@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 flashml_cloud_api/__init__.py
 flashml_cloud_api/app.py

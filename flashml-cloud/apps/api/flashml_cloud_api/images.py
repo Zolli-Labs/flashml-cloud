@@ -23,6 +23,29 @@ from dataclasses import dataclass
 # and this stays correct if the base image's Python version changes.
 _STDLIB = frozenset(sys.stdlib_module_names)
 
+#: Registry namespace for the curated images. Ours, and PUBLIC — a private
+#: package would make every volunteer authenticate to GHCR before their
+#: first job, which is exactly the per-device setup cost these images exist
+#: to avoid. flashnode's built-in allowlist trusts this prefix, so
+#: publishing a new curated image needs no change on any host.
+REGISTRY_PREFIX = "ghcr.io/zolli-labs/flashml-"
+
+#: Version of the curated image set. IMMUTABLE: bump for any change, never
+#: repush an existing tag. Docker serves a cached image when the tag string
+#: is unchanged, so a repushed tag would reach only hosts that had never
+#: pulled it — and preflight validates a user's imports against the manifest
+#: below for THIS version, a guarantee that a mutated tag silently voids.
+#:
+#: Must equal IMAGE_TAG in .github/workflows/images.yml. tests/test_images.py
+#: reads that file and asserts they agree, so bumping one without the other
+#: fails the suite instead of pointing the API at a tag nobody published.
+IMAGE_TAG = "2026.08.1"
+
+
+def _reference(alias: str) -> str:
+    """Full pinned reference for a curated image alias."""
+    return f"{REGISTRY_PREFIX}{alias}:{IMAGE_TAG}"
+
 
 @dataclass(frozen=True)
 class CuratedImage:
@@ -58,14 +81,14 @@ class UnknownImage(Exception):
 CURATED: dict[str, CuratedImage] = {
     "python-slim": CuratedImage(
         alias="python-slim",
-        reference="docker.io/library/python:3.11.9-slim",
+        reference=_reference("python-slim"),
         packages=frozenset(_STDLIB),
         description="Bare CPython 3.11 with only the standard library. "
         "For jobs whose dependencies are entirely stdlib.",
     ),
     "sklearn": CuratedImage(
         alias="sklearn",
-        reference="docker.io/library/flashml-sklearn:2026.07.1",
+        reference=_reference("sklearn"),
         packages=frozenset(_STDLIB)
         | {
             "numpy",
@@ -79,7 +102,7 @@ CURATED: dict[str, CuratedImage] = {
     ),
     "pytorch-cpu": CuratedImage(
         alias="pytorch-cpu",
-        reference="docker.io/pytorch/pytorch:2.3.1-cpu",
+        reference=_reference("pytorch-cpu"),
         packages=frozenset(_STDLIB)
         | {
             "torch",
