@@ -2,10 +2,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { createServerSupabaseClient } from "@/lib/supabase";
 
-// Supabase redirects here after Google hands back an auth code. Exchanging
-// it for a session is what actually sets the auth cookies; everything
-// before this point (the /sign-in button, Google's consent screen) is just
-// getting the browser to this URL with a `code` on it.
+// Supabase redirects here after either auth path hands back a PKCE code:
+// Google's OAuth consent screen, or a clicked email magic link
+// (`signInWithOtp` with `emailRedirectTo` pointed at this route). Exchanging
+// the code for a session is what actually sets the auth cookies; everything
+// before this point — the /sign-in form, Google's consent screen, the
+// emailed link — is just getting the browser to this URL with a `code` on
+// it.
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
@@ -35,7 +38,7 @@ export async function GET(request: NextRequest) {
   const failUrl = new URL("/sign-in", origin);
   failUrl.searchParams.set(
     "error",
-    "Sign-in failed. Check that Google is enabled as a provider in the Supabase dashboard (see apps/web/README.md)."
+    "Sign-in failed or the link expired. Request a new email link, or check that Google is enabled as a provider in the Supabase dashboard (see apps/web/README.md)."
   );
   return NextResponse.redirect(failUrl);
 }

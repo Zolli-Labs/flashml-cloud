@@ -1,7 +1,8 @@
 # FlashML Web
 
-The browser surface of FlashML: sign in with Google, approve a machine from
-your phone, submit a repo, and watch it train.
+The browser surface of FlashML: sign in with an email link (or Google, once
+configured — see below), approve a machine from your phone, submit a repo,
+and watch it train.
 
 This app holds **no business logic** and talks to **no database**. It calls
 the cloud API (`apps/api`) for everything except authentication, and it
@@ -35,11 +36,28 @@ Nothing else is read from `process.env` in browser-reachable code. If you
 find yourself adding a new `NEXT_PUBLIC_*` variable, ask whether the value
 is safe for every visitor to read in devtools — it will be.
 
+## Sign-in: email works today, Google needs one-time setup
+
+`/sign-in` offers two paths:
+
+- **Email magic link** (`supabase.auth.signInWithOtp`) — works out of the
+  box against any Supabase project with email auth enabled, which is the
+  default. No password storage, no extra provider config. This is the path
+  the acceptance run (a friend signing in on their phone) actually uses
+  today.
+- **Google OAuth** — requires the one-time dashboard setup below. Until
+  that's done, clicking "Continue with Google" shows "Google sign-in isn't
+  set up for this deployment yet — use email above" instead of a raw
+  Supabase provider error or a silent no-op.
+
 ## Manual step: enable Google sign-in (do this once per Supabase project)
 
 This cannot be inferred from the repo or done in code — it is dashboard
-configuration. Skip it and sign-in fails with a Supabase provider error that
-reads exactly like a code bug, and it will cost the next person an hour.
+configuration. Skip it and, without the graceful-degradation handling in
+`SignInCard.tsx`, sign-in would fail with a Supabase provider error that
+reads exactly like a code bug. With that handling in place it instead shows
+a clear message pointing back at this section — but the button still won't
+work until these steps are done.
 
 1. **Create a Google OAuth client.** In
    [Google Cloud Console](https://console.cloud.google.com/apis/credentials),
@@ -72,10 +90,11 @@ reads exactly like a code bug, and it will cost the next person an hour.
    Supabase only redirects back to URLs on this list after the Google hop
    completes; anything else is refused.
 
-Until all three are done, clicking "Continue with Google" either shows a
-provider error inline on `/sign-in` or completes the Google consent screen
-and then bounces back to `/sign-in?error=...` — both point back at this
-section.
+Until all three are done, clicking "Continue with Google" shows the
+graceful fallback message described above. Note that step 3's redirect URL
+allow-list is shared with the email magic-link flow (both send the browser
+back to this app's own `/auth/callback`), so it's worth setting up even
+before Google is fully wired.
 
 ## Run it locally
 
@@ -102,20 +121,26 @@ npm test        # vitest — lib/cloud-api.test.ts
 
 `middleware.ts` refreshes the Supabase session on every request and
 redirects signed-out visitors away from private routes to `/sign-in`.
-`/sign-in` is a single "Continue with Google" button
-(`app/(auth)/sign-in`); it starts `supabase.auth.signInWithOAuth`, which
-sends the browser to Google and then to Supabase's fixed callback URL
-above, which in turn redirects to this app's own
-`app/auth/callback/route.ts`. That route exchanges the auth code for a
-session (setting cookies) and redirects to `?next=` (default `/machines`).
-Every subsequent call to the cloud API (`lib/cloud-api.ts`) reads the JWT
-off that session and attaches it as `Authorization: Bearer <jwt>`.
+`/sign-in` (`app/(auth)/sign-in/SignInCard.tsx`) offers an email field
+("Continue with email") and a "Continue with Google" button. Email calls
+`supabase.auth.signInWithOtp`, which emails a magic link and shows a "check
+your email" confirmation naming the address it went to; clicking that link
+lands back here. Google calls `supabase.auth.signInWithOAuth`, sending the
+browser to Google and then to Supabase's fixed callback URL above — if
+Google isn't configured, this call returns a provider error inline instead
+of redirecting, which the button catches and turns into a plain-language
+message. Both paths converge on Supabase's fixed callback URL, which
+redirects to this app's own `app/auth/callback/route.ts`. That route
+exchanges the auth code for a session (setting cookies) and redirects to
+`?next=` (default `/machines`). Every subsequent call to the cloud API
+(`lib/cloud-api.ts`) reads the JWT off that session and attaches it as
+`Authorization: Bearer <jwt>`.
 
 ## Pages
 
 | Route | What it does |
 |---|---|
-| `/sign-in` | Google sign-in. |
+| `/sign-in` | Email magic-link sign-in (working today), with Google as a secondary option that degrades gracefully if unconfigured. |
 | `/activate` | Enter a device code (from `flashnode login`) and approve a machine. Phone-first. |
 | `/machines` | The caller's machines: online state, last seen, revoke. |
 | `/submit` | Paste a GitHub repo + branch, run it through the API's preflight, submit. Renders every preflight finding (level/code/message, quoted verbatim). An error finding blocks the submission entirely; a warning never blocks server-side, so it's surfaced on the post-submit screen instead of gating a second click. |
