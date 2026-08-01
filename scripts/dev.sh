@@ -74,9 +74,17 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 echo "coordinator  http://127.0.0.1:${COORDINATOR_PORT}   (private in production — do not expose)"
+# `python -m uvicorn`, not the `uvicorn` console script. A venv's scripts
+# hardcode an absolute shebang, so moving or renaming the checkout leaves
+# every one of them pointing at a path that no longer exists — and the error,
+# "bad interpreter: .../python3.14: No such file or directory", names an
+# interpreter rather than the venv, which sends you looking for a Python
+# version problem you do not have. Going through the interpreter directly
+# cannot break that way. (Renaming the checkout is exactly what broke this.)
+#
 # --workers 1 is required, not a default: LeaseManager and SqliteLeaseStore
 # are only safe on a single event loop (HANDOFF.md risk #5).
-"$API_VENV/bin/uvicorn" flashruntime.service.app:app \
+"$API_VENV/bin/python" -m uvicorn flashruntime.service.app:app \
   --host 127.0.0.1 --port "$COORDINATOR_PORT" --workers 1 --log-level warning &
 pids+=($!)
 
@@ -92,7 +100,7 @@ done
 
 echo "cloud API    http://127.0.0.1:${API_PORT}"
 cd "$ROOT/flashml-cloud/apps/api"
-"$API_VENV/bin/uvicorn" flashml_cloud_api.app:app \
+"$API_VENV/bin/python" -m uvicorn flashml_cloud_api.app:app \
   --host 127.0.0.1 --port "$API_PORT" --log-level info &
 pids+=($!)
 
