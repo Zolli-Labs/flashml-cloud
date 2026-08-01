@@ -82,9 +82,96 @@ every slice ends with a runnable demo — cut scope, never the demo.
 - [ ] **Stage 8** (Day 14) — goodput/MTTD/MTTR/cost metrics page from the
       ledger; record the three demos; write CASE_STUDY.md.
 
+## M1 checklist — deployed multi-user POC (2026-07-31 →)
+
+Supersedes the Alibaba-gated cloud half of the stage list above: the POC ships
+on **Supabase + Render**; Alibaba is deferred, not abandoned. Spec:
+`flashml-cloud/docs/superpowers/specs/2026-07-31-deployed-multi-user-poc-design.md`.
+Decisions and their revisit-triggers: `M1_DECISIONS.md`.
+
+- [x] **Plan 1 — federated averaging** ✅ (2026-07-31) one model trained across
+      independent machines by exchanging weight deltas per round; proven
+      against a real coordinator AND two genuine flashnode agents, with a
+      falsification check showing the loss decrease is caused by aggregation.
+- [ ] **Plan 2 — agent identity + lease-scoped writes** — device-flow
+      per-machine tokens replacing the shared join code; artifact/checkpoint
+      `PUT` scoped to the caller's live lease. Closes `HANDOFF.md` risk #2;
+      **required before anything faces the internet.**
+- [ ] **Plan 3 — cloud API + Supabase** — Auth (Google), Postgres schema, RLS.
+- [ ] **Plan 4 — GitHub repo → job + preflight** — `flashml.yaml`, curated
+      images, static import/network checks at submit time.
+- [ ] **Plan 5 — web app** — rebuilt against the real API (the current
+      `apps/web/lib/api.ts` still targets a legacy coordinator).
+- [ ] **Plan 6 — Windows hosts** — `hardening.py:60`'s `os.getuid()` is
+      platform-conditional; curated images must declare a non-root `USER`
+      first, or dropping the flag silently means container root.
+- [ ] **Plan 7 — deploy + acceptance** — Render services, curated images to
+      GHCR, and the §10 run-through, whose real test is a friend completing
+      signup → enroll → contribute unaided.
+
 ## Entries
 
 <!-- newest first -->
+
+### 2026-07-31 — Federated averaging across volunteer machines (flashruntime + flashnode + e2e; M1 Plan 1 of 7)
+What/why: one model can now be trained across several independent machines by
+exchanging weight *deltas* once per round instead of gradients once per step —
+the only shape that works over home internet, and the only one possible at all
+on volunteer nodes, where `--network none` means ranks can never rendezvous.
+`fedavg_driver` is `kmeans_driver`'s round loop with `reduce` swapped for a
+sample-weighted delta mean; `fedavg_worker` is the per-shard task; a new
+`federated_averaging` workload type expands one job per round. This is the
+prerequisite for the deployed multi-user POC (`M1_DECISIONS.md` D6).
+How verified: flashruntime **377 passed**, flashnode **75 passed, 1 skipped,
+4 deselected**, workspace e2e **5 passed**. Convergence against a REAL
+coordinator over real HTTP (real expansion, leases, artifact storage,
+commit-time sha256): loss `0.5361 → 0.3781 → 0.2548 → 0.1757` over 4 rounds,
+2/2 participants. **Falsification check** — with `apply_delta` monkeypatched to
+return the base weights unchanged, the same run gives
+`[0.5361, 0.5361, 0.5361, 0.5361]`, exactly flat, so the decrease is *caused*
+by aggregating and broadcasting deltas rather than by workers retraining
+locally each round. With two genuine `flashnode` `ExecutorLoop` agents:
+`[0.5361, 0.3781, 0.2548]`, and the closed-laptop case
+`[0.5361, 0.3734, 0.2458]` (round 0 with 2 participants, rounds 1–2 solo).
+`scripts/fedavg_local_demo.py` exits non-zero if the final loss is not below
+the first.
+Gotchas: (a) **the cross-repo allowlist seam.** `fedavg_worker` was added to the
+coordinator's `ALLOWED_TASK_MODULES` (`service/modea.py`) but NOT to flashnode's
+own `DEFAULT_ALLOWED_MODULES` (`executor/runner.py:26`). Each repo's list looked
+correct in isolation, both suites were green, and the flashruntime-side
+convergence test passed — because it drives a hand-rolled urllib agent that does
+not enforce flashnode's allowlist. A *real* agent refused every task
+("module … is not allowlisted"), burned all 4 attempts per shard, and the job
+FAILED. Federated averaging was completely non-functional on genuine agents
+while everything reported green. This is precisely the failure the 2026-07-29
+entry predicted ("a cross-repo chain test would pin the task-seam integration
+that per-repo unit tests structurally cannot") and the same shape as the
+`argv_capable`/`module_capable` polarity bug — a seam *between* components where
+each side is individually defensible. Guarded now in two places:
+`flashnode/tests/test_allowlist_drift.py` (manually mirrored, because
+`flashnode/AGENTS.md` scopes its flashruntime dependency to `protocol` only) and
+`e2e/test_allowlist_parity.py` (self-maintaining — e2e may import both repos).
+(b) The **quorum rule is deliberately the opposite of `kmeans_driver`'s**, which
+requires every shard: a volunteer pool must aggregate on `min_participants` or
+one closed laptop stalls everyone. Late deltas are discarded, never applied to a
+later round — they were computed against weights that no longer exist. Do NOT
+"harmonize" these; `M1_DECISIONS.md` D7 records why, including that
+`reduce_deltas` divides by *reporting* samples so a lone participant moves the
+weights fully rather than 1/N of the way. (c) Task ids are zero-padded to 3
+digits and the driver sorts them, so `num_shards` now fails closed above 999 —
+`"shard-1000"` would sort before `"shard-999"` and float summation is not
+associative. `_expand_kmeans` has the same latent bug via `it{iteration:02d}`
+past 99 iterations — **not fixed, recorded here**. (d) The documented test
+baseline only reproduces with the venv on `PATH`
+(`PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest`); otherwise `LocalLauncher`
+spawns a bare `python` that does not resolve and an unrelated test fails
+spuriously.
+Next: M1 Plan 2 — per-machine agent identity (device-flow tokens replacing the
+shared join code) and lease-scoped artifact writes, which together close
+`HANDOFF.md` risk #2 before anything faces the internet. Parking lot: this
+proves *collaborative* training, not *faster* — over home links with a small
+model it will usually be slower than one machine, and the docs say so;
+capability-proportional shard sizing and admission probes are M2.
 
 ### 2026-07-29 — Final-review fix wave + deferred follow-ups for the volunteer pool (flashruntime + flashnode)
 What/why: the whole-branch review of the volunteer argv slice found 12 issues,
