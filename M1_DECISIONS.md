@@ -351,6 +351,32 @@ in the same change. A mirrored copy is not a guard.
 
 ---
 
+---
+
+## D13 — FlashML gets its own Supabase project, not an existing one
+
+**Decided (2026-08-01):** created **`flashml-poc`**, project ref
+**`yualksqjjvlfscbbsygq`**, region `us-east-1`, in the `Zolli AI` org
+(`pnctfuztwhlclvjdmzal`). Cost confirmed **$0/month** (free tier).
+
+**Why not the existing projects:** the org already holds `ZolliIAI-Prod`
+(`sgyrzypimyullipjxgvo`) and `ZolliAI-Dev` (`ohqkajtzefseyrafzbfj`, paused).
+Both belong to a **different product** — a real-estate CRM with 37 tables
+(`houses`, `marketplace_listings`, `crm_contacts`, `showing_logs`,
+`gmail_connections`). Critically, that schema already defines
+`public.profiles`, which is one of the tables the FlashML schema needs (§4 of
+the spec). Putting FlashML there would collide on that table and mix a POC's
+auth and data into an unrelated product's database.
+
+**How to apply:** all Plan 3 schema, RLS, and auth work targets
+`yualksqjjvlfscbbsygq`. **Never** apply FlashML migrations to
+`sgyrzypimyullipjxgvo` — it is a live production project for another product.
+
+**Revisit when:** the POC graduates and needs its own org, or the free tier's
+limits bind.
+
+---
+
 ## Open questions carried into execution
 
 1. **Demo dataset** — MNIST (~11 MB) or CIFAR-10 (~170 MB) baked into
