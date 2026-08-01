@@ -49,6 +49,32 @@ OUT_DIR = "/work/out"
 #: The input name the repo tarball is staged under.
 CODE_INPUT = "code"
 
+#: The input name each federated round's aggregated weights are staged
+#: under. Note the *file* a task actually sees is named after the artifact
+#: key's basename, not after this name — flashnode downloads a non-unpacked
+#: input to ``inputs/<basename of key>`` (``executor/loop.py``) — and the
+#: driver writes its weights to ``…/round-NNN/weights.json``. So the path
+#: the user's code opens is ``WEIGHTS_PATH`` below, and these two constants
+#: are one contract: change the driver's key and this goes with it.
+WEIGHTS_INPUT = "weights"
+WEIGHTS_PATH = f"{INPUTS_DIR}/weights.json"
+
+#: The file a federated task writes its weight change to, inside OUT_DIR.
+#: ``fedavg_driver`` reads the name from each task's ``metrics.json``
+#: (``delta_file``) and defaults to exactly this.
+DELTA_FILE = "delta.json"
+
+#: A federated round's lease has to outlive local training, not a single
+#: HTTP call — ``CommandRecipe``'s 60 s default would expire mid-epoch and
+#: hand the shard to a second machine while the first was still working.
+DEFAULT_FEDERATED_LEASE_SECONDS = 600.0
+
+#: Upstream (``service/modea.MAX_LEASE_SECONDS``) refuses more than an hour
+#: for the built-in expansion; ``CommandRecipe`` does not clamp at all, so
+#: this module must, or a repo's ``timeout_seconds: 86400`` would pin a
+#: shard to one machine for a day.
+MAX_LEASE_SECONDS = 3600.0
+
 #: A sweep key becomes both a ``--flag`` and a ``str.format`` field name, so
 #: it has to be a plain identifier: ``"{a-b}".format(**{"a-b": 1})`` raises
 #: inside the recipe, which would surface as a 500 rather than as the user
@@ -260,5 +286,149 @@ def compile_to_jobspec(
     try:
         validated = JobSpec.model_validate(spec)
     except Exception as exc:  # pydantic ValidationError and anything under it
+        raise CompileError(f"compiled JobSpec is invalid: {exc}") from None
+    return json.loads(validated.model_dump_json())
+
+
+# ---------------------------------------------------------------------------
+# federated rounds
+# ---------------------------------------------------------------------------
+
+
+def federated_task_ids(shards: int) -> list[str]:
+    """The task ids ``CommandRecipe`` will produce for a round of ``shards``.
+
+    Stated here rather than inferred by the driver: the driver's
+    participant count is filtered against exactly this set (an artifact key
+    outside it would mint a participant out of nothing), so the naming rule
+    has to come from the module that decides how the round is compiled.
+    Mirrors ``CommandRecipe.expand``'s ``task-{i:03d}``.
+    """
+    return [f"task-{i:03d}" for i in range(shards)]
+
+
+def compile_federated_round(
+    config: FlashmlConfig,
+    image: CuratedImage,
+    code_artifact_uri: str,
+    job_name: str,
+    *,
+    round_index: int,
+    weights_uri: str | None,
+) -> dict[str, Any]:
+    """Compile **one round** of a ``mode: federated`` config into a JobSpec.
+
+    A federated run is N of these, chained by ``fedavg_driver.run_fedavg``
+    running inside this API (design spec §5.4.5 — aggregation stays on
+    trusted infrastructure because until result verification exists a node's
+    reported numbers are believed).
+
+    The round is an ordinary ``command`` job, which is the whole point: the
+    round worker is the *user's own entrypoint*, not a built-in module, so
+    everything already true of a repo job (sandboxed isolation, staged code,
+    ``--network none``, output collected from ``/work/out``) is true here
+    unchanged. What makes it federated is only what is added:
+
+    - ``weights_uri`` staged as an input, so the round's aggregated weights
+      arrive at ``WEIGHTS_PATH``. ``None`` on round 0 — there is nothing to
+      broadcast yet, and the input is omitted rather than pointed at an
+      empty artifact, so the user's code can test for the file's absence.
+    - one task per shard, each told its ``--shard`` index, so the shards
+      partition the data rather than each training on all of it.
+
+    The user's side of the contract (``delta.json`` + a ``metrics.json``
+    carrying ``samples`` and ``loss``) is not enforceable from here — it is
+    checked statically by ``preflight``'s ``federated-contract`` rule and
+    would otherwise fail at commit time on a volunteer's machine.
+    """
+    if not config.is_federated:
+        raise CompileError(
+            f"compile_federated_round needs a 'mode: federated' config, got "
+            f"{config.mode!r}"
+        )
+    if not str(code_artifact_uri).startswith("artifact://"):
+        raise CompileError(
+            f"code_artifact_uri must be an artifact:// URI, got {code_artifact_uri!r}"
+        )
+    if weights_uri is not None and not str(weights_uri).startswith("artifact://"):
+        raise CompileError(
+            f"weights_uri must be an artifact:// URI, got {weights_uri!r}"
+        )
+    if not isinstance(round_index, int) or isinstance(round_index, bool) or round_index < 0:
+        raise CompileError(f"round_index must be a non-negative int, got {round_index!r}")
+
+    shards = config.shards or 0
+    if shards < 1:
+        raise CompileError("a federated config must resolve to at least one shard")
+
+    entry = _entrypoint_path(config.entrypoint)
+
+    # `--shard` is the only per-task value, so it is the only placeholder;
+    # every other token is escaped because CommandRecipe runs str.format over
+    # all of them (see _escape_braces).
+    fixed = ["python", entry, *config.args,
+             "--round", str(round_index),
+             "--num-shards", str(shards)]
+    command = [_escape_braces(token) for token in fixed] + ["--shard", "{shard}"]
+    task_params = [{"shard": str(i)} for i in range(shards)]
+
+    inputs = {CODE_INPUT: code_artifact_uri}
+    if weights_uri is not None:
+        inputs[WEIGHTS_INPUT] = weights_uri
+
+    lease_seconds = float(
+        config.timeout_seconds
+        if config.timeout_seconds is not None
+        else DEFAULT_FEDERATED_LEASE_SECONDS
+    )
+
+    parameters: dict[str, Any] = {
+        "command": command,
+        "inputs": inputs,
+        # Only the code tarball is an archive. The weights artifact is a
+        # plain JSON document and must stay a file the task can open.
+        "unpack_inputs": [CODE_INPUT],
+        "env": {},
+        "task_params": task_params,
+        "lease_seconds": min(lease_seconds, MAX_LEASE_SECONDS),
+    }
+    if config.timeout_seconds is not None:
+        parameters["timeout_seconds"] = config.timeout_seconds
+
+    repository, tag = _split_reference(image.reference)
+
+    spec: dict[str, Any] = {
+        "apiVersion": "flashml.dev/v1alpha1",
+        "kind": "Job",
+        "metadata": {
+            # The round suffix is appended AFTER trimming the base name to
+            # fit, not before: `sanitize_job_name` truncates at 63 and would
+            # otherwise cut the suffix off a long name, making every round
+            # of that run share one job name.
+            "name": sanitize_job_name(
+                sanitize_job_name(job_name)[: MAX_NAME_LENGTH - 5].rstrip("-")
+                + f"-r{round_index:03d}"
+            ),
+            "labels": {
+                "flashml.dev/source": "github-repo",
+                "flashml.dev/mode": "federated",
+            },
+        },
+        "spec": {
+            "execution": {"backend": "leases", "environment": "auto"},
+            "image": {"repository": repository, "tag": tag},
+            "workload": {"type": "command", "parameters": parameters},
+            "resources": _resources(config),
+            # Same fixed isolation as every other repo job — see the module
+            # docstring. Federation changes what the tasks compute, not what
+            # they are allowed to run as.
+            "isolation": {"tier": "sandboxed", "allowFallback": False},
+            "artifacts": {"outputPrefix": "artifact://jobs/{job_id}/"},
+        },
+    }
+
+    try:
+        validated = JobSpec.model_validate(spec)
+    except Exception as exc:
         raise CompileError(f"compiled JobSpec is invalid: {exc}") from None
     return json.loads(validated.model_dump_json())

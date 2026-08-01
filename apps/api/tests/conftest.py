@@ -29,7 +29,13 @@ from pathlib import Path
 
 import pytest
 
-MIGRATION_PATH = Path(__file__).parent.parent / "migrations" / "0001_initial.sql"
+MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+
+#: Every migration, in the order the numeric prefix says. Globbed rather
+#: than listed so a new migration is exercised by this fixture the moment it
+#: is written — a checked-in migration nothing ever applies is a migration
+#: nobody has run.
+MIGRATION_PATHS = sorted(MIGRATIONS_DIR.glob("*.sql"))
 
 REQUIRED_BINARIES = ("initdb", "pg_ctl", "pg_isready", "psql")
 
@@ -117,26 +123,32 @@ def postgres_dsn(tmp_path_factory):
         if stub.returncode != 0:
             raise RuntimeError(f"auth schema stub failed:\n{stub.stdout}\n{stub.stderr}")
 
-        # Apply the real migration, unmodified — applying the actual
-        # migration file is what makes this test meaningful.
-        applied = _run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(MIGRATION_PATH)])
-        if applied.returncode != 0 and "pgcrypto" in applied.stderr.lower():
-            # pgcrypto ships with a standard Postgres install (verified
-            # present locally), but if some other machine's build lacks
-            # the contrib module, gen_random_uuid() — the only thing this
-            # schema actually needs from it — has been a core builtin
-            # since Postgres 13 regardless. Rather than editing the
-            # checked-in migration to drop that line, tolerate *this one
-            # statement* failing and re-apply non-strictly so the rest of
-            # the (unmodified) file still runs and is still checked.
-            retry = _run(["psql", dsn, "-v", "ON_ERROR_STOP=0", "-f", str(MIGRATION_PATH)])
-            if retry.returncode != 0:
+        # Apply the real migrations, unmodified and in order — applying the
+        # actual migration files is what makes this test meaningful.
+        for migration in MIGRATION_PATHS:
+            applied = _run(["psql", dsn, "-v", "ON_ERROR_STOP=1",
+                            "-f", str(migration)])
+            if applied.returncode != 0 and "pgcrypto" in applied.stderr.lower():
+                # pgcrypto ships with a standard Postgres install (verified
+                # present locally), but if some other machine's build lacks
+                # the contrib module, gen_random_uuid() — the only thing this
+                # schema actually needs from it — has been a core builtin
+                # since Postgres 13 regardless. Rather than editing the
+                # checked-in migration to drop that line, tolerate *this one
+                # statement* failing and re-apply non-strictly so the rest of
+                # the (unmodified) file still runs and is still checked.
+                retry = _run(["psql", dsn, "-v", "ON_ERROR_STOP=0",
+                              "-f", str(migration)])
+                if retry.returncode != 0:
+                    raise RuntimeError(
+                        f"migration {migration.name} failed even tolerating "
+                        f"pgcrypto:\n{retry.stdout}\n{retry.stderr}"
+                    )
+            elif applied.returncode != 0:
                 raise RuntimeError(
-                    f"migration failed even tolerating pgcrypto:\n"
-                    f"{retry.stdout}\n{retry.stderr}"
+                    f"migration {migration.name} failed:\n"
+                    f"{applied.stdout}\n{applied.stderr}"
                 )
-        elif applied.returncode != 0:
-            raise RuntimeError(f"migration failed:\n{applied.stdout}\n{applied.stderr}")
 
         yield dsn
     finally:

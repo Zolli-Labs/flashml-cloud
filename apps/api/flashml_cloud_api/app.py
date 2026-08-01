@@ -55,13 +55,18 @@ from flashruntime.protocol.v1alpha1 import JobSpec, NodeHeartbeat, NodeRegistrat
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
+from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api import repo as repomod
 from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
     AuthError,
     verify_supabase_jwt,
 )
-from flashml_cloud_api.compile import CompileError, compile_to_jobspec
+from flashml_cloud_api.compile import (
+    CompileError,
+    compile_federated_round,
+    compile_to_jobspec,
+)
 from flashml_cloud_api.db import Machine
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import UnknownImage, resolve_image
@@ -477,6 +482,7 @@ def create_cloud_app(
     connect: Callable[[], psycopg.Connection] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     fetch_repo: Callable[[str, str, str], bytes] | None = None,
+    start_federated_job: Callable[..., Any] | None = None,
 ) -> FastAPI:
     """The public door. Agents and browsers both arrive here; nothing else
     is exposed to the internet.
@@ -487,7 +493,10 @@ def create_cloud_app(
     exactly what leaves this process without needing a live coordinator.
     ``fetch_repo`` is the GitHub tarball fetch, injected for the same
     reason: the from-repo tests build their fixture tarballs in-process and
-    never reach codeload.
+    never reach codeload. ``start_federated_job`` launches the in-API
+    federated-averaging driver (``fedavg.start_federated_job``), injected so
+    a test can run the driver against a stubbed coordinator — or observe
+    that it was started — without a live one.
 
     On ``settings.require_auth``: it governs *startup validation of the
     environment*, not whether requests are authenticated. There is no open
@@ -500,6 +509,7 @@ def create_cloud_app(
     fetch_repo = fetch_repo or (
         lambda owner, name, ref: repomod.fetch_repo_tarball(owner, name, ref)
     )
+    start_federated_job = start_federated_job or fedavgmod.start_federated_job
     max_upload_bytes = int(
         os.environ.get("FLASHML_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)
     )
@@ -875,8 +885,17 @@ def create_cloud_app(
         try:
             # Compiled *before* the upload: a config this module cannot
             # compile should not leave a multi-megabyte orphan behind in the
-            # artifact store.
-            spec = compile_to_jobspec(config, image, code_uri, config.name)
+            # artifact store. For a federated run this compiles round 0 —
+            # the round the driver is about to submit — so a config that
+            # cannot become a valid round fails here, in the response, and
+            # not silently on a background thread nobody is watching.
+            if config.is_federated:
+                spec = compile_federated_round(
+                    config, image, code_uri, config.name,
+                    round_index=0, weights_uri=None,
+                )
+            else:
+                spec = compile_to_jobspec(config, image, code_uri, config.name)
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
 
@@ -892,6 +911,61 @@ def create_cloud_app(
                             "status": upload.status_code})
             )
             raise HTTPException(status_code=502, detail="could not stage the repo")
+
+        if config.is_federated:
+            # A federated run is N coordinator jobs, one per round, so there
+            # is no single coordinator job id to own it by. The parent id is
+            # minted here and each round's coordinator job is recorded
+            # against it in `job_rounds`; nothing is submitted from this
+            # request at all — the driver submits round 0 itself, so a run
+            # can never end up with a round the driver does not know it owns.
+            job_id = fedavgmod.new_federated_job_id()
+            dbmod.insert_job(
+                db,
+                job_id=job_id,
+                owner_id=user_id,
+                name=spec["metadata"]["name"],
+                source={
+                    "type": "github",
+                    "owner": owner,
+                    "repo": name,
+                    "ref": ref,
+                    "code_artifact": code_uri,
+                    # Only a federated row carries these. An independent
+                    # row's `source` is byte-identical to what it has always
+                    # been, so nothing reading it has to learn a new shape.
+                    "mode": config.mode,
+                    "rounds": config.rounds,
+                    "shards": config.shards,
+                    "min_participants": config.min_participants,
+                },
+                spec=spec,
+                status="PENDING",
+            )
+            start_federated_job(
+                fedavgmod.FederatedRun(
+                    job_id=job_id,
+                    job_name=config.name,
+                    config=config,
+                    image=image,
+                    code_artifact_uri=code_uri,
+                ),
+                settings=settings,
+                connect=request.app.state.connect,
+            )
+            return Response(
+                content=json.dumps({
+                    "job_id": job_id,
+                    "state": "PENDING",
+                    "mode": config.mode,
+                    "rounds": config.rounds,
+                    "shards": config.shards,
+                    "min_participants": config.min_participants,
+                    "findings": rendered,
+                }),
+                status_code=201,
+                media_type="application/json",
+            )
 
         r = await coordinator.forward(
             "POST",
@@ -939,10 +1013,28 @@ def create_cloud_app(
         db: psycopg.Connection = Depends(db_conn),
     ):
         owned = dbmod.list_job_ids_for_owner(db, user_id)
+        # A federated parent id names no coordinator job, so it can never
+        # match anything in the coordinator's list; dropping it here is what
+        # lets a user whose only jobs are federated skip the round trip
+        # entirely instead of fetching a list to throw all of it away.
+        owned = {j for j in owned if not fedavgmod.is_federated_job_id(j)}
+        # A federated run is one coordinator job per round, so it is not in
+        # the coordinator's list at all and has to be added from this table.
+        # Empty for every user who has never submitted one, which is what
+        # keeps this list byte-identical to before for them.
+        federated = [
+            {
+                "job_id": row["id"],
+                "name": row.get("name"),
+                "state": row.get("status"),
+                "mode": "federated",
+            }
+            for row in dbmod.list_federated_jobs_for_owner(db, user_id)
+        ]
         if not owned:
             # Nothing to scope down to; skip the coordinator round trip
             # rather than fetch a list of jobs we would only throw away.
-            return []
+            return federated
         r = await coordinator.forward("GET", "/v1alpha1/jobs")
         if r.status_code >= 300:
             return _passthrough(r)
@@ -955,7 +1047,9 @@ def create_cloud_app(
         # The coordinator has no notion of accounts and returns every job
         # unscoped behind the operator token; this table is the only place
         # the owner filter can be applied.
-        return [j for j in jobs if isinstance(j, dict) and j.get("job_id") in owned]
+        return [
+            j for j in jobs if isinstance(j, dict) and j.get("job_id") in owned
+        ] + federated
 
     @app.get("/v1alpha1/jobs/{job_id}", tags=["browser"])
     async def get_job_route(
@@ -963,12 +1057,54 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_owner(db, job_id, user_id)
+        if row is None:
             # Not found and not yours look identical: a 403 here would
             # confirm to a guesser that the id exists.
             raise HTTPException(status_code=404, detail="unknown job")
+        if fedavgmod.is_federated_job_id(job_id):
+            # A federated run has no single coordinator job — it is one job
+            # per round — so forwarding this id would ask the coordinator
+            # about something it has never heard of and answer 404 for a job
+            # the user does own. The local row plus the round history IS the
+            # job here. Unreachable for every non-federated id, so the
+            # forwarding path below is unchanged.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            source = row.get("source") or {}
+            return {
+                "job_id": job_id,
+                "state": row.get("status"),
+                "mode": source.get("mode"),
+                "rounds_requested": source.get("rounds"),
+                "rounds_completed": len(rounds),
+                "spec": row.get("spec"),
+                "created_at": str(row["created_at"]) if row.get("created_at") else None,
+                "finished_at": (
+                    str(row["finished_at"]) if row.get("finished_at") else None
+                ),
+            }
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}")
         return _passthrough(r)
+
+    @app.get("/v1alpha1/jobs/{job_id}/rounds", tags=["browser"])
+    async def get_job_rounds(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The federated-averaging history of a job the caller owns.
+
+        Ownership is checked exactly as the rest of this block does it —
+        against the ``jobs`` table, before anything else, answering 404 (not
+        403) for a job that exists but belongs to someone else, so this
+        route cannot be used to learn which job ids are real. The listing
+        query joins on ownership a second time (``list_job_rounds_for_owner``)
+        rather than trusting this check to have happened.
+        """
+        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return [_jsonable(r)
+                for r in dbmod.list_job_rounds_for_owner(db, job_id, user_id)]
 
     @app.post("/v1alpha1/jobs/{job_id}/cancel", tags=["browser"])
     async def cancel_job_route(
@@ -981,6 +1117,18 @@ def create_cloud_app(
             # contacted: cancelling a job you don't own must not reach the
             # coordinator at all, let alone actually cancel it.
             raise HTTPException(status_code=404, detail="unknown job")
+        if fedavgmod.is_federated_job_id(job_id):
+            # Say so, rather than forwarding an id the coordinator has never
+            # seen and answering 404 for a job the caller does own. The
+            # driver is an in-process loop with no cancellation channel;
+            # stopping one mid-round is cooperative cancel, which the design
+            # spec (§6.4) puts in M3 alongside result verification.
+            raise HTTPException(
+                status_code=501,
+                detail="cancelling a federated run is not implemented yet; "
+                       "the current round finishes and the run stops when the "
+                       "API process does",
+            )
         r = await coordinator.forward("POST", f"/v1alpha1/jobs/{_seg(job_id)}/cancel")
         return _passthrough(r)
 

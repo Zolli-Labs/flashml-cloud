@@ -353,6 +353,156 @@ def fetch_job_for_owner(
         return cur.fetchone()
 
 
+def set_job_status(
+    db: psycopg.Connection, job_id: str, status: str, *, finished: bool
+) -> None:
+    """Record a job's terminal (or in-flight) status.
+
+    Deliberately **not** owner-scoped, and that is the one exception to this
+    module's rule: the only caller is the in-API federated driver, which is
+    not acting for a request and has no ``owner_id`` to fold in — it is
+    reporting what happened to a job it was itself started for. Making it
+    take an owner would mean carrying a user id into a background thread for
+    no security gain, since the job_id is not attacker-supplied there.
+
+    ``finished`` stamps ``finished_at``; a driver that fails must not leave
+    a job looking like it is still running, so the failure path sets both in
+    one statement rather than two that could half-apply.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.jobs
+               set status = %s,
+                   finished_at = case when %s then now() else finished_at end
+             where id = %s
+            """,
+            (status, finished, job_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# job_rounds
+# ---------------------------------------------------------------------------
+
+def insert_job_round(
+    db: psycopg.Connection,
+    *,
+    job_id: str,
+    round_index: int,
+    participants: int,
+    mean_loss: float | None,
+    contributors: list[str],
+    coordinator_job_id: str | None,
+) -> None:
+    """Record one completed federated-averaging round.
+
+    ``on conflict do nothing`` on ``(job_id, round)``: a round is aggregated
+    once, but a driver resumed onto a run whose history is already written
+    must be able to re-report it without either crashing or appending a
+    second, contradictory row. Idempotent commits, same rule as everywhere
+    else money and metrics are counted.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.job_rounds
+                (job_id, round, participants, mean_loss, contributors,
+                 coordinator_job_id)
+            values (%s, %s, %s, %s, %s, %s)
+            on conflict (job_id, round) do nothing
+            """,
+            (
+                job_id,
+                round_index,
+                participants,
+                mean_loss,
+                Json(list(contributors)),
+                coordinator_job_id,
+            ),
+        )
+
+
+#: Columns of ``public.job_rounds`` that may leave the API. Spelled out for
+#: the same reason ``MACHINE_PUBLIC_COLUMNS`` is: adding a column to the
+#: schema must not silently add it to a response.
+JOB_ROUND_PUBLIC_COLUMNS = (
+    "round", "participants", "mean_loss", "contributors",
+    "coordinator_job_id", "recorded_at",
+)
+
+
+def list_job_rounds_for_owner(
+    db: psycopg.Connection, job_id: str, owner_id: str
+) -> list[dict[str, Any]]:
+    """Every recorded round of ``job_id``, but only if ``owner_id`` owns it.
+
+    The ownership test is the join, not a check the caller is trusted to
+    have done first: a route that forgot it would return an empty list here
+    rather than another user's loss curve.
+    """
+    columns = ", ".join(f"r.{c}" for c in JOB_ROUND_PUBLIC_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {columns}
+              from public.job_rounds r
+              join public.jobs j on j.id = r.job_id
+             where r.job_id = %s and j.owner_id = %s
+             order by r.round
+            """,
+            (job_id, owner_id),
+        )
+        return list(cur.fetchall())
+
+
+def list_round_job_ids(db: psycopg.Connection, job_id: str) -> list[tuple[int, str]]:
+    """``(round, coordinator_job_id)`` for every completed round, oldest first.
+
+    This is exactly the shape ``fedavg_driver.resume_state`` takes: it is
+    the persisted form of a driver's in-memory round history, which is what
+    makes a run resumable across an API restart at all. Rounds with no
+    recorded coordinator job are skipped — ``resume_state`` probes an
+    artifact key built from that id, so a null would look like a round that
+    never completed.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select round, coordinator_job_id
+              from public.job_rounds
+             where job_id = %s and coordinator_job_id is not null
+             order by round
+            """,
+            (job_id,),
+        )
+        return [(int(r["round"]), str(r["coordinator_job_id"]))
+                for r in cur.fetchall()]
+
+
+def list_federated_jobs_for_owner(
+    db: psycopg.Connection, owner_id: str
+) -> list[dict[str, Any]]:
+    """The caller's federated runs, which the coordinator cannot list.
+
+    A federated run is one coordinator job *per round*, so it has no single
+    coordinator job id and never appears in the coordinator's job list. This
+    table is the only place it exists as one thing, which is why the job
+    list has to union the two rather than filtering one.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select id, name, status, created_at, finished_at
+              from public.jobs
+             where owner_id = %s and source->>'mode' = 'federated'
+             order by created_at
+            """,
+            (owner_id,),
+        )
+        return list(cur.fetchall())
+
+
 def list_job_ids_for_owner(db: psycopg.Connection, owner_id: str) -> set[str]:
     """Every job id belonging to owner_id, and nothing else. Used to filter
     the coordinator's (unscoped, operator-token) job list down to exactly

@@ -34,8 +34,29 @@ MAX_SWEEP_COMBINATIONS = 100
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
 REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
-OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds"}
+OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
+                 "mode", "rounds", "min_participants", "shards"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
+
+#: Today's behaviour, and the default: one round of independent tasks (a
+#: sweep, or a single task). Nothing about an ``independent`` config changes
+#: because ``federated`` now exists.
+MODE_INDEPENDENT = "independent"
+
+#: Federated averaging: the same entrypoint runs once per shard per round,
+#: and the API drives the rounds. This is a **contract the user opts into**
+#: — see ``preflight``'s ``federated-contract`` check — not something that
+#: can be inferred from arbitrary repo code.
+MODE_FEDERATED = "federated"
+
+MODES = (MODE_INDEPENDENT, MODE_FEDERATED)
+
+#: A federated run submits one coordinator job per round and the driver
+#: holds the loop in memory for its whole duration. The cap is not about
+#: arithmetic — it is that each round is a full submit/lease/commit cycle
+#: across volunteer machines, so a four-digit round count is a runaway, not
+#: a plan.
+MAX_ROUNDS = 500
 
 
 class ConfigError(Exception):
@@ -54,6 +75,18 @@ class FlashmlConfig:
     sweep: dict[str, list] = field(default_factory=dict)
     resources: dict = field(default_factory=dict)
     timeout_seconds: int | None = None
+    #: ``independent`` (default, unchanged) or ``federated``.
+    mode: str = MODE_INDEPENDENT
+    #: Federated only. ``None`` under ``independent``, so a caller that
+    #: reads these without checking the mode gets a TypeError rather than a
+    #: plausible-looking default.
+    rounds: int | None = None
+    min_participants: int | None = None
+    shards: int | None = None
+
+    @property
+    def is_federated(self) -> bool:
+        return self.mode == MODE_FEDERATED
 
 
 def _require_string(raw: dict, key: str) -> str:
@@ -101,6 +134,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     sweep = _validate_sweep(raw.get("sweep", {}))
     resources = _validate_resources(raw.get("resources", {}))
     timeout_seconds = _validate_timeout_seconds(raw.get("timeout_seconds"))
+    mode, rounds, min_participants, shards = _validate_mode(raw)
 
     return FlashmlConfig(
         version=version,
@@ -111,7 +145,92 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         sweep=sweep,
         resources=resources,
         timeout_seconds=timeout_seconds,
+        mode=mode,
+        rounds=rounds,
+        min_participants=min_participants,
+        shards=shards,
     )
+
+
+def _positive_int(raw: dict, key: str, maximum: int) -> int:
+    value = raw[key]
+    # bool before int: `True` is an int in Python, and `rounds: true` is a
+    # typo that would otherwise silently mean one round.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"flashml.yaml {key!r} must be an integer, got {value!r}")
+    if value < 1:
+        raise ConfigError(f"flashml.yaml {key!r} must be >= 1, got {value!r}")
+    if value > maximum:
+        raise ConfigError(
+            f"flashml.yaml {key!r} is {value}, above the cap of {maximum}"
+        )
+    return value
+
+
+def _validate_mode(raw: dict) -> tuple[str, int | None, int | None, int | None]:
+    """``(mode, rounds, min_participants, shards)``.
+
+    Federated-only keys are refused under ``independent`` rather than
+    ignored, for the same reason unknown top-level keys are: a config that
+    names ``rounds`` has an author who believes rounds are happening, and
+    silently running a single round instead is the kind of "worked, but not
+    the thing you asked for" outcome this parser exists to prevent.
+    """
+    mode = raw.get("mode", MODE_INDEPENDENT)
+    if mode not in MODES:
+        raise ConfigError(
+            f"flashml.yaml 'mode' must be one of {list(MODES)!r}, got {mode!r}"
+        )
+
+    federated_keys = ("rounds", "min_participants", "shards")
+    if mode == MODE_INDEPENDENT:
+        present = [k for k in federated_keys if k in raw]
+        if present:
+            raise ConfigError(
+                f"flashml.yaml sets {sorted(present)!r}, which only apply to "
+                f"'mode: {MODE_FEDERATED}'; the default mode "
+                f"('{MODE_INDEPENDENT}') runs one round of independent tasks"
+            )
+        return MODE_INDEPENDENT, None, None, None
+
+    missing = [k for k in ("rounds", "min_participants") if k not in raw]
+    if missing:
+        raise ConfigError(
+            f"flashml.yaml 'mode: {MODE_FEDERATED}' also requires "
+            f"{sorted(missing)!r} — federated averaging has no sensible "
+            f"default for how many rounds to run or how many machines a "
+            f"round needs before it averages"
+        )
+
+    rounds = _positive_int(raw, "rounds", MAX_ROUNDS)
+    min_participants = _positive_int(raw, "min_participants", MAX_SWEEP_COMBINATIONS)
+    if "shards" in raw:
+        shards = _positive_int(raw, "shards", MAX_SWEEP_COMBINATIONS)
+    else:
+        # One shard per required participant. Deliberately not "some
+        # generous multiple": every extra shard is a task that has to find a
+        # volunteer, and a default that dispatched more work than the user
+        # asked for would make an idle pool look like a stuck job.
+        shards = min_participants
+    if min_participants > shards:
+        raise ConfigError(
+            f"flashml.yaml 'min_participants' ({min_participants}) exceeds "
+            f"'shards' ({shards}): a round would need more contributions than "
+            f"it dispatches tasks, so quorum could never be reached"
+        )
+
+    if raw.get("sweep"):
+        # A sweep expands to one task per hyperparameter combination; a
+        # federated round expands to one task per shard. Both cannot be the
+        # meaning of the same task list, and quietly picking one would train
+        # something the author did not describe.
+        raise ConfigError(
+            f"flashml.yaml cannot combine 'sweep' with 'mode: {MODE_FEDERATED}': "
+            f"a sweep's tasks are independent trials, a federated round's tasks "
+            f"are shards of one model"
+        )
+
+    return MODE_FEDERATED, rounds, min_participants, shards
 
 
 def _validate_args(args: object) -> list[str]:

@@ -107,6 +107,32 @@ _WRITE_METHODS = frozenset(
 #: The only directory a task's output is collected from.
 OUT_DIR = "/work/out"
 
+#: Where a federated round's aggregated weights are staged, and what a
+#: federated task must write. Kept in step with ``compile.WEIGHTS_PATH`` /
+#: ``compile.DELTA_FILE`` by ``test_preflight``; spelled out here so a
+#: finding can quote the exact path a user has to open.
+FEDERATED_WEIGHTS_PATH = "/work/inputs/weights.json"
+FEDERATED_DELTA_FILE = "delta.json"
+
+#: The full statement of the federated contract, quoted verbatim in the
+#: finding. It is long because it is the entire specification of what the
+#: user has to write — a finding that said "your entrypoint does not follow
+#: the delta protocol" would be a refusal with no way to act on it.
+FEDERATED_CONTRACT = (
+    f"'mode: federated' asks the platform to average your model across "
+    f"machines every round, which only works if your entrypoint speaks the "
+    f"delta protocol: (1) read the round's weights from "
+    f"{FEDERATED_WEIGHTS_PATH} — the file is absent on round 0, where you "
+    f"start from your own initialisation; (2) train locally on the shard "
+    f"given by --shard/--num-shards; (3) write your weight change to "
+    f"{OUT_DIR}/{FEDERATED_DELTA_FILE} as "
+    f'{{"<param>": {{"shape": [...], "data": [...]}}}} — on round 0, where '
+    f"you were given no weights, that is your trained weights themselves; "
+    f"(4) write {OUT_DIR}/metrics.json with at least a positive integer "
+    f"'samples' and a numeric 'loss', which is how the round weights your "
+    f"contribution in the average"
+)
+
 #: Largest entrypoint this module will read and parse. A single Python
 #: source file larger than this is pathological; refusing to analyze it
 #: beats reading an unbounded amount of a stranger's tarball into the API
@@ -543,6 +569,7 @@ def preflight(
     findings.extend(_import_findings(tree, Path(repo_root), path, image))
     findings.extend(_shell_findings(tree))
     findings.extend(_metrics_findings(source_text, entry_label))
+    findings.extend(_federated_findings(config, source_text, entry_label))
     findings.extend(_write_findings(tree))
 
     return _dedupe(findings)
@@ -644,6 +671,49 @@ def _metrics_findings(source_text: str, entry_label: str) -> list[Finding]:
             "no-metrics-json",
             f"{entry_label} never mentions 'metrics.json'; a task that does not "
             f"write {OUT_DIR}/metrics.json cannot commit its result",
+        )
+    ]
+
+
+def _federated_findings(
+    config: FlashmlConfig, source_text: str, entry_label: str
+) -> list[Finding]:
+    """Refuse a ``mode: federated`` job whose entrypoint cannot participate.
+
+    An **error**, unlike the ``metrics.json`` hint next door, and the
+    difference is real rather than a matter of taste. That one is a warning
+    because a task may legitimately write its metrics from a helper this
+    scan never opens, and refusing would block working code. This one guards
+    a mode the author explicitly opted into: without the delta protocol,
+    every round of a federated run trains on nothing it was sent and commits
+    nothing the driver can average, so the run does not degrade — it burns
+    N rounds of volunteers' electricity and then fails on the first fetch.
+    Preferring a false positive here to that is the whole point of the
+    module docstring's "helpfulness control".
+
+    Deliberately a *text* scan, not an ast walk: what has to be true is that
+    the file names the paths, and a path can be built by ``Path(INPUTS) /
+    "weights.json"``, an f-string, or a constant at the top of the file.
+    Requiring a recognisable ``open()`` call would refuse all three.
+    """
+    if not config.is_federated:
+        return []
+    missing: list[str] = []
+    # `weights.json` alone, not the full `/work/inputs/weights.json`: code
+    # that splits the directory into a constant is the common shape, and
+    # refusing it would fail a repo that does the right thing.
+    if "weights.json" not in source_text:
+        missing.append(FEDERATED_WEIGHTS_PATH)
+    if FEDERATED_DELTA_FILE not in source_text:
+        missing.append(f"{OUT_DIR}/{FEDERATED_DELTA_FILE}")
+    if not missing:
+        return []
+    return [
+        Finding(
+            ERROR,
+            "federated-contract",
+            f"{entry_label} never mentions {' or '.join(missing)}. "
+            f"{FEDERATED_CONTRACT}",
         )
     ]
 
