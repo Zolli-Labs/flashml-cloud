@@ -6,6 +6,14 @@ e2e/.venv/
 __pycache__/
 .pytest_cache/
 .DS_Store
+
+# Secrets. `.env` holds the real deploy values; `.env.example` is the
+# committed, value-free template. audit_secrets.sh asserts .env is untracked,
+# but that check passes trivially while no .env exists — this ignore rule is
+# the actual guard, and it must come before anyone creates the file.
+.env
+.env.*
+!.env.example
 .env.alibaba
 **/.venv/
 **/node_modules/
