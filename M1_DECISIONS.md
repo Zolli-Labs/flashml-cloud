@@ -197,6 +197,21 @@ and load-bearing. This mirrors the 2026-07-29 lesson where `argv_capable` and
 `module_capable` were given deliberately *opposite* polarities and the code had
 to warn future readers against unifying them.
 
+**The property that makes quorum safe** (verified numerically, 2026-07-31).
+`reduce_deltas` divides by the sum of *reporting* samples, not by the round's
+full shard count. That renormalization is what keeps partial participation
+correct:
+
+| Case | Result |
+|---|---|
+| Both workers report (100 samples → 12, 300 samples → 20, from base 10) | `18.0` — identical to textbook FedAvg, the sample-weighted mean of the *trained* weights |
+| Only the 300-sample worker reports | `20.0` — exactly that worker's trained weights |
+
+If the divisor were the full shard count instead, a lone participant would move
+the weights only 1/N of the way toward its result, so every dropped machine
+would quietly slow training with no error and no log line. Anyone "fixing"
+`reduce_deltas` to divide by `num_shards` reintroduces exactly that.
+
 ---
 
 ## D8 — `fedavg_driver` ships in flashruntime (public), not flashml-cloud (private)
