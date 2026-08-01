@@ -93,11 +93,15 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       independent machines by exchanging weight deltas per round; proven
       against a real coordinator AND two genuine flashnode agents, with a
       falsification check showing the loss decrease is caused by aggregation.
-- [ ] **Plan 2 — agent identity + lease-scoped writes** — device-flow
-      per-machine tokens replacing the shared join code; artifact/checkpoint
-      `PUT` scoped to the caller's live lease. Closes `HANDOFF.md` risk #2;
-      **required before anything faces the internet.**
-- [ ] **Plan 3 — cloud API + Supabase** — Auth (Google), Postgres schema, RLS.
+- [x] **Plan 2 — agent identity + lease-scoped writes** ✅ (2026-08-01)
+      per-machine bearer tokens, writes confined to live leases, lease
+      lifecycle endpoints authenticated, operator credential for drivers,
+      fail-closed startup guard. **`HANDOFF.md` risk #2 is closed**, proven
+      against a real coordinator process over real HTTP (e2e 15 passed).
+      Self-service enrolment (device flow) still belongs to Plan 3.
+- [~] **Plan 3 — cloud API + Supabase** — Auth (Google), Postgres schema, RLS.
+      Supabase project `flashml-poc` (`yualksqjjvlfscbbsygq`) created
+      2026-08-01, $0/month (D13).
 - [ ] **Plan 4 — GitHub repo → job + preflight** — `flashml.yaml`, curated
       images, static import/network checks at submit time.
 - [ ] **Plan 5 — web app** — rebuilt against the real API (the current
@@ -112,6 +116,61 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 ## Entries
 
 <!-- newest first -->
+
+### 2026-08-01 — Per-machine identity + lease-scoped writes; risk #2 closed (flashruntime + flashnode + e2e; M1 Plan 2 of 7)
+What/why: `PUT /v1alpha1/artifacts/{key}` accepted **any key from any caller**
+with no authentication — only path containment and a size cap — so one
+volunteer could overwrite another job's committed result, and the
+federated-averaging model sits at a predictable key in that same writable
+namespace. The sha256 commit check was no defense: the attacker supplies both
+file and hash. This is `HANDOFF.md` risk #2, the reason the coordinator could
+never go on a public IP. Now: a pluggable `NodeAuthenticator` resolves a bearer
+token to a node, and every write is confined to `jobs/{job}/{task}/` for tasks
+that node holds a **live** lease on. `flashnode login` stores a per-coordinator
+token at 0600 and `CoordinatorClient` sends it on every request.
+How verified: flashruntime **475 passed**, flashnode **85 passed, 1 skipped**,
+workspace e2e **15 passed**. The 8 write-scope assertions run against a **real
+uvicorn coordinator subprocess over real HTTP**, not FastAPI's in-process
+`TestClient` — that distinction matters and an earlier claim that the hole was
+closed was made on `TestClient` evidence alone and was wrong. Results: no token
+401; forged token 401; **node-b writing under node-a's held task 403**; node-a
+under its own task 200; **write after lease expiry 403** (2 s lease, checked
+against the deadline directly so it does not depend on the 2 s sweeper);
+round-weights key 403 for a node token and 200 for an operator token; **node-b
+failing or completing node-a's lease 403/403** with the victim's lease left
+`LEASED`; and a `claim` whose body says `node_id: node-a` under token `tok-b` is
+served as **node-b**. The fedavg demo converges `0.5361 → 0.1757` and exits 0
+**both with and without enforcement**.
+Gotchas: (a) **scoping the writes alone did not close the hole.** The lease
+lifecycle endpoints were unauthenticated — `claim` took `node_id` from the
+request *body*, and `complete`/`fail`/`heartbeat` checked nothing — so an
+attacker never needed to defeat write scoping: fail another node's attempt
+until the task requeues to you, then write legitimately. This violated the
+spec's own §5.2 rule ("resolve node_id from the token, never the body"), which
+the plan's self-review had ticked off as satisfied because it was applied to
+the write path only. (b) **TOCTOU:** authorization ran before
+`await request.body()`, so a slow chunked upload held an *attacker-controlled*
+window open past its own lease expiry, past requeue, past another node's
+commit — defeating revocation entirely. Fixed by re-authorizing after the body
+is read. (c) A **non-ASCII bearer token** made `hmac.compare_digest` raise
+`TypeError` → an unauthenticated remote 500 and a 500-vs-401 oracle.
+(d) **Enforcement would have made the drivers unrunnable:** `fedavg_driver` and
+`kmeans_driver` both PUT artifacts while holding no lease. A driver is a
+legitimate writer running in the trusted cloud API, so it gets
+`FLASHML_OPERATOR_TOKENS` — a credential class, not an exemption. The demo is
+now run under enforcement in CI-able form precisely to pin this.
+(e) FastAPI validates request bodies **before** the handler, so a malformed
+body yields 422 and never reaches the authorization check — a test asserting
+401/403 with an invalid body proves nothing. This bit both a task brief and one
+of my own manual probes.
+Next: M1 Plan 3 — Supabase auth + schema + the cloud API, targeting the newly
+created project `flashml-poc` (`yualksqjjvlfscbbsygq`; see `M1_DECISIONS.md`
+D13 — do **not** migrate the org's other projects, they are a different
+product). Parking lot, all still true and deliberately unbuilt: tokens are
+configured statically on the coordinator (self-service enrolment is Plan 3);
+**result verification is unbuilt — a node can still lie about its own results
+and be believed** (M3); `POST /v1alpha1/jobs` is unauthenticated (Plan 3);
+reads are unscoped by design.
 
 ### 2026-07-31 — Federated averaging across volunteer machines (flashruntime + flashnode + e2e; M1 Plan 1 of 7)
 What/why: one model can now be trained across several independent machines by
