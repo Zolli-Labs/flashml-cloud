@@ -106,8 +106,10 @@ npm run dev
 
 Open `http://localhost:3000`. This runs against `NEXT_PUBLIC_CLOUD_API`
 (default `http://localhost:8000`) — start `apps/api`'s cloud app separately,
-pointed at a real Supabase project and a coordinator (see `apps/api`'s own
-docs for `SUPABASE_URL` / `SUPABASE_JWT_SECRET` / `COORDINATOR_URL`, etc).
+pointed at a real Supabase project and a coordinator (see `apps/api/README.md`
+for `SUPABASE_URL` / `COORDINATOR_URL`, etc — note there is no shared JWT
+secret to set: modern Supabase projects sign ES256 and the API verifies
+against the project's JWKS).
 
 ## Verify
 

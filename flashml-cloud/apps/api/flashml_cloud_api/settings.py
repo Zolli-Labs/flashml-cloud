@@ -3,6 +3,11 @@
 Fails loudly at startup when auth is required and a secret is missing,
 rather than silently running open and failing at the first request. This
 mirrors the coordinator's ``FLASHML_REQUIRE_NODE_AUTH`` guard.
+
+Note that ``SUPABASE_JWT_SECRET`` is NOT among those required secrets:
+modern Supabase projects sign with asymmetric ES256 keys and have no shared
+secret to hand out. ``SUPABASE_URL`` is the mandatory input instead, because
+the public keys are fetched from it (see ``auth.jwks_url``).
 """
 from __future__ import annotations
 
@@ -32,11 +37,17 @@ def _with_default_scheme(url: str, scheme: str) -> str:
 @dataclass
 class Settings:
     supabase_url: str
-    supabase_jwt_secret: str
     supabase_service_key: str
     coordinator_url: str
     coordinator_operator_token: str
     require_auth: bool
+    #: LEGACY, and optional. Only projects still issuing HS256 tokens from a
+    #: shared secret need this. Our project rotated to ECC (P-256) and every
+    #: newly-issued token is ES256, verified against the JWKS public key —
+    #: which is why this is not in the require_auth check below. Left set, it
+    #: keeps not-yet-expired tokens signed by the PREVIOUS key working
+    #: through a rotation.
+    supabase_jwt_secret: str = ""
     database_url: str = ""
     #: Public base URL of the browser console, used to build the
     #: `verification_uri` a machine prints during device-code enrolment.
@@ -53,7 +64,11 @@ class Settings:
             "0", "false", "no", "off", "",
         )
 
+        # Mandatory when auth is on: the JWKS the API verifies browser tokens
+        # against is derived from it.
         supabase_url = os.environ.get("SUPABASE_URL", "")
+        # Optional — see the field comment. Absent on any project migrated to
+        # asymmetric signing keys.
         supabase_jwt_secret = os.environ.get("SUPABASE_JWT_SECRET", "")
         supabase_service_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
         # http, not https: Render private-service traffic (COORDINATOR_URL
@@ -88,8 +103,11 @@ class Settings:
             missing = [
                 name
                 for name, value in (
+                    # SUPABASE_JWT_SECRET is deliberately absent from this
+                    # list. It is legacy and optional; SUPABASE_URL is what
+                    # verification actually needs now, and it must still be
+                    # a hard startup failure.
                     ("SUPABASE_URL", supabase_url),
-                    ("SUPABASE_JWT_SECRET", supabase_jwt_secret),
                     ("SUPABASE_SERVICE_KEY", supabase_service_key),
                     ("COORDINATOR_URL", coordinator_url),
                     ("COORDINATOR_OPERATOR_TOKEN", coordinator_operator_token),

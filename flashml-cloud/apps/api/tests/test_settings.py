@@ -20,7 +20,6 @@ from flashml_cloud_api.settings import Settings, _with_default_scheme
 
 REQUIRED_ENV = {
     "SUPABASE_URL": "https://yualksqjjvlfscbbsygq.supabase.co",
-    "SUPABASE_JWT_SECRET": "test-jwt-secret-long-enough-for-hs256",
     "SUPABASE_SERVICE_KEY": "service-key-not-used-here",
     "COORDINATOR_OPERATOR_TOKEN": "op-secret",
 }
@@ -29,6 +28,49 @@ REQUIRED_ENV = {
 def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
+    # Deliberately absent: SUPABASE_JWT_SECRET. It is legacy and optional
+    # now that the project signs ES256 and the API verifies against JWKS.
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+
+
+# ---------------------------------------------------------------------------
+# Which Supabase inputs are mandatory
+# ---------------------------------------------------------------------------
+
+
+def test_a_jwt_secret_is_not_required_when_auth_is_on(monkeypatch):
+    """Our project rotated to ECC (P-256); there is no shared secret to set.
+    Demanding one would refuse to boot the API over a value that no longer
+    exists."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("COORDINATOR_URL", "flashml-coordinator:10000")
+
+    settings = Settings.from_env()
+
+    assert settings.require_auth is True
+    assert settings.supabase_jwt_secret == ""
+
+
+def test_a_jwt_secret_is_still_carried_through_when_one_is_set(monkeypatch):
+    """Legacy/self-hosted projects: the secret must still reach `Settings`,
+    since it is what keeps not-yet-expired HS256 tokens verifiable."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("COORDINATOR_URL", "flashml-coordinator:10000")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "legacy-shared-secret")
+
+    assert Settings.from_env().supabase_jwt_secret == "legacy-shared-secret"
+
+
+def test_missing_supabase_url_still_fails_loudly_when_auth_is_required(monkeypatch):
+    """SUPABASE_URL is the mandatory Supabase input now — the JWKS is derived
+    from it, so without it nothing can be verified. A missing one must not
+    degrade silently."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("COORDINATOR_URL", "flashml-coordinator:10000")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="SUPABASE_URL"):
+        Settings.from_env()
 
 
 # ---------------------------------------------------------------------------

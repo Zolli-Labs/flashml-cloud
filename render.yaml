@@ -117,8 +117,19 @@ services:
           envVarKey: OPERATOR_TOKEN
       # sync: false => Render prompts for these at blueprint creation and
       # never stores them in git.
+      #
+      # REQUIRED. The API derives the JWKS endpoint from this
+      # (`{SUPABASE_URL}/auth/v1/.well-known/jwks.json`) and verifies every
+      # browser token against the public key published there. Missing => the
+      # API refuses to boot.
       - key: SUPABASE_URL
         sync: false
+      # OPTIONAL, and legacy — kept only for HS256 projects. This project's
+      # CURRENT signing key is ECC (P-256), so every newly-issued token is
+      # ES256 and needs no shared secret; leave this blank. Set it only to
+      # keep not-yet-expired tokens signed by a PREVIOUS HS256 key working
+      # through a rotation, or when pointing the API at a self-hosted or
+      # older project that still signs symmetrically.
       - key: SUPABASE_JWT_SECRET
         sync: false
       - key: SUPABASE_SERVICE_KEY

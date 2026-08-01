@@ -778,7 +778,46 @@ def test_create_app_refuses_to_start_with_half_an_environment(monkeypatch):
 
     with pytest.raises(RuntimeError) as exc:
         create_app()
-    assert "SUPABASE_JWT_SECRET" in str(exc.value)
+    assert "SUPABASE_SERVICE_KEY" in str(exc.value)
+    assert "COORDINATOR_OPERATOR_TOKEN" in str(exc.value)
+    # ...but NOT the JWT secret: it is legacy and optional now that the
+    # project signs ES256 and tokens are verified against its JWKS.
+    assert "SUPABASE_JWT_SECRET" not in str(exc.value)
+
+
+def test_create_app_starts_without_a_jwt_secret(monkeypatch):
+    """A Supabase project migrated to asymmetric keys has no shared secret
+    to configure at all — requiring one would keep the API from booting."""
+    from flashml_cloud_api.app import create_app
+
+    monkeypatch.setenv("SUPABASE_URL", "https://yualksqjjvlfscbbsygq.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "svc")
+    monkeypatch.setenv("COORDINATOR_URL", COORDINATOR_URL)
+    monkeypatch.setenv("COORDINATOR_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+
+    app = create_app()
+    assert "/v1alpha1/me" in {r.path for r in app.routes}
+
+
+def test_a_jwt_secret_alone_does_not_bring_up_the_cloud_app(monkeypatch):
+    """SUPABASE_URL has replaced the secret as the mandatory Supabase input —
+    the JWKS is derived from it. A deploy that sets everything EXCEPT the URL
+    must not serve authenticated routes it cannot actually verify tokens for;
+    `create_app` falls back to the legacy app instead, and `Settings.from_env`
+    raises outright (see tests/test_settings.py)."""
+    from flashml_cloud_api.app import create_app
+    from flashml_cloud_api.settings import Settings
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", JWT_SECRET)
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "svc")
+    monkeypatch.setenv("COORDINATOR_URL", COORDINATOR_URL)
+    monkeypatch.setenv("COORDINATOR_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    assert "/v1alpha1/me" not in {r.path for r in create_app().routes}
+    with pytest.raises(RuntimeError, match="SUPABASE_URL"):
+        Settings.from_env()
 
 
 def test_machine_token_is_never_logged(client, machine, caplog):
