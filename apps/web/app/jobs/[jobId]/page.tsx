@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, DownloadSimple, Warning } from "@phosphor-icons/react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { formatBytes } from "@/lib/utils";
 import {
   ApiError,
@@ -15,7 +16,9 @@ import {
   fetchJobArtifact,
   getJob,
   jobArtifactKey,
+  listJobRounds,
   type JobRecord,
+  type JobRound,
 } from "@/lib/cloud-api";
 import { StateBadge } from "../page";
 
@@ -32,6 +35,7 @@ export default function JobDetailPage({
   const { jobId } = use(params);
   const router = useRouter();
   const [job, setJob] = useState<JobRecord | null>(null);
+  const [rounds, setRounds] = useState<JobRound[]>([]);
   const [state, setState] = useState<LoadState>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -41,6 +45,21 @@ export default function JobDetailPage({
         setJob(j);
         setState("ready");
         setErrorMessage(null);
+        // Best-effort: round history is only ever non-empty for a
+        // federated job, and its absence must never block the rest of the
+        // page from rendering. A NotAuthenticated here is still routed to
+        // sign-in (the JWT just expired between the two calls); any other
+        // failure — including NotFound, which can legitimately happen for
+        // a non-federated job depending on how the API models it — just
+        // leaves `rounds` empty, which the "only render when there is
+        // round history" rule already treats as "nothing to show".
+        listJobRounds(jobId)
+          .then(setRounds)
+          .catch((err) => {
+            if (err instanceof NotAuthenticated) {
+              router.push(`/sign-in?next=/jobs/${jobId}`);
+            }
+          });
       })
       .catch((err) => {
         if (err instanceof NotAuthenticated) {
@@ -191,14 +210,11 @@ export default function JobDetailPage({
         </Card>
       </div>
 
-      {/* Per-round federated-averaging progress (round, participants, mean
-          loss) and which machines contributed are not rendered here: the
-          driver that produces them (flashruntime's fedavg_driver.RoundResult)
-          is not yet invoked by this API, and neither flashruntime's
-          protocol.JobRecord nor this cloud API's `jobs` table carries that
-          data today (verified against both). Showing a fabricated or
-          stale-looking progress panel would be worse than this gap — once
-          the API surfaces it, it belongs here. */}
+      {/* Only federated jobs ever have rounds — `GET /rounds` returns an
+          empty list for every independent job, and an empty "Rounds" card
+          on an independent job's page would misread as "stuck" or
+          "failed". Render the section only once there is real history. */}
+      {rounds.length > 0 && <RoundsSection rounds={rounds} />}
 
       <CancelSection job={job} onCancelled={setJob} />
     </main>
@@ -276,6 +292,83 @@ function CancelSection({
     >
       Cancel job
     </Button>
+  );
+}
+
+/** `mean_loss` is nullable end to end — the API leaves it null when a round
+ * completed without reporting a loss, and this must render as absent, never
+ * as `0` or an interpolated value. Its only use here beyond display is as
+ * the denominator for the trend bar's width, computed from the rounds that
+ * actually reported a number — nothing is smoothed or guessed. */
+function RoundsSection({ rounds }: { rounds: JobRound[] }) {
+  const reportedLosses = rounds
+    .map((r) => r.mean_loss)
+    .filter((v): v is number => v !== null);
+  const maxLoss = reportedLosses.length > 0 ? Math.max(...reportedLosses) : null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm font-mono">
+          Rounds <span className="text-muted-foreground">({rounds.length})</span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-0">
+        {rounds.map((r) => (
+          <RoundRow key={r.round} round={r} maxLoss={maxLoss} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RoundRow({ round, maxLoss }: { round: JobRound; maxLoss: number | null }) {
+  const hasLoss = round.mean_loss !== null;
+
+  return (
+    <div className="flex flex-col gap-1.5 py-2.5 border-b border-border/50 last:border-0">
+      <div className="flex items-center justify-between gap-3 text-xs font-mono">
+        <span className="text-foreground">round {round.round}</span>
+        <span className="text-muted-foreground">
+          {round.participants} participant{round.participants === 1 ? "" : "s"}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-mono text-muted-foreground w-24 shrink-0">
+          {hasLoss ? `loss ${round.mean_loss!.toFixed(4)}` : "loss —"}
+        </span>
+        {/* The trend visual: a bar scaled against the largest reported loss
+            across this job's rounds. Only drawn for a round that actually
+            reported a number — an absent mean_loss gets no bar at all,
+            never a zero-width or full-width stand-in that would imply a
+            value. */}
+        {hasLoss && maxLoss !== null && (
+          <div className="h-1.5 flex-1 rounded-full bg-muted overflow-hidden">
+            <div
+              className="h-full bg-cyan"
+              style={{
+                width: `${maxLoss > 0 ? (round.mean_loss! / maxLoss) * 100 : 100}%`,
+              }}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Which machines contributed — an explicit acceptance criterion, so
+          it is rendered directly in the row, not behind a click. */}
+      <div className="flex flex-wrap gap-1">
+        {round.contributors.map((nodeId) => (
+          <Badge
+            key={nodeId}
+            variant="outline"
+            className="font-mono text-[10px] text-muted-foreground"
+          >
+            {nodeId}
+          </Badge>
+        ))}
+      </div>
+    </div>
   );
 }
 

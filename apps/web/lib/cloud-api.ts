@@ -163,6 +163,23 @@ export interface PreflightFinding {
   message: string;
 }
 
+/** A row of `public.job_rounds`, restricted to `JOB_ROUND_PUBLIC_COLUMNS` —
+ * one completed federated-averaging round. Only federated jobs have any of
+ * these; an independent job's list is always empty, never an error.
+ * `mean_loss` is nullable on the API side and must stay nullable here: a
+ * round can complete with no loss reported, and rendering that as `0` or a
+ * smoothed guess would fabricate a number a training dashboard would then
+ * be trusted on. `contributors` is the list of contributing machines' node
+ * ids for that round. */
+export interface JobRound {
+  round: number;
+  participants: number;
+  mean_loss: number | null;
+  contributors: string[];
+  coordinator_job_id: string | null;
+  recorded_at: string;
+}
+
 export interface SubmitFromRepoResult extends JobRecord {
   findings: PreflightFinding[];
 }
@@ -279,6 +296,15 @@ export function cancelJob(jobId: string): Promise<JobRecord> {
   return request<JobRecord>(
     `/v1alpha1/jobs/${encodeURIComponent(jobId)}/cancel`,
     { method: "POST" }
+  );
+}
+
+/** `GET /v1alpha1/jobs/{id}/rounds` — owner-scoped exactly like `getJob`:
+ * a job that isn't yours 404s here too, never a 403 that would confirm the
+ * id exists. Oldest round first, matching the API's `order by r.round`. */
+export function listJobRounds(jobId: string): Promise<JobRound[]> {
+  return request<JobRound[]>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/rounds`
   );
 }
 

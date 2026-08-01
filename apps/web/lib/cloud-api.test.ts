@@ -18,6 +18,7 @@ import {
   cloudApiBase,
   approveDeviceCode,
   getJob,
+  listJobRounds,
   listMachines,
 } from "./cloud-api";
 
@@ -103,6 +104,48 @@ describe("cloud-api", () => {
     const err: unknown = await submitFromRepo("owner/repo").catch((e) => e);
     expect(err).toBeInstanceOf(PreflightRejected);
     expect((err as PreflightRejected).findings).toEqual(findings);
+  });
+
+  it("attaches the JWT and returns round history in order for a federated job", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const rounds = [
+      {
+        round: 0,
+        participants: 2,
+        mean_loss: 0.42,
+        contributors: ["node-0", "node-1"],
+        coordinator_job_id: "job-round-0",
+        recorded_at: "2026-07-31T00:00:00Z",
+      },
+      {
+        round: 1,
+        participants: 2,
+        mean_loss: null,
+        contributors: ["node-0", "node-1"],
+        coordinator_job_id: "job-round-1",
+        recorded_at: "2026-07-31T00:05:00Z",
+      },
+    ];
+    fetchMock.mockResolvedValue(jsonResponse(200, rounds));
+
+    const result = await listJobRounds("fed-abc123");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/fed-abc123/rounds`);
+    expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+    expect(result).toEqual(rounds);
+    // Never coerced to 0 or dropped — a null mean_loss must round-trip as
+    // null, not become a fabricated number.
+    expect(result[1].mean_loss).toBeNull();
+  });
+
+  it("raises NotFound for another user's job rounds, never a 403-style message", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(jsonResponse(404, { detail: "unknown job" }));
+
+    const err: unknown = await listJobRounds("not-mine").catch((e) => e);
+    expect(err).toBeInstanceOf(NotFound);
   });
 
   it("reads the base URL from NEXT_PUBLIC_CLOUD_API, not a hardcoded host", () => {
