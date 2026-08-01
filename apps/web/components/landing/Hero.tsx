@@ -60,17 +60,17 @@ export function Hero() {
             className="flex flex-wrap gap-4"
           >
             <Link
-              href="/launch"
+              href="/submit"
               className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-cyan text-background font-semibold text-sm hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
             >
               Launch Training <ArrowRight weight="bold" className="w-4 h-4" />
             </Link>
             <Link
-              href="/dashboard"
+              href="/jobs"
               className="inline-flex items-center gap-2 px-6 py-3 rounded-lg border border-border/60 text-foreground/80 font-medium text-sm hover:border-border hover:text-foreground hover:bg-white/5 active:scale-[0.98] transition-all"
             >
               <Play weight="fill" className="w-3.5 h-3.5 text-cyan" />
-              View Demo
+              View Jobs
             </Link>
           </motion.div>
 

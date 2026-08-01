@@ -58,10 +58,10 @@ export function Navbar() {
 
         <div className="flex items-center gap-3">
           <Link
-            href="/launch"
+            href="/submit"
             className="hidden md:inline-flex px-4 py-1.5 rounded-md bg-cyan text-background text-sm font-semibold hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
           >
-            Launch Training
+            Submit a job
           </Link>
           <UserMenu />
         </div>

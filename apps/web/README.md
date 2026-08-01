@@ -111,11 +111,31 @@ session (setting cookies) and redirects to `?next=` (default `/machines`).
 Every subsequent call to the cloud API (`lib/cloud-api.ts`) reads the JWT
 off that session and attaches it as `Authorization: Bearer <jwt>`.
 
-## Stale code, on its way out
+## Pages
 
-`lib/api.ts` and `lib/poc-api.ts` predate accounts and the current cloud
-API contract (`apps/api/flashml_cloud_api/app.py`); do not extend them or
-use them as a contract reference. `lib/cloud-api.ts` is the one typed
-client going forward, and the prototype pages that still import the old
-clients (`/launch`, `/visualize`, `/dashboard`, `/integration`, `/nodes`)
-are candidates for deletion once the pages that replace them land.
+| Route | What it does |
+|---|---|
+| `/sign-in` | Google sign-in. |
+| `/activate` | Enter a device code (from `flashnode login`) and approve a machine. Phone-first. |
+| `/machines` | The caller's machines: online state, last seen, revoke. |
+| `/submit` | Paste a GitHub repo + branch, run it through the API's preflight, submit. Renders every preflight finding (level/code/message, quoted verbatim). An error finding blocks the submission entirely; a warning never blocks server-side, so it's surfaced on the post-submit screen instead of gating a second click. |
+| `/jobs` | The caller's jobs: name, state, created. Polls every 3s, stops once every listed job is in a terminal state. |
+| `/jobs/[jobId]` | One job's state, error, artifacts (with an authenticated download button), and spec summary. Cancel with a confirm step. Polls every 2.5s, stops on a terminal state. |
+
+**Known gap:** the job detail page does not show per-round federated-averaging
+progress (round, participants, mean loss) or which machines contributed to a
+job. That data is produced by `flashruntime`'s `fedavg_driver.RoundResult`,
+but nothing in `apps/api` invokes that driver or persists its history yet —
+neither `flashruntime.protocol.v1alpha1.JobRecord` nor this API's own `jobs`
+table carries it. Once the API surfaces it, it belongs on this page; showing
+a fabricated or permanently-empty progress bar in the meantime would be
+worse than the gap.
+
+## Stale code (removed)
+
+`lib/api.ts`, `lib/poc-api.ts`, and the prototype pages that only they
+served (`/launch`, `/visualize`, `/dashboard`, `/integration`, `/nodes`) have
+been deleted — they predated accounts and targeted either a retired
+coordinator or the legacy (pre-accounts) mode of `apps/api` that this app no
+longer runs against. `lib/cloud-api.ts` is the single typed client; every
+page imports its types from there rather than defining its own.

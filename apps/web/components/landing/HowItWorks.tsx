@@ -116,7 +116,7 @@ export function HowItWorks() {
           </p>
         </div>
         <Link
-          href="/launch"
+          href="/submit"
           className="shrink-0 inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-cyan text-background font-semibold text-sm hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
         >
           Launch Training <ArrowRight weight="bold" className="w-4 h-4" />
