@@ -217,6 +217,16 @@ def compile_to_jobspec(
     parameters: dict[str, Any] = {
         "command": command,
         "inputs": {CODE_INPUT: code_artifact_uri},
+        # The staged artifact is the repo *tarball*. Without this the
+        # executor drops it on disk as a single file and the argv above
+        # looks for `<entrypoint>` inside a gzip blob — "file not found",
+        # every repo job, which is exactly how this shipped once.
+        # `unpack_inputs` is the executor's explicit opt-in: it extracts
+        # this input to `/work/inputs/code/` (stripping GitHub's
+        # `owner-name-<sha>/` wrapper) and hands the runner that directory,
+        # which is the path `_entrypoint_path` builds argv against. The two
+        # are one contract; changing either alone breaks the job.
+        "unpack_inputs": [CODE_INPUT],
         "env": {},
     }
     if task_params is not None:

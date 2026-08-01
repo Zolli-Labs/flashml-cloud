@@ -34,6 +34,14 @@ _CHUNK_SIZE = 1 << 16  # 64 KiB
 
 _FETCH_TIMEOUT_SECONDS = 30.0
 
+#: Member-count ceiling. A byte cap does not bound this: an empty file costs
+#: zero bytes and one inode, so an archive of a million empty members slips
+#: under any size limit while filling the filesystem's inode table. Matches
+#: ``flashnode.executor.archives.DEFAULT_MAX_MEMBERS`` — the same bytes are
+#: unpacked on both sides, and a cap only one side enforces is a cap the
+#: attacker chooses which side to hit.
+DEFAULT_MAX_MEMBERS = 20_000
+
 
 class RepoError(Exception):
     """Raised for any repo-fetch or extraction failure the caller should
@@ -125,20 +133,32 @@ def _resolve_symlink_target(member_path: Path, link_name: str, dest_root: Path) 
     return target
 
 
-def _resolve_hardlink_target(link_name: str, dest_root: Path) -> Path:
-    """A tar hard-link's target names another member of the same
-    archive, i.e. it is archive-root-relative, not relative to the
-    linking member's own directory."""
-    target = (dest_root / link_name).resolve()
-    if not _is_within(target, dest_root):
+def _top_level(name: str) -> str:
+    """First path component of a member name.
+
+    GNU tar emits a bare ``./`` member for the archive root, whose name has
+    *zero* path components — so indexing ``parts[0]`` unguarded raises
+    IndexError, which is not a ``RepoError`` and therefore reached the
+    caller as an HTTP 500 on a malformed upload instead of a 400. A
+    submitter-controlled crash, not a containment break, but the fix is the
+    same either way: refuse it as the malformed archive it is. GitHub never
+    produces one — every repo tarball is wrapped in exactly one directory.
+    """
+    parts = PurePosixPath(name).parts
+    if not parts:
         raise RepoError(
-            f"refusing hardlink member whose target {link_name!r} escapes "
-            f"the destination"
+            f"refusing tar member with no path components: {name!r} — a repo "
+            f"tarball must wrap its contents in one top-level directory"
         )
-    return target
+    return parts[0]
 
 
-def extract_safely(tar_bytes: bytes, dest: Path, max_bytes: int) -> Path:
+def extract_safely(
+    tar_bytes: bytes,
+    dest: Path,
+    max_bytes: int,
+    max_members: int = DEFAULT_MAX_MEMBERS,
+) -> Path:
     """Extract a (trusted-format, untrusted-content) gzipped tarball under
     ``dest``, refusing anything that could write outside it or exhaust
     disk/memory, and return the path to the single top-level directory
@@ -146,10 +166,11 @@ def extract_safely(tar_bytes: bytes, dest: Path, max_bytes: int) -> Path:
 
     Raises ``RepoError`` for: a member whose path escapes ``dest``
     (zip-slip, relative or absolute), a symlink whose target escapes
-    ``dest``, a malformed tarball, total extracted bytes over
+    ``dest``, a hard link (contained or not), a member with no path
+    components at all, a malformed tarball, total extracted bytes over
     ``max_bytes`` (checked incrementally, mid-extraction — see module
-    docstring), or a tarball that doesn't wrap its contents in exactly
-    one top-level directory.
+    docstring), more than ``max_members`` members, or a tarball that
+    doesn't wrap its contents in exactly one top-level directory.
 
     On any refusal, anything already written under ``dest`` during this
     call is removed — a rejected tarball must not leave partial content
@@ -169,8 +190,15 @@ def extract_safely(tar_bytes: bytes, dest: Path, max_bytes: int) -> Path:
             raise RepoError(f"not a valid tarball: {exc}") from exc
 
         with tar:
+            member_count = 0
             for member in tar:
-                top_level_names.add(PurePosixPath(member.name).parts[0])
+                member_count += 1
+                if member_count > max_members:
+                    raise RepoError(
+                        f"tarball has more than {max_members} members — "
+                        f"refusing the rest"
+                    )
+                top_level_names.add(_top_level(member.name))
                 member_path = _resolve_member_path(member.name, dest_root)
 
                 if member.issym():
@@ -182,8 +210,17 @@ def extract_safely(tar_bytes: bytes, dest: Path, max_bytes: int) -> Path:
                     continue
 
                 if member.islnk():
-                    _resolve_hardlink_target(member.linkname, dest_root)
-                    continue
+                    # Refused outright, contained target or not — matching
+                    # flashnode, which unpacks these same bytes on a
+                    # volunteer's machine. Nothing in a code archive needs a
+                    # hard link, and a skipped-but-accepted one is still an
+                    # alias to a file a later member may rewrite. Refusing
+                    # costs a legitimate submitter nothing.
+                    raise RepoError(
+                        f"refusing hardlink member {member.name!r} (target "
+                        f"{member.linkname!r}) — hard links have no place in "
+                        f"a code archive"
+                    )
 
                 if member.isdir():
                     member_path.mkdir(parents=True, exist_ok=True)

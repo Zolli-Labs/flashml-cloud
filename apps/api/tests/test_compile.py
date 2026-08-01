@@ -100,6 +100,48 @@ def test_a_non_artifact_code_uri_is_refused():
         compile_to_jobspec(_config(), PYTORCH, "https://example.com/code.tgz", "demo")
 
 
+def test_the_code_input_is_marked_for_unpacking():
+    """The staged artifact is a tarball; without this the executor leaves it
+    on disk as one file and the argv points inside a gzip blob."""
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    assert _params(spec)["unpack_inputs"] == ["code"]
+
+
+@pytest.mark.parametrize(
+    "entrypoint", ["train.py", "src/models/train.py"], ids=["flat", "nested"]
+)
+def test_unpack_inputs_and_the_argv_path_name_the_same_input(entrypoint):
+    """The two halves of one contract, asserted together.
+
+    ``unpack_inputs`` decides which input becomes a *directory* under
+    ``/work/inputs/``; the argv's second token is a path *inside* that
+    directory. They agreed by coincidence until nothing emitted
+    ``unpack_inputs`` at all — at which point the argv named a path that
+    could not exist. Asserting either one alone would still have passed.
+    """
+    spec = compile_to_jobspec(_config(entrypoint=entrypoint), PYTORCH, CODE_URI, "demo")
+    params = _params(spec)
+
+    unpacked = params["unpack_inputs"]
+    assert len(unpacked) == 1
+    name = unpacked[0]
+    assert name in params["inputs"], "unpacking an input that was never declared"
+
+    argv_path = params["command"][1]
+    assert argv_path == f"/work/inputs/{name}/{entrypoint}"
+
+
+def test_the_recipe_forwards_unpack_inputs_into_the_task_payload():
+    """End of the coordinator half: what the compiler emits is what a node
+    is actually told, via the real upstream recipe."""
+    from flashruntime.recipes.command import CommandRecipe
+
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    task = CommandRecipe().expand("job-123", JobSpec.model_validate(spec))[0]
+    assert task.payload["unpack_inputs"] == ["code"]
+    assert task.payload["argv"][1] == "/work/inputs/code/train.py"
+
+
 # ---------------------------------------------------------------------------
 # isolation: fixed, and not the submitter's to choose
 # ---------------------------------------------------------------------------

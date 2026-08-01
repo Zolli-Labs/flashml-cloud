@@ -178,6 +178,76 @@ def test_multiple_top_level_entries_is_refused(tmp_path):
         extract_safely(tar_bytes, tmp_path / "dest", max_bytes=10_000)
 
 
+# --- extract_safely: the three gaps closed after the parity audit ----------
+#
+# Each of these was found by ``e2e/test_archive_parity.py``, which feeds one
+# attack corpus to this extractor and to flashnode's. All three were places
+# where this side was the weaker of the two — recorded there as documented
+# divergences until they were fixed here.
+
+
+def test_a_bare_root_member_is_refused_not_a_crash(tmp_path):
+    """GNU tar emits a ``./`` member for the archive root; its name has zero
+    path components, so the top-level check used to raise IndexError. That
+    is not a ``RepoError``, so an authenticated upload of a crafted tarball
+    came back as an HTTP 500 rather than the 400 it is. Containment was
+    never broken — the crash was."""
+    tar_bytes = _make_tarball(
+        [_dir_member("."), _file_member("./train.py", b"print('hi')\n")]
+    )
+
+    with pytest.raises(RepoError, match="no path components"):
+        extract_safely(tar_bytes, tmp_path / "dest", max_bytes=10_000)
+
+
+def test_member_count_is_capped(tmp_path):
+    """A byte cap does not bound member count: empty files cost inodes, not
+    bytes, so an archive of a million of them passes any size limit."""
+    top = "acme-widgets-abc1234"
+    tar_bytes = _make_tarball(
+        [_dir_member(top)] + [_file_member(f"{top}/f{i}", b"") for i in range(60)]
+    )
+
+    with pytest.raises(RepoError, match="members"):
+        extract_safely(
+            tar_bytes, tmp_path / "dest", max_bytes=10_000_000, max_members=10
+        )
+    assert not (tmp_path / "dest").exists()
+
+
+def test_a_contained_hardlink_is_refused(tmp_path):
+    """Even one whose target stays inside the destination. flashnode refuses
+    it on a volunteer's machine; this side used to accept (and silently
+    skip) it. Nothing in a code archive needs a hard link, and a member that
+    is an alias for a file something else is about to rewrite is not worth
+    tolerating for zero legitimate use."""
+    top = "acme-widgets-abc1234"
+    info = tarfile.TarInfo(name=f"{top}/alias")
+    info.type = tarfile.LNKTYPE
+    info.linkname = f"{top}/train.py"
+    tar_bytes = _make_tarball(
+        [
+            _dir_member(top),
+            _file_member(f"{top}/train.py", b"print('hi')\n"),
+            (info, None),
+        ]
+    )
+
+    with pytest.raises(RepoError, match="hardlink"):
+        extract_safely(tar_bytes, tmp_path / "dest", max_bytes=10_000)
+    assert not (tmp_path / "dest").exists()
+
+
+def test_a_normal_repo_still_extracts_under_the_new_caps(tmp_path):
+    """The control that keeps the three refusals above meaningful: an
+    extractor that rejected everything would satisfy all of them."""
+    top = "acme-widgets-abc1234"
+    result = extract_safely(
+        _normal_repo_tarball(top), tmp_path / "dest", max_bytes=10_000_000
+    )
+    assert (result / "train.py").is_file()
+
+
 # --- fetch_repo_tarball -----------------------------------------------------
 
 
