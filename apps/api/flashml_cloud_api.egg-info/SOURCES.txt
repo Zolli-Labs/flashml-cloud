@@ -2,6 +2,8 @@ pyproject.toml
 flashml_cloud_api/__init__.py
 flashml_cloud_api/app.py
 flashml_cloud_api/auth.py
+flashml_cloud_api/db.py
+flashml_cloud_api/enrolment.py
 flashml_cloud_api/settings.py
 flashml_cloud_api/store.py
 flashml_cloud_api.egg-info/PKG-INFO
@@ -9,6 +11,9 @@ flashml_cloud_api.egg-info/SOURCES.txt
 flashml_cloud_api.egg-info/dependency_links.txt
 flashml_cloud_api.egg-info/requires.txt
 flashml_cloud_api.egg-info/top_level.txt
+tests/test_agent_proxy.py
 tests/test_auth.py
+tests/test_enrolment.py
+tests/test_jobs.py
 tests/test_nodes.py
 tests/test_schema.py
