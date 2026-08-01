@@ -1,0 +1,102 @@
+# MinIO: the local artifact store (OSS stands in for it on Alibaba).
+# The credentials below are LOCAL DEV ONLY — they never leave the Kind
+# cluster and must never be reused anywhere real.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flashml-artifact-credentials
+  namespace: flashml
+type: Opaque
+stringData:
+  FLASHML_ARTIFACT_ACCESS_KEY: flashml-local
+  FLASHML_ARTIFACT_SECRET_KEY: flashml-local-dev-secret
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: flashml
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: flashml-artifact-credentials
+                  key: FLASHML_ARTIFACT_ACCESS_KEY
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: flashml-artifact-credentials
+                  key: FLASHML_ARTIFACT_SECRET_KEY
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: flashml
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+# One-shot bucket creation. Durable artifacts require the bucket to exist
+# before the first job finishes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket-init
+  namespace: flashml
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set local http://minio.flashml.svc.cluster.local:9000 \
+                "$FLASHML_ARTIFACT_ACCESS_KEY" "$FLASHML_ARTIFACT_SECRET_KEY" && \
+              mc mb --ignore-existing local/flashml-artifacts
+          envFrom:
+            - secretRef:
+                name: flashml-artifact-credentials

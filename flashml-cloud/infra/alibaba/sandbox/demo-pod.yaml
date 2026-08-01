@@ -1,0 +1,24 @@
+# One small trusted pod on the sandboxed runtime — evidence that the secure
+# pool works, without making the Ray POC depend on Bare Metal capacity.
+# Requires: RuntimeClass installed by the ACK sandboxed-container add-on and
+# a labeled secure node pool (see README.md). Adjust runtimeClassName to the
+# name your cluster actually provides.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: flashml-sandbox-demo
+  namespace: flashml
+  labels:
+    flashml.dev/pool: secure-cloud
+spec:
+  runtimeClassName: runv
+  nodeSelector:
+    flashml.dev/pool: secure-cloud
+  restartPolicy: Never
+  containers:
+    - name: demo
+      image: busybox:1.36.1
+      command: ["sh", "-c", "echo sandboxed tier OK on $(hostname); sleep 5"]
+      resources:
+        requests: { cpu: 250m, memory: 256Mi }
+        limits: { cpu: 500m, memory: 512Mi }

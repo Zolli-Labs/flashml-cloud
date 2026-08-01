@@ -1,0 +1,202 @@
+"""Device-code enrolment: turning a machine into an authenticated worker.
+
+The flow, spelled out because the security properties live in the order
+of operations, not just the individual queries:
+
+1. The machine calls ``start_device_code`` and gets back a long
+   ``device_code`` (for itself) and a short ``user_code`` (for a human to
+   type into a browser). Neither identifies anyone yet.
+2. A signed-in person reads the user_code off the machine's terminal and
+   calls ``approve_device_code``. This is the only place ``owner_id``
+   enters the flow, and it comes from the verified JWT ``sub`` — never
+   from the request body.
+3. The machine polls ``redeem_device_code`` with its device_code. Only
+   once approval has happened does this return a token, and it returns
+   the raw token *exactly once* — the raw value is never persisted, only
+   its hash, so after that one response it is gone even from the
+   database's point of view.
+
+No FastAPI here — pure functions the app layer wraps into HTTP responses.
+"""
+from __future__ import annotations
+
+import secrets
+from datetime import datetime, timedelta, timezone
+
+import psycopg
+
+from flashml_cloud_api import db as dbmod
+from flashml_cloud_api.auth import hash_machine_token, new_machine_token
+from flashml_cloud_api.db import Machine
+
+# Unambiguous alphabet: no O/0 or I/1, which are hard to tell apart when
+# read off a terminal and typed into a phone.
+USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+USER_CODE_LENGTH = 8
+USER_CODE_INSERT_ATTEMPTS = 5
+
+DEVICE_CODE_TTL = timedelta(minutes=10)
+POLL_INTERVAL_SECONDS = 5
+
+
+class EnrolmentError(Exception):
+    """Base class for enrolment failures the app layer must turn into a
+    clean HTTP response — never let one of these surface as an unhandled
+    500, and never let the underlying DB integrity error do so either."""
+
+
+class DeviceCodeNotFound(EnrolmentError):
+    """No device_codes row matches this user_code."""
+
+
+class DeviceCodeExpired(EnrolmentError):
+    """The code existed but its 10-minute window has passed and it was
+    never approved."""
+
+
+class NodeAlreadyEnrolled(EnrolmentError):
+    """node_id is already bound to a different machine. Refused rather
+    than allowed, or a new enrolment could impersonate one that already
+    exists — see machines.node_id's unique constraint."""
+
+
+def _new_user_code() -> str:
+    return "".join(secrets.choice(USER_CODE_ALPHABET) for _ in range(USER_CODE_LENGTH))
+
+
+def _new_device_code() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def start_device_code(
+    db: psycopg.Connection,
+    node_id: str,
+    hostname: str | None,
+    platform: str | None,
+) -> dict:
+    """Issue a fresh device_code/user_code pair for a machine that wants
+    to enrol. Nobody is authenticated yet — node_id is only a claim at
+    this point; ``approve_device_code`` is where the security properties
+    that matter (uniqueness, ownership) get enforced."""
+    device_code = _new_device_code()
+    expires_at = datetime.now(timezone.utc) + DEVICE_CODE_TTL
+
+    user_code = ""
+    for _ in range(USER_CODE_INSERT_ATTEMPTS):
+        candidate = _new_user_code()
+        try:
+            dbmod.insert_device_code(
+                db,
+                device_code=device_code,
+                user_code=candidate,
+                node_id=node_id,
+                hostname=hostname,
+                platform=platform,
+                expires_at=expires_at,
+            )
+        except psycopg.errors.UniqueViolation:
+            # user_code collision (astronomically unlikely at 32**8) or,
+            # in principle, a device_code collision. Retry with fresh
+            # random values rather than surfacing a 500.
+            device_code = _new_device_code()
+            continue
+        user_code = candidate
+        break
+    else:
+        raise EnrolmentError("could not allocate a unique device code")
+
+    return {
+        "device_code": device_code,
+        "user_code": user_code,
+        "expires_at": expires_at,
+        "interval": POLL_INTERVAL_SECONDS,
+    }
+
+
+def approve_device_code(db: psycopg.Connection, user_code: str, user_id: str) -> str:
+    """A signed-in user approves a code they read off a machine. Returns
+    the new machine's id. Raises DeviceCodeNotFound / DeviceCodeExpired /
+    NodeAlreadyEnrolled rather than ever minting a machine that shouldn't
+    exist."""
+    row = dbmod.fetch_device_code_by_user_code(db, user_code)
+    if row is None:
+        raise DeviceCodeNotFound(user_code)
+
+    if row["machine_id"] is not None:
+        # Already approved — approving twice must not mint a second
+        # machine, so this is a no-op that returns the existing id.
+        return row["machine_id"]
+
+    now = datetime.now(timezone.utc)
+    if row["expires_at"] <= now:
+        raise DeviceCodeExpired(user_code)
+
+    if dbmod.fetch_machine_by_node_id(db, row["node_id"]) is not None:
+        raise NodeAlreadyEnrolled(row["node_id"])
+
+    try:
+        machine_id = dbmod.insert_machine(
+            db,
+            owner_id=user_id,
+            node_id=row["node_id"],
+            name=row["hostname"],
+            platform=row["platform"],
+        )
+    except psycopg.errors.UniqueViolation as exc:
+        # Lost a race against a concurrent approval of a different code
+        # for the same node_id. Same refusal either way.
+        raise NodeAlreadyEnrolled(row["node_id"]) from exc
+
+    dbmod.mark_device_code_approved(db, user_code, user_id, machine_id)
+    return machine_id
+
+
+def redeem_device_code(db: psycopg.Connection, device_code: str) -> str | None:
+    """The machine exchanges its device_code for a token. Returns the raw
+    token exactly once: the atomic claim in
+    ``claim_device_code_for_redemption`` ensures a second call — or a
+    concurrent one — gets None instead of a second copy. Returns None
+    (never raises) for an unknown code, an unapproved code, an expired
+    code, or an already-redeemed code, all indistinguishably: no token
+    may reach a machine nobody approved, and there is nothing helpful to
+    tell a caller that isn't the machine itself."""
+    machine_id = dbmod.claim_device_code_for_redemption(db, device_code)
+    if machine_id is None:
+        return None
+
+    token = new_machine_token()
+    token_hash = hash_machine_token(token)
+    dbmod.set_machine_token(db, machine_id, token_hash, token[:12])
+    return token
+
+
+def authenticate_machine(db: psycopg.Connection, token: str | None) -> Machine | None:
+    """Look up the machine a token belongs to. Returns None immediately
+    for an unknown token or a revoked machine — a revoked machine's token
+    must stop working the instant it is revoked, not at its next natural
+    expiry (machine tokens do not expire on their own)."""
+    if not token:
+        return None
+    row = dbmod.fetch_machine_by_token_hash(db, hash_machine_token(token))
+    if row is None:
+        return None
+    if row["status"] == "revoked":
+        return None
+    return Machine(
+        id=row["id"],
+        owner_id=row["owner_id"],
+        node_id=row["node_id"],
+        name=row["name"],
+        platform=row["platform"],
+        status=row["status"],
+        created_at=row.get("created_at"),
+        revoked_at=row.get("revoked_at"),
+    )
+
+
+def revoke_machine(db: psycopg.Connection, machine_id: str, user_id: str) -> bool:
+    """Revoke a machine. Returns False — not an error, not a distinguishable
+    404 — both when the machine doesn't exist and when it exists but is
+    owned by someone else, so a caller cannot use this to enumerate other
+    users' machine ids."""
+    return dbmod.revoke_machine_row(db, machine_id, user_id)

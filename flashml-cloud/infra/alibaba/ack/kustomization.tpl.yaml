@@ -1,0 +1,22 @@
+# ACK deployment profile — TEMPLATE. Rendered by scripts/alibaba/render.sh
+# (envsubst from .env.alibaba) into infra/alibaba/ack/build/, which is
+# gitignored. Do not kubectl-apply this file directly.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base
+  - secret-oss.yaml
+patches:
+  - path: patch-flashruntime.yaml
+  - path: patch-cloud-api.yaml
+  - path: patch-flashnode.yaml
+images:
+  - name: flashml/runtime
+    newName: ${ACR_REGISTRY}/${ACR_NAMESPACE}/runtime
+    newTag: ${IMAGE_TAG}
+  - name: flashml/cloud-api
+    newName: ${ACR_REGISTRY}/${ACR_NAMESPACE}/cloud-api
+    newTag: ${IMAGE_TAG}
+  - name: flashml/node
+    newName: ${ACR_REGISTRY}/${ACR_NAMESPACE}/node
+    newTag: ${IMAGE_TAG}

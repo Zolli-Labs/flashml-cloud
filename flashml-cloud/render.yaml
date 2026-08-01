@@ -1,0 +1,156 @@
+# FlashML Cloud — Render Blueprint (M1 deployed POC)
+#
+# Three services. Create once with: Render dashboard -> New -> Blueprint ->
+# point at this repo. Render reads this file and provisions everything.
+#
+# WHY A BLUEPRINT AND NOT THE DASHBOARD/API: the coordinator must be a
+# PRIVATE service with a persistent disk. Render's MCP tooling can only
+# create public web services with no disk, so the one service whose privacy
+# the entire security model depends on cannot be created that way. A
+# blueprint can declare it, and does so here in version control where the
+# choice is reviewable.
+#
+# ---------------------------------------------------------------------------
+# THE LOAD-BEARING DECISION: flashml-coordinator is `type: pserv` (private).
+#
+# It has no public URL and is reachable only from the other services in this
+# workspace. That is not a hardening nicety — it is the assumption every
+# other security property rests on:
+#
+#   * flashml-api holds an OPERATOR credential that is deliberately UNSCOPED.
+#     It can act as any machine, because it is the only component that can
+#     authenticate machines at all (the coordinator has no database and
+#     machines are enrolled at runtime in Postgres). Anyone who could reach
+#     the coordinator directly with that token could act as every machine.
+#   * The coordinator runs ONE uvicorn worker. LeaseManager and
+#     SqliteLeaseStore are safe only on a single event loop (HANDOFF.md risk
+#     #5). A public service invites autoscaling, which would break that
+#     silently.
+#   * Lease-scoped writes are enforced coordinator-side against the caller's
+#     live leases. That confinement is meaningful only if every caller
+#     arrives through the API.
+#
+# If you ever change `pserv` to `web`, you have undone Plans 2 and 3.
+# ---------------------------------------------------------------------------
+
+services:
+  # -------------------------------------------------------------------------
+  # 1. The coordinator — PRIVATE. No public URL.
+  # -------------------------------------------------------------------------
+  - type: pserv
+    name: flashml-coordinator
+    runtime: python
+    repo: https://github.com/Zolli-Labs/flashruntime
+    branch: main
+    plan: starter          # free tier has no private services and no disks
+    region: oregon
+    buildCommand: pip install -e ".[service]"
+    # --workers 1 is REQUIRED, not a default. See HANDOFF.md risk #5.
+    startCommand: >-
+      FLASHML_OPERATOR_TOKENS="flashml-api:$OPERATOR_TOKEN"
+      uvicorn flashruntime.service.app:app
+      --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /healthz
+    disk:
+      # leases.db and locally-hosted artifacts live here. Without a disk, a
+      # restart loses every in-flight lease and every committed artifact.
+      name: flashml-coordinator-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      # Generated once by Render and never seen by a human. The API reads it
+      # back via fromService below, so the two always agree.
+      - key: OPERATOR_TOKEN
+        generateValue: true
+      # Refuses to BOOT if no tokens are configured — so a misconfigured
+      # deploy fails loudly instead of quietly running unauthenticated.
+      - key: FLASHML_REQUIRE_NODE_AUTH
+        value: "1"
+      - key: FLASHML_LEDGER_PATH
+        value: /data/ledger.db
+      - key: FLASHML_LOCAL_ARTIFACTS_DIR
+        value: /data/artifacts
+      - key: FLASHML_ENABLE_KUBERAY
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+  # -------------------------------------------------------------------------
+  # 2. The API — public. The ONLY door to the coordinator.
+  # -------------------------------------------------------------------------
+  - type: web
+    name: flashml-api
+    runtime: python
+    repo: https://github.com/Zolli-Labs/flashml-cloud
+    branch: main
+    rootDir: apps/api
+    plan: starter          # must not sleep: a suspended API strands every agent
+    region: oregon
+    # flashruntime is installed from the BRANCH, not PyPI. The published
+    # wheel predates the federated-averaging driver this API runs in-process,
+    # so a PyPI install would import a flashruntime without `build_round` and
+    # fail at the first federated job.
+    buildCommand: >-
+      pip install "flashruntime[service] @ git+https://github.com/Zolli-Labs/flashruntime@main"
+      && pip install -e .
+    startCommand: uvicorn flashml_cloud_api.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: REQUIRE_AUTH
+        value: "1"
+      # Internal hostname — resolvable only inside this workspace.
+      - key: COORDINATOR_URL
+        fromService:
+          type: pserv
+          name: flashml-coordinator
+          property: hostport
+      # Same generated value the coordinator uses. Never typed by hand.
+      - key: COORDINATOR_OPERATOR_TOKEN
+        fromService:
+          type: pserv
+          name: flashml-coordinator
+          envVarKey: OPERATOR_TOKEN
+      # sync: false => Render prompts for these at blueprint creation and
+      # never stores them in git.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+  # -------------------------------------------------------------------------
+  # 3. The web app — public. Talks only to the API, never to Postgres.
+  # -------------------------------------------------------------------------
+  - type: web
+    name: flashml-web
+    runtime: node
+    repo: https://github.com/Zolli-Labs/flashml-cloud
+    branch: main
+    rootDir: apps/web
+    plan: free             # may sleep; only the API and coordinator must not
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- -p $PORT
+    envVars:
+      # Must be NEXT_PUBLIC_CLOUD_API, not NEXT_PUBLIC_API_BASE: that is the
+      # only var name `apps/web/lib/cloud-api.ts` (`cloudApiBase()`) reads.
+      # Render's `fromService: {property: host}` returns a bare hostname
+      # (e.g. `flashml-api.onrender.com`, no scheme) — cloud-api.ts
+      # normalizes that with `https://` at read time.
+      - key: NEXT_PUBLIC_CLOUD_API
+        fromService:
+          type: web
+          name: flashml-api
+          property: host
+      # ONLY the anon key reaches the browser. The service-role key and the
+      # operator token must never appear in a NEXT_PUBLIC_* var or a bundle —
+      # a leaked service key bypasses every ownership check the API performs.
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        sync: false

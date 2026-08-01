@@ -1,0 +1,190 @@
+"""flashml.yaml parsing and validation.
+
+No I/O here — parse_flashml_yaml takes text, not a path, so preflight and
+the endpoint can feed it bytes pulled straight out of an extracted repo
+tarball without this module ever touching a filesystem itself.
+
+Every rule below is deliberate refusal, not lenient best-effort parsing:
+a config that fails loudly at submit time is worth far more than one that
+silently means something the user didn't intend.
+"""
+from __future__ import annotations
+
+import pytest
+
+from flashml_cloud_api.flashml_yaml import ConfigError, FlashmlConfig, parse_flashml_yaml
+
+MINIMAL = """
+version: 1
+name: cifar-sweep
+image: pytorch-cpu
+entrypoint: train.py
+"""
+
+
+def test_minimal_valid_config_parses():
+    config = parse_flashml_yaml(MINIMAL)
+    assert isinstance(config, FlashmlConfig)
+    assert config.version == 1
+    assert config.name == "cifar-sweep"
+    assert config.image == "pytorch-cpu"
+    assert config.entrypoint == "train.py"
+    assert config.args == []
+    assert config.sweep == {}
+    assert config.resources == {}
+    assert config.timeout_seconds is None or isinstance(config.timeout_seconds, int)
+
+
+def test_full_config_parses():
+    text = """
+version: 1
+name: cifar-sweep
+image: pytorch-cpu
+entrypoint: train.py
+args: ["--epochs", "20"]
+sweep:
+  lr: [0.001, 0.01, 0.1]
+  batch_size: [32, 64]
+resources: {cpus: 2, memory_gb: 4}
+timeout_seconds: 1800
+"""
+    config = parse_flashml_yaml(text)
+    assert config.args == ["--epochs", "20"]
+    assert config.sweep == {"lr": [0.001, 0.01, 0.1], "batch_size": [32, 64]}
+    assert config.resources == {"cpus": 2, "memory_gb": 4}
+    assert config.timeout_seconds == 1800
+
+
+def test_version_other_than_1_is_refused():
+    text = MINIMAL.replace("version: 1", "version: 2")
+    with pytest.raises(ConfigError, match="version"):
+        parse_flashml_yaml(text)
+
+
+def test_missing_entrypoint_is_refused():
+    text = """
+version: 1
+name: x
+image: pytorch-cpu
+"""
+    with pytest.raises(ConfigError, match="entrypoint"):
+        parse_flashml_yaml(text)
+
+
+def test_missing_image_is_refused():
+    text = """
+version: 1
+name: x
+entrypoint: train.py
+"""
+    with pytest.raises(ConfigError, match="image"):
+        parse_flashml_yaml(text)
+
+
+def test_args_must_be_a_list_not_a_shell_string():
+    # A string would invite shell-injection thinking where none applies
+    # (there is no shell) — and would be silently wrong: the executor
+    # expects an argv list, not something to be split later.
+    text = MINIMAL + "\nargs: \"--epochs 20\"\n"
+    with pytest.raises(ConfigError, match="args"):
+        parse_flashml_yaml(text)
+
+
+def test_args_must_be_a_list_of_strings():
+    text = MINIMAL + "\nargs: [1, 2]\n"
+    with pytest.raises(ConfigError, match="args"):
+        parse_flashml_yaml(text)
+
+
+def test_sweep_values_must_be_non_empty_lists():
+    text = MINIMAL + "\nsweep:\n  lr: []\n"
+    with pytest.raises(ConfigError, match="sweep"):
+        parse_flashml_yaml(text)
+
+
+def test_sweep_value_must_be_a_list_not_scalar():
+    text = MINIMAL + "\nsweep:\n  lr: 0.01\n"
+    with pytest.raises(ConfigError, match="sweep"):
+        parse_flashml_yaml(text)
+
+
+def test_sweep_cartesian_product_is_capped_and_message_names_the_size():
+    # 5 * 5 * 5 * 5 = 625, over the 100 cap, and far more likely a typo
+    # than an intention (num_shards is bounded at 999 downstream).
+    text = MINIMAL + """
+sweep:
+  a: [1, 2, 3, 4, 5]
+  b: [1, 2, 3, 4, 5]
+  c: [1, 2, 3, 4, 5]
+  d: [1, 2, 3, 4, 5]
+"""
+    with pytest.raises(ConfigError, match="625"):
+        parse_flashml_yaml(text)
+
+
+def test_sweep_cartesian_product_at_the_cap_is_allowed():
+    text = MINIMAL + """
+sweep:
+  a: [1, 2, 3, 4, 5]
+  b: [1, 2, 3, 4, 5]
+  c: [1, 2, 3, 4]
+"""
+    # 5 * 5 * 4 = 100, exactly at the cap.
+    config = parse_flashml_yaml(text)
+    assert config.sweep["a"] == [1, 2, 3, 4, 5]
+
+
+def test_timeout_seconds_is_bounded():
+    text = MINIMAL + "\ntimeout_seconds: 100000000\n"
+    with pytest.raises(ConfigError, match="timeout_seconds"):
+        parse_flashml_yaml(text)
+
+
+def test_timeout_seconds_must_be_positive():
+    text = MINIMAL + "\ntimeout_seconds: 0\n"
+    with pytest.raises(ConfigError, match="timeout_seconds"):
+        parse_flashml_yaml(text)
+
+
+def test_unknown_top_level_key_is_refused():
+    # A typo'd `entrypint` must fail loudly, not be silently ignored while
+    # `entrypoint` falls back to some default meaning.
+    text = MINIMAL + "\nentrypint: oops.py\n"
+    with pytest.raises(ConfigError, match="entrypint"):
+        parse_flashml_yaml(text)
+
+
+def test_not_a_mapping_is_refused():
+    with pytest.raises(ConfigError):
+        parse_flashml_yaml("- just\n- a\n- list\n")
+
+
+def test_empty_text_is_refused():
+    with pytest.raises(ConfigError):
+        parse_flashml_yaml("")
+
+
+def test_invalid_yaml_is_refused_as_config_error_not_a_yaml_exception():
+    with pytest.raises(ConfigError):
+        parse_flashml_yaml("version: 1\n  bad indent: [unterminated\n")
+
+
+def test_name_must_be_a_string():
+    text = """
+version: 1
+name: 123
+image: pytorch-cpu
+entrypoint: train.py
+"""
+    with pytest.raises(ConfigError, match="name"):
+        parse_flashml_yaml(text)
+
+
+def test_missing_name_is_refused():
+    text = """
+version: 1
+image: pytorch-cpu
+entrypoint: train.py
+"""
+    with pytest.raises(ConfigError, match="name"):
+        parse_flashml_yaml(text)

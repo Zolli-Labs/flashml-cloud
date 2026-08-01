@@ -1,0 +1,26 @@
+# FlashML POC local cluster: 1 control-plane + 3 workers.
+# Each worker simulates one compute-contributing device; FlashNode runs as a
+# DaemonSet on the workers only (see infra/base/flashnode-daemonset.yaml).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: flashml-poc
+# Nodes pull FlashML/Ray images from the local registry (kind-registry:5000,
+# reachable as localhost:5001 on the host). See scripts/local/registry.sh.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.cri.v1.images".registry]
+      config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      flashml.dev/pool: local
+      flashml.dev/compute: "true"
+  - role: worker
+    labels:
+      flashml.dev/pool: local
+      flashml.dev/compute: "true"
+  - role: worker
+    labels:
+      flashml.dev/pool: local
+      flashml.dev/compute: "true"

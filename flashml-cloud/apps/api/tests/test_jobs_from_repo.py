@@ -1,0 +1,620 @@
+"""``POST /v1alpha1/jobs/from-repo``: paste a repo, get a job — or get told
+everything that is wrong with it, at once, before anything is queued.
+
+The two assertions that matter most are negative ones. A repo with an error
+finding must leave **no** trace: nothing on the recording transport (no
+artifact staged, no job submitted) and no row in the real ``jobs`` table.
+Both are checked, because either one alone would pass while the other leaked
+— a job submitted but unrecorded is an orphan nobody can cancel, and a row
+written for a job that was never submitted is a permanent phantom in the
+owner's list.
+
+The coordinator is the in-memory fake from ``test_jobs.py``, extended to
+accept artifact PUTs. The database is the real, freshly migrated ephemeral
+Postgres from ``conftest.py``. GitHub is never contacted: every repo here is
+a tarball built in-process and handed to the app through the injected
+``fetch_repo``.
+
+No skips in this file. A test that asserts a job was *not* submitted is
+worthless if it silently doesn't run.
+"""
+from __future__ import annotations
+
+import io
+import tarfile
+import textwrap
+import time
+import uuid
+
+import httpx
+import jwt
+import psycopg
+import pytest
+from fastapi.testclient import TestClient
+from psycopg.rows import dict_row
+
+from flashml_cloud_api.app import create_cloud_app
+from flashml_cloud_api.settings import Settings
+
+JWT_SECRET = "test-jwt-secret-long-enough-for-hs256-abcdef"
+OPERATOR_TOKEN = "op-secret-do-not-leak-3f9c1b"
+COORDINATOR_URL = "http://coordinator.internal:8100"
+
+TOP = "acme-trainer-abc1234"
+
+CLEAN_TRAIN_PY = """
+    import json
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=0.1)
+    args = parser.parse_args()
+
+    with open("/work/out/metrics.json", "w") as fh:
+        json.dump({"accuracy": 0.9, "lr": args.lr}, fh)
+"""
+
+CLEAN_YAML = """
+    version: 1
+    name: acme-trainer
+    image: python-slim
+    entrypoint: train.py
+    args: ["--epochs", "20"]
+"""
+
+
+# ---------------------------------------------------------------------------
+# fixture repos
+# ---------------------------------------------------------------------------
+
+
+def make_tarball(files: dict[str, str], top: str = TOP) -> bytes:
+    """A GitHub-shaped tarball: everything under one top-level directory."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name=top + "/")
+        info.type = tarfile.DIRTYPE
+        tar.addfile(info)
+        for name, content in files.items():
+            payload = textwrap.dedent(content).encode()
+            member = tarfile.TarInfo(name=f"{top}/{name}")
+            member.size = len(payload)
+            member.type = tarfile.REGTYPE
+            tar.addfile(member, io.BytesIO(payload))
+    return buf.getvalue()
+
+
+CLEAN_REPO = {"flashml.yaml": CLEAN_YAML, "train.py": CLEAN_TRAIN_PY}
+
+
+class RecordingFetch:
+    """Stands in for codeload.github.com. Records what was asked for so a
+    test can assert the ref actually travelled, and never touches the
+    network."""
+
+    def __init__(self, tar_bytes: bytes):
+        self.tar_bytes = tar_bytes
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, owner: str, name: str, ref: str) -> bytes:
+        self.calls.append((owner, name, ref))
+        return self.tar_bytes
+
+
+# ---------------------------------------------------------------------------
+# the fake coordinator
+# ---------------------------------------------------------------------------
+
+
+class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.artifacts: dict[str, bytes] = {}
+        self.submitted: list[dict] = []
+        self._prefix = uuid.uuid4().hex[:10]
+        self._next_id = 1
+        self.submit_status = 201
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        self.requests.append(request)
+        method, path = request.method, request.url.path
+
+        if method == "PUT" and path.startswith("/v1alpha1/artifacts/"):
+            key = path[len("/v1alpha1/artifacts/"):]
+            self.artifacts[key] = request.content
+            return httpx.Response(200, json={"uri": f"artifact://{key}"})
+
+        if method == "POST" and path == "/v1alpha1/jobs":
+            if self.submit_status >= 300:
+                return httpx.Response(self.submit_status, json={"detail": "refused"})
+            import json as _json
+
+            body = _json.loads(request.content or b"{}")
+            self.submitted.append(body)
+            job_id = f"job-{self._prefix}-{self._next_id:04d}"
+            self._next_id += 1
+            return httpx.Response(
+                201, json={"job_id": job_id, "spec": body, "state": "RUNNING"}
+            )
+
+        return httpx.Response(404, json={"detail": f"unhandled: {method} {path}"})
+
+    @property
+    def job_submissions(self) -> list[httpx.Request]:
+        return [
+            r for r in self.requests
+            if r.method == "POST" and r.url.path == "/v1alpha1/jobs"
+        ]
+
+
+# ---------------------------------------------------------------------------
+# fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def settings(postgres_dsn) -> Settings:
+    return Settings(
+        supabase_url="https://yualksqjjvlfscbbsygq.supabase.co",
+        supabase_jwt_secret=JWT_SECRET,
+        supabase_service_key="service-key-not-used-here",
+        coordinator_url=COORDINATOR_URL,
+        coordinator_operator_token=OPERATOR_TOKEN,
+        require_auth=True,
+        database_url=postgres_dsn,
+        console_url="https://console.example",
+    )
+
+
+@pytest.fixture
+def transport() -> FakeCoordinatorTransport:
+    return FakeCoordinatorTransport()
+
+
+@pytest.fixture
+def db(postgres_dsn):
+    conn = psycopg.connect(postgres_dsn, row_factory=dict_row, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def make_client(settings, postgres_dsn, transport):
+    clients = []
+
+    def build(files: dict[str, str] | None = None, tar_bytes: bytes | None = None):
+        fetch = RecordingFetch(
+            tar_bytes if tar_bytes is not None else make_tarball(files or CLEAN_REPO)
+        )
+
+        def connect() -> psycopg.Connection:
+            conn = psycopg.connect(postgres_dsn, row_factory=dict_row, connect_timeout=5)
+            conn.autocommit = True
+            return conn
+
+        app = create_cloud_app(
+            settings, connect=connect, transport=transport, fetch_repo=fetch
+        )
+        client = TestClient(app)
+        client.__enter__()
+        clients.append(client)
+        client.fetch = fetch  # type: ignore[attr-defined]
+        return client
+
+    yield build
+    for client in clients:
+        client.__exit__(None, None, None)
+
+
+def _new_user(db) -> str:
+    user_id = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute("insert into auth.users (id) values (%s)", (user_id,))
+        cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
+    return user_id
+
+
+def _jwt(user_id: str) -> str:
+    return jwt.encode(
+        {"sub": user_id, "aud": "authenticated", "exp": time.time() + 3600},
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+
+
+def _post(client, token: str, **body):
+    payload = {"repo": "https://github.com/acme/trainer", "ref": "main"}
+    payload.update(body)
+    return client.post(
+        "/v1alpha1/jobs/from-repo",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _job_rows(db, owner_id: str) -> list[dict]:
+    with db.cursor() as cur:
+        cur.execute("select * from public.jobs where owner_id = %s", (owner_id,))
+        return list(cur.fetchall())
+
+
+# ---------------------------------------------------------------------------
+# 1. auth
+# ---------------------------------------------------------------------------
+
+
+def test_without_a_jwt_nothing_is_fetched_or_submitted(make_client, transport):
+    client = make_client()
+    r = client.post("/v1alpha1/jobs/from-repo", json={"repo": "acme/trainer"})
+    assert r.status_code == 401
+    assert transport.requests == []
+    assert client.fetch.calls == []
+
+
+def test_a_machine_token_cannot_submit_from_a_repo(make_client, db, transport):
+    from flashml_cloud_api import enrolment
+
+    client = make_client()
+    owner = _new_user(db)
+    started = enrolment.start_device_code(db, f"n-{uuid.uuid4().hex[:8]}", "h", "linux")
+    enrolment.approve_device_code(db, started["user_code"], owner)
+    token = enrolment.redeem_device_code(db, started["device_code"])
+    r = _post(client, token)
+    assert r.status_code == 401
+    assert transport.requests == []
+
+
+# ---------------------------------------------------------------------------
+# 2. the happy path
+# ---------------------------------------------------------------------------
+
+
+def test_a_clean_repo_is_submitted_and_recorded(make_client, db, transport):
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+
+    job_id = r.json()["job_id"]
+    rows = _job_rows(db, alice)
+    assert [row["id"] for row in rows] == [job_id]
+    assert len(transport.job_submissions) == 1
+
+
+def test_the_submitted_argv_is_exactly_right(make_client, db, transport):
+    client = make_client()
+    _post(client, _jwt(_new_user(db)))
+    params = transport.submitted[0]["spec"]["workload"]["parameters"]
+    assert params["command"] == [
+        "python",
+        "/work/inputs/code/train.py",
+        "--epochs",
+        "20",
+    ]
+    assert "task_params" not in params
+
+
+def test_a_sweep_repo_submits_one_task_per_combination(make_client, db, transport):
+    files = dict(CLEAN_REPO)
+    # Kept at CLEAN_YAML's indentation: make_tarball dedents, and a block
+    # appended flush-left would make the common prefix empty and leave the
+    # rest of the document indented.
+    files["flashml.yaml"] = CLEAN_YAML + "    sweep:\n      lr: [0.001, 0.01, 0.1]\n"
+    client = make_client(files)
+    r = _post(client, _jwt(_new_user(db)))
+    assert r.status_code == 201, r.text
+
+    params = transport.submitted[0]["spec"]["workload"]["parameters"]
+    assert params["command"] == [
+        "python",
+        "/work/inputs/code/train.py",
+        "--epochs",
+        "20",
+        "--lr",
+        "{lr}",
+    ]
+    assert params["task_params"] == [
+        {"lr": "0.001"}, {"lr": "0.01"}, {"lr": "0.1"}
+    ]
+
+
+def test_the_submitted_spec_is_sandboxed(make_client, db, transport):
+    client = make_client()
+    _post(client, _jwt(_new_user(db)))
+    isolation = transport.submitted[0]["spec"]["isolation"]
+    assert isolation == {"tier": "sandboxed", "allowFallback": False}
+
+
+def test_the_repo_tarball_is_staged_as_the_code_input(make_client, db, transport):
+    client = make_client()
+    _post(client, _jwt(_new_user(db)))
+    inputs = transport.submitted[0]["spec"]["workload"]["parameters"]["inputs"]
+    key = inputs["code"].removeprefix("artifact://")
+    assert inputs["code"].startswith("artifact://")
+    assert transport.artifacts[key] == client.fetch.tar_bytes
+
+
+def test_the_ref_the_caller_asked_for_is_the_one_fetched(make_client, db):
+    client = make_client()
+    _post(client, _jwt(_new_user(db)), ref="v1.2.3")
+    assert client.fetch.calls == [("acme", "trainer", "v1.2.3")]
+
+
+def test_a_bare_owner_slash_name_is_accepted(make_client, db):
+    client = make_client()
+    r = _post(client, _jwt(_new_user(db)), repo="acme/trainer")
+    assert r.status_code == 201
+    assert client.fetch.calls[0][:2] == ("acme", "trainer")
+
+
+def test_the_source_row_records_where_the_code_came_from(make_client, db):
+    client = make_client()
+    alice = _new_user(db)
+    _post(client, _jwt(alice), ref="dev")
+    source = _job_rows(db, alice)[0]["source"]
+    assert source["owner"] == "acme"
+    assert source["repo"] == "trainer"
+    assert source["ref"] == "dev"
+
+
+# ---------------------------------------------------------------------------
+# 3. ownership comes from the JWT, never the body
+# ---------------------------------------------------------------------------
+
+
+def test_owner_id_is_the_jwt_sub_even_when_the_body_claims_another(make_client, db):
+    client = make_client()
+    alice = _new_user(db)
+    mallory = _new_user(db)
+    r = _post(client, _jwt(alice), owner_id=mallory, owner=mallory, user_id=mallory)
+    assert r.status_code == 201
+
+    job_id = r.json()["job_id"]
+    with db.cursor() as cur:
+        cur.execute("select owner_id from public.jobs where id = %s", (job_id,))
+        row = cur.fetchone()
+    assert str(row["owner_id"]) == alice
+    assert _job_rows(db, mallory) == []
+
+
+def test_another_user_cannot_see_the_job_created_from_a_repo(make_client, db):
+    client = make_client()
+    alice = _new_user(db)
+    bob = _new_user(db)
+    job_id = _post(client, _jwt(alice)).json()["job_id"]
+
+    r = client.get(
+        f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {_jwt(bob)}"}
+    )
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 4. preflight errors block — nothing submitted, nothing written
+# ---------------------------------------------------------------------------
+
+
+BAD_TRAIN_PY = """
+    import torch
+    import requests
+
+    def go():
+        data = requests.get("http://example.com/data").content
+        open("/tmp/model.pt", "wb").write(data)
+"""
+
+
+def test_an_error_finding_blocks_the_submission_entirely(make_client, db, transport):
+    files = dict(CLEAN_REPO)
+    files["train.py"] = BAD_TRAIN_PY
+    client = make_client(files)
+    alice = _new_user(db)
+
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 400, r.text
+    # Nothing reached the coordinator: no artifact staged, no job submitted.
+    assert transport.requests == []
+    # And nothing was written to the database.
+    assert _job_rows(db, alice) == []
+
+
+def test_all_findings_come_back_at_once_not_one_per_round_trip(make_client, db):
+    files = dict(CLEAN_REPO)
+    files["train.py"] = BAD_TRAIN_PY
+    client = make_client(files)
+    body = _post(client, _jwt(_new_user(db))).json()
+
+    codes = {f["code"] for f in body["findings"]}
+    assert {"unknown-import", "network-use"} <= codes
+    assert "writes-outside-out" in codes  # warnings are reported too
+    assert len(body["findings"]) >= 3
+
+
+def test_a_missing_entrypoint_blocks_the_submission(make_client, db, transport):
+    files = {"flashml.yaml": CLEAN_YAML}
+    client = make_client(files)
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 400
+    assert {f["code"] for f in r.json()["findings"]} == {"entrypoint-missing"}
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
+def test_an_unparseable_entrypoint_blocks_the_submission(make_client, db, transport):
+    files = dict(CLEAN_REPO)
+    files["train.py"] = "def broken(:\n"
+    client = make_client(files)
+    alice = _new_user(db)
+    assert _post(client, _jwt(alice)).status_code == 400
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
+# ---------------------------------------------------------------------------
+# 5. warnings alone do not block
+# ---------------------------------------------------------------------------
+
+
+def test_warnings_alone_do_not_block_and_are_returned(make_client, db, transport):
+    files = dict(CLEAN_REPO)
+    # No metrics.json mention, and a write outside /work/out: two warnings,
+    # zero errors.
+    files["train.py"] = 'open("/tmp/out.txt", "w").close()\n'
+    client = make_client(files)
+    alice = _new_user(db)
+
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    findings = r.json()["findings"]
+    assert findings
+    assert {f["level"] for f in findings} == {"warning"}
+    assert {f["code"] for f in findings} == {"no-metrics-json", "writes-outside-out"}
+    assert len(_job_rows(db, alice)) == 1
+
+
+def test_a_guarded_import_does_not_block(make_client, db):
+    files = dict(CLEAN_REPO)
+    files["train.py"] = textwrap.dedent(
+        """
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        open("/work/out/metrics.json", "w").close()
+        """
+    )
+    client = make_client(files)
+    r = _post(client, _jwt(_new_user(db)))
+    assert r.status_code == 201, r.text
+    assert {f["level"] for f in r.json()["findings"]} == {"warning"}
+
+
+# ---------------------------------------------------------------------------
+# 6. config and repo errors
+# ---------------------------------------------------------------------------
+
+
+def test_a_repo_without_a_flashml_yaml_is_a_clean_400(make_client, db, transport):
+    client = make_client({"train.py": CLEAN_TRAIN_PY})
+    r = _post(client, _jwt(_new_user(db)))
+    assert r.status_code == 400
+    assert "flashml.yaml" in r.json()["detail"]
+    assert transport.requests == []
+
+
+def test_an_invalid_config_is_a_clean_400(make_client, db, transport):
+    files = dict(CLEAN_REPO)
+    files["flashml.yaml"] = "version: 2\nname: x\nimage: python-slim\nentrypoint: t.py\n"
+    client = make_client(files)
+    r = _post(client, _jwt(_new_user(db)))
+    assert r.status_code == 400
+    assert "version" in r.json()["detail"]
+    assert transport.requests == []
+
+
+def test_an_unknown_image_alias_lists_the_real_ones(make_client, db):
+    files = dict(CLEAN_REPO)
+    files["flashml.yaml"] = CLEAN_YAML.replace("python-slim", "tensorflow-gpu")
+    client = make_client(files)
+    r = _post(client, _jwt(_new_user(db)))
+    assert r.status_code == 400
+    assert "pytorch-cpu" in r.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "",
+        "not-a-repo",
+        "acme/trainer/extra",
+        "https://evil.example.com/acme/trainer",
+        "acme/../../etc",
+        "acme/trainer\r\nX-Evil: 1",
+    ],
+)
+def test_a_malformed_repo_reference_is_refused_before_any_fetch(
+    make_client, db, transport, repo
+):
+    client = make_client()
+    r = _post(client, _jwt(_new_user(db)), repo=repo)
+    assert r.status_code == 400, r.text
+    assert client.fetch.calls == []
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize("ref", ["../../etc", "main\r\nEvil: 1", "-oProxyCommand=x", ""])
+def test_a_malformed_ref_is_refused_before_any_fetch(make_client, db, ref):
+    client = make_client()
+    r = _post(client, _jwt(_new_user(db)), ref=ref)
+    assert r.status_code == 400
+    assert client.fetch.calls == []
+
+
+def test_a_malicious_tarball_is_refused_without_a_stack_trace(
+    make_client, db, transport
+):
+    """A zip-slip member: refused by extract_safely, surfaced as a clean
+    400 whose message cannot carry a line break out of the member name."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        payload = b"pwned"
+        member = tarfile.TarInfo(name="../evil\r\nX-Evil: 1.txt")
+        member.size = len(payload)
+        member.type = tarfile.REGTYPE
+        tar.addfile(member, io.BytesIO(payload))
+
+    client = make_client(tar_bytes=buf.getvalue())
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "Traceback" not in detail
+    assert "\n" not in detail and "\r" not in detail
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
+def test_a_decompression_bomb_is_refused(make_client, db, transport):
+    class _Zeros:
+        def __init__(self, total: int):
+            self._left = total
+
+        def read(self, n: int = -1) -> bytes:
+            if n < 0 or n > self._left:
+                n = self._left
+            self._left -= n
+            return b"\x00" * n
+
+    buf = io.BytesIO()
+    size = 300 * 1024 * 1024
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        member = tarfile.TarInfo(name=f"{TOP}/bomb.bin")
+        member.size = size
+        member.type = tarfile.REGTYPE
+        tar.addfile(member, _Zeros(size))
+
+    client = make_client(tar_bytes=buf.getvalue())
+    alice = _new_user(db)
+    assert _post(client, _jwt(alice)).status_code == 400
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
+# ---------------------------------------------------------------------------
+# 7. coordinator failures never leave a phantom row
+# ---------------------------------------------------------------------------
+
+
+def test_a_refused_submission_writes_no_jobs_row(make_client, db, transport):
+    transport.submit_status = 422
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 422
+    assert _job_rows(db, alice) == []

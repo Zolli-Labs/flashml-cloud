@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flashml-cloud-api
+  namespace: flashml
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: FLASHML_PROFILE
+              value: alibaba-ack
+            - name: FLASHML_ARTIFACT_BACKEND
+              value: oss
+            - name: FLASHML_ACR_IMAGE
+              value: "${ACR_REGISTRY}/${ACR_NAMESPACE}"
+            - name: FLASHML_OSS_BUCKET
+              value: "${OSS_BUCKET}"
+            - name: FLASHML_SLS_ENABLED
+              value: "${FLASHML_SLS_ENABLED}"
+            - name: FLASHML_PROMETHEUS_ENABLED
+              value: "${FLASHML_PROMETHEUS_ENABLED}"
+            - name: FLASHML_SANDBOX_POOL
+              value: "${FLASHML_SANDBOX_NODE_SELECTOR}"

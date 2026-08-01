@@ -1,0 +1,62 @@
+# FlashML Cloud control-plane API (private).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flashml-cloud-api
+  namespace: flashml
+  labels:
+    app: flashml-cloud-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flashml-cloud-api
+  template:
+    metadata:
+      labels:
+        app: flashml-cloud-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: api
+          image: flashml/cloud-api:poc-v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: FLASHML_RUNTIME_API
+              value: http://flashruntime.flashml.svc.cluster.local:8100
+            - name: FLASHML_CLOUD_DB
+              value: /data/flashml-cloud.db
+            - name: FLASHML_NODE_OFFLINE_SECONDS
+              value: "30"
+            - name: FLASHML_PROFILE
+              value: local
+            - name: FLASHML_ARTIFACT_BACKEND
+              value: minio
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 3
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { cpu: 500m, memory: 384Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flashml-cloud-api
+  namespace: flashml
+spec:
+  selector:
+    app: flashml-cloud-api
+  ports:
+    - port: 8000
+      targetPort: 8000

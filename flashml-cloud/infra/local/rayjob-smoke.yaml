@@ -1,0 +1,46 @@
+# Gate 0: smallest possible RayJob. Proves kind + KubeRay + Ray before any
+# FlashML code is involved. Not part of the POC demo itself.
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: smoke-rayjob
+  labels:
+    flashml.dev/job-id: smoke
+    flashml.dev/backend: kuberay
+    flashml.dev/deployment-profile: local
+spec:
+  entrypoint: >-
+    python -c "import ray; ray.init();
+    print('nodes:', len(ray.nodes()));
+    print(ray.get([ray.remote(lambda x: x * x).remote(i) for i in range(8)]))"
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 600
+  rayClusterSpec:
+    rayVersion: "2.46.0"
+    headGroupSpec:
+      rayStartParams:
+        num-cpus: "0"
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: localhost:5001/rayproject/ray:2.46.0-py311-cpu
+              resources:
+                requests: { cpu: "500m", memory: 1Gi }
+                limits: { cpu: "1", memory: 1.5Gi }
+    workerGroupSpecs:
+      - groupName: workers
+        replicas: 2
+        minReplicas: 2
+        maxReplicas: 2
+        rayStartParams: {}
+        template:
+          spec:
+            nodeSelector:
+              flashml.dev/compute: "true"
+            containers:
+              - name: ray-worker
+                image: localhost:5001/rayproject/ray:2.46.0-py311-cpu
+                resources:
+                  requests: { cpu: "500m", memory: 1Gi }
+                  limits: { cpu: "1", memory: 1.5Gi }
