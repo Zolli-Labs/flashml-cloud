@@ -31,7 +31,11 @@ make e2e-demo     # watchable version: real `flashnode work` subprocesses,
 Files: `conftest.py` (coordinator subprocess fixture + dataset generator),
 `test_local_loop.py` (kill-a-machine sweep), `test_kmeans_loop.py`
 (distributed K-means: 3 Lloyd iterations as 3 lease jobs across 2 agents),
-`run_demo.py` (the human-watchable version). The kill in the pytest is
+`run_demo.py` (the human-watchable version),
+`test_allowlist_parity.py` and `test_archive_parity.py` (cross-repo drift
+guards — the latter feeds one in-process attack corpus to *both* untrusted-
+archive extractors, flashnode's and the cloud API's, because the two cannot
+share code across the repo boundary). The kill in the pytest is
 simulated by severing the dying agent's network (every call raises), which
 exercises the *lease-expiry* recovery path — the harshest one. The demo
 uses a real SIGKILL.

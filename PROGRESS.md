@@ -123,6 +123,38 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 <!-- newest first -->
 
+### 2026-08-01 — flashnode unpacks archive inputs safely (flashnode + e2e; cross-repo blocker)
+What/why: the API compiles repo jobs as `python /work/inputs/code/<entrypoint>`
+and stages the repo **tarball** as the `code` input, but flashnode downloaded
+every input as a plain file — the argv pointed at a directory that never
+existed and every repo job burned all four attempts on "file not found". New
+`flashnode/executor/archives.py` unpacks it, and only for inputs the payload
+names in `unpack_inputs` (explicit, never sniffed from a submitter-chosen
+filename). The archive is attacker-controlled and lands on a *volunteer's*
+machine, so the extractor refuses zip-slip (relative and absolute), escaping
+symlinks, decompression bombs (capped during extraction), member-count
+blowups, and device/fifo/hardlink members.
+How verified: flashnode 116 passed / 1 skipped (was 85/1); e2e 48 passed
+(was 15) — 33 of them the new `e2e/test_archive_parity.py`, one in-process
+attack corpus fed to *both* extractors plus a benign control so a
+reject-everything guard cannot pass. Docs: flashnode/AGENTS.md, e2e/README.md.
+Gotchas: (1) `Path(dest) / "/etc/evil"` silently discards `dest` — resolve then
+`relative_to`, or absolute zip-slip walks straight past a join-then-check.
+(2) GitHub wraps every repo in `owner-name-<sha>/`; the extractor returns the
+content root and the loop renames *that* into place, or the fix would have
+left argv one directory too high — the same failure again. (3) Symlinks are
+validated then deliberately not created, which kills the write-through-a-link
+TOCTOU class outright. (4) Found in the API: a `./` member makes
+`PurePosixPath(name).parts[0]` raise IndexError, so a crafted upload is a 500
+instead of a 400 — not a containment break, not fixed here, asserted in the
+parity test so a fix cannot silently regress flashnode's side.
+Next: **the coordinator does not emit `unpack_inputs` yet** — `CommandRecipe`
+builds a fixed payload key set and `compile.py` sets no such parameter, so
+repo jobs stay broken until flashruntime forwards it and the API sets
+`unpack_inputs: ["code"]`. flashnode already honours it when present and
+behaves exactly as before when absent, so the two changes can land in any
+order. Parking lot: a member-count cap and the `./`-member fix on the API side.
+
 ### 2026-08-01 — Job ownership closes Plan 3's last residual (flashml-cloud/apps/api; M1 Plan 3 of 7, Task 6 — plan complete)
 What/why: Task 5's report flagged one deliberate residual: job artifact reads
 were open at the coordinator with no per-job scoping at the API. This task
