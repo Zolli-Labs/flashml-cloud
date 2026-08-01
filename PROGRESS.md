@@ -99,9 +99,15 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       fail-closed startup guard. **`HANDOFF.md` risk #2 is closed**, proven
       against a real coordinator process over real HTTP (e2e 15 passed).
       Self-service enrolment (device flow) still belongs to Plan 3.
-- [~] **Plan 3 — cloud API + Supabase** — Auth (Google), Postgres schema, RLS.
-      Supabase project `flashml-poc` (`yualksqjjvlfscbbsygq`) created
-      2026-08-01, $0/month (D13).
+- [x] **Plan 3 — cloud API + Supabase** ✅ (2026-08-01) Supabase project
+      `flashml-poc` (`yualksqjjvlfscbbsygq`, D13); deny-by-default RLS schema;
+      Supabase JWT + machine-token auth (requires exp/sub/aud); device-code
+      enrolment; operator-asserted node identity fronting the now-private
+      coordinator (D14); job ownership scoped to the verified JWT `sub`,
+      including job-scoped artifact reads. **Google OAuth is not yet
+      enabled** — a manual step in the Supabase dashboard (Authentication →
+      Providers → Google), not inferable from this repo; must be done by
+      hand before any real sign-in works.
 - [ ] **Plan 4 — GitHub repo → job + preflight** — `flashml.yaml`, curated
       images, static import/network checks at submit time.
 - [ ] **Plan 5 — web app** — rebuilt against the real API (the current
@@ -116,6 +122,58 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 ## Entries
 
 <!-- newest first -->
+
+### 2026-08-01 — Job ownership closes Plan 3's last residual (flashml-cloud/apps/api; M1 Plan 3 of 7, Task 6 — plan complete)
+What/why: Task 5's report flagged one deliberate residual: job artifact reads
+were open at the coordinator with no per-job scoping at the API. This task
+closes it and finishes Plan 3. `POST /v1alpha1/jobs` now requires a Supabase
+JWT and writes a `jobs` row whose `owner_id` comes **only** from the verified
+JWT `sub` — a body-supplied `owner_id`/`owner` is parsed, ignored, and never
+reaches the insert. `GET /v1alpha1/jobs` filters the coordinator's (unscoped,
+operator-token) list down to the caller's own ids using that table.
+`GET /v1alpha1/jobs/{id}` and `POST /v1alpha1/jobs/{id}/cancel` check
+ownership **before** ever contacting the coordinator and answer 404 (never
+403) for both "does not exist" and "exists but isn't yours" — cancel on
+someone else's job makes zero outbound requests, asserted on the recording
+fake transport, not just the status code. A new browser-facing
+`GET /v1alpha1/jobs/{job_id}/artifacts/{key:path}` scopes artifact reads to
+jobs the caller owns (agent/machine artifact reads are untouched — an agent
+legitimately reads inputs for the task it holds). `CoordinatorClient.forward`'s
+`on_behalf_of` became optional: job routes are plain operator-token
+operations with no node identity to assert, so they carry no delegation
+header at all, only the ones that need lease scoping do.
+How verified: `flashml-cloud/apps/api` **91 passed, 0 skipped** (baseline 75,
++16 new tests in `tests/test_jobs.py`, all pinning an ownership property that
+would be a privacy or integrity bug if wrong: no-JWT → 401, `owner_id` proven
+by direct DB read after a spoofed body, list never leaking another user's job
+name in the response text, get/cancel of another user's job both 404 with
+identical bodies to a genuinely nonexistent id, cancel-not-called asserted on
+the fake coordinator's request log, artifact read of another user's job both
+404 and byte-for-byte absent from the response, and a dot-segment artifact
+key rejected with 400 before it reaches the coordinator). Re-ran the
+unaffected upstream suites to confirm no regression from this change:
+flashruntime **532 passed, 1 skipped, 20 deselected**, flashnode **85 passed,
+1 skipped**, workspace e2e **15 passed** — matches D14's regression gate.
+Gotchas: the coordinator generates `job_id` itself (`uuid.uuid4().hex[:12]`
+in `flashruntime/service/app.py`); the cloud API cannot choose it up front,
+so the `jobs` row is written *after* forwarding, keyed by whatever id comes
+back in the 2xx response — a submission that fails at the coordinator writes
+no row at all. Recorded as **D14** in `M1_DECISIONS.md`: operator-asserted
+identity over dynamic per-machine token registration (two sources of truth
+about identity plus a cache to invalidate on revocation), and that the
+coordinator must stay unreachable from the internet once deployed — that
+requirement is what makes D14 safe, not merely convenient.
+Still NOT true, stated plainly: no web UI (Plan 5 — `apps/web` still targets
+the legacy unauthenticated coordinator proxy); no GitHub→job integration
+(Plan 4); result verification is unbuilt (M3) — a host can still lie about a
+result and be believed; and Google OAuth is **not enabled** — it is a manual
+step in the Supabase dashboard (Authentication → Providers → Google) that
+nothing in this repo can do or infer, and must happen before Plan 7's
+acceptance run-through.
+Next: Plan 4 (GitHub repo → job + preflight) or Plan 5 (web app), per
+`SPRINT_PLAN.md`; Plan 7's Render deploy is the one that must verify the
+coordinator is actually unreachable from outside the private network, not
+just configured to be.
 
 ### 2026-08-01 — Per-machine identity + lease-scoped writes; risk #2 closed (flashruntime + flashnode + e2e; M1 Plan 2 of 7)
 What/why: `PUT /v1alpha1/artifacts/{key}` accepted **any key from any caller**

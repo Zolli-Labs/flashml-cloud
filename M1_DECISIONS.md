@@ -377,6 +377,66 @@ limits bind.
 
 ---
 
+## D14 — Operator-asserted node identity for the private coordinator, not per-machine tokens registered into it
+
+**Decided (2026-08-01, Plan 3 Task 6):** now that D2 has made
+`flashml-coordinator` a private service, the cloud API is the only thing that
+can reach it, and it holds exactly one credential for that: an operator
+token. Every agent request the API forwards carries that operator token
+**plus** `X-FlashML-On-Behalf-Of: <node_id>`, where `node_id` is resolved
+from the caller's machine token (never from the request body — the rule
+Plan 2 already learned the hard way on `claim`). The coordinator
+(`flashruntime/flashruntime/service/modea.py`, Plan 3 Task 4) honours that
+header **only** when the caller presents the operator credential; a node
+token presenting the same header has it silently ignored, so a volunteer can
+never assert another machine's identity. Once the header is accepted, the
+coordinator authorizes exactly as it did before the indirection existed — the
+write must fall inside a live lease held by that node (`live_leases_for_node`)
+— so Plan 2's lease-scoping guarantee survives being fronted by an API that
+didn't exist when that guarantee was proven.
+
+**Why not the alternative (dynamic per-machine token registration into the
+coordinator):** the API could instead mint a token per enrolled machine and
+push it into the coordinator's own auth store at enrolment time, then let
+agents authenticate to the coordinator directly with it. Rejected because it
+recreates the exact shape of bug this plan exists to close: two systems
+(`flashml-cloud`'s Postgres `machines` table and the coordinator's runtime
+auth state) would each hold an independent, mutable opinion about which
+tokens are valid for which node. Revocation would need to invalidate both —
+miss the coordinator's copy (a cache that was never told to expire, a push
+that failed silently, a restart that reloaded a stale snapshot) and a
+revoked machine keeps working *at the coordinator* even though the cloud API
+correctly shows it as revoked. Operator-asserted identity has no second copy
+to go stale: revocation is one row flip in one table
+(`enrolment.revoke_machine`), and the very next request through the API's
+`current_machine` dependency sees it, because there is nothing else to ask.
+
+**Cost:** the coordinator now trusts the API completely for identity claims —
+if the operator token leaks, the leak is total (any node, any lease). This is
+why the API validates `node_id` at both ends before it ever becomes a header
+value (`NODE_ID_RE` at enrolment time, `valid_node_id` again in
+`CoordinatorClient.forward`) — a CR/LF in it would be request splitting
+against a service the whole security model now depends on trusting blindly.
+
+**The coordinator must be unreachable from the internet once deployed.**
+This decision is not a substitute for D2's private-networking requirement —
+it is what makes the private-networking requirement *sufficient* rather than
+merely convenient. Operator-asserted identity is safe only because the
+operator token itself is unobtainable by anyone who isn't the cloud API. If
+the coordinator is ever given a public IP or its Render service's networking
+is loosened, the operator token becomes reachable from the internet and every
+node's lease scoping is void — an attacker holding it can assert any
+`node_id` at will. Render deploy (Plan 7) must configure
+`flashml-coordinator` with no public ingress and verify that from outside the
+private network before anything is called done.
+
+**Revisit when:** result verification (M3) exists and volunteer nodes are no
+longer implicitly trusted to report their own results honestly — at that
+point the same "who can assert what" question reopens one layer up, not at
+the transport.
+
+---
+
 ## Open questions carried into execution
 
 1. **Demo dataset** — MNIST (~11 MB) or CIFAR-10 (~170 MB) baked into
