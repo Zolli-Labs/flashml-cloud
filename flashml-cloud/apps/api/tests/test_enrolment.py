@@ -263,3 +263,56 @@ def test_revoke_refuses_when_user_does_not_own_the_machine(db, owner, other_owne
     assert enrolment.revoke_machine(db, machine_id, other_owner) is False
     # Untouched: the legitimate token still authenticates.
     assert enrolment.authenticate_machine(db, token) is not None
+
+
+# --- the URL we print on a volunteer's terminal ----------------------------
+#
+# /v1alpha1/device/code returns `verification_uri`, flashnode prints it, and
+# the volunteer types it into a browser. It said `{console}/enrol` while the
+# console has only ever served `/activate`, so that URL 404'd at the exact
+# moment a first-time host is most likely to give up.
+#
+# Nothing caught it because both sides were internally consistent: the API
+# had a route name, the web app had a page, and no test compared the two.
+# This does — against the filesystem, so renaming or moving the page fails
+# here rather than in someone's terminal.
+
+
+def _console_routes() -> set[str]:
+    """Route paths the Next.js app actually serves, read from disk."""
+    from pathlib import Path
+
+    web = Path(__file__).resolve().parents[4] / "flashml-cloud" / "apps" / "web" / "app"
+    assert web.is_dir(), f"expected the web app at {web}"
+    routes = set()
+    for page in web.rglob("page.tsx"):
+        rel = page.relative_to(web).parent
+        # Route groups like (auth) are organisational and not in the URL.
+        parts = [p for p in rel.parts if not (p.startswith("(") and p.endswith(")"))]
+        routes.add("/" + "/".join(parts) if parts else "/")
+    return routes
+
+
+def test_verification_uri_points_at_a_page_that_exists():
+    from flashml_cloud_api.images import CURATED  # noqa: F401  (import sanity)
+
+    routes = _console_routes()
+    # Sanity: the reader found real pages, so an empty set cannot make this
+    # pass vacuously.
+    assert "/machines" in routes, f"route reader looks broken: {sorted(routes)}"
+
+    import re
+    from pathlib import Path
+
+    app_src = (
+        Path(__file__).resolve().parents[1]
+        / "flashml_cloud_api"
+        / "app.py"
+    ).read_text()
+    printed = set(re.findall(r'"verification_uri": f?"\{base\}(/[a-z0-9-]+)"', app_src))
+    assert printed, "could not find the verification_uri literal in app.py"
+    for path in printed:
+        assert path in routes, (
+            f"device-code enrolment sends volunteers to {path!r}, which the "
+            f"console does not serve. Real routes: {sorted(routes)}"
+        )

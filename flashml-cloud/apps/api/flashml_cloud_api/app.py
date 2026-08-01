@@ -655,10 +655,17 @@ def create_cloud_app(
             _opt_str(payload.get("platform")),
         )
         base = settings.console_url.rstrip("/")
+        # /activate, not /enrol. The console has never served /enrol —
+        # apps/web/app/activate/page.tsx is the page — so this URL was
+        # printed on the volunteer's terminal, typed into a browser, and
+        # 404'd, at the one moment they are most likely to give up. Nothing
+        # caught it because each side was self-consistent: the API had a
+        # route name, the web app had a page, and no test compared them.
+        # tests/test_device_code.py now pins this against the filesystem.
         return {
             "device_code": started["device_code"],
             "user_code": started["user_code"],
-            "verification_uri": f"{base}/enrol" if base else "/enrol",
+            "verification_uri": f"{base}/activate" if base else "/activate",
             "interval": started["interval"],
             "expires_at": started["expires_at"].isoformat(),
         }
