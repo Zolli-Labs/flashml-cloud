@@ -89,12 +89,12 @@ export default function JobsPage() {
   }
 
   return (
-    <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
       <div className="flex items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold font-mono">Jobs</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Everything you've submitted.
+            Everything you&apos;ve submitted.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -168,6 +168,6 @@ export default function JobsPage() {
           ))}
         </div>
       )}
-    </main>
+    </div>
   );
 }

@@ -71,7 +71,7 @@ export default function MachinesPage() {
   }
 
   return (
-    <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
       <div className="flex items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold font-mono">My Machines</h1>
@@ -124,7 +124,7 @@ export default function MachinesPage() {
           ))}
         </div>
       )}
-    </main>
+    </div>
   );
 }
 

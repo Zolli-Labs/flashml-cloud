@@ -102,7 +102,7 @@ export default function ActivatePage() {
   if (status === "success") {
     const label = machine?.name || machine?.node_id || machineId;
     return (
-      <main className="min-h-[calc(100dvh-4rem)] flex items-center justify-center px-4 py-10">
+      <div className="min-h-[calc(100dvh-4rem)] flex items-center justify-center px-4 py-10">
         <Card className="w-full max-w-sm">
           <CardContent className="flex flex-col items-center text-center gap-4 pt-6 pb-2">
             <div className="flex items-center justify-center w-14 h-14 rounded-full bg-node-green/10 border border-node-green/30">
@@ -149,12 +149,12 @@ export default function ActivatePage() {
             />
           </CardContent>
         </Card>
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="min-h-[calc(100dvh-4rem)] flex items-center justify-center px-4 py-10">
+    <div className="min-h-[calc(100dvh-4rem)] flex items-center justify-center px-4 py-10">
       <Card className="w-full max-w-sm">
         <CardHeader className="items-center text-center gap-2 pt-2">
           <div className="relative flex items-center justify-center w-10 h-10">
@@ -219,6 +219,6 @@ export default function ActivatePage() {
           </form>
         </CardContent>
       </Card>
-    </main>
+    </div>
   );
 }

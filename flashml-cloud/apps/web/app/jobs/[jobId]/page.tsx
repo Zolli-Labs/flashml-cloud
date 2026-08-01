@@ -92,35 +92,35 @@ export default function JobDetailPage({
 
   if (state === "loading") {
     return (
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
         <Card>
           <CardContent className="h-32 animate-pulse bg-muted/30 rounded-lg" />
         </Card>
-      </main>
+      </div>
     );
   }
 
   if (state === "not-found") {
     return (
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
         <Card>
           <CardContent className="flex flex-col items-center text-center gap-3 py-10">
             <Warning className="w-6 h-6 text-muted-foreground" weight="fill" />
             <p className="text-sm text-muted-foreground">
-              This job doesn't exist, or isn't yours.
+              This job doesn&apos;t exist, or isn&apos;t yours.
             </p>
             <Link href="/jobs" className="text-cyan text-sm underline underline-offset-2">
               Back to jobs
             </Link>
           </CardContent>
         </Card>
-      </main>
+      </div>
     );
   }
 
   if (state === "error" || !job) {
     return (
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
         <Card>
           <CardContent className="flex flex-col items-center text-center gap-3 py-10">
             <Warning className="w-6 h-6 text-destructive" weight="fill" />
@@ -130,12 +130,12 @@ export default function JobDetailPage({
             </Button>
           </CardContent>
         </Card>
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
       <Link
         href="/jobs"
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
@@ -217,7 +217,7 @@ export default function JobDetailPage({
       {rounds.length > 0 && <RoundsSection rounds={rounds} />}
 
       <CancelSection job={job} onCancelled={setJob} />
-    </main>
+    </div>
   );
 }
 
