@@ -154,13 +154,40 @@ the SQL directly. Routing it through `migrate.py` means all 427+ tests exercise
 the runner on every run — the alternative is a deploy-critical component whose
 only test is the one place it is used least.
 
-### 2.4 The prod gate
+### 2.4 The prod gate — CORRECTED 2026-08-02, after GitHub refused the design
 
-Prod migration and prod deploy run in a GitHub Environment named `production`
-with a required reviewer. The pipeline stops and waits; the owner approves in
-the GitHub UI; then `migrate.py` runs against prod, and only then does the
-deploy fire. This is decision 3 ("gated for prod") implemented with a native
-mechanism rather than a convention.
+This section originally specified a GitHub Environment named `production` with
+a **required reviewer**, so a push to `main` would pause for approval.
+
+**That is not available on this account.** Creating the protection rule returns:
+
+```
+422 Failed to create the environment protection rule. Please ensure the
+    billing plan supports the required reviewers protection rule.
+```
+
+`Zolli-Labs` is on GitHub **Free**, where environment protection rules do not
+apply to **private** repositories. A bare `production` environment *can* be
+created and was — but it enforces nothing, which is worse than having no gate,
+because it reads like one.
+
+**What replaces it:** production migration and deploy live in a separate,
+**manually triggered** workflow, `.github/workflows/deploy-prod.yml`
+(`on: workflow_dispatch`). It never runs on a push. Someone has to start it,
+pick the commit, and type `deploy` to confirm. That is a real gate on any plan.
+
+Two guards make the manual trigger safe rather than merely manual:
+
+1. **Preflight requires a green `ci.yml` run for that exact SHA.** Otherwise
+   `workflow_dispatch` would cheerfully deploy a commit whose tests never ran —
+   the precise failure this whole effort exists to prevent.
+2. **A post-migration `--dry-run` must come back clean**, so a partial
+   migration cannot be followed by a deploy that assumes it finished.
+
+`environment: production` is kept on the migrate and deploy jobs purely for
+deployment history in the UI. If the org ever moves to Team, adding a required
+reviewer to that environment upgrades this into an approval gate with no code
+change.
 
 ### 2.5 Secrets required
 
@@ -206,8 +233,8 @@ Estimated ~$7/mo. Not started here.
 
 ## 5. Human gates
 
-🔒 Create `RENDER_API_KEY` and `PROD_DATABASE_URL` as repository secrets.
-🔒 Create the `production` GitHub Environment with yourself as a required reviewer.
+🔒 Create `RENDER_API_KEY` as a repository secret. (`PROD_DATABASE_URL` — **done** 2026-08-02.)
+🔒 ~~Create the `production` GitHub Environment with a required reviewer.~~ **Not possible on GitHub Free for a private repo** — see §2.4. The gate is `workflow_dispatch` in `deploy-prod.yml` instead. Done: the bare environment exists for deployment history only.
 🔒 Run the one-time `--baseline` against `flashml-poc` so the four existing
 migrations are recorded as applied rather than re-run.
 🔒 `0004_attempts.sql` is still **not applied to prod** — after baselining, it

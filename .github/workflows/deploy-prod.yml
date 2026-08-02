@@ -1,0 +1,160 @@
+# Production migration + deploy. MANUAL ONLY.
+#
+# WHY THIS IS A SEPARATE, DISPATCH-ONLY WORKFLOW.
+#
+# The original design put `migrate-prod` and `deploy-prod` in ci.yml behind
+# `environment: production` with a required reviewer, so a push to main would
+# pause for approval. GitHub refused to create that protection rule:
+#
+#   "Failed to create the environment protection rule. Please ensure the
+#    billing plan supports the required reviewers protection rule." (HTTP 422)
+#
+# Zolli-Labs is on GitHub Free, where environment protection rules are not
+# available on PRIVATE repositories. A bare `production` environment can be
+# created and enforces nothing — a gate that looks like a gate and is not.
+#
+# `workflow_dispatch` is a real gate on any plan: this file never runs on a
+# push. Someone has to start it, name the commit, and type the confirmation.
+#
+# `environment: production` is kept below purely for deployment history in the
+# GitHub UI. If the org ever moves to Team, adding a required reviewer to that
+# environment upgrades this into an approval gate with no change to this file.
+
+name: deploy-prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm production deploy'
+        required: true
+        type: string
+      skip_migrations:
+        description: "Deploy without running migrations (rare; only if already applied)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-prod          # never two production deploys at once
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the confirmation
+        if: inputs.confirm != 'deploy'
+        run: |
+          echo "confirm was '${{ inputs.confirm }}', expected 'deploy'." >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      # Deploying a commit whose tests never passed is the exact thing this
+      # whole pipeline exists to prevent, and workflow_dispatch would happily
+      # let you do it. So verify CI actually succeeded for THIS sha.
+      - name: Require a green ci run for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="${{ github.sha }}"
+          conclusion="$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$sha&status=completed" \
+            --jq '.workflow_runs[0].conclusion // "none"')"
+          echo "ci conclusion for $sha: $conclusion"
+          if [ "$conclusion" != "success" ]; then
+            echo "Refusing to deploy: ci.yml has not completed successfully for this commit." >&2
+            echo "Push it, let ci finish, then run this workflow again." >&2
+            exit 1
+          fi
+
+  migrate:
+    needs: [preflight]
+    if: ${{ !inputs.skip_migrations }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        working-directory: flashml-cloud/apps/api
+        run: |
+          uv venv .venv
+          uv pip install -e .
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/flashml-cloud/apps/api/.venv
+
+      # Print the intent before acting on it, so the run log records what was
+      # about to change. Exits 1 while anything is pending, which is the
+      # normal case here — hence `|| true`, required on this step and no other.
+      - name: What is pending
+        working-directory: flashml-cloud/apps/api
+        run: .venv/bin/python -m flashml_cloud_api.migrate --dry-run || true
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+      - name: Apply
+        working-directory: flashml-cloud/apps/api
+        run: .venv/bin/python -m flashml_cloud_api.migrate
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+      - name: Confirm the database is now up to date
+        working-directory: flashml-cloud/apps/api
+        run: .venv/bin/python -m flashml_cloud_api.migrate --dry-run
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+  deploy:
+    needs: [migrate]
+    # `always()` so a deliberate skip_migrations run still deploys; the
+    # preflight result is still required.
+    if: ${{ always() && needs.preflight.result == 'success' && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      # Service ids are not secrets and are literal on purpose: one is useless
+      # without RENDER_API_KEY, and hiding them would only make this file
+      # harder to read against the Render dashboard.
+      #
+      # ORDER IS LOAD-BEARING. The coordinator goes first: the API will not
+      # serve without one behind it.
+      - name: Deploy coordinator
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-d9mts2u417fc73c7l5g0/deploys" \
+            -d '{}' > /dev/null
+          echo "coordinator deploy triggered"
+
+      - name: Deploy API
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-d9mtspu417fc73c7mip0/deploys" \
+            -d '{}' > /dev/null
+          echo "api deploy triggered"
+
+      - name: Deploy web
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-d9mtt9e417fc73c7ni30/deploys" \
+            -d '{}' > /dev/null
+          echo "web deploy triggered"

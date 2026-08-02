@@ -169,90 +169,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ---------------------------------------------------------------------------
-  # PRODUCTION. Only from a push to main, only after all four jobs above pass.
-  #
-  # `environment: production` is what makes this a GATE rather than a
-  # convention: with a required reviewer configured on that environment, the
-  # run PAUSES here until a human approves it in the GitHub UI. Without the
-  # reviewer the jobs run unattended and the gate is decorative — see the
-  # human gates in docs/superpowers/plans/2026-08-02-ci-cd-phase-1.md.
-  # ---------------------------------------------------------------------------
-  migrate-prod:
-    needs: [api, web, e2e, secrets]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Install
-        working-directory: flashml-cloud/apps/api
-        run: |
-          uv venv .venv
-          uv pip install -e .
-        env:
-          VIRTUAL_ENV: ${{ github.workspace }}/flashml-cloud/apps/api/.venv
-
-      # Shows what WOULD be applied before applying it, so the approval and
-      # the deploy log both record the intent. Exits 1 when work is pending,
-      # so `|| true` is required here and only here.
-      - name: Pending migrations
-        working-directory: flashml-cloud/apps/api
-        run: .venv/bin/python -m flashml_cloud_api.migrate --dry-run || true
-        env:
-          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-
-      - name: Apply
-        working-directory: flashml-cloud/apps/api
-        run: .venv/bin/python -m flashml_cloud_api.migrate
-        env:
-          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-
-  deploy-prod:
-    needs: [migrate-prod]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      # Service ids are NOT secrets and are literal on purpose: one is useless
-      # without RENDER_API_KEY, and hiding them would only make this file
-      # harder to read against the Render dashboard.
-      #
-      # ORDER IS LOAD-BEARING. The coordinator goes first: the API refuses to
-      # serve without one behind it, so deploying the API against a
-      # mid-restart coordinator turns a rolling update into an outage.
-      - name: Deploy coordinator
-        run: |
-          curl -fsS -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            "https://api.render.com/v1/services/srv-d9mts2u417fc73c7l5g0/deploys" \
-            -d '{}' > /dev/null
-          echo "coordinator deploy triggered"
-
-      - name: Deploy API
-        run: |
-          curl -fsS -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            "https://api.render.com/v1/services/srv-d9mtspu417fc73c7mip0/deploys" \
-            -d '{}' > /dev/null
-          echo "api deploy triggered"
-
-      - name: Deploy web
-        run: |
-          curl -fsS -X POST \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            "https://api.render.com/v1/services/srv-d9mtt9e417fc73c7ni30/deploys" \
-            -d '{}' > /dev/null
-          echo "web deploy triggered"
+# ---------------------------------------------------------------------------
+# PRODUCTION DEPLOYS ARE NOT IN THIS FILE.
+#
+# They were, briefly: `migrate-prod` and `deploy-prod` jobs gated by
+# `environment: production` with a required reviewer. That does not work here.
+# GitHub REFUSED to create the protection rule (2026-08-02):
+#
+#   "Failed to create the environment protection rule. Please ensure the
+#    billing plan supports the required reviewers protection rule." (HTTP 422)
+#
+# The Zolli-Labs org is on GitHub **Free**, where environment protection rules
+# are unavailable for PRIVATE repositories. A bare `production` environment can
+# still be created — it just enforces nothing, which is worse than no gate at
+# all because it looks like one.
+#
+# So the gate is now that production deploys live in a SEPARATE,
+# manually-triggered workflow: .github/workflows/deploy-prod.yml. Nothing
+# reaches production without someone deliberately starting it.
+# ---------------------------------------------------------------------------

@@ -184,9 +184,17 @@ Gotchas:
 4. Web is 36 tests, not the 26 this entry's spec first claimed — the console
    session added 10 while this was being built.
 
-Next: the four human gates — `RENDER_API_KEY` and `PROD_DATABASE_URL` repo
-secrets, a `production` GitHub Environment **with a required reviewer** (without
-it the gate is decorative), and the three-command prod baseline. Then Phase 2,
+Next: `RENDER_API_KEY` repo secret (`PROD_DATABASE_URL` is set), disable Render
+auto-deploy on the three services, then the three-command prod baseline.
+
+**Correction, same day:** the approval gate as specified does not exist on this
+account. Creating an environment protection rule returns HTTP 422 — Zolli-Labs
+is on GitHub **Free**, where required reviewers do not apply to private repos.
+A bare `production` environment enforces nothing, which is worse than none. The
+gate is now a separate manually-triggered workflow (`deploy-prod.yml`,
+`on: workflow_dispatch`) that additionally refuses to run unless `ci.yml` has
+completed successfully for that exact SHA — otherwise a manual dispatch could
+deploy a commit whose tests never ran. Then Phase 2,
 the dev environment (~$7/mo: the coordinator needs a disk, which the free tier
 has no way to provide). Parking lot: no rollback automation, no per-PR preview
 environments, no post-deploy smoke test.
