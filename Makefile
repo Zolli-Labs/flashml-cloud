@@ -1,4 +1,4 @@
-.PHONY: setup test sync-docs check-docs \
+.PHONY: setup test check-flashml \
 	poc-local-up poc-local-down poc-local-status poc-local-logs \
 	poc-local-submit poc-local-fail-worker poc-local-forward poc-reset \
 	poc-images poc-ack-bootstrap poc-acr-push poc-ack-deploy poc-ack-submit \
@@ -15,10 +15,47 @@ POC_NS                := flashml
 INFRA                 := flashml-cloud/infra
 JOB                   ?= $$(cat /tmp/flashml-last-job-id 2>/dev/null)
 
-poc-images:
-	cd flashruntime && docker build -f deploy/docker/Dockerfile.kmeans  -t $(REGISTRY)/flashml/kmeans:poc-v1 .
-	cd flashruntime && docker build -f deploy/docker/Dockerfile.service -t $(REGISTRY)/flashml/runtime:poc-v1 .
-	docker build -f flashnode/Dockerfile          -t $(REGISTRY)/flashml/node:poc-v1 .
+# ---------------------------------------------------------------------------
+# Where flashruntime and flashnode come from (changed 2026-08-01)
+#
+# They used to be directories in this repo. They are now the public monorepo
+# github.com/Zolli-Labs/flashml, and there is exactly one copy of each.
+#
+# FLASHML_PIN is what anything DEPLOYED or TESTED resolves — a commit, because
+# flashruntime is not on PyPI yet. Replace both of these with `==0.3.0` style
+# version pins once the release lands, and keep this identical to the pin in
+# flashml-cloud/apps/api/pyproject.toml and render.yaml.
+#
+# FLASHML is a sibling CHECKOUT, needed only by targets that build from source
+# (docker images) or that you deliberately point at local runtime edits. No
+# deployed path uses it. `make check-flashml` explains what to do if missing.
+# ---------------------------------------------------------------------------
+FLASHML_REPO := https://github.com/Zolli-Labs/flashml
+FLASHML_PIN  := 383efaab74196c6d86bcb6517e6ee20403a00e1a
+FLASHML      ?= ../flashml
+
+# The `\#` escapes are REQUIRED. Make treats an unescaped `#` as a comment, so
+# `...@<sha>#subdirectory=flashruntime` silently truncates to `...@<sha>` — pip
+# then installs the repository ROOT, which has no package in it. The failure is
+# a confusing build error far from its cause, so do not "tidy" these away.
+RUNTIME_PIN := "flashruntime[service,sklearn,dev] @ git+$(FLASHML_REPO)@$(FLASHML_PIN)\#subdirectory=flashruntime"
+NODE_PIN    := "flashnode @ git+$(FLASHML_REPO)@$(FLASHML_PIN)\#subdirectory=flashnode"
+
+check-flashml:
+	@test -d "$(FLASHML)/flashruntime" || { \
+		echo "error: no FlashML checkout at $(FLASHML)"; \
+		echo "  This target builds from runtime/agent SOURCE, which lives in the"; \
+		echo "  public monorepo, not in this repo. Clone it as a sibling:"; \
+		echo ""; \
+		echo "    git clone $(FLASHML_REPO).git $(FLASHML)"; \
+		echo ""; \
+		echo "  Or point at an existing checkout: make <target> FLASHML=/path/to/flashml"; \
+		exit 1; }
+
+poc-images: check-flashml
+	cd $(FLASHML)/flashruntime && docker build -f deploy/docker/Dockerfile.kmeans  -t $(REGISTRY)/flashml/kmeans:poc-v1 .
+	cd $(FLASHML)/flashruntime && docker build -f deploy/docker/Dockerfile.service -t $(REGISTRY)/flashml/runtime:poc-v1 .
+	cd $(FLASHML) && docker build -f flashnode/Dockerfile -t $(REGISTRY)/flashml/node:poc-v1 .
 	docker build -f flashml-cloud/apps/api/Dockerfile -t $(REGISTRY)/flashml/cloud-api:poc-v1 .
 	docker pull $(RAY_IMAGE)
 	docker tag  $(RAY_IMAGE) $(REGISTRY)/$(RAY_IMAGE)
@@ -134,30 +171,50 @@ poc-ack-destroy:
 	helm uninstall kuberay-operator -n $(POC_NS) || true
 	kubectl delete namespace $(POC_NS)
 
+# Set up THIS repo for local work. flashruntime and flashnode are ordinary
+# pinned dependencies now — there is nothing here to build them from.
 setup:
-	cd flashruntime && uv venv -q && uv pip install -q -e ".[sklearn,dev]"
-	cd flashnode && uv venv -q && uv pip install -q -e ".[dev]"
+	cd flashml-cloud/apps/api && uv venv -q .venv && uv pip install -q -e ".[dev]"
+	cd flashml-cloud/apps/web && npm ci
 
 test:
-	cd flashruntime && .venv/bin/pytest -q
+	cd flashml-cloud/apps/api && .venv/bin/pytest -q
+	cd flashml-cloud/apps/web && npm test
 
-# SYSTEM_OVERVIEW.md is canonical in flashruntime; the other repos carry
-# synced copies. Edit flashruntime/docs/SYSTEM_OVERVIEW.md, then run this.
-sync-docs:
-	cp flashruntime/docs/SYSTEM_OVERVIEW.md flashnode/docs/SYSTEM_OVERVIEW.md
-	cp flashruntime/docs/SYSTEM_OVERVIEW.md flashml-cloud/docs/SYSTEM_OVERVIEW.md
-	@echo "Synced. Remember to commit in flashnode and flashml-cloud too."
-
-check-docs:
-	@diff -q flashruntime/docs/SYSTEM_OVERVIEW.md flashnode/docs/SYSTEM_OVERVIEW.md >/dev/null \
-		&& diff -q flashruntime/docs/SYSTEM_OVERVIEW.md flashml-cloud/docs/SYSTEM_OVERVIEW.md >/dev/null \
-		&& echo "SYSTEM_OVERVIEW.md in sync across all repos" \
-		|| { echo "DRIFT DETECTED: run 'make sync-docs' (after confirming flashruntime's copy is the intended one)"; exit 1; }
+# sync-docs / check-docs are GONE (2026-08-01).
+#
+# They copied SYSTEM_OVERVIEW.md from flashruntime into flashnode and
+# flashml-cloud, then diffed the copies to detect drift — a hand-run sync
+# maintaining three copies of one document, which is the same shape of problem
+# as the subtree mirroring this migration removed. flashruntime and flashnode
+# now share one repo, so two of the three copies collapsed on their own; the
+# copy that was in flashml-cloud/docs/ is replaced by a pointer to the
+# canonical file. Nothing to sync, nothing to drift, nothing to check.
 
 # --- end-to-end local loop (cloud-free) -------------------------------------
+# Installs the PINNED runtime and agent — the same artifacts the deployed
+# services resolve, not a working tree. That is what makes this suite a drift
+# detector: it proves the two halves still agree at the version we ship.
+#
+# When you are actively changing the runtime and need the fast loop, pass a
+# checkout instead:  make e2e-setup LOCAL=1
 e2e-setup:
 	uv venv e2e/.venv
-	VIRTUAL_ENV=$(CURDIR)/e2e/.venv uv pip install -e "./flashruntime[service,sklearn,dev]" -e ./flashnode
+ifdef LOCAL
+	@$(MAKE) --no-print-directory check-flashml
+	@echo ">>> e2e using LOCAL checkout at $(FLASHML) — not the pin. Do not trust a green run here as release evidence."
+	VIRTUAL_ENV=$(CURDIR)/e2e/.venv uv pip install \
+		-e "$(FLASHML)/flashruntime[service,sklearn,dev]" -e "$(FLASHML)/flashnode"
+else
+	VIRTUAL_ENV=$(CURDIR)/e2e/.venv uv pip install $(RUNTIME_PIN) $(NODE_PIN)
+endif
+	@# torch is NOT an extra of either package, and without it
+	@# test_fedavg_loop.py skips at module level — silently taking the
+	@# federated-averaging path (the whole point of examples/federated) out of
+	@# the suite while it still reports green. This target used to omit it while
+	@# the documented setup command included it, so `make e2e-setup` and the
+	@# README produced different suites. They agree now; keep them that way.
+	VIRTUAL_ENV=$(CURDIR)/e2e/.venv uv pip install torch numpy scikit-learn pandas scipy requests
 
 e2e:
 	e2e/.venv/bin/pytest e2e -q
@@ -168,9 +225,13 @@ e2e-demo:
 # --- real second machine (LAN) ----------------------------------------------
 # On THIS machine (the coordinator host):
 #   make local-coordinator [JOIN_CODE=LOCAL-2026]
-# On ANY OTHER machine on the LAN (needs: uv, git clone of the two repos):
-#   uv venv .venv && uv pip install -e ./flashruntime -e ./flashnode
+# On ANY OTHER machine on the LAN (needs only python3 — no repo clone now):
+#   python3 -m venv .venv
+#   .venv/bin/python -m pip install \
+#     "flashnode @ git+https://github.com/Zolli-Labs/flashml@<pin>#subdirectory=flashnode"
 #   FLASHNODE_JOIN_CODE=LOCAL-2026 .venv/bin/flashnode work --coordinator http://<this-mac-ip>:8100
+#
+# Once flashnode is on PyPI this collapses to `pip install flashnode`.
 JOIN_CODE ?=
 local-coordinator:
 	@mkdir -p .local-state

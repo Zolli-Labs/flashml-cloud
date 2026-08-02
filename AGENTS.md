@@ -1,94 +1,99 @@
 # Zolli Labs — `flashml-cloud`
 
-**This repository is `Zolli-Labs/flashml-cloud` (PRIVATE).** It holds all
-three components of the FlashML system as git subtrees with their history
-intact (see any component's docs/SYSTEM_OVERVIEW.md for product context):
+**This repository is `Zolli-Labs/flashml-cloud` (PRIVATE).** It holds the
+managed application: the control-plane API, the web console, and the
+cross-component end-to-end suite.
 
-- flashruntime/  — **PUBLIC**, mirrored standalone at
-                   `Zolli-Labs/flashruntime`. Protocol + fault-tolerant
-                   runtime. The other two depend on it; it depends on
-                   neither.
-- flashnode/     — **PUBLIC**, mirrored standalone at
-                   `Zolli-Labs/flashnode`. The host agent contributors
-                   install.
-- flashml-cloud/ — PRIVATE forever. Managed control plane + dashboard.
-                   Never mirrored anywhere public.
-
-## The public repos are downstream of this one
-
-Work happens here. The public copies are updated by splitting a subtree out
-and pushing:
-
-```bash
-git subtree split --prefix=flashnode -b split-flashnode
-git merge-base --is-ancestor <public-main> split-flashnode   # must pass
-git push https://github.com/Zolli-Labs/flashnode.git split-flashnode:main
+```
+flashml-cloud/            THIS REPO — private
+├── flashml-cloud/apps/api/   FastAPI control plane
+├── flashml-cloud/apps/web/   Next.js console
+├── e2e/                      the whole loop, against PINNED public artifacts
+└── render.yaml               three services: web, api, coordinator
 ```
 
-Never force-push them. Contributors clone those repos, so a rewritten
-history breaks every existing checkout.
+The runtime and the host agent are **not here**. They live in the public
+monorepo `github.com/Zolli-Labs/flashml` and are consumed as ordinary pinned
+dependencies.
 
-**Push after any change under `flashruntime/` or `flashnode/`.** Volunteers
-install from the public repos, so an unsynced subtree means the agent
-running on someone's laptop is not the agent this repo's tests cover. That
-has already happened: `flashnode/executor/images.py` existed here and not
-there, so a public install still demanded the hand-maintained image
-allowlist this repo had already removed.
+## The rule that replaced the old rule
 
-Dependency rule: flashml-cloud and flashnode import flashruntime's versioned
-protocol package. Nothing else crosses component boundaries. Never copy
-private code into the public subtrees — one repo makes that easy to do by
-accident, and `flashruntime/scripts/audit_secrets.sh` does not catch it.
+Until 2026-08-01 this repo contained `flashruntime/` and `flashnode/` as git
+subtrees, mirrored by hand to two public repos with `git subtree split` +
+push. **That is gone. Do not reintroduce it.**
+
+It shipped a real bug: `flashnode/executor/images.py` existed here and not in
+the public mirror, so a volunteer's install demanded an image allowlist this
+repo had already removed. The deployed coordinator and the agents talking to
+it were running different code, and nothing detected it.
+
+**There is now exactly one copy of the runtime, and this repo does not hold
+it.** Both `flashml-cloud/apps/api/pyproject.toml` and `render.yaml` pin the
+same commit of `Zolli-Labs/flashml`. When you change the pin, change it in
+**both**, plus `FLASHML_PIN` in the `Makefile` — the API and the coordinator
+running different protocol versions is precisely the failure this removed.
+
+Commit pins are acceptable while `flashruntime` is unpublished. Once it is on
+PyPI, move to `flashruntime==0.3.0` and treat a surviving commit pin as a
+release blocker. See
+`flashml-cloud/docs/superpowers/specs/2026-08-01-foundation-design.md` §3.3.
+
+## Dependency direction
+
+`flashml-cloud` imports `flashruntime`'s versioned protocol package. Nothing
+else crosses a component boundary, and nothing imports this repo.
+
+## Working on the runtime at the same time
+
+Clone the public repo as a sibling and point the local tooling at it:
+
+```bash
+git clone https://github.com/Zolli-Labs/flashml.git ../flashml
+make e2e-setup LOCAL=1     # e2e against your checkout instead of the pin
+```
+
+`LOCAL=1` prints a warning, deliberately: a green run against a working tree
+is not release evidence. The default — and everything deployed — uses the pin.
+
+## Running it
+
+```bash
+make setup                 # api venv (from the pin) + web deps
+./scripts/dev.sh --all     # coordinator :8100 + API :8000 + console :3000
+```
+
+`npm run dev` alone is not enough — every page after sign-in calls the API,
+and the API will not start without a coordinator behind it. A lone console
+shows "Failed to fetch" on every screen, which looks like a bug and is not.
+
+Needs a `.env` at the repo root (gitignored; copy `.env.example`).
 
 ## Naming history
 
 Until 2026-08-01 this repo was `Zolli-Labs/flashml-poc`, and a separate,
 now-superseded `Zolli-Labs/flashml-cloud` held only the cloud component. Its
-final commit `159ff30` is an ancestor of this history, so nothing was lost;
-it was renamed `flashml-cloud-legacy`.
+final commit `159ff30` is an ancestor of this history, so nothing was lost; it
+was renamed `flashml-cloud-legacy`.
 
-The Supabase project is still *named* `flashml-poc`. That is a different
-thing from the repo, its ref `yualksqjjvlfscbbsygq` is what anything
-actually resolves, and renaming it would only invalidate the docs citing it.
+The Supabase project is still *named* `flashml-poc`. That is a different thing
+from the repo, its ref `yualksqjjvlfscbbsygq` is what anything actually
+resolves, and renaming it would only invalidate the docs citing it.
 
-Local Python setup (per component): uv venv && uv pip install -e ".[dev]"
-Cross-component editable: uv pip install -e ../flashruntime -e .
-Run the whole stack locally: ./scripts/dev.sh --all
+## Document map (read in this order)
 
-Workspace document map (read in this order when starting work):
-- HANDBOOK.md               — READ FIRST, once: product + per-component
-                              breakdown, as-built local architecture, cloud
-                              target, implementation recipes, edge-case
-                              register, research register (R1–R10), DoD.
-- HANDOFF.md                — READ SECOND: the builder's exit notes —
-                              ranked risks, hard-won gotchas, judgment
-                              calls, per-sprint-item tips, git-branch state
-                              (all work on local-milestone-2026-07).
-- PROGRESS.md               — AUTHORITATIVE status: stage checklist, dated
-                              work log, and the LOGGING PROTOCOL every
-                              agent must follow.
-- SPRINT_PLAN.md            — the next two weeks, day by day, with demos
-                              and acceptance criteria.
-- M1_DECISIONS.md           — the M1 (deployed multi-user POC) decision
-                              record: what was decided, why, what it costs,
-                              and what would make us revisit. Read before
-                              re-opening any M1 design choice. Companion to
-                              flashml-cloud/docs/superpowers/specs/
-                              2026-07-31-deployed-multi-user-poc-design.md.
-                              NOTE: M1 ships on Supabase + Render; Alibaba
-                              is deferred, not abandoned (see D1).
-- PLAN_2WEEKS.md            — the original staged plan; local half complete
-                              (status banner at top). Still the Alibaba
-                              (Stage 5) runbook detail.
-- FLASHRUNTIME_EVALUATION.md — architecture decisions for flashruntime
-                              (reliability runtime first; planner = explainable
-                              feasibility filter; four axes; StrategyPlan;
-                              library stances). Summarized in
-                              flashruntime/docs/adr/0003.
-- archive/ — historical: POC_PLAN.md + POC_REPORT.md (July 17–18 POC record).
-- FlashML_Master_..._Report.docx — product strategy source of truth.
-- e2e/                      — cloud-free end-to-end proof of the whole loop
-                              (make e2e / e2e-demo) + the real-second-machine
-                              runbook in e2e/README.md.
-- Each repo's docs/SYSTEM_OVERVIEW.md is synced FROM flashruntime's copy
-  (make sync-docs); never edit the copies in flashnode/flashml-cloud.
+- `HANDBOOK.md` — READ FIRST, once: product + per-component breakdown,
+  as-built architecture, cloud target, edge-case and research registers.
+- `PROGRESS.md` — AUTHORITATIVE status: stage checklist, dated work log, and
+  the LOGGING PROTOCOL every agent must follow.
+- `M1_DECISIONS.md` — the M1 decision record (D1–D15). Read before re-opening
+  any M1 design choice.
+- `flashml-cloud/docs/superpowers/specs/2026-08-01-foundation-design.md` —
+  the current architecture work: repo topology, releases, and the diskless
+  control plane. Plans A/B1/B2 sit beside it in `plans/`.
+- `e2e/` — the whole loop against pinned artifacts (`make e2e`, `make
+  e2e-demo`) + the real-second-machine runbook in `e2e/README.md`.
+- `archive/` — historical: HANDOFF, PLAN_2WEEKS, SPRINT_PLAN, POC records.
+
+Product context (`SYSTEM_OVERVIEW.md`) lives in the public repo and is linked
+from `flashml-cloud/docs/SYSTEM_OVERVIEW.md`. It is no longer copied here —
+`make sync-docs` and `make check-docs` are gone with it.
