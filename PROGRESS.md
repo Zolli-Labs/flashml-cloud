@@ -146,6 +146,51 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-02 — CI, a deploy gate, and a migration runner (flashml-cloud)
+
+What/why: this repository had **no CI at all**, while all three Render services
+ran `autoDeploy: yes` with the `commit` trigger on `main`. Every commit
+deployed to production without a single test running. Separately, migrations
+were applied to Supabase by hand, so "what schema does that database have?"
+was answerable only from memory — survivable with one database, guaranteed
+drift with two. Owner chose: gate prod now, add the dev environment second.
+
+How verified: apps/api 419 → **432** (13 new in `test_migrate.py`), e2e **61**,
+web **36**. `render.yaml` parses with `autoDeploy: false` on all three
+services; `ci.yml` parses with the job graph
+`api,web,e2e,secrets → migrate-prod → deploy-prod`. Git history scanned for
+both DATABASE_URL passwords: **0 commits each**, `.env` untracked, and the two
+`pooler.supabase.com` hits in history are placeholder docs — so gitleaks
+should be green on day one.
+
+Gotchas:
+1. **The `api` job cannot use a `services: postgres:` container.**
+   `tests/conftest.py` starts its *own* server with `initdb`/`pg_ctl`, so it
+   needs the BINARIES on PATH, not a server on a port. The workflow discovers
+   the bin directory (`ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1`)
+   rather than hardcoding 16 — a pinned version breaks silently when the
+   runner image moves, reading as "initdb not found" long afterwards.
+2. **Render's `checksPass` trigger was rejected on purpose.** It works, but it
+   is a dashboard setting with no blueprint field, so it cannot be reviewed in
+   a diff. Deploys are now triggered by CI with `autoDeploy: false`; the whole
+   rule lives in one reviewable file. Break-glass is a dashboard deploy.
+3. **`--baseline` was a live footgun and is fixed.** A bare baseline records
+   EVERY pending migration. Prod has 0001-0003 but not `0004_attempts`, so the
+   documented gate would have recorded 0004 as applied *without creating
+   `public.attempts`* — the contribution ledger would credit nobody, forever,
+   while `--dry-run` reported the database up to date. `--baseline-through`
+   now baselines a prefix; the prod runbook is three commands with a verify in
+   the middle. Found by an agent checking the plan against the schema.
+4. Web is 36 tests, not the 26 this entry's spec first claimed — the console
+   session added 10 while this was being built.
+
+Next: the four human gates — `RENDER_API_KEY` and `PROD_DATABASE_URL` repo
+secrets, a `production` GitHub Environment **with a required reviewer** (without
+it the gate is decorative), and the three-command prod baseline. Then Phase 2,
+the dev environment (~$7/mo: the coordinator needs a disk, which the free tier
+has no way to provide). Parking lot: no rollback automation, no per-PR preview
+environments, no post-deploy smoke test.
+
 ### 2026-08-02 — Attempt ledger: every job now credits accepted work (flashml-cloud)
 
 What/why: `db.record_contributions` had exactly **one** caller — inside
