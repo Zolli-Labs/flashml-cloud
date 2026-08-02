@@ -89,7 +89,7 @@ export default function SubmitPage() {
   // the job rather than being silently redirected as if nothing was flagged.
   if (status === "submitted" && result) {
     return (
-      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
         <div>
           <h1 className="text-2xl font-bold font-mono">Job submitted</h1>
           <p className="text-sm text-muted-foreground mt-1">
@@ -124,7 +124,7 @@ export default function SubmitPage() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
       <div>
         <h1 className="text-2xl font-bold font-mono">Submit a repo</h1>
         <p className="text-sm text-muted-foreground mt-1">
