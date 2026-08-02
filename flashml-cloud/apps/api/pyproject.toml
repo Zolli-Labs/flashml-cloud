@@ -21,7 +21,7 @@ dependencies = [
     #
     # Change this in render.yaml and the Makefile's FLASHML_PIN at the same
     # time. See docs/superpowers/specs/2026-08-01-foundation-design.md §3.3.
-    "flashruntime==0.3.0",
+    "flashruntime==0.4.0",
     "fastapi>=0.111",
     "uvicorn>=0.30",
     "httpx>=0.27",
