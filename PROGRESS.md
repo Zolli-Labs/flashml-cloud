@@ -140,11 +140,70 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       preflight against the real example repo returns 0 findings and resolves
       to the now-public image reference.
       **REMAINING: the §10 run-through itself**, whose real test is a friend
-      completing signup → enroll → contribute unaided. No job has yet been
-      submitted, claimed and completed against the DEPLOYED stack — only
-      locally (e2e 61).
+      completing signup → enroll → contribute unaided. A job HAS now been
+      submitted, claimed and completed against the deployed stack —
+      `fed-2e2d4d6ab57f`, 5 rounds, 2026-08-02 — but on **one** machine, so
+      item 4 (contributions from more than one machine) is still open, and
+      items 2, 5, 6, 7 and 10 with it. (This paragraph claimed no deployed job
+      had ever run; that was true when written and was not updated in the same
+      edit as the entry that disproved it — logging rule 2.)
+      Host preconditions ✅ (2026-08-02) — `flashnode doctor` and the
+      fail-closed `work` gate, because both prior attempts died on host-side
+      Docker misconfiguration rather than on anything distributed.
 
 ## Entries
+
+### 2026-08-02 — flashnode doctor: name the broken host instead of failing its tasks (flashnode)
+
+What/why: M1 §10 items 4 and 10 have failed twice on host-side Docker
+misconfiguration — `docker-credential-desktop` missing on macOS, engine
+`_ping` 500 on Windows. The startup gate was `shutil.which("docker")`, which
+**both** machines pass. Worse, `docker_runner` raised TaskExecutionError,
+`loop.py` called `fail()` and kept claiming, so a broken host burned task after
+task while looking healthy to its owner, the coordinator and the submitter.
+Six checks now run as `flashnode doctor` and gate `flashnode work` fail-closed.
+
+How verified: flashnode 214 → **257** unit tests, plus 2 new integration tests
+green against a real daemon (`pytest -m integration`). Both recorded field
+failures are fixtures: fed that exact stderr, the doctor fails the right check
+**and** prints the remedy. `flashnode` 0.3.1 published to PyPI (all four
+release jobs green, including the resolvable-from-PyPI gate); `NODE_VERSION`
+moved to 0.3.1 and **e2e 61** passed against the published wheel.
+
+Gotchas:
+1. **`def check_cli_on_path(which=shutil.which)` was a real bug, not a style
+   nit.** A default argument binds the original function at import, so
+   `monkeypatch.setattr("shutil.which", ...)` — the idiom this suite uses and
+   documents — could not reach it. The `work` gate ignored the patch, ran a
+   **real `docker run` inside unit tests**, and passed or failed with the
+   machine's Docker state: four tests in test_agent/test_executor passed alone
+   and failed in the suite. Resolve side effects at call time. Two regression
+   tests pin it.
+2. Check 4 **reads** a host-written probe rather than writing one. The curated
+   images end in a non-root USER and the minimal flag set has no `--user`, so a
+   write fails on a healthy Linux host — a check that fails on good machines
+   trains people to ignore it.
+3. Checks 4 and 5 are separate **on purpose**. 5 subsumes 4 mechanically;
+   keeping both localises a fault to mount-vs-flags without pattern-matching
+   stderr. On Windows, check 5 is the first thing that has ever *executed*
+   Plan 6's `--user` path, which PROGRESS recorded as argv-verified only.
+4. `flashnode work` does **not** pull (`pull=False`). A registry blip must not
+   stop a daemon whose images are cached. The cost is deliberate: a fresh
+   install must run `flashnode doctor` once.
+5. Check 6 closes gap 3 of the provenance-and-local-data spec —
+   `parse_local_data` never stats the path, so a typo advertised a dataset the
+   host could not serve, and the fail-closed placement gate then routed that
+   job to this host **and only this host**.
+6. `tests/integration/test_argv_runner_docker.py` has two failures on Docker
+   29.6.2 (`Network unreachable` vs the expected `network is unreachable`;
+   `Permission denied` vs `read-only file system`). **Pre-existing** — verified
+   by re-running them at 7a7cd54 — and in both the sandbox is working; the
+   assertions match older wording. Not fixed here, not caused here.
+
+Next: run M1 §10 with a second real machine — items 2, 4, 5, 6, 7, 10. Parking
+lot: mid-session Docker breakage still burns tasks (the fix is server-side node
+quarantine in the coordinator, deliberately out of scope); the two brittle
+integration assertions above.
 
 ### 2026-08-02 — Production migrated by the runner; 0003 had never been applied
 

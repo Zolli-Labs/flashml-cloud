@@ -37,7 +37,7 @@ RUNTIME_VERSION := 0.4.0
 # in step: on an older runtime pydantic silently drops the field, the host
 # advertises nothing, and local-data work is never placed on it — fail-closed,
 # but with no error anywhere to say why.
-NODE_VERSION    := 0.3.0
+NODE_VERSION    := 0.3.1
 FLASHML         ?= ../flashml
 
 RUNTIME_PIN := "flashruntime[service,sklearn,dev]==$(RUNTIME_VERSION)"
