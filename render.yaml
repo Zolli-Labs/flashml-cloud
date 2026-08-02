@@ -346,9 +346,12 @@ services:
           type: web
           name: flashml-dev-coordinator
           envVarKey: OPERATOR_TOKEN
-      # The flashml-dev Supabase project (ktstmvgasqupeuimjrog), NOT prod.
+      # The DEV Supabase project, not prod. sync: false like the production
+      # service above — Render prompts once and the ref never enters git.
+      # Getting this wrong points dev at the production database, so check it
+      # against the dashboard rather than pasting from memory.
       - key: SUPABASE_URL
-        value: https://ktstmvgasqupeuimjrog.supabase.co
+        sync: false
       # sync: false => Render prompts once and never stores it in git.
       # Get it from Supabase -> flashml-dev -> Settings -> Database ->
       # Connection string (SESSION pooler, :5432, user postgres.<ref>).
@@ -373,7 +376,7 @@ services:
       - key: NEXT_PUBLIC_CLOUD_API
         value: https://flashml-dev-api.onrender.com
       - key: NEXT_PUBLIC_SUPABASE_URL
-        value: https://ktstmvgasqupeuimjrog.supabase.co
+        sync: false
       # Only the anon/publishable key ever reaches the browser — and it stays
       # out of git regardless, matching how the prod service above handles it.
       # Render prompts once at blueprint sync. Get it from Supabase ->

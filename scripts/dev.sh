@@ -86,13 +86,25 @@ set +a
 
 # THE PRODUCTION GUARD.
 #
-# Matching on the project ref in DATABASE_URL rather than on the filename: the
+# Matches on the project ref inside DATABASE_URL, not on the filename: the
 # thing that decides which rows you mutate is the connection string, and
-# somebody will eventually paste a prod URL into .env.dev. `yualksqjjvlfscbbsygq`
-# is flashml-poc, the production project.
-if [[ "${DATABASE_URL:-}" == *"yualksqjjvlfscbbsygq"* && "$ALLOW_PRODUCTION" != "1" ]]; then
+# somebody will eventually paste a prod URL into .env.dev.
+#
+# The ref is DERIVED from .env.prod at runtime rather than written here. Two
+# reasons: no production identifier lives in a tracked file, and the guard
+# stays correct automatically if the production project is ever replaced —
+# a hardcoded ref would silently stop guarding anything the day it changed.
+#
+# If .env.prod is absent there is nothing to compare against, and nothing to
+# leak either: you cannot be holding production values you do not have.
+PROD_REF=""
+if [[ -f "$ROOT/.env.prod" ]]; then
+  PROD_REF="$(sed -n 's|.*://postgres\.\([A-Za-z0-9]\{16,\}\):.*|\1|p' "$ROOT/.env.prod" | head -1)"
+fi
+
+if [[ -n "$PROD_REF" && "${DATABASE_URL:-}" == *"$PROD_REF"* && "$ALLOW_PRODUCTION" != "1" ]]; then
   echo "refusing to start: $ENV_FILE points DATABASE_URL at PRODUCTION" >&2
-  echo "  (project yualksqjjvlfscbbsygq / flashml-poc)" >&2
+  echo "  (it matches the project ref in .env.prod)" >&2
   echo "" >&2
   echo "  Use the dev database:   ./scripts/dev.sh --all --env .env.dev" >&2
   echo "  Or, if you truly mean it, add --i-mean-production" >&2
