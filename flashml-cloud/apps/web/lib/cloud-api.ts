@@ -255,7 +255,20 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...(init.headers as Record<string, string> | undefined),
   };
 
-  const res = await fetch(`${cloudApiBase()}${path}`, { ...init, headers });
+  const url = `${cloudApiBase()}${path}`;
+
+  // fetch() rejects with a bare `TypeError: Failed to fetch` for every
+  // transport-level failure — wrong host, DNS, CORS, mixed content, offline,
+  // connection refused — and names none of them. Shown to a user verbatim it
+  // is indistinguishable from the API being down, and it hides the one fact
+  // that identifies the cause: which URL was actually called. Say it.
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, headers });
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    throw new ApiError(0, `${reason} — could not reach ${url}`);
+  }
 
   if (res.status === 401) {
     throw new NotAuthenticated();

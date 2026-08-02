@@ -148,6 +148,19 @@ describe("cloud-api", () => {
     expect(err).toBeInstanceOf(NotFound);
   });
 
+  it("names the URL it could not reach when fetch rejects", async () => {
+    // A bare "Failed to fetch" is the same message for a wrong host, DNS,
+    // CORS, mixed content and offline. The URL is the one fact that tells
+    // them apart, and it is the one thing the raw error omits.
+    vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "https://api.example.com");
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(listMachines()).rejects.toThrow(
+      "Failed to fetch — could not reach https://api.example.com/v1alpha1/machines",
+    );
+  });
+
   it("reads the base URL from NEXT_PUBLIC_CLOUD_API, not a hardcoded host", () => {
     vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "https://cloud.example.com");
     expect(cloudApiBase()).toBe("https://cloud.example.com");
