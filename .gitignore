@@ -19,3 +19,12 @@ __pycache__/
 **/node_modules/
 **/.next/
 **/.superpowers/
+
+# Build artifacts and local databases. flashml-cloud.db and
+# apps/api/*.egg-info were tracked by accident; egg-info in particular goes
+# stale the moment anyone reinstalls and then produces diffs that look like
+# real changes. Nothing here is an input to a build.
+*.db
+*.egg-info/
+build/
+dist/
