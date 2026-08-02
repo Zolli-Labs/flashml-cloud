@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, DownloadSimple, Warning } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { Swimlanes } from "@/components/jobs/Swimlanes";
+import { RoundProgress } from "@/components/jobs/RoundProgress";
 import { formatBytes } from "@/lib/utils";
 import {
   deriveAttempts,
@@ -313,11 +314,6 @@ function ProgressBar({
 }
 
 function ProgressView({ job, rounds }: { job: JobRecord; rounds: JobRound[] }) {
-  const reported = rounds.filter((r) => r.mean_loss !== null);
-  const maxLoss = reported.length
-    ? Math.max(...reported.map((r) => r.mean_loss as number))
-    : null;
-
   return (
     <div className="space-y-6">
       {job.error && (
@@ -330,45 +326,7 @@ function ProgressView({ job, rounds }: { job: JobRecord; rounds: JobRound[] }) {
       )}
 
       {rounds.length > 0 ? (
-        <section className="rounded-lg border border-border bg-surface p-4">
-          <h2 className="text-sm font-semibold">
-            Rounds{" "}
-            <span className="font-normal text-muted-foreground">
-              ({rounds.length})
-            </span>
-          </h2>
-          <div className="mt-3 space-y-2.5">
-            {rounds.map((r) => (
-              <div key={r.round} className="flex items-center gap-3">
-                <span className="w-16 shrink-0 font-mono text-xs text-muted-foreground">
-                  round {r.round}
-                </span>
-                <span className="w-24 shrink-0 font-mono text-xs">
-                  {/* Null loss renders as absent. Never 0, never smoothed: a
-                      training dashboard that invents a number is worse than
-                      one that admits it does not have one. */}
-                  {r.mean_loss === null
-                    ? "loss —"
-                    : `loss ${r.mean_loss.toFixed(4)}`}
-                </span>
-                {r.mean_loss !== null && maxLoss !== null && (
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="h-full bg-primary"
-                      style={{
-                        width: `${maxLoss > 0 ? (r.mean_loss / maxLoss) * 100 : 100}%`,
-                      }}
-                    />
-                  </div>
-                )}
-                <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                  {r.participants} contributor
-                  {r.participants === 1 ? "" : "s"}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
+        <RoundProgress rounds={rounds} jobStartedAt={job.created_at} />
       ) : (
         <NoMetrics />
       )}
