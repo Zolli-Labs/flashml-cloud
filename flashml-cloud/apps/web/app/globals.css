@@ -30,83 +30,95 @@
   --color-cyan: var(--cyan);
   --color-cyan-dim: var(--cyan-dim);
   --color-node-green: var(--node-green);
+  --color-warning: var(--warning);
   --color-surface: var(--surface);
   --color-surface-elevated: var(--surface-elevated);
+  --color-bg-rail: var(--bg-rail);
+  --color-accent-text: var(--accent-text);
 }
 
 /* ─── FlashML theme ───────────────────────────────────────────────
-   ONE accent, used sparingly, plus one semantic status colour.
+   Dark, single-accent, indigo. Per
+   docs/superpowers/specs/2026-08-02-console-and-landing-redesign-design.md §4.1.
 
-   The previous palette ran an accent at chroma 0.16 and then attached
-   glow to it on nav, buttons, progress bars, headings and status dots.
-   That combination — saturated cyan plus bloom on every surface — is the
-   single most recognisable "generated dashboard" signature, and it also
-   flattens hierarchy: when everything is emphasised, nothing is.
+   Two rules the whole palette exists to enforce:
 
-   Here the accent is desaturated to ~0.10 chroma and reserved for four
-   things: the primary action, the current page, the focus ring, and live
-   state. Everything else is neutral, and depth comes from surface steps
-   and tinted shadow rather than light bloom.
+   1. INDIGO IS INTERACTIVE ONLY. Primary actions, links, icon tiles,
+      the current page, the focus ring. Nothing else. The previous teal
+      was on the nav AND the buttons AND the links AND the artifact URIs
+      AND the loss bars AND the headings, which is why it carried no
+      meaning. Every status uses a semantic hue instead.
+
+   2. DEPTH COMES FROM BORDER PLUS SURFACE STEP, never bloom. "Live" is
+      expressed as motion, not as colour, which keeps green/amber/red
+      unambiguous.
    ─────────────────────────────────────────────────────────────────── */
 :root,
 .dark {
-  /* Base — dark charcoal with a faint cool tint, not near-black. A very
-     low lightness reads as a void and makes every border float; lifting
-     it gives the surface steps below somewhere to sit. */
-  --background: oklch(0.145 0.006 265);
-  --foreground: oklch(0.97 0.003 265);
+  /* Base. Not a void: a very low lightness makes every hairline float,
+     and the surface steps below need somewhere to sit. */
+  --background: oklch(0.175 0.004 285);
+  --foreground: oklch(0.97 0 0);
 
-  /* Surface steps. Three, evenly spaced, so elevation is legible without
-     a border on every element. */
-  --surface: oklch(0.185 0.007 265);
-  --surface-elevated: oklch(0.225 0.008 265);
-  --card: oklch(0.185 0.007 265);
-  --card-foreground: oklch(0.97 0.003 265);
+  /* Surface steps. Three, so elevation is legible without a border on
+     every element. */
+  --surface: oklch(0.195 0.005 285);
+  --surface-elevated: oklch(0.235 0.006 285);
+  --card: oklch(0.195 0.005 285);
+  --card-foreground: oklch(0.97 0 0);
 
-  --popover: oklch(0.225 0.008 265);
-  --popover-foreground: oklch(0.97 0.003 265);
+  --popover: oklch(0.235 0.006 285);
+  --popover-foreground: oklch(0.97 0 0);
 
-  /* Primary — muted teal. Distinct enough to own, calm enough to sit
-     next to dense data without competing with it. */
-  --primary: oklch(0.74 0.104 202);
-  --primary-foreground: oklch(0.145 0.006 265);
+  /* The rail is a step DOWN from the content column, not up. */
+  --bg-rail: oklch(0.155 0.004 285);
 
-  --secondary: oklch(0.225 0.008 265);
-  --secondary-foreground: oklch(0.88 0.004 265);
+  /* Primary. Indigo, high chroma, and it earns that saturation by being
+     rare. */
+  --primary: oklch(0.55 0.21 285);
+  --primary-foreground: oklch(0.99 0 0);
 
-  --muted: oklch(0.225 0.008 265);
-  /* Was 0.52, which fell below 4.5:1 against the old background for the
-     small text it was mostly used on. */
-  --muted-foreground: oklch(0.655 0.011 265);
+  --secondary: oklch(0.235 0.006 285);
+  --secondary-foreground: oklch(0.88 0.003 285);
 
-  /* Hover/accent surfaces are NEUTRAL. A tinted hover on every control is
-     what made the old UI feel uniformly electric. */
+  --muted: oklch(0.235 0.006 285);
+  --muted-foreground: oklch(0.70 0.008 285);
+
+  /* Hover surfaces are NEUTRAL. A tinted hover on every control is what
+     made the old UI feel uniformly electric. */
   --accent: oklch(1 0 0 / 0.06);
-  --accent-foreground: oklch(0.97 0.003 265);
+  --accent-foreground: oklch(0.97 0 0);
 
-  /* Status */
-  --destructive: oklch(0.655 0.155 25);
-  --node-green: oklch(0.72 0.115 155);
-  --warning: oklch(0.79 0.115 75);
+  /* Status. Semantic, and none of them is indigo. */
+  --destructive: oklch(0.62 0.20 25); /* failed, rejected            */
+  --node-green: oklch(0.72 0.17 150); /* accepted, healthy           */
+  --warning: oklch(0.78 0.14 80); /* recovering, degraded, expired   */
 
-  --border: oklch(1 0 0 / 0.08);
-  --input: oklch(1 0 0 / 0.10);
-  --ring: oklch(0.74 0.104 202 / 0.55);
+  --border: oklch(1 0 0 / 0.09);
+  --input: oklch(1 0 0 / 0.11);
+  --ring: oklch(0.55 0.21 285 / 0.65);
 
-  --cyan: oklch(0.74 0.104 202);
-  --cyan-dim: oklch(0.74 0.104 202 / 0.14);
+  /* Landing only. The lighter indigo used for the second half of a
+     two-tone headline; too light for UI chrome, correct for display type
+     where it needs to read against the background at 60px. */
+  --accent-text: oklch(0.80 0.13 285);
 
-  /* Shadows carry the background hue rather than neutral black, so
-     elevation reads as this surface being lit rather than a sticker
-     dropped onto it. */
-  --shadow-color: 265 30% 3%;
-  --shadow-sm: 0 1px 2px oklch(0.06 0.01 265 / 0.4);
-  --shadow-md: 0 4px 12px -2px oklch(0.06 0.01 265 / 0.45);
-  --shadow-lg: 0 16px 40px -12px oklch(0.06 0.01 265 / 0.6);
+  /* MIGRATION SHIM. `--cyan` and `--cyan-dim` are referenced by the
+     console pages (text-cyan, bg-cyan/10, border-cyan/30) which are not
+     part of this landing change. Pointing them at the new accent keeps
+     those screens coherent instead of half-migrated. Both names go away
+     with P1 (design system + shell); do not use them in new code. */
+  --cyan: oklch(0.55 0.21 285);
+  --cyan-dim: oklch(0.55 0.21 285 / 0.14);
 
-  /* Slightly softer than the old 0.5rem, and the scale in @theme derives
-     the inner radii from it so nested corners stay concentric. */
-  --radius: 0.625rem;
+  /* Shadows carry the background hue, so elevation reads as this surface
+     being lit rather than a sticker dropped onto it. */
+  --shadow-color: 285 30% 4%;
+  --shadow-sm: 0 1px 2px oklch(0.08 0.01 285 / 0.4);
+  --shadow-md: 0 4px 12px -2px oklch(0.08 0.01 285 / 0.45);
+  --shadow-lg: 0 16px 40px -12px oklch(0.08 0.01 285 / 0.6);
+
+  --radius: 0.5rem;
 }
 
 @layer base {
@@ -139,20 +151,10 @@
 
   body {
     @apply bg-background text-foreground font-sans;
-    /* One soft, off-centre light source. The old version put a symmetric
-       ellipse dead centre at the top, which reads as a template header
-       glow; offsetting it and dropping the opacity makes it ambient
-       rather than announced. */
-    background-image: radial-gradient(
-      ellipse 90% 55% at 18% -10%,
-      oklch(0.74 0.104 202 / 0.05),
-      transparent 70%
-    );
-    background-attachment: fixed;
   }
 
   ::selection {
-    background: oklch(0.74 0.104 202 / 0.28);
+    background: oklch(0.55 0.21 285 / 0.35);
     color: oklch(0.99 0 0);
   }
 
@@ -208,8 +210,13 @@
    The old .glass had blur and a flat border, which is why panels looked
    like translucent rectangles rather than material.
    ─────────────────────────────────────────────────────────────────── */
+/* SCOPE: landing sections and overlays only (command palette, sticky
+   headers, drawers, toasts). Never behind a number, a table row, a log
+   line or an error. Translucency over a moving backdrop costs contrast,
+   and in a console where a changing value means a machine died, that is
+   not a cosmetic cost. */
 .glass {
-  background: oklch(0.185 0.007 265 / 0.62);
+  background: oklch(0.195 0.005 285 / 0.62);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border: 1px solid oklch(1 0 0 / 0.07);
@@ -222,7 +229,7 @@
 /* Denser variant for panels that sit over content and must stay legible
    while it scrolls behind them. */
 .glass-strong {
-  background: oklch(0.185 0.007 265 / 0.85);
+  background: oklch(0.195 0.005 285 / 0.85);
   backdrop-filter: blur(28px) saturate(180%);
   -webkit-backdrop-filter: blur(28px) saturate(180%);
   border: 1px solid oklch(1 0 0 / 0.09);
@@ -237,7 +244,17 @@
 @supports not (backdrop-filter: blur(1px)) {
   .glass,
   .glass-strong {
-    background: oklch(0.185 0.007 265 / 0.97);
+    background: oklch(0.195 0.005 285 / 0.97);
+  }
+}
+
+/* Same fallback for users who ask the OS to cut transparency. */
+@media (prefers-reduced-transparency: reduce) {
+  .glass,
+  .glass-strong {
+    background: oklch(0.195 0.005 285 / 0.97);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }
 
@@ -258,7 +275,7 @@
 
 .ring-accent,
 .glow-green {
-  box-shadow: 0 0 0 1px oklch(0.74 0.104 202 / 0.28);
+  box-shadow: 0 0 0 1px oklch(0.55 0.21 285 / 0.35);
 }
 
 /* Was a text-shadow bloom on headings. Headings earn emphasis from size
@@ -301,7 +318,7 @@
   outline: none;
   box-shadow:
     0 0 0 2px var(--background),
-    0 0 0 4px oklch(0.74 0.104 202 / 0.85);
+    0 0 0 4px oklch(0.66 0.19 285 / 0.95);
   border-radius: var(--radius-sm);
 }
 
@@ -327,11 +344,11 @@
 
 @keyframes halo {
   0% {
-    box-shadow: 0 0 0 0 oklch(0.72 0.115 155 / 0.5);
+    box-shadow: 0 0 0 0 oklch(0.72 0.17 150 / 0.5);
   }
   70%,
   100% {
-    box-shadow: 0 0 0 6px oklch(0.72 0.115 155 / 0);
+    box-shadow: 0 0 0 6px oklch(0.72 0.17 150 / 0);
   }
 }
 
@@ -434,10 +451,10 @@
 }
 
 .flashml-flow {
-  --xy-controls-button-background-color: oklch(0.185 0.007 265 / 0.92);
-  --xy-controls-button-background-color-hover: oklch(0.225 0.008 265 / 0.96);
-  --xy-controls-button-color: oklch(0.74 0.104 202 / 0.8);
-  --xy-controls-button-color-hover: oklch(0.82 0.104 202);
+  --xy-controls-button-background-color: oklch(0.195 0.005 285 / 0.92);
+  --xy-controls-button-background-color-hover: oklch(0.235 0.006 285 / 0.96);
+  --xy-controls-button-color: oklch(0.70 0.008 285);
+  --xy-controls-button-color-hover: oklch(0.97 0 0);
   --xy-controls-button-border-color: oklch(1 0 0 / 0.1);
   --xy-controls-box-shadow: 0 0 0 1px oklch(1 0 0 / 0.08), var(--shadow-md);
 }
@@ -446,7 +463,7 @@
   overflow: hidden;
   border: 1px solid oklch(1 0 0 / 0.08);
   border-radius: var(--radius-sm);
-  background: oklch(0.145 0.006 265 / 0.92);
+  background: oklch(0.175 0.004 285 / 0.92);
 }
 
 .flashml-flow .react-flow__controls-button {
@@ -455,7 +472,24 @@
 
 /* ─── Progress ────────────────────────────────────────────────────── */
 .progress-cyan [data-slot="progress-indicator"] {
-  background: var(--cyan);
+  background: var(--primary);
+}
+
+/* ─── Hairline rules ──────────────────────────────────────────────
+   The landing is structured by rules, not by cards. A section divider
+   that fades at both ends reads as a considered edge rather than a
+   border that ran out of page.
+   ─────────────────────────────────────────────────────────────────── */
+.rule-fade {
+  height: 1px;
+  border: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    oklch(1 0 0 / 0.12) 15%,
+    oklch(1 0 0 / 0.12) 85%,
+    transparent
+  );
 }
 
 /* ─── Scrollbar ───────────────────────────────────────────────────── */

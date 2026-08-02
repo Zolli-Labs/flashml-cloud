@@ -32,9 +32,13 @@ export function NodeBackground() {
     if (!ctx) return;
 
     const resize = () => {
-      canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-      canvas.height = canvas.offsetHeight * window.devicePixelRatio;
-      ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = canvas.offsetWidth * dpr;
+      canvas.height = canvas.offsetHeight * dpr;
+      // setTransform, not scale. `scale` MULTIPLIES the existing matrix,
+      // so every resize compounded the previous one and the canvas drew
+      // progressively further off-screen.
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
     resize();
@@ -88,7 +92,7 @@ export function NodeBackground() {
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
-        ctx.strokeStyle = `oklch(0.80 0.16 200 / ${alpha})`;
+        ctx.strokeStyle = `oklch(0.70 0.17 285 /${alpha})`;
         ctx.lineWidth = 0.5;
         ctx.stroke();
 
@@ -100,7 +104,7 @@ export function NodeBackground() {
 
           ctx.beginPath();
           ctx.arc(px, py, 2, 0, Math.PI * 2);
-          ctx.fillStyle = `oklch(0.80 0.16 200 / 0.7)`;
+          ctx.fillStyle = `oklch(0.70 0.17 285 /0.7)`;
           ctx.fill();
         }
       });
@@ -109,13 +113,13 @@ export function NodeBackground() {
       nodes.forEach((node) => {
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.size, 0, Math.PI * 2);
-        ctx.fillStyle = `oklch(0.80 0.16 200 / ${node.opacity})`;
+        ctx.fillStyle = `oklch(0.70 0.17 285 /${node.opacity})`;
         ctx.fill();
 
         // Subtle glow
         const grd = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, node.size * 4);
-        grd.addColorStop(0, `oklch(0.80 0.16 200 / 0.12)`);
-        grd.addColorStop(1, `oklch(0.80 0.16 200 / 0)`);
+        grd.addColorStop(0, `oklch(0.70 0.17 285 /0.12)`);
+        grd.addColorStop(1, `oklch(0.70 0.17 285 /0)`);
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.size * 4, 0, Math.PI * 2);
         ctx.fillStyle = grd;
