@@ -48,6 +48,7 @@ import httpx
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from starlette.concurrency import run_in_threadpool
 
@@ -515,6 +516,40 @@ def create_cloud_app(
     )
 
     app = FastAPI(title="FlashML Cloud API", version="0.2.0")
+
+    # ORDER MATTERS HERE, and it is not cosmetic.
+    #
+    # Starlette runs the LAST-added middleware outermost, and its own
+    # ServerErrorMiddleware sits outside all of them. So an exception that
+    # escapes a route is turned into a 500 ABOVE CORSMiddleware, and that 500
+    # carries no Access-Control-Allow-Origin. A browser then refuses to read
+    # the response at all and reports `TypeError: Failed to fetch` — the same
+    # message it gives for a wrong host, DNS failure, or being offline.
+    #
+    # That is not hypothetical: the deployed console showed a bare "Failed to
+    # fetch" on every page while the API was in fact returning a perfectly
+    # legible 500 (a database connection failure). curl saw the 500; the
+    # browser could not. Hours went into looking for a network problem that
+    # did not exist.
+    #
+    # So: catch exceptions INSIDE the CORS layer and return a real Response.
+    # It then travels back out through CORSMiddleware and gets the headers,
+    # and the browser can show the status and the body.
+    @app.middleware("http")
+    async def cors_visible_errors(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except HTTPException:
+            raise  # already a Response; FastAPI's handler adds the headers
+        except Exception:
+            log.exception("unhandled error on %s %s", request.method, request.url.path)
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "internal error — see server logs"},
+            )
+
+    # Added AFTER the handler above, so CORS is the outer of the two and
+    # decorates the 500 it produces. Do not reorder.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -629,7 +664,37 @@ def create_cloud_app(
 
     @app.get("/healthz")
     async def healthz():
-        return {"status": "ok"}
+        """Healthy means *able to serve requests*, which requires the database.
+
+        This used to return {"status": "ok"} unconditionally. Render's health
+        check passed, the deploy went live, and every authenticated route
+        returned 500 because DATABASE_URL pointed at a database that does not
+        exist. The service reported healthy while being completely unusable,
+        and the only visible symptom was "Failed to fetch" in a browser.
+
+        Checking the dependency here means a deploy that cannot reach Postgres
+        FAILS instead of replacing a working one — Render keeps the previous
+        deploy serving when a health check never passes. That is the whole
+        point: a broken config should not be able to take production down.
+
+        Cheap on purpose: one round trip, no query planning, short timeout.
+        """
+        try:
+            conn = await run_in_threadpool(request_scoped_connect)
+        except Exception as exc:
+            log.error("healthz: database unreachable: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="database unreachable — check DATABASE_URL",
+            ) from exc
+        try:
+            await run_in_threadpool(lambda: conn.execute("SELECT 1").fetchone())
+        finally:
+            await run_in_threadpool(conn.close)
+        return {"status": "ok", "database": "ok"}
+
+    def request_scoped_connect() -> psycopg.Connection:
+        return app.state.connect()
 
     # -- enrolment: unauthenticated by necessity ----------------------------
     #
