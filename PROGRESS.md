@@ -124,16 +124,25 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       Packages ✅ (`flashruntime` 0.3.0, `flashnode` 0.2.1 on PyPI; `pip
       install flashnode` works on a clean machine). **BLOCKED on two things,
       both manual:**
-      (a) the curated GHCR images are **private** — a volunteer's agent pulls
-          them anonymously, so every job fails at execution. Verified against a
-          public control (public repos answer 200 to an anonymous token; ours
-          answer 403). Fix is org → Packages → each of `flashml-python-slim`,
-          `flashml-sklearn`, `flashml-pytorch-cpu` → Package settings → Change
-          visibility → Public.
-      (b) the §10 run-through itself, whose real test is a friend completing
-          signup → enroll → contribute unaided. No job has yet been submitted,
-          claimed and completed against the DEPLOYED stack — only locally
-          (e2e 61).
+      Curated images ✅ (2026-08-01) — all three anonymously pullable at
+      `2026.08.1`. They had been PRIVATE: GHCR creates container packages
+      private regardless of the publishing repo's visibility (a wrong guess
+      that moving the build to the public repo would fix it was tested and
+      disproved), and the org additionally forbade public packages until that
+      policy was changed. A volunteer's Docker pulls anonymously, so every job
+      would have died at execution after signup, install and enrolment all
+      appeared to work. Image sources now live in the public repo beside the
+      agent that pulls them; `test_every_curated_image_is_anonymously_pullable`
+      (marked `network`) asks GHCR for an anonymous token for every reference
+      the API can emit, replacing two tests that compared strings across files
+      and passed throughout the outage.
+      Submission pipeline dry-run ✅ — fetch → extract → parse → resolve →
+      preflight against the real example repo returns 0 findings and resolves
+      to the now-public image reference.
+      **REMAINING: the §10 run-through itself**, whose real test is a friend
+      completing signup → enroll → contribute unaided. No job has yet been
+      submitted, claimed and completed against the DEPLOYED stack — only
+      locally (e2e 61).
 
 ## Entries
 
