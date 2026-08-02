@@ -333,14 +333,25 @@ services:
     envVars:
       - key: REQUIRE_AUTH
         value: "1"
-      # A full URL, not `hostport`: the dev coordinator is a public `web`
-      # service, so it is reached over https like any other, not by the
-      # internal host:port a private service exposes.
+      # An explicit https:// URL, NOT `fromService … property: host`.
+      #
+      # `host` yields a bare hostname with no scheme, and settings.py then
+      # prepends `http://` — correct for prod, where the coordinator is a
+      # PRIVATE service on an internal network that does not terminate TLS.
+      # Dev's coordinator is PUBLIC, and Render answers plain http with a
+      # 301 to https. `httpx.AsyncClient` does not follow redirects by
+      # default and the proxy does not ask it to, so every agent call would
+      # have come back as a 301 (verified against the live service
+      # 2026-08-02).
+      #
+      # Fixed here rather than by enabling follow_redirects on the client:
+      # that request carries the unscoped OPERATOR token, and a proxy that
+      # chases redirects while holding a credential is a much worse thing to
+      # own than one hardcoded URL.
+      #
+      # Not a secret — it is this service's own public address.
       - key: COORDINATOR_URL
-        fromService:
-          type: web
-          name: flashml-dev-coordinator
-          property: host
+        value: https://flashml-dev-coordinator.onrender.com
       - key: COORDINATOR_OPERATOR_TOKEN
         fromService:
           type: web
