@@ -153,6 +153,45 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-02 — render.yaml is not the deployed truth: autoDeploy never re-reads the blueprint (flashml-cloud)
+
+What/why: found while verifying the dev deploy after the 0.4.1 pin move. The
+dev coordinator redeployed the merge commit and went **live** — and built with
+`pip install "flashruntime[service]==0.4.0"`, the version the pin move had
+just replaced. Render's autoDeploy redeploys CODE; service settings like
+`buildCommand` are stored on the service and only change when the Blueprint is
+explicitly synced. For the two coordinators that is the whole deployment:
+`rootDir: .` and a one-line pip install, so a "successful" deploy of a new
+commit can reinstall the old runtime and report itself healthy.
+
+How verified: not from the dashboard's word. `list_deploys` on
+`srv-d9nfvv6417fc73d9nvj0` shows `dep-d9nt5noae00c73fihm80` for commit
+979a5b0, `trigger: new_commit`, `status: live`, finished 23:30:38Z — while
+`get_service` still reports `buildCommand: pip install
+"flashruntime[service]==0.4.0"`. Independently: the live coordinator's
+`/openapi.json` has no `gpuPerTask`, and a local 0.4.1 service's does.
+
+Gotchas:
+1. **This splits the two services.** `flashml-api` builds with `pip install
+   -e .`, which reads `apps/api/pyproject.toml` — so the API DOES pick up
+   0.4.1 on any redeploy, while the coordinator stays where its stored string
+   says. API on 0.4.1 + coordinator on 0.4.0 is precisely the drift the
+   monorepo consolidation existed to end, arriving through the deploy layer
+   instead of the source layer.
+2. The failure is silent in the worst direction. The API would compile
+   `gpuPerTask`, the older coordinator would drop it under `extra="ignore"`,
+   and GPU jobs would be placed on GPU-less hosts — the bug the 0.4.1 release
+   was cut to fix, reintroduced by a service setting nobody re-read.
+3. The four-sites-must-agree rule is necessary but not sufficient: three of
+   the four are read at build time from the repo, and `render.yaml` is not.
+
+Next: **sync the Blueprint before the production deploy** (Render dashboard →
+Blueprint → Sync, or PATCH the two coordinators' buildCommand via the API),
+then re-check `/openapi.json` for `gpuPerTask` on each coordinator. Parking
+lot: a deploy-time assertion that the running coordinator's version equals
+RUNTIME_VERSION would have caught this in seconds and should probably gate
+`deploy-prod`.
+
 ### 2026-08-02 — flashruntime 0.4.1 + flashnode 0.3.2 released; the four pins move together (all repos)
 
 What/why: one version string named two protocols. `flashruntime-v0.4.0` was
