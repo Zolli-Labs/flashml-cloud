@@ -21,25 +21,26 @@ JOB                   ?= $$(cat /tmp/flashml-last-job-id 2>/dev/null)
 # They used to be directories in this repo. They are now the public monorepo
 # github.com/Zolli-Labs/flashml, and there is exactly one copy of each.
 #
-# FLASHML_PIN is what anything DEPLOYED or TESTED resolves — a commit, because
-# flashruntime is not on PyPI yet. Replace both of these with `==0.3.0` style
-# version pins once the release lands, and keep this identical to the pin in
-# flashml-cloud/apps/api/pyproject.toml and render.yaml.
+# RUNTIME_VERSION / NODE_VERSION are what anything DEPLOYED or TESTED resolves.
+# Keep RUNTIME_VERSION identical to the pins in
+# flashml-cloud/apps/api/pyproject.toml and render.yaml — the API and the
+# coordinator speaking different protocol versions is the exact failure this
+# consolidation removed.
 #
 # FLASHML is a sibling CHECKOUT, needed only by targets that build from source
 # (docker images) or that you deliberately point at local runtime edits. No
 # deployed path uses it. `make check-flashml` explains what to do if missing.
 # ---------------------------------------------------------------------------
-FLASHML_REPO := https://github.com/Zolli-Labs/flashml
-FLASHML_PIN  := 383efaab74196c6d86bcb6517e6ee20403a00e1a
-FLASHML      ?= ../flashml
+FLASHML_REPO    := https://github.com/Zolli-Labs/flashml
+RUNTIME_VERSION := 0.3.0
+# 0.2.1, not 0.2.0: 0.2.0 shipped a hardcoded __version__ of "0.1.0", so every
+# agent registered under the wrong agent_version. Pinning e2e to 0.2.0 would
+# test a version no volunteer should be running.
+NODE_VERSION    := 0.2.1
+FLASHML         ?= ../flashml
 
-# The `\#` escapes are REQUIRED. Make treats an unescaped `#` as a comment, so
-# `...@<sha>#subdirectory=flashruntime` silently truncates to `...@<sha>` — pip
-# then installs the repository ROOT, which has no package in it. The failure is
-# a confusing build error far from its cause, so do not "tidy" these away.
-RUNTIME_PIN := "flashruntime[service,sklearn,dev] @ git+$(FLASHML_REPO)@$(FLASHML_PIN)\#subdirectory=flashruntime"
-NODE_PIN    := "flashnode @ git+$(FLASHML_REPO)@$(FLASHML_PIN)\#subdirectory=flashnode"
+RUNTIME_PIN := "flashruntime[service,sklearn,dev]==$(RUNTIME_VERSION)"
+NODE_PIN    := "flashnode==$(NODE_VERSION)"
 
 check-flashml:
 	@test -d "$(FLASHML)/flashruntime" || { \

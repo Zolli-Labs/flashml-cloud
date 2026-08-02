@@ -8,19 +8,20 @@ version = "0.1.0"
 description = "FlashML Cloud control-plane API: node registry, job submission, timelines. Private."
 requires-python = ">=3.10"
 dependencies = [
-    # flashruntime lives in the PUBLIC Zolli-Labs/flashml monorepo. It is no
-    # longer a directory in this repo, and there is no relative-path install
-    # anywhere — that duplication is what let the deployed API and a
-    # volunteer's agent run different code without anyone noticing.
+    # flashruntime lives in the PUBLIC Zolli-Labs/flashml monorepo and ships to
+    # PyPI from a tag. It is no longer a directory in this repo, and there is
+    # no relative-path install anywhere — that duplication is what let the
+    # deployed API and a volunteer's agent run different code without anyone
+    # noticing.
     #
-    # This is a COMMIT pin, not a version pin, and that is deliberate for now:
-    # flashruntime 0.3.0 is not on PyPI yet (the name has never been
-    # published). The repo is public, so this resolves with no credentials.
+    # An EXACT version, not a range: this API and the coordinator must run the
+    # same protocol. A range lets a rebuild of one service pick up a new
+    # runtime while the other stays put, which is the drift this whole
+    # migration removed, reintroduced through the back door.
     #
-    # REPLACE WITH `flashruntime==0.3.0` once the release lands. A commit pin
-    # is fine on main and must not survive into a tagged release of this
-    # service — see docs/superpowers/specs/2026-08-01-foundation-design.md §3.3.
-    "flashruntime @ git+https://github.com/Zolli-Labs/flashml@383efaab74196c6d86bcb6517e6ee20403a00e1a#subdirectory=flashruntime",
+    # Change this in render.yaml and the Makefile's FLASHML_PIN at the same
+    # time. See docs/superpowers/specs/2026-08-01-foundation-design.md §3.3.
+    "flashruntime==0.3.0",
     "fastapi>=0.111",
     "uvicorn>=0.30",
     "httpx>=0.27",

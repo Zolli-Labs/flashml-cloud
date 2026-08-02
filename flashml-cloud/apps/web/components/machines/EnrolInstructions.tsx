@@ -6,14 +6,13 @@ import { Check, Copy } from "@phosphor-icons/react";
 /**
  * How a volunteer actually gets flashnode running.
  *
- * Every shorter version of this fails on a normal machine, and each failure
- * arrives before the person has done anything, so it reads as our install
- * being broken:
+ * `pip install flashnode` is the whole install as of 2026-08-01: flashnode
+ * 0.2.1 and flashruntime 0.3.0 are published, so pip resolves the dependency
+ * itself. Until then neither package existed on PyPI and this component had to
+ * name both as git URLs — that workaround is gone, and it must not come back.
  *
- *   `pip install flashnode`
- *     -> No solution found. flashnode depends on flashruntime>=0.2, pip
- *        resolves that from PyPI, and neither package is published there.
- *        Naming both as git URLs is the only thing that works today.
+ * The VIRTUAL ENVIRONMENT stays, and not as ceremony. Two failures have
+ * nothing to do with where the package is hosted and are still live:
  *
  *   `pip install ...`
  *     -> zsh: command not found: pip. macOS ships no `pip` on PATH; only
@@ -24,22 +23,21 @@ import { Check, Copy } from "@phosphor-icons/react";
  *        refuses to install into itself, and the suggested escape hatch,
  *        --break-system-packages, is exactly what its name says.
  *
- * So: a virtual environment. It sidesteps PATH and PEP 668 together, needs
- * nothing installed beyond Python, and leaves the host's system Python
- * untouched — which matters when you are asking a friend to run your code on
- * their laptop. Verified end to end on macOS with Homebrew Python 3.14.
+ * A venv sidesteps PATH and PEP 668 together, needs nothing installed beyond
+ * Python, and leaves the host's system Python untouched — which matters when
+ * you are asking a friend to run your code on their laptop.
  *
  * The commands use the venv's binaries by full path rather than `activate`,
  * because activation does not survive closing the terminal and the follow-up
  * command would then fail with `command not found: flashnode` a day later.
+ *
+ * Deliberately NOT version-pinned. A volunteer should get the current agent;
+ * pinning here would create a fourth place a version has to be kept in step
+ * with pyproject.toml, render.yaml and the Makefile, and it would silently
+ * freeze the fleet on whatever was current the day this line was written.
  */
 
 type Platform = "unix" | "windows";
-
-const REPOS = {
-  runtime: "flashruntime @ git+https://github.com/Zolli-Labs/flashruntime",
-  node: "flashnode @ git+https://github.com/Zolli-Labs/flashnode",
-};
 
 function steps(platform: Platform, base: string) {
   if (platform === "windows") {
@@ -47,7 +45,7 @@ function steps(platform: Platform, base: string) {
       { label: "Create an isolated environment", cmd: "py -m venv flashml" },
       {
         label: "Install the agent",
-        cmd: `flashml\\Scripts\\python -m pip install "${REPOS.runtime}" "${REPOS.node}"`,
+        cmd: "flashml\\Scripts\\python -m pip install flashnode",
       },
       {
         label: "Connect it to your account",
@@ -59,7 +57,7 @@ function steps(platform: Platform, base: string) {
     { label: "Create an isolated environment", cmd: "python3 -m venv flashml" },
     {
       label: "Install the agent",
-      cmd: `flashml/bin/python -m pip install "${REPOS.runtime}" "${REPOS.node}"`,
+      cmd: "flashml/bin/python -m pip install flashnode",
     },
     {
       label: "Connect it to your account",
@@ -190,23 +188,18 @@ export function EnrolInstructions({ base }: { base: string }) {
           <span className="font-mono text-foreground">/activate</span> from any
           signed-in browser — your phone works — to approve the machine.
         </p>
+        {/*
+          Git used to be listed here, and it is deliberately gone. It was only
+          ever needed because pip shelled out to it for a `git+https://`
+          install; installing from PyPI does not. Windows in particular usually
+          lacks Git, so this removes a prerequisite that failed late, on the
+          machines least likely to have it.
+        */}
         <p>
-          You&apos;ll need <span className="text-foreground">Python 3.10+</span>,{" "}
-          <span className="text-foreground">Docker Desktop</span> running, and{" "}
-          {platform === "windows" ? (
-            <a
-              href="https://git-scm.com/download/win"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline underline-offset-2 hover:no-underline"
-            >
-              Git for Windows
-            </a>
-          ) : (
-            <span className="text-foreground">Git</span>
-          )}
-          . The first job pulls a container image of roughly 1&nbsp;GB; after
-          that it&apos;s cached.
+          You&apos;ll need <span className="text-foreground">Python 3.10+</span>{" "}
+          and <span className="text-foreground">Docker Desktop</span> running.
+          The first job pulls a container image of roughly 1&nbsp;GB; after that
+          it&apos;s cached.
         </p>
       </div>
     </div>

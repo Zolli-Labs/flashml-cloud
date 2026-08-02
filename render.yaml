@@ -57,15 +57,11 @@ services:
     rootDir: .
     plan: starter          # free tier has no private services and no disks
     region: oregon
-    # A COMMIT pin, because flashruntime is not on PyPI yet. The repo is
-    # public, so this needs no credentials at build time. Swap to
-    # `flashruntime[service]==0.3.0` once the release lands, and keep this
-    # pin identical to apps/api/pyproject.toml — the API and the coordinator
-    # speaking different protocol versions is the exact failure this
-    # consolidation exists to prevent.
-    buildCommand: >-
-      pip install "flashruntime[service] @
-      git+https://github.com/Zolli-Labs/flashml@383efaab74196c6d86bcb6517e6ee20403a00e1a#subdirectory=flashruntime"
+    # An exact version from PyPI. Keep it identical to the pin in
+    # flashml-cloud/apps/api/pyproject.toml and FLASHML_PIN in the Makefile —
+    # the API and the coordinator speaking different protocol versions is the
+    # exact failure this consolidation exists to prevent.
+    buildCommand: pip install "flashruntime[service]==0.3.0"
     # --workers 1 is REQUIRED, not a default. See HANDOFF.md risk #5.
     startCommand: >-
       FLASHML_OPERATOR_TOKENS="flashml-api:$OPERATOR_TOKEN"
