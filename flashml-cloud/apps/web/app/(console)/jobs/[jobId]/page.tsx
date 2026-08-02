@@ -194,7 +194,7 @@ export default function JobDetailPage({
           <ProgressBar progress={progress} />
         ) : (
           <p className="text-xs text-muted-foreground">
-            No task breakdown reported for this job.
+            {noBreakdownReason(job)}
           </p>
         )}
         {stall && (
@@ -234,7 +234,7 @@ export default function JobDetailPage({
           <ProgressView job={job} rounds={rounds} />
         )}
         {activeView === "placement" && (
-          <PlacementView tasks={tasks} attempts={attempts} now={now} />
+          <PlacementView job={job} tasks={tasks} attempts={attempts} now={now} />
         )}
         {activeView === "ledger" && <LedgerView events={events} />}
       </div>
@@ -244,6 +244,26 @@ export default function JobDetailPage({
       </div>
     </div>
   );
+}
+
+/** Why there is no task breakdown, said accurately.
+ *
+ * "No task breakdown reported" was wrong and actively misleading for the
+ * commonest case. A federated run is one coordinator job PER ROUND, and the
+ * API can only find a round's coordinator job through
+ * `job_rounds.coordinator_job_id` — a row written when the round COMPLETES
+ * (db.py `list_round_jobs_for_owner`: "for every completed round"). So while
+ * round 0 is still running there is no pointer to it, the fan-out matches
+ * nothing, and the console says "nothing here" about a coordinator that is
+ * sitting on a full set of tasks.
+ *
+ * Until the driver persists the in-flight round, say which of the two it is
+ * rather than implying the work does not exist. */
+function noBreakdownReason(job: JobRecord): string {
+  if (job.mode === "federated" && !TERMINAL.has(job.state)) {
+    return "Per-round detail appears once a round finishes. A federated run is one coordinator job per round, and the round in flight is not recorded until it completes.";
+  }
+  return "The coordinator reported no task breakdown for this job.";
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -381,10 +401,12 @@ function NoMetrics() {
 }
 
 function PlacementView({
+  job,
   tasks,
   attempts,
   now,
 }: {
+  job: JobRecord;
   tasks: JobTask[];
   attempts: ReturnType<typeof deriveAttempts>;
   now: number;
@@ -394,9 +416,7 @@ function PlacementView({
       <section className="rounded-lg border border-border bg-surface p-6">
         <h2 className="text-sm font-semibold">No placement recorded</h2>
         <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-          The coordinator has no task breakdown for this job. That is expected
-          for a run that has not been scheduled yet, and for jobs submitted
-          before the lease coordinator was in the path.
+          {noBreakdownReason(job)}
         </p>
       </section>
     );
