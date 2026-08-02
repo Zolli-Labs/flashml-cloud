@@ -1,13 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, DownloadSimple, Warning } from "@phosphor-icons/react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { StateBadge } from "@/components/jobs/StateBadge";
+import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { formatBytes } from "@/lib/utils";
+import {
+  deriveAttempts,
+  deriveProgress,
+  deriveStallReason,
+} from "@/lib/job-activity";
 import {
   ApiError,
   NotAuthenticated,
@@ -16,15 +20,29 @@ import {
   fetchJobArtifact,
   getJob,
   jobArtifactKey,
+  listJobEvents,
   listJobRounds,
+  listJobTasks,
+  type JobEvent,
   type JobRecord,
   type JobRound,
+  type JobTask,
 } from "@/lib/cloud-api";
-import { StateBadge } from "@/components/jobs/StateBadge";
 
-const TERMINAL_STATES = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
+// Three views over one job:
+//   Progress   what the run is achieving
+//   Placement  where it is running and what that cost
+//   Ledger     what actually happened, in the coordinator's own words
+//
+// The rule that makes the switcher safe: it changes the DETAIL, never the
+// ALARM. State, accepted-progress and the stall reason sit above the tabs and
+// stay visible from every view, so nobody watches a flat metric panel for
+// twenty minutes while the run has been wedged for nineteen.
+
+const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
 const POLL_MS = 2500;
 
+type View = "progress" | "placement" | "ledger";
 type LoadState = "loading" | "ready" | "not-found" | "error";
 
 export default function JobDetailPage({
@@ -34,10 +52,15 @@ export default function JobDetailPage({
 }) {
   const { jobId } = use(params);
   const router = useRouter();
+
   const [job, setJob] = useState<JobRecord | null>(null);
   const [rounds, setRounds] = useState<JobRound[]>([]);
+  const [tasks, setTasks] = useState<JobTask[]>([]);
+  const [events, setEvents] = useState<JobEvent[]>([]);
   const [state, setState] = useState<LoadState>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [view, setView] = useState<View | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(() => {
     getJob(jobId)
@@ -45,21 +68,6 @@ export default function JobDetailPage({
         setJob(j);
         setState("ready");
         setErrorMessage(null);
-        // Best-effort: round history is only ever non-empty for a
-        // federated job, and its absence must never block the rest of the
-        // page from rendering. A NotAuthenticated here is still routed to
-        // sign-in (the JWT just expired between the two calls); any other
-        // failure — including NotFound, which can legitimately happen for
-        // a non-federated job depending on how the API models it — just
-        // leaves `rounds` empty, which the "only render when there is
-        // round history" rule already treats as "nothing to show".
-        listJobRounds(jobId)
-          .then(setRounds)
-          .catch((err) => {
-            if (err instanceof NotAuthenticated) {
-              router.push(`/sign-in?next=/jobs/${jobId}`);
-            }
-          });
       })
       .catch((err) => {
         if (err instanceof NotAuthenticated) {
@@ -75,83 +83,104 @@ export default function JobDetailPage({
         );
         setState("error");
       });
+
+    // The three detail sources are best-effort and independent. A federated
+    // job has no coordinator tasks; an older job may predate the ledger.
+    // None of that should take the page down, so each failure just leaves
+    // its section empty. NotAuthenticated is the exception: that is a real
+    // signed-out state and belongs at sign-in, not rendered as "no data".
+    const soft = (err: unknown) => {
+      if (err instanceof NotAuthenticated) {
+        router.push(`/sign-in?next=/jobs/${jobId}`);
+      }
+    };
+    listJobRounds(jobId).then(setRounds).catch(soft);
+    listJobTasks(jobId).then(setTasks).catch(soft);
+    listJobEvents(jobId).then(setEvents).catch(soft);
   }, [jobId, router]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // Stop polling once the job has reached a terminal state — a finished
-  // job's status never changes again, so continuing to poll would just
-  // hammer the API for nothing.
   useEffect(() => {
-    if (job && TERMINAL_STATES.has(job.state)) return;
-    const t = setInterval(load, POLL_MS);
+    if (job && TERMINAL.has(job.state)) return;
+    const t = setInterval(() => {
+      load();
+      setNow(Date.now());
+    }, POLL_MS);
     return () => clearInterval(t);
   }, [job, load]);
 
+  const attempts = useMemo(() => deriveAttempts(events), [events]);
+  const progress = useMemo(
+    () => deriveProgress(tasks, attempts),
+    [tasks, attempts]
+  );
+  const stall = useMemo(
+    () => (job ? deriveStallReason(job.state, tasks, events, now) : null),
+    [job, tasks, events, now]
+  );
+
+  // Default the view by state: a failed job opens on the ledger, because
+  // "why" is the only question you have. Opening it on a truncated metric
+  // chart is a small cruelty. Once the user picks a view, theirs wins.
+  const activeView: View =
+    view ?? (job && job.state === "FAILED" ? "ledger" : "progress");
+
   if (state === "loading") {
     return (
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <Card>
-          <CardContent className="h-32 animate-pulse bg-muted/30 rounded-lg" />
-        </Card>
+      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+        <div className="skeleton h-32 rounded-lg" />
       </div>
     );
   }
 
   if (state === "not-found") {
     return (
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <Card>
-          <CardContent className="flex flex-col items-center text-center gap-3 py-10">
-            <Warning className="w-6 h-6 text-muted-foreground" weight="fill" />
-            <p className="text-sm text-muted-foreground">
-              This job doesn&apos;t exist, or isn&apos;t yours.
-            </p>
-            <Link href="/jobs" className="text-cyan text-sm underline underline-offset-2">
-              Back to jobs
-            </Link>
-          </CardContent>
-        </Card>
-      </div>
+      <Shell>
+        <p className="text-sm text-muted-foreground">
+          This job doesn&apos;t exist, or isn&apos;t yours.
+        </p>
+        <Link href="/jobs" className="text-sm text-primary hover:underline">
+          Back to jobs
+        </Link>
+      </Shell>
     );
   }
 
   if (state === "error" || !job) {
     return (
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <Card>
-          <CardContent className="flex flex-col items-center text-center gap-3 py-10">
-            <Warning className="w-6 h-6 text-destructive" weight="fill" />
-            <p className="text-sm text-muted-foreground">{errorMessage}</p>
-            <Button type="button" variant="outline" size="sm" onClick={load}>
-              Try again
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
+      <Shell>
+        <Warning className="h-5 w-5 text-destructive" weight="fill" />
+        <p className="text-sm text-muted-foreground">{errorMessage}</p>
+        <button
+          type="button"
+          onClick={load}
+          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+        >
+          Try again
+        </button>
+      </Shell>
     );
   }
 
+  const name = job.spec?.metadata?.name ?? job.name ?? job.job_id;
+
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <Link
         href="/jobs"
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="w-3.5 h-3.5" /> Jobs
+        <ArrowLeft className="h-3.5 w-3.5" /> Jobs
       </Link>
 
-      <div className="flex items-start justify-between gap-4">
+      <div className="mt-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="text-2xl font-bold font-mono truncate">
-            {/* A federated job carries `name` and no `spec` — it lives in
-                public.jobs, not on the coordinator. */}
-            {job.spec?.metadata?.name ?? job.name ?? job.job_id}
-          </h1>
-          <p className="text-xs text-muted-foreground font-mono mt-1 truncate">
-            {[job.job_id, job.backend, job.deployment_profile, job.runtime_execution_id]
+          <h1 className="truncate font-mono text-2xl font-semibold">{name}</h1>
+          <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+            {[job.job_id, job.backend, job.deployment_profile]
               .filter(Boolean)
               .join(" · ")}
           </p>
@@ -159,231 +188,410 @@ export default function JobDetailPage({
         <StateBadge state={job.state} />
       </div>
 
-      <div className="grid gap-3 grid-cols-2 sm:grid-cols-3">
-        {job.created_at && (
-          <Row label="created" value={new Date(job.created_at).toLocaleString()} />
+      {/* The alarm band. Visible from every view, by design. */}
+      <div className="mt-6 rounded-lg border border-border bg-surface p-4">
+        {progress.total > 0 ? (
+          <ProgressBar progress={progress} />
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            No task breakdown reported for this job.
+          </p>
         )}
-        {job.finished_at && (
-          <Row label="finished" value={new Date(job.finished_at).toLocaleString()} />
+        {stall && (
+          <p className="mt-3 flex items-start gap-2 border-t border-border pt-3 text-xs text-[var(--warning)]">
+            <Warning className="mt-px h-3.5 w-3.5 shrink-0" weight="fill" />
+            <span>{stall}</span>
+          </p>
         )}
-        <Row label="artifacts" value={String(job.artifacts?.length ?? 0)} />
       </div>
 
+      <div className="mt-6 flex gap-6 border-b border-border">
+        {(
+          [
+            ["progress", "Progress"],
+            ["placement", "Placement"],
+            ["ledger", "Ledger"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setView(id)}
+            aria-current={activeView === id ? "page" : undefined}
+            className={`-mb-px border-b-2 px-0.5 pb-2.5 text-sm transition-colors ${
+              activeView === id
+                ? "border-primary font-medium text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-6">
+        {activeView === "progress" && (
+          <ProgressView job={job} rounds={rounds} />
+        )}
+        {activeView === "placement" && (
+          <PlacementView tasks={tasks} attempts={attempts} now={now} />
+        )}
+        {activeView === "ledger" && <LedgerView events={events} />}
+      </div>
+
+      <div className="mt-8">
+        <CancelSection job={job} onCancelled={setJob} />
+      </div>
+    </div>
+  );
+}
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+      <div className="flex flex-col items-center gap-3 rounded-lg border border-border bg-surface py-10 text-center">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Accepted work, with attempts spent shown underneath. The gap between the
+ * two is what unreliable machines cost, and hiding it would hide the one
+ * number this product exists to talk about. */
+function ProgressBar({
+  progress,
+}: {
+  progress: ReturnType<typeof deriveProgress>;
+}) {
+  const pct = progress.total ? (progress.accepted / progress.total) * 100 : 0;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-sm">
+          <span className="metric-value">
+            {progress.accepted}/{progress.total}
+          </span>{" "}
+          <span className="text-muted-foreground">tasks accepted</span>
+        </span>
+        {progress.attemptsSpent > 0 && (
+          <span className="font-mono text-xs text-muted-foreground">
+            {progress.attemptsSpent} attempt
+            {progress.attemptsSpent === 1 ? "" : "s"} spent
+            {progress.wasted > 0 && `, ${progress.wasted} wasted`}
+          </span>
+        )}
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-[var(--node-green)] transition-[width] duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ProgressView({ job, rounds }: { job: JobRecord; rounds: JobRound[] }) {
+  const reported = rounds.filter((r) => r.mean_loss !== null);
+  const maxLoss = reported.length
+    ? Math.max(...reported.map((r) => r.mean_loss as number))
+    : null;
+
+  return (
+    <div className="space-y-6">
       {job.error && (
-        <Card className="border-destructive/30">
-          <CardHeader>
-            <CardTitle className="text-sm font-mono text-destructive">Error</CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm font-mono text-destructive">
+        <div className="rounded-lg border border-destructive/30 bg-surface p-4">
+          <div className="label-caps text-destructive">Error</div>
+          <p className="mt-1.5 font-mono text-sm text-destructive">
             {job.error}
-          </CardContent>
-        </Card>
+          </p>
+        </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm font-mono">Artifacts</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {(job.artifacts ?? []).map((a) => (
-              <ArtifactRow key={a.uri} jobId={job.job_id} artifact={a} />
+      {rounds.length > 0 ? (
+        <section className="rounded-lg border border-border bg-surface p-4">
+          <h2 className="text-sm font-semibold">
+            Rounds{" "}
+            <span className="font-normal text-muted-foreground">
+              ({rounds.length})
+            </span>
+          </h2>
+          <div className="mt-3 space-y-2.5">
+            {rounds.map((r) => (
+              <div key={r.round} className="flex items-center gap-3">
+                <span className="w-16 shrink-0 font-mono text-xs text-muted-foreground">
+                  round {r.round}
+                </span>
+                <span className="w-24 shrink-0 font-mono text-xs">
+                  {/* Null loss renders as absent. Never 0, never smoothed: a
+                      training dashboard that invents a number is worse than
+                      one that admits it does not have one. */}
+                  {r.mean_loss === null
+                    ? "loss —"
+                    : `loss ${r.mean_loss.toFixed(4)}`}
+                </span>
+                {r.mean_loss !== null && maxLoss !== null && (
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full bg-primary"
+                      style={{
+                        width: `${maxLoss > 0 ? (r.mean_loss / maxLoss) * 100 : 100}%`,
+                      }}
+                    />
+                  </div>
+                )}
+                <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                  {r.participants} contributor
+                  {r.participants === 1 ? "" : "s"}
+                </span>
+              </div>
             ))}
-            {(job.artifacts?.length ?? 0) === 0 && (
-              <p className="text-xs font-mono text-muted-foreground">
-                {TERMINAL_STATES.has(job.state)
-                  ? "no artifacts were produced"
-                  : "artifacts appear once the job produces output"}
-              </p>
-            )}
-          </CardContent>
-        </Card>
+          </div>
+        </section>
+      ) : (
+        <NoMetrics />
+      )}
 
-        {/* Only a COORDINATOR job has a spec. A federated run is one
-            coordinator job per round, so the parent has none — and an empty
-            Spec card would read as missing data rather than as a different
-            kind of job. Mirrors the Rounds section below, which only a
-            federated job ever has. */}
-        {job.spec && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm font-mono">Spec</CardTitle>
-            </CardHeader>
-            <CardContent className="text-xs font-mono space-y-1.5">
-              <SpecRow
-                k="image"
-                v={`${job.spec.spec.image.repository}:${job.spec.spec.image.tag}`}
-              />
-              <SpecRow k="workload" v={job.spec.spec.workload.type} />
-              <SpecRow
-                k="workers"
-                v={`${job.spec.spec.resources.minimumWorkers}–${job.spec.spec.resources.maximumWorkers}`}
-              />
-              <SpecRow k="isolation" v={job.spec.spec.isolation.tier} />
-            </CardContent>
-          </Card>
-        )}
-      </div>
-
-      {/* Only federated jobs ever have rounds — `GET /rounds` returns an
-          empty list for every independent job, and an empty "Rounds" card
-          on an independent job's page would misread as "stuck" or
-          "failed". Render the section only once there is real history. */}
-      {rounds.length > 0 && <RoundsSection rounds={rounds} />}
-
-      <CancelSection job={job} onCancelled={setJob} />
+      <ArtifactsCard job={job} />
+      {job.spec && <SpecCard job={job} />}
     </div>
   );
 }
 
-function CancelSection({
-  job,
-  onCancelled,
+/** The honest empty state. The only model metric the system records is
+ * `mean_loss` per federated round. Rather than draw an empty chart frame,
+ * say what is missing and what would fill it. */
+function NoMetrics() {
+  return (
+    <section className="rounded-lg border border-border bg-surface p-6">
+      <h2 className="text-sm font-semibold">No training metrics for this job</h2>
+      <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
+        FlashML records a mean loss per round for federated runs. Independent
+        jobs report no model metrics today, so there is nothing to chart here
+        rather than an empty axis.
+      </p>
+      <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted-foreground">
+        Per-step curves need the workload to emit them through the event
+        ledger, which is a change to the runtime&apos;s protocol package
+        rather than to this console.
+      </p>
+    </section>
+  );
+}
+
+function PlacementView({
+  tasks,
+  attempts,
+  now,
 }: {
-  job: JobRecord;
-  onCancelled: (job: JobRecord) => void;
+  tasks: JobTask[];
+  attempts: ReturnType<typeof deriveAttempts>;
+  now: number;
 }) {
-  const [confirming, setConfirming] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  if (TERMINAL_STATES.has(job.state)) return null;
-
-  async function confirmCancel() {
-    setCancelling(true);
-    setError(null);
-    try {
-      const updated = await cancelJob(job.job_id);
-      onCancelled(updated);
-      setConfirming(false);
-    } catch (err) {
-      setError(
-        err instanceof ApiError ? err.detail : "Couldn't cancel this job. Try again."
-      );
-    } finally {
-      setCancelling(false);
-    }
+  if (tasks.length === 0 && attempts.length === 0) {
+    return (
+      <section className="rounded-lg border border-border bg-surface p-6">
+        <h2 className="text-sm font-semibold">No placement recorded</h2>
+        <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
+          The coordinator has no task breakdown for this job. That is expected
+          for a run that has not been scheduled yet, and for jobs submitted
+          before the lease coordinator was in the path.
+        </p>
+      </section>
+    );
   }
 
-  return confirming ? (
-    <Card className="border-destructive/30">
-      <CardContent className="flex flex-col gap-3 py-4">
-        <div className="flex items-start gap-2 text-sm text-destructive">
-          <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
-          <span>Cancel this job? It cannot be resumed.</span>
-        </div>
-        {error && <p className="text-xs text-destructive">{error}</p>}
-        <div className="flex gap-2">
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            disabled={cancelling}
-            onClick={confirmCancel}
-          >
-            {cancelling ? "Cancelling…" : "Confirm cancel"}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={cancelling}
-            onClick={() => {
-              setConfirming(false);
-              setError(null);
-            }}
-          >
-            Keep running
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  ) : (
-    <Button
-      type="button"
-      variant="outline"
-      className="text-destructive hover:text-destructive"
-      onClick={() => setConfirming(true)}
-    >
-      Cancel job
-    </Button>
+  return (
+    <div className="space-y-6">
+      {attempts.length > 0 && (
+        <section className="rounded-lg border border-border bg-surface p-4">
+          <h2 className="text-sm font-semibold">Attempts by machine</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Reconstructed from the coordinator&apos;s lease and commit events.
+          </p>
+          <div className="mt-4">
+            <Swimlanes attempts={attempts} now={now} />
+          </div>
+        </section>
+      )}
+
+      {tasks.length > 0 && (
+        <section className="overflow-hidden rounded-lg border border-border bg-surface">
+          <div className="border-b border-border px-4 py-2.5">
+            <h2 className="text-sm font-semibold">Tasks</h2>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[520px] text-left">
+              <thead>
+                <tr className="border-b border-border">
+                  {["Task", "State", "Attempts", "Machine", "Lease ends"].map(
+                    (h) => (
+                      <th key={h} className="label-caps px-4 py-2 font-medium">
+                        {h}
+                      </th>
+                    )
+                  )}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {tasks.map((t, i) => (
+                  <tr key={`${t.round ?? ""}-${t.task_id}-${i}`}>
+                    <td className="px-4 py-2.5 font-mono text-xs">
+                      {t.round !== undefined && (
+                        <span className="text-muted-foreground">
+                          r{t.round}/
+                        </span>
+                      )}
+                      {t.task_id}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-xs">{t.state}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs tabular-nums">
+                      {t.attempts}/{t.max_attempts}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">
+                      {t.node_id ?? "—"}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">
+                      {t.deadline
+                        ? new Date(t.deadline).toLocaleTimeString()
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+    </div>
   );
 }
 
-/** `mean_loss` is nullable end to end — the API leaves it null when a round
- * completed without reporting a loss, and this must render as absent, never
- * as `0` or an interpolated value. Its only use here beyond display is as
- * the denominator for the trend bar's width, computed from the rounds that
- * actually reported a number — nothing is smoothed or guessed. */
-function RoundsSection({ rounds }: { rounds: JobRound[] }) {
-  const reportedLosses = rounds
-    .map((r) => r.mean_loss)
-    .filter((v): v is number => v !== null);
-  const maxLoss = reportedLosses.length > 0 ? Math.max(...reportedLosses) : null;
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm font-mono">
-          Rounds <span className="text-muted-foreground">({rounds.length})</span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-0">
-        {rounds.map((r) => (
-          <RoundRow key={r.round} round={r} maxLoss={maxLoss} />
-        ))}
-      </CardContent>
-    </Card>
-  );
+function ledgerTone(type: string): string {
+  if (
+    type.includes("FAILED") ||
+    type.includes("REJECTED") ||
+    type.includes("EXPIRED") ||
+    type.includes("LOST") ||
+    type.includes("FROZEN")
+  ) {
+    return "text-[var(--warning)]";
+  }
+  if (
+    type.includes("ACCEPTED") ||
+    type.includes("SUCCEEDED") ||
+    type.includes("COMMITTED")
+  ) {
+    return "text-[var(--node-green)]";
+  }
+  return "text-muted-foreground";
 }
 
-function RoundRow({ round, maxLoss }: { round: JobRound; maxLoss: number | null }) {
-  const hasLoss = round.mean_loss !== null;
+function LedgerView({ events }: { events: JobEvent[] }) {
+  if (events.length === 0) {
+    return (
+      <section className="rounded-lg border border-border bg-surface p-6">
+        <h2 className="text-sm font-semibold">No events recorded</h2>
+        <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
+          The coordinator has written nothing for this job yet.
+        </p>
+      </section>
+    );
+  }
+
+  // Newest first: when something has just gone wrong, it is at the top.
+  const rows = [...events].reverse();
 
   return (
-    <div className="flex flex-col gap-1.5 py-2.5 border-b border-border/50 last:border-0">
-      <div className="flex items-center justify-between gap-3 text-xs font-mono">
-        <span className="text-foreground">round {round.round}</span>
-        <span className="text-muted-foreground">
-          {round.participants} participant{round.participants === 1 ? "" : "s"}
+    <section className="overflow-hidden rounded-lg border border-border bg-surface">
+      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+        <h2 className="text-sm font-semibold">Event ledger</h2>
+        <span className="font-mono text-xs text-muted-foreground">
+          {events.length} events
         </span>
       </div>
+      <ul className="divide-y divide-border">
+        {rows.map((e, i) => (
+          <li key={`${e.timestamp}-${i}`} className="px-4 py-2.5">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                {new Date(e.timestamp).toLocaleTimeString()}
+              </span>
+              {e.round !== undefined && (
+                <span className="font-mono text-[10px] text-muted-foreground">
+                  r{e.round}
+                </span>
+              )}
+              <span className={`font-mono text-xs ${ledgerTone(e.type)}`}>
+                {e.type}
+              </span>
+              {typeof e.data?.node_id === "string" && (
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {e.data.node_id}
+                </span>
+              )}
+            </div>
+            {/* The coordinator's own words, verbatim. Recovery decisions in
+                particular must never be paraphrased: the policy's reason IS
+                the explanation, and rewriting it would be inventing one. */}
+            {e.message && (
+              <p className="mt-1 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                {e.message}
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-mono text-muted-foreground w-24 shrink-0">
-          {hasLoss ? `loss ${round.mean_loss!.toFixed(4)}` : "loss —"}
-        </span>
-        {/* The trend visual: a bar scaled against the largest reported loss
-            across this job's rounds. Only drawn for a round that actually
-            reported a number — an absent mean_loss gets no bar at all,
-            never a zero-width or full-width stand-in that would imply a
-            value. */}
-        {hasLoss && maxLoss !== null && (
-          <div className="h-1.5 flex-1 rounded-full bg-muted overflow-hidden">
-            <div
-              className="h-full bg-cyan"
-              style={{
-                width: `${maxLoss > 0 ? (round.mean_loss! / maxLoss) * 100 : 100}%`,
-              }}
-            />
-          </div>
+function ArtifactsCard({ job }: { job: JobRecord }) {
+  const artifacts = job.artifacts ?? [];
+  return (
+    <section className="rounded-lg border border-border bg-surface p-4">
+      <h2 className="text-sm font-semibold">Artifacts</h2>
+      <div className="mt-3 space-y-2">
+        {artifacts.map((a) => (
+          <ArtifactRow key={a.uri} jobId={job.job_id} artifact={a} />
+        ))}
+        {artifacts.length === 0 && (
+          <p className="font-mono text-xs text-muted-foreground">
+            {TERMINAL.has(job.state)
+              ? "no artifacts were produced"
+              : "artifacts appear once the job produces output"}
+          </p>
         )}
       </div>
+    </section>
+  );
+}
 
-      {/* Which machines contributed — an explicit acceptance criterion, so
-          it is rendered directly in the row, not behind a click. */}
-      <div className="flex flex-wrap gap-1">
-        {round.contributors.map((nodeId) => (
-          <Badge
-            key={nodeId}
-            variant="outline"
-            className="font-mono text-[10px] text-muted-foreground"
-          >
-            {nodeId}
-          </Badge>
+function SpecCard({ job }: { job: JobRecord }) {
+  const s = job.spec;
+  if (!s) return null;
+  const rows: [string, string][] = [
+    ["image", `${s.spec.image.repository}:${s.spec.image.tag}`],
+    ["workload", s.spec.workload.type],
+    [
+      "workers",
+      `${s.spec.resources.minimumWorkers}–${s.spec.resources.maximumWorkers}`,
+    ],
+    ["isolation", s.spec.isolation.tier],
+  ];
+  return (
+    <section className="rounded-lg border border-border bg-surface p-4">
+      <h2 className="text-sm font-semibold">Spec</h2>
+      <dl className="mt-3 space-y-1.5 text-xs">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-4">
+            <dt className="label-caps">{k}</dt>
+            <dd className="truncate font-mono">{v}</dd>
+          </div>
         ))}
-      </div>
-    </div>
+      </dl>
+    </section>
   );
 }
 
@@ -419,23 +627,22 @@ function ArtifactRow({
 
   return (
     <div className="flex flex-col gap-0.5">
-      <div className="flex items-center justify-between gap-3 text-xs font-mono">
-        <span className="text-cyan truncate">{artifact.uri}</span>
-        <span className="flex items-center gap-2 shrink-0">
+      <div className="flex items-center justify-between gap-3 font-mono text-xs">
+        <span className="truncate text-primary">{artifact.uri}</span>
+        <span className="flex shrink-0 items-center gap-2">
           <span className="text-muted-foreground">
             {artifact.backend} · {formatBytes(artifact.size_bytes)}
           </span>
           {key && (
-            <Button
+            <button
               type="button"
-              variant="ghost"
-              size="icon-xs"
               onClick={download}
               disabled={downloading}
               aria-label="Download artifact"
+              className="rounded p-1 hover:bg-white/[0.06] disabled:opacity-50"
             >
               <DownloadSimple className={downloading ? "animate-pulse" : ""} />
-            </Button>
+            </button>
           )}
         </span>
       </div>
@@ -444,24 +651,73 @@ function ArtifactRow({
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <Card>
-      <CardContent className="py-3">
-        <div className="text-sm font-mono text-foreground truncate">{value}</div>
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">
-          {label}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
+function CancelSection({
+  job,
+  onCancelled,
+}: {
+  job: JobRecord;
+  onCancelled: (job: JobRecord) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-function SpecRow({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="flex justify-between gap-4">
-      <span className="text-muted-foreground uppercase text-[10px] tracking-wide shrink-0">{k}</span>
-      <span className="truncate">{v}</span>
+  if (TERMINAL.has(job.state)) return null;
+
+  async function confirmCancel() {
+    setCancelling(true);
+    setError(null);
+    try {
+      const updated = await cancelJob(job.job_id);
+      onCancelled(updated);
+      setConfirming(false);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.detail
+          : "Couldn't cancel this job. Try again."
+      );
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  return confirming ? (
+    <div className="rounded-lg border border-destructive/30 bg-surface p-4">
+      <div className="flex items-start gap-2 text-sm text-destructive">
+        <Warning className="mt-0.5 h-4 w-4 shrink-0" weight="fill" />
+        <span>Cancel this job? It cannot be resumed.</span>
+      </div>
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={cancelling}
+          onClick={confirmCancel}
+          className="rounded-md bg-destructive/15 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/25 disabled:opacity-50"
+        >
+          {cancelling ? "Cancelling…" : "Confirm cancel"}
+        </button>
+        <button
+          type="button"
+          disabled={cancelling}
+          onClick={() => {
+            setConfirming(false);
+            setError(null);
+          }}
+          className="rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground"
+        >
+          Keep running
+        </button>
+      </div>
     </div>
+  ) : (
+    <button
+      type="button"
+      onClick={() => setConfirming(true)}
+      className="rounded-md border border-border px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10"
+    >
+      Cancel job
+    </button>
   );
 }

@@ -227,6 +227,53 @@ export interface SubmitFromRepoResult extends JobRecord {
   findings: PreflightFinding[];
 }
 
+/** One entry of the coordinator's event ledger, as
+ * `GET /v1alpha1/jobs/{id}/events` returns it. Mirrors
+ * `flashruntime.protocol.v1alpha1.Event`.
+ *
+ * `type` is typed as a plain string on purpose. It is an enum upstream with
+ * 30-odd members that grows independently of this repo, and a union here
+ * would turn "the runtime added an event type" into a build break in the
+ * console. The UI groups by known prefixes and renders anything it does not
+ * recognise verbatim rather than dropping it, which is the behaviour you
+ * want from a ledger.
+ *
+ * `data` carries `task_id` and, for lease and commit events, `node_id`.
+ * Neither is guaranteed: job-level events (JOB_ACCEPTED, JOB_SUCCEEDED)
+ * carry neither, so both are read defensively.
+ */
+export interface JobEvent {
+  job_id: string;
+  type: string;
+  timestamp: string;
+  source: string;
+  message: string;
+  data: Record<string, unknown>;
+  /** Present only on a federated job, where the API fans out over the
+   * per-round coordinator jobs and tags each event with its round. */
+  round?: number;
+}
+
+/** Current state of one task, from `GET /v1alpha1/jobs/{id}/tasks`.
+ *
+ * Current state ONLY. The coordinator's task view carries no attempt
+ * history and no `accepted` flag, so anything historical (which node held
+ * what, and how it ended) is derived from the event ledger instead. See
+ * `lib/job-activity.ts`. */
+export interface JobTask {
+  task_id: string;
+  state: "PENDING" | "LEASED" | "COMPLETED" | "FAILED" | "CANCELLED" | string;
+  attempts: number;
+  max_attempts: number;
+  /** The node holding it now, or the last one to hold it. Null if never
+   * claimed. */
+  node_id: string | null;
+  /** The live lease deadline, ISO. Null when no lease is active. */
+  deadline: string | null;
+  /** Federated only: task ids repeat across rounds, so rows are not merged. */
+  round?: number;
+}
+
 // ---------------------------------------------------------------------------
 // request plumbing
 // ---------------------------------------------------------------------------
@@ -361,6 +408,27 @@ export function cancelJob(jobId: string): Promise<JobRecord> {
 export function listJobRounds(jobId: string): Promise<JobRound[]> {
   return request<JobRound[]>(
     `/v1alpha1/jobs/${encodeURIComponent(jobId)}/rounds`
+  );
+}
+
+/** `GET /v1alpha1/jobs/{id}/events` — owner-scoped exactly like `getJob`.
+ *
+ * `since` is an offset into an append-only list, not a timestamp: pass the
+ * number of events already held and get only what arrived after. A time
+ * cursor would be wrong here because a single sweep expires a lease and
+ * requeues its task with identical timestamps, so any `>` comparison drops
+ * one of them and any `>=` replays it. */
+export function listJobEvents(jobId: string, since = 0): Promise<JobEvent[]> {
+  const q = since > 0 ? `?since=${since}` : "";
+  return request<JobEvent[]>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/events${q}`
+  );
+}
+
+/** `GET /v1alpha1/jobs/{id}/tasks` — owner-scoped. Current state only. */
+export function listJobTasks(jobId: string): Promise<JobTask[]> {
+  return request<JobTask[]>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/tasks`
   );
 }
 
