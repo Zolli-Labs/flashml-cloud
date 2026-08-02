@@ -9,6 +9,8 @@ provably the one preflight validated against.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from flashml_cloud_api.images import CURATED, CuratedImage, UnknownImage, resolve_image
@@ -92,42 +94,67 @@ def test_each_curated_image_has_a_description():
 # tests pin the properties that would have caught all three.
 
 
-def _workflow_text() -> str:
-    """The publish workflow, read from the repo root."""
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[4]
-    path = root / ".github" / "workflows" / "images.yml"
-    assert path.is_file(), f"expected the image publish workflow at {path}"
-    return path.read_text()
-
-
-def test_image_tag_matches_the_publish_workflow():
-    """A bump in one place and not the other points the API at a tag nobody
-    published — a failure that only shows up as an image-pull error on a
-    volunteer's machine, far from the change that caused it."""
-    from flashml_cloud_api.images import IMAGE_TAG
-
-    assert f'IMAGE_TAG: "{IMAGE_TAG}"' in _workflow_text(), (
-        f"images.py pins {IMAGE_TAG!r}; .github/workflows/images.yml publishes "
-        "a different tag"
-    )
+# The image SOURCES and their publish workflow moved to the public monorepo
+# Zolli-Labs/flashml on 2026-08-01, so GHCR creates the packages public —
+# visibility is inherited from the publishing repo, and a private package
+# fails a volunteer's anonymous pull with an authentication error that looks
+# nothing like "this package is private".
+#
+# The tests that used to read that workflow off disk are gone with it. They
+# were weak anyway: they compared two strings in two files and could not tell
+# whether an image EXISTS or is REACHABLE. All three were unpullable for
+# fourteen hours while those assertions passed.
+#
+# What replaces them checks the thing that actually matters, from the position
+# that actually matters: can a stranger, with no credentials, pull every
+# reference this API is capable of emitting?
 
 
-def test_every_alias_has_a_dockerfile_that_gets_built():
-    """An alias the workflow does not build resolves to a reference that will
-    never exist in the registry."""
-    from pathlib import Path
+@pytest.mark.network
+def test_every_curated_image_is_anonymously_pullable():
+    """The check that would have caught the outage.
+
+    A volunteer's Docker has no GitHub credentials and must never need any.
+    This asks GHCR for an anonymous pull token and lists the tags — exactly
+    what `docker pull` does first — for every reference the API can emit.
+
+    Marked `network` and deselected by default: it reaches the public
+    internet, so it must not fail a suite run on a plane. CI runs it with
+    `-m network`, which is where a regression here needs to be caught.
+    """
+    import urllib.error
+    import urllib.request
 
     from flashml_cloud_api.images import CURATED
 
-    root = Path(__file__).resolve().parents[4]
-    workflow = _workflow_text()
-    for alias in CURATED:
-        assert (root / "flashml-cloud" / "images" / alias / "Dockerfile").is_file(), (
-            f"alias {alias!r} has no Dockerfile"
-        )
-        assert alias in workflow, f"alias {alias!r} is never built by the workflow"
+    unreachable = []
+    for alias, image in CURATED.items():
+        # ghcr.io/zolli-labs/flashml-sklearn:TAG -> zolli-labs/flashml-sklearn
+        repo = image.reference.split("/", 1)[1].rsplit(":", 1)[0]
+        try:
+            with urllib.request.urlopen(
+                f"https://ghcr.io/token?scope=repository:{repo}:pull&service=ghcr.io",
+                timeout=30,
+            ) as r:
+                token = json.load(r)["token"]
+            req = urllib.request.Request(
+                f"https://ghcr.io/v2/{repo}/tags/list",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as r:
+                tags = json.load(r).get("tags") or []
+        except urllib.error.HTTPError as exc:
+            unreachable.append(f"{alias}: {repo} -> HTTP {exc.code} (private?)")
+            continue
+
+        expected = image.reference.rsplit(":", 1)[1]
+        if expected not in tags:
+            unreachable.append(f"{alias}: {repo} has no tag {expected!r}")
+
+    assert not unreachable, (
+        "a volunteer cannot pull these, so every job assigned to them fails "
+        "at execution:\n  " + "\n  ".join(unreachable)
+    )
 
 
 def test_references_live_in_our_own_namespace():

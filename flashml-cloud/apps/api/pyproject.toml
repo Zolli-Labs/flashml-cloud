@@ -38,3 +38,14 @@ dev = ["pytest", "pytest-asyncio>=0.23"]
 
 [tool.setuptools.packages.find]
 include = ["flashml_cloud_api*"]
+
+[tool.pytest.ini_options]
+# `network` reaches the public internet (GHCR). Deselected by default so the
+# suite runs offline; CI runs it with `-m network`. It is the only check that
+# proves a volunteer with no credentials can actually pull the curated images
+# — the thing that was broken for fourteen hours while every offline
+# assertion about them passed.
+addopts = "-m 'not network'"
+markers = [
+    "network: reaches the public internet; excluded by default, run with -m network",
+]
