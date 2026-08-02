@@ -86,13 +86,48 @@ flashml/bin/python -m pip install flashnode
 flashml/bin/flashnode login --coordinator ${base}`}
             />
             <p className="mt-4 max-w-prose text-sm leading-relaxed text-muted-foreground">
-              Once approved, start it taking work. It claims tasks, runs them,
-              and keeps renewing its lease until you stop it.
+              Once approved, check the machine can actually run a task. This
+              needs Docker running — every curated image executes in a
+              container.
             </p>
             <CopyBlock
               label="then"
-              code={`flashml/bin/flashnode work --coordinator ${base}`}
+              code={`flashml/bin/flashnode doctor`}
             />
+            <p className="mt-4 max-w-prose text-sm leading-relaxed text-muted-foreground">
+              When it is all green, start taking work. It claims tasks, runs
+              them, and keeps renewing its lease until you stop it.
+            </p>
+            <CopyBlock
+              label="finally"
+              code={`flashml/bin/flashnode work --coordinator ${base} --runner argv`}
+            />
+            {/* --runner argv is REQUIRED, not a tuning knob, and getting it
+                wrong fails silently: the agent registers, heartbeats, polls
+                forever and claims nothing, which reads as "no work available"
+                rather than as a misconfiguration. Jobs submitted from this
+                console carry isolation.tier=sandboxed with
+                allowFallback=false, and the coordinator's placement gate is
+                fail-closed on sandbox_capable. In flashnode's capability
+                probe only `argv` implies sandbox_capable — `--runner docker`
+                deliberately does NOT (see inventory/capabilities.py). So the
+                default subprocess runner, and docker, can never claim these
+                tasks. */}
+            <div className="mt-3 rounded-md border border-[var(--warning)]/30 bg-[var(--warning)]/[0.06] px-3 py-2.5">
+              <p className="max-w-prose text-sm leading-relaxed">
+                <span className="font-medium">
+                  {String.fromCharCode(0x2014)} <code className="font-mono text-xs">--runner argv</code>{" "}
+                  is required, not optional.
+                </span>{" "}
+                <span className="text-muted-foreground">
+                  Jobs from this console request sandboxed isolation with no
+                  fallback, and only the argv runner advertises that
+                  capability. Without it the agent registers and polls
+                  normally but never claims anything &mdash; which looks like
+                  &ldquo;no work available&rdquo;, not like a mistake.
+                </span>
+              </p>
+            </div>
           </section>
 
           <hr className="rule-fade mt-12 border-0" />
