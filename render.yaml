@@ -374,6 +374,9 @@ services:
         value: https://flashml-dev-api.onrender.com
       - key: NEXT_PUBLIC_SUPABASE_URL
         value: https://ktstmvgasqupeuimjrog.supabase.co
-      # Only the anon/publishable key ever reaches the browser.
+      # Only the anon/publishable key ever reaches the browser — and it stays
+      # out of git regardless, matching how the prod service above handles it.
+      # Render prompts once at blueprint sync. Get it from Supabase ->
+      # flashml-dev -> Settings -> API keys -> publishable.
       - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
-        value: sb_publishable_l9_Pp5agZR0SaEHR_MAdKQ_hqozpigJ
+        sync: false
