@@ -51,6 +51,21 @@ services:
   - type: pserv
     name: flashml-coordinator
     runtime: python
+    # DEPLOYS ARE GATED BY CI (2026-08-02). See .github/workflows/ci.yml.
+    #
+    # Until today all three services ran `autoDeploy: yes` with Render's
+    # `commit` trigger and this repository had no CI at all, so every commit
+    # that reached `main` deployed to production without the 419 API tests,
+    # the 61 e2e tests or the 26 web tests ever running.
+    #
+    # Render's own `checksPass` trigger would also fix that, but it is a
+    # dashboard/API setting with no blueprint field, so it could be neither
+    # reviewed in a diff nor set from version control. Turning auto-deploy
+    # off entirely and letting the workflow call the Render API keeps the
+    # whole rule in one reviewable place.
+    #
+    # Break-glass: a manual deploy from the Render dashboard still works.
+    autoDeploy: false
     # rootDir was `flashruntime` — a directory in THIS repo. It is gone: the
     # runtime now lives in the public Zolli-Labs/flashml monorepo and installs
     # like any other dependency. There is no longer a copy of it here to drift.
@@ -106,6 +121,9 @@ services:
   # -------------------------------------------------------------------------
   - type: web
     name: flashml-api
+    # Deploys gated by CI — see the note on flashml-coordinator above and
+    # .github/workflows/ci.yml.
+    autoDeploy: false
     runtime: python
     rootDir: flashml-cloud/apps/api
     plan: starter          # must not sleep: a suspended API strands every agent
@@ -187,6 +205,9 @@ services:
   # -------------------------------------------------------------------------
   - type: web
     name: flashml-web
+    # Deploys gated by CI — see the note on flashml-coordinator above and
+    # .github/workflows/ci.yml.
+    autoDeploy: false
     runtime: node
     rootDir: flashml-cloud/apps/web
     plan: free             # may sleep; only the API and coordinator must not
