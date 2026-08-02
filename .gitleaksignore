@@ -1,0 +1,28 @@
+# Findings the secret scanner should stop re-reporting.
+#
+# FINGERPRINTS ONLY — never the secret itself. A fingerprint is
+# commit:file:rule:line, so this file identifies WHICH finding is handled
+# without writing the value into a tracked file, which is what an
+# allowlist-by-value would do.
+#
+# POLICY (owner, 2026-08-02): every key is treated as a secret, including
+# Supabase "publishable"/anon keys. They stay out of git regardless of what
+# the vendor says is safe to expose. An entry here is never a claim that a
+# value is harmless — it means the value has been ROTATED and the dead
+# original cannot be scrubbed from history that is already pushed.
+
+# flashml-dev Supabase publishable key, committed in .env.dev.example on
+# 2026-08-02 and pushed before the policy above was set.
+#
+# !! ROTATION PENDING — owner action. !!
+# The key has NOT been rotated yet; there is no API for it, so it has to be
+# done in the Supabase dashboard (flashml-dev -> Settings -> API keys ->
+# rotate/disable the publishable key). Until that happens the value in history
+# is still live. Nothing depends on it yet: the dev project is new, the
+# template now leaves the field blank, and render.yaml carries it as
+# `sync: false` like prod.
+#
+# This entry exists so CI is not permanently red on a value that cannot be
+# scrubbed from already-pushed history. It is NOT a statement that the value
+# is safe.
+b1e5df96aa7c76021fb1be5a5fe538a249bedcde:.env.dev.example:generic-api-key:32

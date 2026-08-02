@@ -3,17 +3,16 @@
 # Scanned in CI by the `secrets` job in .github/workflows/ci.yml, over the
 # FULL history, on every push and pull request.
 #
-# A note on why this file is deliberately small. The temptation with a secret
+# A note on why the allowlists below are narrow. The temptation with a secret
 # scanner is to silence it by excluding `tests/` wholesale, at which point it
-# no longer scans the files most likely to contain a copy-pasted real
-# credential. So the allowlist below names ONE literal string. Any other
-# high-entropy value, in any file including these same test files, still
-# fails the build.
+# stops scanning the files most likely to contain a copy-pasted real
+# credential. Each entry here names one specific pattern and says why it is
+# not a secret. Anything else, in any file, still fails the build.
 
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = """
 The HS256 signing secret used by the API test suite.
 
@@ -25,9 +24,8 @@ real key, and the string says so.
 
 Verified separately, and the reason this file does not simply disable the
 rule: NEITHER of the two real Supabase DATABASE_URL passwords used by this
-project appears in any commit (`git log --all -S<password>` -> 0 for both),
-and `.env` has never been tracked. The only credentials in this history are
-the ones named right here.
+project appears in any commit (git log --all -S<password> returns 0 for both),
+and .env has never been tracked.
 """
 regexes = [
   '''test-jwt-secret-long-enough-for-hs256(-abcdef)?''',
