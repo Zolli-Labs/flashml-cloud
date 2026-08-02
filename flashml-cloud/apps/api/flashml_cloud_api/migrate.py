@@ -143,6 +143,46 @@ def _drifted(migrations: list[Migration], already: dict[str, str]) -> list[Migra
     ]
 
 
+def reconcile_checksums(
+    conn: psycopg.Connection,
+    directory: Path = MIGRATIONS_DIR,
+) -> list[str]:
+    r"""Rewrite recorded checksums to match the files on disk. Returns the
+    versions it changed.
+
+    **This is the "reconcile by hand" that `DriftError` tells you to do, and
+    it is only correct when you have verified the change is NON-SEMANTIC** —
+    a comment edit, a reformat, a line-ending change. It cannot check that for
+    you: by the time drift exists, the only record of what was actually
+    applied is the database itself.
+
+    Verify first, e.g.:
+
+        git show <commit>:migrations/0001_x.sql | grep -v '^\s*--' > /tmp/old
+        grep -v '^\s*--' migrations/0001_x.sql > /tmp/new
+        diff /tmp/old /tmp/new    # must be empty
+
+    Why it exists at all: scrubbing project identifiers out of migration
+    COMMENTS on 2026-08-02 changed four checksums and wedged the pipeline,
+    with no way forward that did not involve either reverting a deliberate
+    security change or hand-editing rows in two databases. A guard with no
+    supported escape hatch gets bypassed in a hurry, which is worse.
+    """
+    already = applied(conn)
+    changed: list[str] = []
+    for migration in discover(directory):
+        recorded = already.get(migration.version)
+        if recorded is None or recorded == migration.checksum:
+            continue
+        with conn.transaction():
+            conn.execute(
+                f"update {TABLE} set checksum = %s where version = %s",
+                (migration.checksum, migration.version),
+            )
+        changed.append(migration.version)
+    return changed
+
+
 def apply(
     conn: psycopg.Connection,
     directory: Path = MIGRATIONS_DIR,
@@ -253,6 +293,18 @@ def main(argv: list[str] | None = None) -> int:
              "database is BEHIND the migration directory — a bare --baseline "
              "would mark those later migrations as done without running them.",
     )
+    parser.add_argument(
+        "--reconcile-checksums",
+        action="store_true",
+        help="Re-record checksums for migrations whose FILE changed after "
+             "they were applied. Only after verifying the change is "
+             "non-semantic (a comment edit). Prints every version it rewrites.",
+    )
+    parser.add_argument(
+        "--dir",
+        default=str(MIGRATIONS_DIR),
+        help=argparse.SUPPRESS,   # tests point this at a temporary directory
+    )
     args = parser.parse_args(argv)
 
     if not args.database_url:
@@ -261,21 +313,44 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
+    directory = Path(args.dir)
+
     with psycopg.connect(args.database_url, autocommit=True) as conn:
+        if args.reconcile_checksums:
+            changed = reconcile_checksums(conn, directory)
+            if not changed:
+                print("No drift; nothing to reconcile.")
+            else:
+                for version in changed:
+                    print(f"Re-recorded checksum for {version}")
+            return 0
+
         if args.dry_run:
-            outstanding = pending(conn, MIGRATIONS_DIR)
-            if not outstanding:
-                print("Up to date; nothing pending.")
-                return 0
-            print(f"{len(outstanding)} migration(s) pending:")
-            for migration in outstanding:
-                print(f"  {migration.version}")
-            return 1
+            # Drift FIRST. Checking only for missing versions is what let a
+            # drifted database report "up to date" — a false green on the one
+            # question this command exists to answer.
+            drifted = _drifted(discover(directory), applied(conn))
+            outstanding = pending(conn, directory)
+            if drifted:
+                print(f"{len(drifted)} migration(s) DRIFTED "
+                      f"(file changed after it was applied):")
+                for migration in drifted:
+                    print(f"  {migration.version}")
+                print("Verify the change is non-semantic, then re-record with "
+                      "--reconcile-checksums.")
+            if outstanding:
+                print(f"{len(outstanding)} migration(s) pending:")
+                for migration in outstanding:
+                    print(f"  {migration.version}")
+            if drifted or outstanding:
+                return 1
+            print("Up to date; nothing pending.")
+            return 0
 
         try:
             done = apply(
                 conn,
-                MIGRATIONS_DIR,
+                directory,
                 baseline=args.baseline,
                 baseline_through=args.baseline_through,
             )

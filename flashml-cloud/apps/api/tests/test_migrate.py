@@ -329,3 +329,66 @@ def test_tracking_table_has_rls_enabled(postgres_dsn):
             " where oid = 'public.schema_migrations'::regclass"
         ).fetchone()
         assert row[0] is True, "schema_migrations is exposed to anon"
+
+
+# ---------------------------------------------------------------------------
+# drift must be visible to --dry-run, and reconcilable when it is benign
+#
+# Found in CI 2026-08-02: scrubbing project refs out of migration COMMENTS
+# changed their checksums, so `apply` refused (correctly). But `--dry-run`
+# against the same database had said "Up to date; nothing pending" — it only
+# ever compared the SET of versions, never their checksums. A drifted database
+# reported healthy, which is a false green on the exact question this tool
+# exists to answer.
+# ---------------------------------------------------------------------------
+
+
+def _drift_one(directory: Path) -> None:
+    """Append a comment to an applied migration — changes the checksum, not
+    the SQL."""
+    p = directory / "0001_first.sql"
+    p.write_text(p.read_text() + "\n-- an edit after the fact\n")
+
+
+def test_dry_run_reports_drift_instead_of_reporting_healthy(postgres_dsn, tmp_path):
+    write_migrations(tmp_path, {"0001_first.sql": "create table public.a (id int);"})
+    with scratch_database(postgres_dsn) as dsn:
+        with connected(dsn) as conn:
+            migrate.apply(conn, tmp_path)
+        _drift_one(tmp_path)
+
+        # The whole point: nothing is PENDING, so the old implementation
+        # returned 0 and said the database was fine.
+        with connected(dsn) as conn:
+            assert migrate.pending(conn, tmp_path) == []
+
+        rc = migrate.main(["--dry-run", "--database-url", dsn, "--dir", str(tmp_path)])
+        assert rc != 0, "a drifted database must not report healthy"
+
+
+def test_reconcile_checksums_makes_a_benign_edit_applyable_again(
+    postgres_dsn, tmp_path
+):
+    write_migrations(tmp_path, {"0001_first.sql": "create table public.a (id int);"})
+    with scratch_database(postgres_dsn) as dsn:
+        with connected(dsn) as conn:
+            migrate.apply(conn, tmp_path)
+        _drift_one(tmp_path)
+
+        with connected(dsn) as conn:
+            with pytest.raises(migrate.DriftError):
+                migrate.apply(conn, tmp_path)
+
+            changed = migrate.reconcile_checksums(conn, tmp_path)
+            assert changed == ["0001_first"]
+
+            # Now it is quiet again, and a NEW migration can still be applied.
+            assert migrate.apply(conn, tmp_path) == []
+        assert migrate.main(["--dry-run", "--database-url", dsn, "--dir", str(tmp_path)]) == 0
+
+
+def test_reconcile_checksums_is_a_no_op_when_nothing_drifted(postgres_dsn, tmp_path):
+    write_migrations(tmp_path, {"0001_first.sql": "create table public.a (id int);"})
+    with scratch_database(postgres_dsn) as dsn, connected(dsn) as conn:
+        migrate.apply(conn, tmp_path)
+        assert migrate.reconcile_checksums(conn, tmp_path) == []
