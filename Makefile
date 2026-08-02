@@ -1,4 +1,11 @@
+# `e2e` MUST be here. There is a directory called e2e/, so without .PHONY make
+# resolves the target to that path, finds it exists with no prerequisites, and
+# reports "make: `e2e' is up to date." — running NOTHING while looking like a
+# pass. That is the worst possible failure for a test target: a green that
+# never executed. e2e-setup and e2e-demo do not collide with any path, which
+# is why only this one was silently dead.
 .PHONY: setup test check-flashml \
+	e2e e2e-setup e2e-demo \
 	poc-local-up poc-local-down poc-local-status poc-local-logs \
 	poc-local-submit poc-local-fail-worker poc-local-forward poc-reset \
 	poc-images poc-ack-bootstrap poc-acr-push poc-ack-deploy poc-ack-submit \
