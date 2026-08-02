@@ -165,9 +165,30 @@ jobs:
         with:
           fetch-depth: 0   # history, not just the tip — gitleaks needs the range
 
-      - uses: gitleaks/gitleaks-action@v2
+      # The BINARY, not gitleaks/gitleaks-action@v2.
+      #
+      # That action refuses to run for organizations without a paid licence,
+      # and Zolli-Labs is one. Its first run here failed in 7 seconds:
+      #
+      #   "[Zolli-Labs] is an organization. License key is required."
+      #
+      # The gitleaks tool itself is MIT-licensed and free; only the Action
+      # wrapper is gated. So install the release binary and call it directly.
+      #
+      # --redact so a finding never prints the secret it found into a log that
+      # is far more widely readable than the commit it came from.
+      - name: Install gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Scan the full history
+        run: gitleaks git . --redact --verbose
 
 # ---------------------------------------------------------------------------
 # PRODUCTION DEPLOYS ARE NOT IN THIS FILE.
