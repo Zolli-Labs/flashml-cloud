@@ -1,6 +1,7 @@
 import { Hero } from "@/components/landing/Hero";
 import { LedgerWall } from "@/components/landing/LedgerWall";
 import { RecoveryDemo } from "@/components/landing/RecoveryDemo";
+import { SchedulerComparison } from "@/components/landing/SchedulerComparison";
 import { SupplyTiers } from "@/components/landing/SupplyTiers";
 import { Guarantees } from "@/components/landing/Guarantees";
 import { HowItWorks } from "@/components/landing/HowItWorks";
@@ -15,6 +16,10 @@ export default function Home() {
   return (
     <>
       <Hero />
+      {/* Frames the problem before RecoveryDemo explains the mechanism.
+          Without it the page only ever showed our own behaviour, so there
+          was nothing to measure the claim against. */}
+      <SchedulerComparison />
       <RecoveryDemo />
       <SupplyTiers />
       <Guarantees />
