@@ -5,30 +5,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowClockwise, Warning } from "@phosphor-icons/react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { StateBadge } from "@/components/jobs/StateBadge";
 import { NotAuthenticated, listJobs, type JobRecord, type JobState } from "@/lib/cloud-api";
 
-const stateStyles: Record<JobState, string> = {
-  PENDING: "text-muted-foreground border-muted",
-  SUBMITTED: "text-cyan border-cyan/40",
-  RUNNING: "text-cyan border-cyan/40",
-  RECOVERING: "text-amber-400 border-amber-400/40",
-  SUCCEEDED: "text-node-green border-node-green/40",
-  FAILED: "text-destructive border-destructive/40",
-  CANCELLED: "text-muted-foreground border-muted",
-};
-
-export function StateBadge({ state }: { state: JobState }) {
-  return (
-    <Badge
-      variant="outline"
-      className={`font-mono text-xs ${stateStyles[state] ?? "text-muted-foreground border-muted"}`}
-    >
-      {state}
-    </Badge>
-  );
-}
 
 // Terminal states: once a job lands here it will never change again, so
 // polling it is just load with no payoff. `/jobs` polls anyway (the list as

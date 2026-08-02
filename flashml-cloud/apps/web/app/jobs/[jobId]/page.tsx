@@ -20,7 +20,7 @@ import {
   type JobRecord,
   type JobRound,
 } from "@/lib/cloud-api";
-import { StateBadge } from "../page";
+import { StateBadge } from "@/components/jobs/StateBadge";
 
 const TERMINAL_STATES = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
 const POLL_MS = 2500;
