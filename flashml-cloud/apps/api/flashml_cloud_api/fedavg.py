@@ -177,17 +177,29 @@ def _round_timeout_seconds(config: FlashmlConfig) -> float:
     return task_seconds * ROUND_TIMEOUT_MULTIPLIER
 
 
-def _contributors(coord: Coordinator, coordinator_job_id: str) -> list[str]:
-    """Node ids whose commit the coordinator ACCEPTED for this round.
+def _accepted_tasks(
+    coord: Coordinator, coordinator_job_id: str
+) -> list[dict[str, Any]]:
+    """One ``{node_id, task_id, duration_s}`` per task the coordinator ACCEPTED.
+
+    The acceptance judgement lives here, unchanged and in one place: it is
+    the same filter ``_contributors`` has always applied, moved rather than
+    copied so the round's provenance list and the credit ledger can never
+    disagree about who did accepted work.
 
     Filtered on ``COMPLETED``, never on "has a node_id": a task that was
     leased, failed and got retried elsewhere still reports the last node
     that held it, and crediting that machine would count attempted work as
     accepted work — the one thing the workspace rules say never to blur.
 
-    Never fatal. This is provenance for the UI and for later credit
-    accounting; failing the round because the task list was momentarily
-    unavailable would throw away an aggregation that already succeeded.
+    ``duration_s`` is read only if the coordinator's task view actually
+    reports one, and is ``None`` otherwise. The current view (``GET
+    /v1alpha1/jobs/{id}/tasks``) does not, and a made-up number in a credit
+    ledger is worse than an absent one.
+
+    Never fatal. This is provenance for the UI and for credit accounting;
+    failing the round because the task list was momentarily unavailable
+    would throw away an aggregation that already succeeded.
     """
     try:
         tasks = coord.tasks(coordinator_job_id)
@@ -196,14 +208,65 @@ def _contributors(coord: Coordinator, coordinator_job_id: str) -> list[str]:
             {"text": "could not read round contributors", "job": coordinator_job_id}
         ))
         return []
-    seen: list[str] = []
+    accepted: list[dict[str, Any]] = []
     for task in tasks:
         if not isinstance(task, dict) or task.get("state") != "COMPLETED":
             continue
         node_id = task.get("node_id")
-        if isinstance(node_id, str) and node_id and node_id not in seen:
+        if not isinstance(node_id, str) or not node_id:
+            continue
+        task_id = task.get("task_id")
+        duration = task.get("duration_s")
+        accepted.append({
+            "node_id": node_id,
+            "task_id": task_id if isinstance(task_id, str) and task_id else None,
+            "duration_s": (
+                float(duration)
+                if isinstance(duration, (int, float))
+                and not isinstance(duration, bool)
+                else None
+            ),
+        })
+    return accepted
+
+
+def _contributors(accepted: list[dict[str, Any]]) -> list[str]:
+    """The distinct node ids in ``_accepted_tasks``, first-seen order.
+
+    Nothing is judged here — the ``COMPLETED`` filter that decides who
+    counts is ``_accepted_tasks``'s, and this is only the shape
+    ``job_rounds.contributors`` stores: node ids, deduplicated, because one
+    machine may have run several of a round's shards.
+    """
+    seen: list[str] = []
+    for task in accepted:
+        node_id = task["node_id"]
+        if node_id not in seen:
             seen.append(node_id)
     return seen
+
+
+def _record_contributions(
+    db: psycopg.Connection, coordinator_job_id: str, accepted: list[dict[str, Any]]
+) -> None:
+    """Write the round's credit rows, and never fail the round doing it.
+
+    Same rule as ``_accepted_tasks``, for the same reason: this round has
+    already been aggregated and its weights already written, so a ledger
+    that is momentarily unwritable must not turn a successful round into a
+    failed run. The row is recoverable — the accepted-task list can be
+    re-read from the coordinator and re-inserted, which is idempotent by
+    schema — and a lost aggregation is not.
+    """
+    try:
+        dbmod.record_contributions(
+            db, job_id=coordinator_job_id, entries=accepted
+        )
+    except Exception:  # noqa: BLE001 - credit is not worth a failed round
+        log.warning(json.dumps(
+            {"text": "could not record round contributions",
+             "job": coordinator_job_id}
+        ))
 
 
 def run_federated_job(
@@ -244,6 +307,11 @@ def run_federated_job(
         # whole duration: a driver thread can sit idle for an hour between
         # rounds, which is long enough for any pooler or firewall to drop a
         # connection underneath it.
+        coordinator_job_id = str(result["job_id"])
+        # Read once, used twice: the round's provenance list and its credit
+        # rows are two views of the same accepted-task set, and a second
+        # fetch could see a different one.
+        accepted = _accepted_tasks(coord, coordinator_job_id)
         db = connect()
         try:
             dbmod.insert_job_round(
@@ -252,9 +320,14 @@ def run_federated_job(
                 round_index=int(result["round"]),
                 participants=int(result["participants"]),
                 mean_loss=float(result["mean_loss"]),
-                contributors=_contributors(coord, str(result["job_id"])),
-                coordinator_job_id=str(result["job_id"]),
+                contributors=_contributors(accepted),
+                coordinator_job_id=coordinator_job_id,
             )
+            # Same connection as the round row, and keyed on the ROUND's
+            # coordinator job rather than the parent run: task ids repeat
+            # every round, so credit keyed on the parent id would collide
+            # under 0003's unique index and only round 0 would ever be paid.
+            _record_contributions(db, coordinator_job_id, accepted)
         finally:
             db.close()
 

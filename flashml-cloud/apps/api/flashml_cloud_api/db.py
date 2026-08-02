@@ -14,6 +14,7 @@ remember a ``commit()``.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -539,6 +540,109 @@ def list_round_job_ids(db: psycopg.Connection, job_id: str) -> list[tuple[int, s
         )
         return [(int(r["round"]), str(r["coordinator_job_id"]))
                 for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# contributions
+# ---------------------------------------------------------------------------
+
+def record_contributions(
+    db: psycopg.Connection,
+    *,
+    job_id: str,
+    entries: Sequence[Mapping[str, Any]],
+) -> int:
+    """Credit every machine whose work on ``job_id`` was ACCEPTED.
+
+    ``entries`` is one mapping per accepted task — ``node_id``, ``task_id``,
+    ``duration_s`` — and the acceptance judgement is the caller's: this
+    function writes what it is given and never re-decides who deserves
+    credit. ``job_id`` is the id of the job the tasks actually belong to (for
+    a federated run, the *round's* coordinator job, not the parent run —
+    otherwise round 1's ``task-000`` would collide with round 0's under the
+    unique index and only the first round of an N-round run would ever be
+    paid). Returns the number of rows written.
+
+    **A node with no ``machines`` row is skipped, not raised on.** A node
+    registered against a self-hosted coordinator has no cloud enrolment at
+    all: nobody signed in, nobody owns it, and there is nothing to credit.
+    That is a supported deployment — flashruntime runs with no Postgres and
+    no cloud — so an unresolvable node_id is an expected, ordinary outcome
+    and not an error condition. Raising would turn somebody else's perfectly
+    correct self-hosted pool into a failure on our side, and (because this is
+    called from a round callback) would put at risk a round that had already
+    aggregated successfully. The write is deliberately partial: the machines
+    we do know about are credited, the rest are silently not.
+
+    **Idempotent by schema, not by convention.** ``on conflict do nothing``
+    against the unique index from migration 0003 on ``(machine_id, job_id,
+    coalesce(task_id, ''))``. The caller may be retried — a round callback
+    can run twice and a driver can be restarted onto a run whose rounds are
+    already recorded — and a credit ledger that double-counts fails silently
+    and compounds. Hard rule 4: idempotent commits, no double counting.
+
+    One resolve query for the whole batch rather than one per row: per-row
+    resolution is a database round trip per contributor per round, which
+    becomes O(pool size) load exactly when the pool is large enough for that
+    to hurt.
+    """
+    rows: list[tuple[str, str, str | None, float | None]] = []
+    seen: set[tuple[str, str | None]] = set()
+
+    node_ids = []
+    for entry in entries:
+        node_id = entry.get("node_id")
+        if isinstance(node_id, str) and node_id:
+            node_ids.append(node_id)
+    if not node_ids:
+        # Nothing to resolve and nothing to write. An empty round (or a round
+        # in which every contributor was self-hosted) is a no-op, not an
+        # error — and it must not cost a query either.
+        return 0
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select id, node_id from public.machines where node_id = any(%s)",
+            (list(set(node_ids)),),
+        )
+        machine_by_node = {row["node_id"]: row["id"] for row in cur.fetchall()}
+
+        for entry in entries:
+            node_id = entry.get("node_id")
+            if not isinstance(node_id, str) or node_id not in machine_by_node:
+                continue
+            task_id = entry.get("task_id")
+            task_id = task_id if isinstance(task_id, str) and task_id else None
+            key = (node_id, task_id)
+            if key in seen:
+                # The batch itself is deduplicated so the statement below
+                # cannot depend on how Postgres handles a conflict between
+                # two rows of the same command.
+                continue
+            seen.add(key)
+            duration = entry.get("duration_s")
+            duration = (
+                float(duration)
+                if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                else None
+            )
+            rows.append((machine_by_node[node_id], job_id, task_id, duration))
+
+        if not rows:
+            return 0
+
+        values = ", ".join(["(%s, %s, %s, %s)"] * len(rows))
+        cur.execute(
+            f"""
+            insert into public.contributions
+                (machine_id, job_id, task_id, duration_s)
+            values {values}
+            on conflict do nothing
+            returning id
+            """,
+            [field for row in rows for field in row],
+        )
+        return len(cur.fetchall())
 
 
 def list_federated_jobs_for_owner(
