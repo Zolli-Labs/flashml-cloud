@@ -226,16 +226,9 @@ def _skip_without_public_repo():
     return root
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "IMAGE_TAG bumped to 2026.08.2 here to publish the new pytorch-cuda "
-        "image; the PUBLIC repo still says 2026.08.1. Bump IMAGE_TAG in "
-        "flashml/.github/workflows/images.yml to 2026.08.2 and let it publish. "
-        "strict=True: this FAILS as XPASS the day that lands, which is the "
-        "signal to delete this marker."
-    ),
-)
+# The public workflow was bumped to 2026.08.2 (flashml commit on 2026-08-02),
+# so this now genuinely passes and the xfail is retired. It stays as a live
+# assertion: nothing else checks that the two repos agree.
 def test_image_tag_agrees_with_the_public_images_workflow():
     import re
 
