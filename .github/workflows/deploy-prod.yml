@@ -35,6 +35,18 @@ on:
         type: boolean
         default: false
 
+# `actions: read` is REQUIRED and is not granted by default. The preflight
+# below queries /actions/workflows/ci.yml/runs to confirm CI passed for this
+# exact commit, and without it GITHUB_TOKEN gets
+# "Resource not accessible by integration (HTTP 403)" — which is how the very
+# first run of this workflow failed (2026-08-02).
+#
+# Declared explicitly rather than relying on the repository default, because
+# that default is a setting someone can change without touching this file.
+permissions:
+  contents: read
+  actions: read
+
 concurrency:
   group: deploy-prod          # never two production deploys at once
   cancel-in-progress: false
