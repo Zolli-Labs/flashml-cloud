@@ -36,10 +36,37 @@ REGISTRY_PREFIX = "ghcr.io/zolli-labs/flashml-"
 #: pulled it — and preflight validates a user's imports against the manifest
 #: below for THIS version, a guarantee that a mutated tag silently voids.
 #:
-#: Must equal IMAGE_TAG in .github/workflows/images.yml. tests/test_images.py
-#: reads that file and asserts they agree, so bumping one without the other
-#: fails the suite instead of pointing the API at a tag nobody published.
-IMAGE_TAG = "2026.08.1"
+#: THIS TAG EXISTS IN THREE PLACES, IN TWO REPOS. All three must agree:
+#:
+#:   1. this constant                                  (PRIVATE, here)
+#:   2. `IMAGE_TAG` in .github/workflows/images.yml    (PUBLIC flashml)
+#:   3. `PROBE_IMAGE` in flashnode/flashnode/doctor.py (PUBLIC flashml)
+#:      — `ghcr.io/zolli-labs/flashml-python-slim:<tag>`, inline in the string
+#:
+#: (3) was found in review on 2026-08-02 and nothing documented it, here or
+#: there; the public `images/README.md` publish checklist still lists only
+#: (1) and (2). It is the dangerous one precisely because it never breaks:
+#: old tags persist, so after a bump a host's `doctor` cheerfully verifies it
+#: can pull an image the fleet no longer runs, and every check passes. That
+#: is the exact class of undetected divergence `doctor` was written to catch.
+#:
+#: How the agreement is enforced, and where each check stops:
+#:   * tests/test_images.py compares all three against a sibling checkout of
+#:     the public repo. Best-effort — it skips when no such checkout exists,
+#:     so it cannot run in this repo's CI. It fires where the bump is actually
+#:     performed, by someone with both repos open.
+#:   * `test_every_curated_image_is_anonymously_pullable` (marked `network`,
+#:     run in CI with `-m network`) is the check that proves an image EXISTS
+#:     and is reachable without credentials. A string comparison between files
+#:     never could — all three references were unpullable for fourteen hours
+#:     while assertions like the above passed, which is why the predecessors
+#:     of these tests were deleted.
+#:
+#: ORDERING, and it matters: this constant is a CONSUMER pin naming what the
+#: API emits, so it may only move to a tag that already exists. The public
+#: workflow (2) is the producer and bumps FIRST. Moving this one ahead of
+#: publication points every job at four tags nobody pushed.
+IMAGE_TAG = "2026.08.2"
 
 
 def _reference(alias: str) -> str:
@@ -110,6 +137,25 @@ CURATED: dict[str, CuratedImage] = {
         },
         description="PyTorch (CPU-only build) plus numpy, for training jobs "
         "that don't need a GPU node.",
+    ),
+    "pytorch-cuda": CuratedImage(
+        alias="pytorch-cuda",
+        reference=_reference("pytorch-cuda"),
+        # Deliberately IDENTICAL to pytorch-cpu above. images/pytorch-cuda's
+        # Dockerfile installs the same two packages on a CUDA build of the
+        # same library — it differs in its base, its --index-url, and a torch
+        # version forced by cu124 wheels starting at 2.4.0, not in what it
+        # makes importable. Preflight validates a user's imports against these
+        # manifests, so a divergence would let one repo pass against
+        # pytorch-cpu and be rejected against pytorch-cuda for no real reason.
+        packages=frozenset(_STDLIB)
+        | {
+            "torch",
+            "numpy",
+        },
+        description="PyTorch (CUDA 12.4 build) plus numpy, for jobs that "
+        "request a GPU. Only ever pulled by a host that advertised one; it "
+        "is several gigabytes and shares no layer with the other images.",
     ),
 }
 
