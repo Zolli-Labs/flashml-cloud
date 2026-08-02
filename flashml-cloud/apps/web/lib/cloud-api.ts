@@ -50,7 +50,13 @@ function withDefaultScheme(url: string): string {
  * it is read fresh on every call rather than captured once at import time
  * (and so tests can override `NEXT_PUBLIC_CLOUD_API` per-case). */
 export function cloudApiBase(): string {
-  return withDefaultScheme(process.env.NEXT_PUBLIC_CLOUD_API ?? "http://localhost:8000");
+  // `||`, not `??`. An EMPTY value is not the same as an unset one and `??`
+  // does not catch it: `"" ?? fallback` is `""`, withDefaultScheme returns ""
+  // in turn, and fetch() is then handed a RELATIVE url — every API call
+  // silently goes to the web origin instead of the API. Render produces
+  // exactly this when a `fromService` reference fails to resolve: nothing
+  // fails at build time, and a signed-in user sees a bare "Failed to fetch".
+  return withDefaultScheme(process.env.NEXT_PUBLIC_CLOUD_API || "http://localhost:8000");
 }
 
 export class NotAuthenticated extends Error {

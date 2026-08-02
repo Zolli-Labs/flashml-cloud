@@ -194,14 +194,26 @@ services:
     envVars:
       # Must be NEXT_PUBLIC_CLOUD_API, not NEXT_PUBLIC_API_BASE: that is the
       # only var name `apps/web/lib/cloud-api.ts` (`cloudApiBase()`) reads.
-      # Render's `fromService: {property: host}` returns a bare hostname
-      # (e.g. `flashml-api.onrender.com`, no scheme) — cloud-api.ts
-      # normalizes that with `https://` at read time.
+      #
+      # AN EXPLICIT URL, not `fromService: {property: host}`, as of 2026-08-01.
+      #
+      # NEXT_PUBLIC_* values are inlined by Next.js at BUILD time. A
+      # `fromService` reference that does not resolve during the build yields
+      # an empty string, which is baked in permanently — and nothing fails.
+      # The site serves, sign-in works (Supabase uses its own `sync: false`
+      # vars, which is why those were fine while this one was not), and the
+      # breakage appears only when a signed-in user loads a page that calls
+      # the API: a bare "Failed to fetch", with no hint that a deploy-time
+      # value is missing. That is what happened here.
+      #
+      # A literal costs one edit if the API's hostname ever changes, and that
+      # edit is visible in a diff. Silence was the expensive part.
+      #
+      # apps/web/next.config.ts now refuses to complete a production build
+      # when this is missing or empty, so a recurrence fails at build time
+      # with a message naming the variable, instead of shipping.
       - key: NEXT_PUBLIC_CLOUD_API
-        fromService:
-          type: web
-          name: flashml-api
-          property: host
+        value: https://flashml-api.onrender.com
       # ONLY the anon key reaches the browser. The service-role key and the
       # operator token must never appear in a NEXT_PUBLIC_* var or a bundle —
       # a leaked service key bypasses every ownership check the API performs.

@@ -198,5 +198,26 @@ describe("cloud-api", () => {
       vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "https://cloud.example.com");
       expect(cloudApiBase()).toBe("https://cloud.example.com");
     });
+
+    // An EMPTY value is not the same as an unset one, and `??` does not catch
+    // it: `"" ?? fallback` is `""`. withDefaultScheme then returns "" too (its
+    // `!url` guard), so cloudApiBase() yields "" and fetch() is handed a
+    // RELATIVE url — every call silently goes to the web origin instead of the
+    // API. Render produces exactly this when a `fromService` reference fails to
+    // resolve, which is invisible at build time and surfaces to a signed-in
+    // user as a bare "Failed to fetch".
+    it("treats an EMPTY NEXT_PUBLIC_CLOUD_API as unset, never as a relative base", async () => {
+      vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "");
+      expect(cloudApiBase()).not.toBe("");
+
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+      await listMachines();
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).not.toMatch(/^\/v1alpha1/);
+      expect(url).toBe("http://localhost:8000/v1alpha1/machines");
+    });
   });
 });
