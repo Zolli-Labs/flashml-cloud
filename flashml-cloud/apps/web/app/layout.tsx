@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { Navbar } from "@/components/nav/Navbar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -68,10 +67,10 @@ export default function RootLayout({
         >
           Skip to content
         </a>
-        <Navbar />
-        <main id="content" className="flex-1">
-          {children}
-        </main>
+        {/* No chrome here. The landing and the console wear different
+            chrome (a top nav vs a left rail), so each route group supplies
+            its own layout and its own <main id="content">. */}
+        {children}
       </body>
     </html>
   );
