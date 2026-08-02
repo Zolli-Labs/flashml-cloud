@@ -131,21 +131,50 @@ def approve_device_code(db: psycopg.Connection, user_code: str, user_id: str) ->
     if row["expires_at"] <= now:
         raise DeviceCodeExpired(user_code)
 
-    if dbmod.fetch_machine_by_node_id(db, row["node_id"]) is not None:
-        raise NodeAlreadyEnrolled(row["node_id"])
+    existing = dbmod.fetch_machine_by_node_id(db, row["node_id"])
+    if existing is not None:
+        # machines.node_id is globally unique and revoking only sets
+        # status='revoked' — the row, and the node_id with it, stays. Without
+        # the branch below, revoking a machine you own made its node_id
+        # permanently unusable: re-enrolment hit the unique constraint and the
+        # owner was told "this machine is already enrolled", with no way back
+        # short of deleting the agent's identity file. Revoking and enrolling
+        # again is an ordinary thing to do, and item 7 of the acceptance bar
+        # requires revocation to work — a feature should not punish its user
+        # for using it.
+        #
+        # Owner-scoped, deliberately. A revoked node_id must not become a way
+        # for a second account to adopt someone else's machine identity; that
+        # impersonation is exactly what the unique constraint is for, and
+        # revoking must not open a door into it. Moving a machine between
+        # accounts means resetting its identity on the machine itself.
+        if existing["status"] != "revoked" or str(existing["owner_id"]) != str(user_id):
+            raise NodeAlreadyEnrolled(row["node_id"])
 
-    try:
-        machine_id = dbmod.insert_machine(
+        # Reuse the row rather than inserting a second one: contributions and
+        # any other history reference this machine id, and a duplicate would
+        # silently split a machine's record in two. reactivate_machine clears
+        # the old token_hash, so the revoked token stays dead and the agent
+        # must redeem a fresh one.
+        machine_id = dbmod.reactivate_machine(
             db,
-            owner_id=user_id,
-            node_id=row["node_id"],
+            machine_id=existing["id"],
             name=row["hostname"],
             platform=row["platform"],
         )
-    except psycopg.errors.UniqueViolation as exc:
-        # Lost a race against a concurrent approval of a different code
-        # for the same node_id. Same refusal either way.
-        raise NodeAlreadyEnrolled(row["node_id"]) from exc
+    else:
+        try:
+            machine_id = dbmod.insert_machine(
+                db,
+                owner_id=user_id,
+                node_id=row["node_id"],
+                name=row["hostname"],
+                platform=row["platform"],
+            )
+        except psycopg.errors.UniqueViolation as exc:
+            # Lost a race against a concurrent approval of a different code
+            # for the same node_id. Same refusal either way.
+            raise NodeAlreadyEnrolled(row["node_id"]) from exc
 
     dbmod.mark_device_code_approved(db, user_code, user_id, machine_id)
     return machine_id

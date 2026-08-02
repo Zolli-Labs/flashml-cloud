@@ -316,3 +316,58 @@ def test_verification_uri_points_at_a_page_that_exists():
             f"device-code enrolment sends volunteers to {path!r}, which the "
             f"console does not serve. Real routes: {sorted(routes)}"
         )
+
+
+def test_a_revoked_machine_can_be_re_enrolled_by_its_owner(db, owner):
+    """Revoke must not be a one-way door.
+
+    machines.node_id is globally unique and revoking only sets
+    status='revoked' — the row, and therefore the node_id, stays. So a plain
+    INSERT on re-enrolment raised UniqueViolation and the owner was told
+    "this machine is already enrolled", with no way back except deleting the
+    agent's identity file. Revoking a machine you own and enrolling it again
+    is an ordinary thing to do; item 7 of the M1 acceptance bar even requires
+    revocation to work, which makes a permanently unusable node_id a poor
+    reward for using the feature.
+
+    The old token must NOT survive: re-enrolment issues a fresh one, and
+    anything holding the revoked token stays locked out.
+    """
+    node_id = _node_id("re-enrol")
+    first = enrolment.start_device_code(db, node_id, "host", "linux")
+    machine_id = enrolment.approve_device_code(db, first["user_code"], owner)
+    old_token = enrolment.redeem_device_code(db, first["device_code"])
+    assert enrolment.revoke_machine(db, machine_id, owner) is True
+    assert enrolment.authenticate_machine(db, old_token) is None
+
+    second = enrolment.start_device_code(db, node_id, "host", "linux")
+    again_id = enrolment.approve_device_code(db, second["user_code"], owner)
+    new_token = enrolment.redeem_device_code(db, second["device_code"])
+
+    assert enrolment.authenticate_machine(db, new_token) is not None
+    assert enrolment.authenticate_machine(db, old_token) is None, (
+        "the revoked token must not come back to life"
+    )
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.machines where node_id = %s",
+            (node_id,),
+        )
+        assert cur.fetchone()["n"] == 1, "re-enrolment must reuse the row, not duplicate it"
+    assert again_id == machine_id
+
+
+def test_a_revoked_machine_cannot_be_claimed_by_a_different_account(db, owner, other_owner):
+    """Re-enrolment is owner-scoped. A revoked node_id must not become a way
+    for a second account to adopt someone else's machine id — that is the
+    impersonation the unique constraint exists to prevent, and revoking must
+    not open it."""
+    node_id = _node_id("re-enrol-other")
+    first = enrolment.start_device_code(db, node_id, "host", "linux")
+    machine_id = enrolment.approve_device_code(db, first["user_code"], owner)
+    assert enrolment.revoke_machine(db, machine_id, owner) is True
+
+    second = enrolment.start_device_code(db, node_id, "host", "linux")
+    with pytest.raises(NodeAlreadyEnrolled):
+        enrolment.approve_device_code(db, second["user_code"], other_owner)

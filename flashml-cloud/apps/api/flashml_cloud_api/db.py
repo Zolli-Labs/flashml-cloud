@@ -213,6 +213,47 @@ def insert_machine(
         return row["id"]
 
 
+def reactivate_machine(
+    db: psycopg.Connection,
+    *,
+    machine_id: str,
+    name: str | None,
+    platform: str | None,
+) -> str:
+    """Return a revoked machine to 'pending' so it can redeem a fresh token.
+
+    Reuses the existing row rather than inserting a second one: contributions
+    reference this machine id, and a duplicate would split one machine's
+    history in two while also colliding with the node_id unique constraint.
+
+    **Clears token_hash and token_prefix.** The revoked token must stay dead —
+    re-enrolment issues a new one through the normal redeem path, and anything
+    still holding the old token remains locked out. `revoked_at` is left as it
+    is: it records that a revocation happened, which is worth keeping even
+    after the machine returns.
+
+    `name` and `platform` are refreshed from the new enrolment, so a machine
+    that was renamed or reinstalled reports its current identity.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.machines
+               set status = 'pending',
+                   token_hash = null,
+                   token_prefix = null,
+                   name = %s,
+                   platform = %s
+             where id = %s
+            returning id
+            """,
+            (name, platform, machine_id),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return row["id"]
+
+
 def set_machine_token(
     db: psycopg.Connection, machine_id: str, token_hash: str, token_prefix: str
 ) -> None:
