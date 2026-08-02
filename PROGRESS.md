@@ -118,11 +118,68 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 - [x] **Plan 6 — Windows hosts** ✅ (2026-08-01) images declare USER
       10001:10001 FIRST, then --user became platform-conditional; unknown
       platforms raise. Constructed-argv-verified, NOT execution-verified.
-- [ ] **Plan 7 — deploy + acceptance** — Render services, curated images to
-      GHCR, and the §10 run-through, whose real test is a friend completing
-      signup → enroll → contribute unaided.
+- [~] **Plan 7 — deploy + acceptance** — Render services ✅ (2026-08-01: all
+      three live; API↔Postgres and API↔private-coordinator both verified;
+      health check now fails a deploy that cannot reach the database).
+      Packages ✅ (`flashruntime` 0.3.0, `flashnode` 0.2.1 on PyPI; `pip
+      install flashnode` works on a clean machine). **BLOCKED on two things,
+      both manual:**
+      (a) the curated GHCR images are **private** — a volunteer's agent pulls
+          them anonymously, so every job fails at execution. Verified against a
+          public control (public repos answer 200 to an anonymous token; ours
+          answer 403). Fix is org → Packages → each of `flashml-python-slim`,
+          `flashml-sklearn`, `flashml-pytorch-cpu` → Package settings → Change
+          visibility → Public.
+      (b) the §10 run-through itself, whose real test is a friend completing
+          signup → enroll → contribute unaided. No job has yet been submitted,
+          claimed and completed against the DEPLOYED stack — only locally
+          (e2e 61).
 
 ## Entries
+
+### 2026-08-01 — One copy of the runtime: repo consolidation, first PyPI releases, deploy repaired (all repos; M1 Plan 7)
+
+What/why: `flashruntime`/`flashnode` existed twice — as subtrees here and as
+public mirrors synced by hand — with no version anywhere, which had already
+shipped an outage (`images.py`). Six repos are now **two**: public
+`Zolli-Labs/flashml` (runtime + agent + example, history intact) and this
+private one, which consumes them as pinned PyPI versions. `pip install
+flashnode` works for the first time; Git is no longer a prerequisite.
+
+How verified: baseline before/after — apps/api 367→370, e2e 61 (against
+PUBLISHED 0.3.0/0.2.1, not a working tree), web 19→21, flashnode 171→172.
+`pip install flashnode` from an empty dir on a clean venv. All three Render
+services live; `/healthz` returns `{"status":"ok","database":"ok"}`. Public-repo
+CI green (15 jobs) — it had never run before, because GitHub reads workflows
+only from the repo root and flashruntime's sat in a subdirectory.
+
+Gotchas (each cost real time):
+- **DATABASE_URL on Render was wrong** — a pooler username missing its
+  `.<project-ref>` suffix reports `FATAL: database "postgres" does not exist`,
+  which points at a database, not a credential. Three defects hid it: /healthz
+  ignored the DB so Render served a dead API as healthy; 500s carried no CORS
+  headers (ServerErrorMiddleware sits OUTSIDE CORSMiddleware) so the browser
+  said "Failed to fetch"; and fetch errors named no URL. All three fixed and
+  pinned by `tests/test_failure_visibility.py`.
+- **Make eats `#`** — `...@<sha>#subdirectory=` truncates silently.
+- **`".[dev]"` is not enough for flashruntime's suite** — 8 modules need
+  `service`. AGENTS.md said otherwise.
+- **flashnode 0.2.0 hardcoded `__version__ = "0.1.0"`**, and that value is sent
+  as `agent_version` in every registration — the coordinator would have seen
+  the whole fleet as 0.1.0. Fixed in 0.2.1; reads installed metadata now.
+- **`_create_legacy_app` is NOT dead code** (I was wrong): `create_app` falls
+  back to it when SUPABASE_URL is absent, serving an OPEN node registry. That
+  is a live risk on a public deploy — see spec §1.1, belongs to S3.
+
+Next: **the curated GHCR images are PRIVATE** (verified against a public
+control) — a volunteer's agent pulls them anonymously and every job will fail
+at execution. Making them public is a UI action and the last hard blocker
+before the Plan 7 acceptance run. Parking lot: protocol-version handshake
+(spec §3.5), Postgres control plane (Plans B1/B2).
+
+Spec: `flashml-cloud/docs/superpowers/specs/2026-08-01-foundation-design.md`.
+Plans A/B1/B2 alongside it.
+
 
 <!-- newest first -->
 
