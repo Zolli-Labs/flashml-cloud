@@ -93,7 +93,8 @@ export default function SubmitPage() {
         <div>
           <h1 className="text-2xl font-bold font-mono">Job submitted</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {result.spec.metadata.name} · {result.job_id}
+            {result.spec?.metadata?.name ?? result.name ?? result.job_id} ·{" "}
+            {result.job_id}
           </p>
         </div>
 

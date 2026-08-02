@@ -135,10 +135,17 @@ export default function JobsPage() {
                 <CardContent className="py-3 flex items-center justify-between gap-4">
                   <div className="min-w-0">
                     <div className="font-mono text-sm truncate">
-                      {j.spec.metadata.name}
+                      {/* A FEDERATED job carries `name` and no `spec` at all —
+                          it exists in public.jobs, not on the coordinator. The
+                          first one in a user's list used to throw here and take
+                          the whole page down with it. */}
+                      {j.spec?.metadata?.name ?? j.name ?? j.job_id}
                     </div>
                     <div className="text-xs text-muted-foreground font-mono truncate">
-                      {j.job_id} · {new Date(j.created_at).toLocaleString()}
+                      {j.job_id}
+                      {j.created_at
+                        ? ` · ${new Date(j.created_at).toLocaleString()}`
+                        : ""}
                     </div>
                   </div>
                   <StateBadge state={j.state} />

@@ -168,7 +168,6 @@ describe("cloud-api", () => {
 
   it("falls back to localhost:8000 when NEXT_PUBLIC_CLOUD_API is unset", () => {
     vi.stubEnv("NEXT_PUBLIC_CLOUD_API", "");
-    // @ts-expect-error -- deliberately deleting for the fallback case
     delete process.env.NEXT_PUBLIC_CLOUD_API;
     expect(cloudApiBase()).toBe("http://localhost:8000");
   });

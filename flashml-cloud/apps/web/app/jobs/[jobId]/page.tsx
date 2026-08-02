@@ -146,22 +146,27 @@ export default function JobDetailPage({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-2xl font-bold font-mono truncate">
-            {job.spec.metadata.name}
+            {/* A federated job carries `name` and no `spec` — it lives in
+                public.jobs, not on the coordinator. */}
+            {job.spec?.metadata?.name ?? job.name ?? job.job_id}
           </h1>
           <p className="text-xs text-muted-foreground font-mono mt-1 truncate">
-            {job.job_id} · {job.backend} · {job.deployment_profile}
-            {job.runtime_execution_id && <> · {job.runtime_execution_id}</>}
+            {[job.job_id, job.backend, job.deployment_profile, job.runtime_execution_id]
+              .filter(Boolean)
+              .join(" · ")}
           </p>
         </div>
         <StateBadge state={job.state} />
       </div>
 
       <div className="grid gap-3 grid-cols-2 sm:grid-cols-3">
-        <Row label="created" value={new Date(job.created_at).toLocaleString()} />
+        {job.created_at && (
+          <Row label="created" value={new Date(job.created_at).toLocaleString()} />
+        )}
         {job.finished_at && (
           <Row label="finished" value={new Date(job.finished_at).toLocaleString()} />
         )}
-        <Row label="artifacts" value={String(job.artifacts.length)} />
+        <Row label="artifacts" value={String(job.artifacts?.length ?? 0)} />
       </div>
 
       {job.error && (
@@ -181,10 +186,10 @@ export default function JobDetailPage({
             <CardTitle className="text-sm font-mono">Artifacts</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {job.artifacts.map((a) => (
+            {(job.artifacts ?? []).map((a) => (
               <ArtifactRow key={a.uri} jobId={job.job_id} artifact={a} />
             ))}
-            {job.artifacts.length === 0 && (
+            {(job.artifacts?.length ?? 0) === 0 && (
               <p className="text-xs font-mono text-muted-foreground">
                 {TERMINAL_STATES.has(job.state)
                   ? "no artifacts were produced"
@@ -194,20 +199,30 @@ export default function JobDetailPage({
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm font-mono">Spec</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs font-mono space-y-1.5">
-            <SpecRow k="image" v={`${job.spec.spec.image.repository}:${job.spec.spec.image.tag}`} />
-            <SpecRow k="workload" v={job.spec.spec.workload.type} />
-            <SpecRow
-              k="workers"
-              v={`${job.spec.spec.resources.minimumWorkers}–${job.spec.spec.resources.maximumWorkers}`}
-            />
-            <SpecRow k="isolation" v={job.spec.spec.isolation.tier} />
-          </CardContent>
-        </Card>
+        {/* Only a COORDINATOR job has a spec. A federated run is one
+            coordinator job per round, so the parent has none — and an empty
+            Spec card would read as missing data rather than as a different
+            kind of job. Mirrors the Rounds section below, which only a
+            federated job ever has. */}
+        {job.spec && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-mono">Spec</CardTitle>
+            </CardHeader>
+            <CardContent className="text-xs font-mono space-y-1.5">
+              <SpecRow
+                k="image"
+                v={`${job.spec.spec.image.repository}:${job.spec.spec.image.tag}`}
+              />
+              <SpecRow k="workload" v={job.spec.spec.workload.type} />
+              <SpecRow
+                k="workers"
+                v={`${job.spec.spec.resources.minimumWorkers}–${job.spec.spec.resources.maximumWorkers}`}
+              />
+              <SpecRow k="isolation" v={job.spec.spec.isolation.tier} />
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {/* Only federated jobs ever have rounds — `GET /rounds` returns an
@@ -377,7 +392,7 @@ function ArtifactRow({
   artifact,
 }: {
   jobId: string;
-  artifact: JobRecord["artifacts"][number];
+  artifact: NonNullable<JobRecord["artifacts"]>[number];
 }) {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);

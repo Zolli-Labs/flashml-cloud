@@ -169,17 +169,35 @@ export interface ArtifactRecord {
 
 /** The coordinator's job record, passed through by the API once ownership
  * is established. Field set matches `flashruntime.protocol.v1alpha1`. */
+/** A job as `/v1alpha1/jobs` returns it — and it returns TWO shapes.
+ *
+ * A coordinator job carries everything below. A FEDERATED job does not exist
+ * on the coordinator (it is one coordinator job per round), so the API
+ * synthesises it from public.jobs and sends only:
+ *
+ *   {job_id, name, state, mode: "federated"}
+ *
+ * Everything a federated job omits is therefore optional HERE, however
+ * reliably a coordinator job supplies it. Declaring them required did not make
+ * them arrive: it only moved the failure from a type error at build time to a
+ * TypeError during render, which took the whole /jobs page down the first time
+ * anyone ran a federated job. A type cannot constrain what a server sends. */
 export interface JobRecord {
   job_id: string;
-  spec: JobSpec;
   state: JobState;
-  backend: string;
-  deployment_profile: string;
-  runtime_execution_id: string | null;
-  created_at: string;
-  finished_at: string | null;
-  error: string | null;
-  artifacts: ArtifactRecord[];
+  /** Absent on federated jobs. */
+  spec?: JobSpec;
+  /** Present on federated jobs, which have no spec to carry a name. */
+  name?: string;
+  /** "federated" for a federated run; absent otherwise. */
+  mode?: string;
+  backend?: string;
+  deployment_profile?: string;
+  runtime_execution_id?: string | null;
+  created_at?: string;
+  finished_at?: string | null;
+  error?: string | null;
+  artifacts?: ArtifactRecord[];
 }
 
 export interface PreflightFinding {
