@@ -1,124 +1,124 @@
 "use client";
 
 import Link from "next/link";
-import { motion } from "motion/react";
-import { ArrowRight, Play } from "@phosphor-icons/react";
+import { motion, useReducedMotion } from "motion/react";
+import { ArrowRight } from "@phosphor-icons/react";
 import { NodeBackground } from "@/components/shared/NodeBackground";
+import { EventLedger } from "@/components/landing/EventLedger";
+import { MagneticLink } from "@/components/motion/MagneticLink";
+import { SAMPLE_LEDGER } from "@/lib/landing/sample-ledger";
+import { BASE, SLOW, staggerParent, wipeLine } from "@/lib/motion";
+
+/** Each headline line rides up from behind its own clip box.
+ *
+ * The `pb`/`-mb` pair is not decoration. An overflow-hidden wipe crops the
+ * line box, so descenders (the p in "disappears", the y in "anyway") get
+ * sliced off along the bottom edge. The padding gives them room inside the
+ * clip and the negative margin takes that space back out of the layout. */
+function WipeLine({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <span className="block overflow-hidden pb-[0.14em] -mb-[0.14em]">
+      <motion.span variants={wipeLine} className={`block ${className}`}>
+        {children}
+      </motion.span>
+    </span>
+  );
+}
 
 export function Hero() {
+  const reduce = useReducedMotion();
+
   return (
-    <section className="relative min-h-[100dvh] flex items-center overflow-hidden grid-bg">
-      {/* Animated node graph background */}
-      <NodeBackground />
+    <section className="relative isolate min-h-[100dvh] overflow-hidden">
+      {/* The page's ONE atmospheric moment. Everything below the fold is
+          flat. Kept off-centre and low-opacity so it reads as a light
+          source rather than the centred purple bloom every AI-infra
+          landing page ships. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10"
+        style={{
+          backgroundImage:
+            "radial-gradient(ellipse 70% 60% at 78% 8%, oklch(0.55 0.21 285 / 0.16), transparent 62%)",
+        }}
+      />
+      <div aria-hidden className="absolute inset-0 -z-10 opacity-70">
+        <NodeBackground />
+      </div>
 
-      {/* Radial gradient overlay */}
-      <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-background pointer-events-none" />
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-cyan/5 rounded-full blur-3xl pointer-events-none" />
+      <div className="mx-auto flex min-h-[100dvh] max-w-7xl items-center px-4 pt-20 pb-16 sm:px-6 md:pt-24">
+        <motion.div
+          className="grid w-full items-center gap-12 lg:grid-cols-12 lg:gap-10"
+          variants={staggerParent(0.09)}
+          initial={reduce ? false : "hidden"}
+          animate="show"
+        >
+          <div className="lg:col-span-7">
+            {/* 52px, not 60px, and a 7/5 split rather than 6/6. At 60px in
+                a half-width column "Cheap compute disappears." wraps, which
+                makes the headline three lines. Two is the limit. */}
+            <h1 className="text-4xl font-semibold leading-[1.08] tracking-[-0.035em] md:text-5xl lg:text-[3.25rem]">
+              <WipeLine>Cheap compute disappears.</WipeLine>
+              <WipeLine className="text-accent-text">
+                Run on it anyway.
+              </WipeLine>
+            </h1>
 
-      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 pt-20 pb-16">
-        <div className="max-w-4xl">
-          {/* Eyebrow */}
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-            className="mb-6"
-          >
-            <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-cyan/25 bg-cyan/8 text-cyan text-xs font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-node-green pulse-dot" />
-              Powered by RunPod Flash
-            </span>
-          </motion.div>
-
-          {/* Headline */}
-          <motion.h1
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.05, ease: [0.16, 1, 0.3, 1] }}
-            className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight leading-[1.05] text-foreground mb-6"
-          >
-            Distributed ML training{" "}
-            <span className="text-cyan text-glow-cyan">as simple</span>
-            {" "}as a function call.
-          </motion.h1>
-
-          {/* Sub */}
-          <motion.p
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.1, ease: [0.16, 1, 0.3, 1] }}
-            className="text-base sm:text-lg text-muted-foreground max-w-2xl mb-10 leading-relaxed"
-          >
-            Choose the built-in dataset and model. FlashML partitions your data across RunPod Flash workers, runs the Map phase in parallel, and aggregates results with zero infrastructure setup.
-          </motion.p>
-
-          {/* CTAs */}
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.15, ease: [0.16, 1, 0.3, 1] }}
-            className="flex flex-wrap gap-4"
-          >
-            <Link
-              href="/submit"
-              className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-cyan text-background font-semibold text-sm hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
+            <motion.p
+              variants={{
+                hidden: { opacity: 0, y: 16 },
+                show: { opacity: 1, y: 0, transition: BASE },
+              }}
+              className="mt-6 max-w-[46ch] text-base leading-relaxed text-muted-foreground md:text-lg"
             >
-              Launch Training <ArrowRight weight="bold" className="w-4 h-4" />
-            </Link>
-            <Link
-              href="/jobs"
-              className="inline-flex items-center gap-2 px-6 py-3 rounded-lg border border-border/60 text-foreground/80 font-medium text-sm hover:border-border hover:text-foreground hover:bg-white/5 active:scale-[0.98] transition-all"
-            >
-              <Play weight="fill" className="w-3.5 h-3.5 text-cyan" />
-              View Jobs
-            </Link>
-          </motion.div>
+              FlashML spreads a training job across pods, rigs and spot
+              instances that vanish mid-run. Leases expire, work requeues,
+              jobs finish.
+            </motion.p>
 
-          {/* Code snippet hint */}
+            <motion.div
+              variants={{
+                hidden: { opacity: 0, y: 16 },
+                show: { opacity: 1, y: 0, transition: BASE },
+              }}
+              className="mt-9 flex flex-wrap items-center gap-3"
+            >
+              <MagneticLink
+                href="/submit"
+                className="interactive inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground hover:brightness-110"
+              >
+                Submit a job
+                <ArrowRight weight="bold" className="h-4 w-4" />
+              </MagneticLink>
+              <Link
+                href="#recover"
+                className="interactive inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.04] px-6 py-3 text-sm font-medium text-foreground transition-colors hover:bg-white/[0.08]"
+              >
+                See it recover
+              </Link>
+            </motion.div>
+          </div>
+
+          {/* The evidence sits beside the claim, not below it. Offset down
+              so the two columns do not read as a symmetric pair. */}
           <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.25, ease: [0.16, 1, 0.3, 1] }}
-            className="mt-10"
+            variants={{
+              hidden: { opacity: 0, y: 26 },
+              show: { opacity: 1, y: 0, transition: SLOW },
+            }}
+            className="lg:col-span-5 lg:mt-12"
           >
-            <div className="inline-block rounded-lg border border-border/60 bg-[oklch(0.06_0.01_240)] overflow-hidden">
-              <div className="flex items-center gap-2 px-4 py-2 border-b border-border/40 bg-surface/30">
-                <span className="w-2 h-2 rounded-full bg-red-500/50" />
-                <span className="w-2 h-2 rounded-full bg-amber-500/50" />
-                <span className="w-2 h-2 rounded-full bg-node-green/50" />
-                <span className="ml-2 text-[10px] font-mono text-muted-foreground">train.py</span>
-              </div>
-              <div className="px-5 py-4 text-sm font-mono leading-relaxed">
-                <div>
-                  <span className="text-violet-400">from</span>{" "}
-                  <span className="text-cyan">flashml</span>{" "}
-                  <span className="text-violet-400">import</span>{" "}
-                  <span className="text-foreground/80">KMeans</span>
-                </div>
-                <div className="mt-2">
-                  <span className="text-muted-foreground"># Runs distributed across configured workers</span>
-                </div>
-                <div>
-                  <span className="text-node-green">model</span>
-                  <span className="text-foreground/60"> = </span>
-                  <span className="text-cyan">KMeans</span>
-                  <span className="text-foreground/60">(n_clusters=</span>
-                  <span className="text-amber-400">k</span>
-                  <span className="text-foreground/60">, workers=</span>
-                  <span className="text-amber-400">workers</span>
-                  <span className="text-foreground/60">)</span>
-                </div>
-                <div>
-                  <span className="text-node-green">model</span>
-                  <span className="text-foreground/60">.fit(</span>
-                  <span className="text-foreground/80">dataset</span>
-                  <span className="text-foreground/60">)</span>
-                  <span className="text-muted-foreground">  # That&apos;s it.</span>
-                </div>
-              </div>
+            <div className="glass overflow-hidden rounded-lg">
+              <EventLedger events={SAMPLE_LEDGER} label="sample run" stream />
             </div>
           </motion.div>
-        </div>
+        </motion.div>
       </div>
     </section>
   );

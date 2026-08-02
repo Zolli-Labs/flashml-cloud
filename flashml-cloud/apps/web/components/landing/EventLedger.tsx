@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useReducedMotion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
+import { QUICK } from "@/lib/motion";
 import type { LedgerEvent, LedgerTone } from "@/lib/landing/sample-ledger";
 
 // The ledger is the landing page's one real product visual. It is a live
@@ -31,21 +32,35 @@ function formatOffset(seconds: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+// A grid, not a flex row with shrink-0 columns. The flex version let the
+// event-type cell set its own intrinsic width, which at 390px made the row
+// wider than the viewport and gave the whole PAGE a horizontal scrollbar:
+// the widest ledger row was setting the document width. Both text cells are
+// minmax(0, ...) so they truncate instead of pushing.
+// Justification for the entry animation: state transition. A row appearing
+// instantly reads as a re-render; sliding in from the left reads as an event
+// arriving, which is what it is.
 export function LedgerRow({ event }: { event: LedgerEvent }) {
+  const reduce = useReducedMotion();
   return (
-    <li className="flex items-baseline gap-3 py-[5px] text-[11px] leading-snug">
+    <motion.li
+      initial={reduce ? false : { opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={QUICK}
+      className="grid grid-cols-[0.25rem_2.25rem_minmax(0,auto)_minmax(0,1fr)] items-baseline gap-x-2.5 py-[5px] text-[11px] leading-snug"
+    >
       <span
         aria-hidden
-        className={`mt-[6px] h-1 w-1 shrink-0 self-start rounded-full ${TONE_MARK[event.tone]}`}
+        className={`mt-[6px] h-1 w-1 self-start rounded-full ${TONE_MARK[event.tone]}`}
       />
-      <span className="w-9 shrink-0 font-mono tabular-nums text-white/35">
+      <span className="font-mono tabular-nums text-white/35">
         {formatOffset(event.at)}
       </span>
-      <span className={`shrink-0 font-mono ${TONE_TEXT[event.tone]}`}>
+      <span className={`truncate font-mono ${TONE_TEXT[event.tone]}`}>
         {event.type}
       </span>
       <span className="truncate font-mono text-white/35">{event.detail}</span>
-    </li>
+    </motion.li>
   );
 }
 
@@ -62,29 +77,26 @@ export function EventLedger({
   className?: string;
 }) {
   const reduce = useReducedMotion();
-  const [shown, setShown] = useState(stream ? 0 : events.length);
 
+  // Reduced motion gets the finished ledger immediately, not a slower
+  // version of the same animation.
+  const wantsStream = stream && !reduce;
+
+  const [streamed, setStreamed] = useState(0);
+
+  // setState happens only inside the interval callback, never in the effect
+  // body. Setting it synchronously here is what react-hooks/set-state-in-effect
+  // flags, and the non-streaming case does not need an effect at all: it is
+  // derived below.
   useEffect(() => {
-    if (!stream) {
-      setShown(events.length);
-      return;
-    }
-    // Reduced motion gets the finished ledger immediately rather than a
-    // slower version of the same animation.
-    if (reduce) {
-      setShown(events.length);
-      return;
-    }
-    setShown(0);
+    if (!wantsStream) return;
     const id = setInterval(() => {
-      setShown((n) => {
-        if (n >= events.length) return n;
-        return n + 1;
-      });
+      setStreamed((n) => (n >= events.length ? n : n + 1));
     }, 420);
     return () => clearInterval(id);
-  }, [stream, reduce, events.length]);
+  }, [wantsStream, events.length]);
 
+  const shown = wantsStream ? streamed : events.length;
   const visible = events.slice(0, shown);
 
   return (
@@ -97,7 +109,7 @@ export function EventLedger({
       </div>
       <ul
         aria-label="FlashML coordinator event ledger, sample data"
-        className="min-h-[276px] overflow-hidden px-4 py-3"
+        className="min-h-[276px] overflow-hidden px-4 py-3 [&>li]:min-w-0"
       >
         {visible.map((e, i) => (
           <LedgerRow key={`${e.type}-${e.at}-${i}`} event={e} />

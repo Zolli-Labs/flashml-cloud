@@ -15,27 +15,31 @@ const geistMono = Geist_Mono({
   display: "swap",
 });
 
-// Was still describing the July POC — "Distributed K-Means Training",
-// "Powered by RunPod Flash" — which is the browser tab title and the social
-// card for every link anyone shares of this app. Neither claim is true: it
-// runs arbitrary PyTorch from a GitHub repo, on volunteers' own machines.
+// This is the browser tab title and the social card for every link anyone
+// shares. It has been wrong twice: first describing the July K-Means POC,
+// then describing donated laptops, which the 2026-08-02 supply-side note
+// rates as the least valuable tier and no longer the pitch. The positioning
+// here is that note's conclusion: aggregation for fault-tolerant, shardable
+// training across whatever compute is cheap, which is the same thing as
+// saying across whatever compute is unreliable.
 export const metadata: Metadata = {
   title: {
     default: "FlashML",
     template: "%s · FlashML",
   },
   description:
-    "Train models across machines people lend you. Point FlashML at a GitHub repo and it runs on a pool of donated laptops, one round at a time.",
+    "Cheap compute disappears. FlashML spreads a training job across pods, rigs and spot instances that vanish mid-run: leases expire, work requeues, jobs finish.",
   keywords: [
     "distributed training",
     "federated learning",
-    "machine learning",
-    "volunteer compute",
+    "fault tolerant training",
+    "spot instances",
+    "gpu aggregation",
   ],
   openGraph: {
     title: "FlashML",
     description:
-      "Train models across machines people lend you, straight from a GitHub repo.",
+      "Cheap compute disappears. Run on it anyway. Fault-tolerant distributed training across pods, rigs and spot instances.",
     type: "website",
   },
 };
