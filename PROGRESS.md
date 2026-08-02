@@ -146,6 +146,55 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-02 — Federated averaging runs on the deployed stack, on one machine (M1 Plan 7)
+
+What/why: first end-to-end run against the deployed system. Submitted
+`Zolli-Labs/flashml-example-federated` from the browser; job `fed-2e2d4d6ab57f`
+SUCCEEDED in 101s across 5 rounds with loss falling monotonically
+0.6268 → 0.4836 → 0.3651 → 0.2802 → 0.2308. Repo fetch, safe extract,
+preflight, curated image pull, sandboxed argv execution, checkpoint exchange
+and aggregation all work in production.
+
+How verified: `public.job_rounds` (5 rows, quorum met each round); job status
+SUCCEEDED in `public.jobs`; deployed API logs showing claim → heartbeat →
+commit.
+
+**M1 §10 item 4 is NOT met.** It requires contributions from more than one
+machine. `job_rounds.contributors` names only `fn-2bea665a4bbf440f` (the Mac)
+on every round, and the Windows machine's `last_seen_at` (04:03:48) predates
+the run (04:08–04:09) — it was down on Docker engine errors. `participants: 2`
+counts deltas aggregated, not distinct machines, and reading it as machines
+overstated the result. What is proven is the MECHANISM end to end; what is not
+is distribution across hosts. Items 2, 5, 6, 7 and 10 remain open with it.
+
+Gotchas — four bugs, each found only by running it for real:
+- **Revoke was a one-way door.** `machines.node_id` is globally unique and
+  revoking only sets status, so re-enrolment hit the constraint forever.
+  Fixed: approve reactivates a revoked row owned by the same user, reusing the
+  row (contributions reference the id) and clearing the old token.
+- **`last_seen_at` was never written.** The column existed, the console read
+  it, nothing set it — so no machine could EVER display online however
+  healthily it heartbeated. Two liveness views, only the coordinator's written.
+- **`/jobs` crashed on the first federated job.** `/v1alpha1/jobs` returns two
+  shapes; a federated job has no `spec`, and the page rendered
+  `j.spec.metadata.name`. `JobRecord` declared it required — a type cannot
+  constrain what a server sends, so the failure moved from build time to
+  render time. Correcting the type surfaced the same lie in six more places,
+  including the detail page, which would have crashed on the same job.
+- **Curated images were private.** GHCR creates container packages private
+  regardless of the publishing repo (a guess that moving to the public repo
+  would fix it was tested and disproved), and the org forbade public packages
+  until that policy changed.
+
+Also: two host-side Docker failures, unrelated to us and both cryptic —
+`docker-credential-desktop` missing on macOS, engine `_ping` 500 on Windows.
+Concrete evidence for S4's bundled runtime.
+
+Next: get the Windows machine contributing to a round — that is item 4, and
+items 2/5/6/7 follow from the same session. Parking lot: `contributions` table
+is empty (0 rows) so no accepted work is credited to any host.
+
+
 ### 2026-08-01 — One copy of the runtime: repo consolidation, first PyPI releases, deploy repaired (all repos; M1 Plan 7)
 
 What/why: `flashruntime`/`flashnode` existed twice — as subtrees here and as
