@@ -90,6 +90,16 @@ resolves, and renaming it would only invalidate the docs citing it.
 - `flashml-cloud/docs/superpowers/specs/2026-08-01-foundation-design.md` —
   the current architecture work: repo topology, releases, and the diskless
   control plane. Plans A/B1/B2 sit beside it in `plans/`.
+- Two strategy notes from 2026-08-02, both of which **disagree with that
+  spec's S4-first ordering**. Read them before scheduling the desktop app:
+  - `2026-08-02-supply-side-positioning-note.md` — rented providers and home
+    GPU rigs are where the compute is; volunteer laptops are the tier we
+    optimised for and the one worth least. Makes GPU support the gate and the
+    desktop app the least urgent item.
+  - `2026-08-02-colab-gpu-pooling-strategy-note.md` — pooling Colab GPUs
+    across a research group. Google's FAQ names "running distributed
+    computing workers" as prohibited on the FREE tier; paid plans lift it.
+    Reaches the same roadmap conclusion from a different direction.
 - `e2e/` — the whole loop against pinned artifacts (`make e2e`, `make
   e2e-demo`) + the real-second-machine runbook in `e2e/README.md`.
 - `archive/` — historical: HANDOFF, PLAN_2WEEKS, SPRINT_PLAN, POC records.
