@@ -230,3 +230,80 @@ def test_dry_run_exits_non_zero_only_while_something_is_pending(postgres_dsn):
 
         assert migrate.main(["--database-url", dsn]) == 0
         assert migrate.main(["--dry-run", "--database-url", dsn]) == 0
+
+
+# ---------------------------------------------------------------------------
+# --baseline-through: baselining a PREFIX, not everything pending
+#
+# `flashml-poc` has 0001-0003 applied by hand but does NOT have 0004_attempts.
+# A bare `--baseline` there would record 0004 as applied without ever creating
+# public.attempts: the contribution ledger would credit nobody, forever, while
+# `--dry-run` reported the database up to date. That is precisely the silent
+# drift this runner exists to prevent, so the operation the production gate
+# actually needs is "baseline up to and including X".
+# ---------------------------------------------------------------------------
+
+BASELINE_TO = "0003_contributions_unique"
+
+
+def test_baseline_through_stops_after_the_named_version(postgres_dsn):
+    with scratch_database(postgres_dsn) as dsn, connected(dsn) as conn:
+        recorded = migrate.apply(
+            conn, REAL_MIGRATIONS, baseline=True, baseline_through=BASELINE_TO
+        )
+
+        assert recorded == [
+            "0001_initial",
+            "0002_job_rounds",
+            "0003_contributions_unique",
+        ]
+        # Recorded, never executed.
+        assert not table_exists(conn, "public.machines")
+        # 0004 is untouched and still pending — the whole point.
+        assert [m.version for m in migrate.pending(conn, REAL_MIGRATIONS)] == [
+            "0004_attempts"
+        ]
+
+
+def test_baseline_through_then_apply_runs_only_the_remainder(postgres_dsn):
+    """The real production sequence, end to end: baseline what is already
+    there by hand, then apply the rest for real."""
+    with scratch_database(postgres_dsn, auth_stub=True) as dsn, connected(dsn) as conn:
+        migrate.apply(
+            conn, REAL_MIGRATIONS, baseline=True, baseline_through=BASELINE_TO
+        )
+        # Baselining did not run 0001, so give 0004 the table it references.
+        conn.execute("create table public.machines (id uuid primary key)")
+
+        done = migrate.apply(conn, REAL_MIGRATIONS)
+
+        assert done == ["0004_attempts"]
+        assert table_exists(conn, "public.attempts")
+        assert migrate.pending(conn, REAL_MIGRATIONS) == []
+
+
+def test_baseline_through_an_unknown_version_is_refused(postgres_dsn):
+    """A typo must not silently fall back to baselining everything."""
+    with scratch_database(postgres_dsn) as dsn, connected(dsn) as conn:
+        with pytest.raises(ValueError, match="0009_nope"):
+            migrate.apply(
+                conn, REAL_MIGRATIONS, baseline=True, baseline_through="0009_nope"
+            )
+        assert migrate.applied(conn) == {}
+
+
+def test_baseline_through_without_baseline_is_refused(postgres_dsn):
+    """Misuse, not a silent full apply."""
+    with scratch_database(postgres_dsn) as dsn, connected(dsn) as conn:
+        with pytest.raises(ValueError, match="baseline"):
+            migrate.apply(conn, REAL_MIGRATIONS, baseline_through=BASELINE_TO)
+
+
+def test_cli_baseline_through_is_wired(postgres_dsn):
+    with scratch_database(postgres_dsn) as dsn:
+        rc = migrate.main(
+            ["--database-url", dsn, "--baseline", "--baseline-through", BASELINE_TO]
+        )
+        assert rc == 0
+        # Still pending afterwards => the CLI honoured the prefix.
+        assert migrate.main(["--dry-run", "--database-url", dsn]) == 1

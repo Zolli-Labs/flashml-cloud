@@ -29,6 +29,13 @@ without running their SQL. The four migrations here are already live in
 those live tables would fail. Baselining is how an existing database joins
 the scheme, and it is a deliberate one-time human operation.
 
+Which is why ``--baseline`` alone is dangerous on a database that is
+BEHIND, and ``--baseline-through VERSION`` exists. `flashml-poc` has
+0001-0003 but not `0004_attempts`; a bare baseline there would record 0004
+as applied without creating `public.attempts`, so the contribution ledger
+would credit nobody while ``--dry-run`` reported the database up to date.
+Baseline the prefix that is really there, then apply the rest for real.
+
 The database URL contains a password. It is read from ``--database-url``
 or ``$DATABASE_URL`` and is never printed, not even on failure.
 """
@@ -126,6 +133,7 @@ def apply(
     directory: Path = MIGRATIONS_DIR,
     *,
     baseline: bool = False,
+    baseline_through: str | None = None,
 ) -> list[str]:
     """Apply (or, with `baseline`, merely record) every pending migration.
 
@@ -133,10 +141,35 @@ def apply(
     already up to date. Raises `DriftError`, having applied nothing, if any
     already-applied migration's file has changed.
 
+    `baseline_through` stops the baseline after the named version, leaving
+    everything later genuinely pending. **This is the only safe way to
+    baseline a database that is behind.** `flashml-poc` has 0001-0003 applied
+    by hand but not `0004_attempts`; a bare `baseline=True` there would record
+    0004 as applied without ever creating `public.attempts`, so the
+    contribution ledger would credit nobody while `--dry-run` cheerfully
+    reported the database up to date. Recording a migration you did not run is
+    indistinguishable, later, from having run it.
+
     `conn` must be in autocommit mode; each migration takes its own
     transaction explicitly.
     """
+    if baseline_through is not None and not baseline:
+        raise ValueError(
+            "baseline_through only means anything with baseline=True — "
+            "refusing to guess whether you wanted to apply or to record"
+        )
+
     migrations = discover(directory)
+
+    if baseline_through is not None and baseline_through not in {
+        m.version for m in migrations
+    }:
+        # A typo must not silently fall through to "baseline everything",
+        # which is the outcome this argument exists to prevent.
+        raise ValueError(
+            f"baseline_through names no known migration: {baseline_through!r}. "
+            f"Known: {', '.join(m.version for m in migrations)}"
+        )
 
     conn.execute(CREATE_TABLE)
     already = applied(conn)
@@ -157,6 +190,10 @@ def apply(
     for migration in migrations:
         if migration.version in already:
             continue
+        # Before any work, not after: `discover` is sorted, so once we pass
+        # the named version everything remaining must stay pending.
+        if baseline_through is not None and migration.version > baseline_through:
+            break
         with conn.transaction():
             if not baseline:
                 conn.execute(migration.sql)
@@ -192,6 +229,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Record pending migrations as applied WITHOUT executing their "
              "SQL. For a database that already has the schema.",
     )
+    parser.add_argument(
+        "--baseline-through",
+        metavar="VERSION",
+        help="Stop the baseline after VERSION (e.g. 0003_contributions_unique); "
+             "everything later stays genuinely pending. Use this whenever the "
+             "database is BEHIND the migration directory — a bare --baseline "
+             "would mark those later migrations as done without running them.",
+    )
     args = parser.parse_args(argv)
 
     if not args.database_url:
@@ -212,10 +257,18 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         try:
-            done = apply(conn, MIGRATIONS_DIR, baseline=args.baseline)
+            done = apply(
+                conn,
+                MIGRATIONS_DIR,
+                baseline=args.baseline,
+                baseline_through=args.baseline_through,
+            )
         except DriftError as exc:
             print(f"Refusing to migrate: {exc}", file=sys.stderr)
             return 1
+        except ValueError as exc:
+            print(f"Refusing to migrate: {exc}", file=sys.stderr)
+            return 2
 
     verb = "Baselined" if args.baseline else "Applied"
     if not done:
