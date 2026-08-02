@@ -36,7 +36,9 @@ No new dependencies.
   stated reason, not deferred for effort.
 - Run tests from `~/Work/Zolli-Labs/flashml/flashnode/` with
   `.venv/bin/python -m pytest`.
-- Baseline before starting: **flashnode 257 tests passing.**
+- Baseline before starting: **flashnode 308 tests passing** (the GPU tier landed
+  on `main` from a parallel session after this plan was drafted; expected
+  counts in later tasks are relative to 308, not 257).
 
 ---
 
@@ -56,6 +58,8 @@ No new dependencies.
   - `current_task_started: float | None` (`time.monotonic()`)
   - `quarantined: bool`
   - `__init__(..., health_check: Callable[[], list] | None = None, max_consecutive_failures: int = 0)`
+    where `health_check()` returns the **blocking** problems only — an empty
+    list means healthy. The loop never inspects a `.status`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -314,11 +318,12 @@ Add `import pytest` to the file's imports, then append:
 
 ```python
 class _Check:
-    def __init__(self, status):
-        self.status = status
-        self.name = "docker engine reachable"
-        self.detail = "_ping 500"
-        self.fix = "Start Docker Desktop."
+    """health_check returns BLOCKING problems only, so a test needs just a
+    name to print — the loop never reads a status."""
+
+    name = "docker engine reachable"
+    detail = "_ping 500"
+    fix = "Start Docker Desktop."
 
 
 class _Brake(Exception):
@@ -359,7 +364,7 @@ def _always_fails(monkeypatch, loop):
 
 
 def test_an_unhealthy_host_stops_claiming(monkeypatch):
-    loop = _quarantine_loop(lambda: [_Check("fail")])
+    loop = _quarantine_loop(lambda: [_Check()])   # one blocking problem
     _always_fails(monkeypatch, loop)
     loop.run()  # returns on its own — no brake needed, that is the point
     assert loop.quarantined is True
@@ -371,7 +376,7 @@ def test_an_unhealthy_host_stops_claiming(monkeypatch):
 def test_a_healthy_host_keeps_working_because_the_JOBS_are_failing(monkeypatch):
     """Same three failures, but the machine checks out. The jobs are broken,
     not the host — reset and carry on."""
-    loop = _quarantine_loop(lambda: [_Check("ok")])
+    loop = _quarantine_loop(lambda: [])           # nothing blocking
     _always_fails(monkeypatch, loop)
     with pytest.raises(_Brake):
         loop.run()
@@ -389,7 +394,7 @@ def test_no_health_check_means_no_quarantine(monkeypatch):
 
 
 def test_threshold_zero_disables_the_quarantine(monkeypatch):
-    loop = _quarantine_loop(lambda: [_Check("fail")], threshold=0)
+    loop = _quarantine_loop(lambda: [_Check()], threshold=0)
     _always_fails(monkeypatch, loop)
     with pytest.raises(_Brake):
         loop.run()
@@ -430,8 +435,16 @@ and add the method above `run`:
             return False
         if self.consecutive_failures < self.max_consecutive_failures:
             return False
-        results = self.health_check()
-        unhealthy = [r for r in results if r.status != "ok"]
+        # CONTRACT: health_check returns the BLOCKING problems, and an empty
+        # list means healthy. The loop never inspects a status.
+        #
+        # That is not squeamishness about coupling, it is a live hazard. The
+        # doctor's GPU check returns "info" and never fails, because most
+        # volunteers have no GPU and must keep taking CPU work — so a loop
+        # testing `!= "ok"` itself would quarantine the entire CPU fleet on
+        # its third unlucky job. cli.py filters with NON_BLOCKING_STATUSES,
+        # the same set the startup gate reads, so the two cannot drift.
+        unhealthy = self.health_check()
         if not unhealthy:
             log.info(_jlog(
                 "consecutive task failures, but this host passes its own "
@@ -440,7 +453,7 @@ and add the method above `run`:
             self.consecutive_failures = 0
             return False
         self.quarantined = True
-        self.health_report = results
+        self.health_report = unhealthy
         log.error(_jlog("stopping: this host can no longer run tasks",
                         failures=self.consecutive_failures,
                         failed_checks=[r.name for r in unhealthy]))
@@ -922,7 +935,14 @@ In `_work`, add after the `--poll-seconds` argument:
 Pass the two new params where `ExecutorLoop` is constructed:
 
 ```python
-    from flashnode.doctor import run_checks
+    from flashnode.doctor import NON_BLOCKING_STATUSES, run_checks
+
+    def _blocking_problems():
+        # Filter HERE, with the same set the startup gate uses, so the two
+        # cannot drift. The GPU check returns "info" and never fails; a loop
+        # testing `!= "ok"` itself would quarantine every CPU-only volunteer.
+        return [r for r in run_checks(pull=False)
+                if r.status not in NON_BLOCKING_STATUSES]
 
     loop = ExecutorLoop(
         client, node_id, runner=runner,
@@ -931,7 +951,7 @@ Pass the two new params where `ExecutorLoop` is constructed:
         # Injected, never imported by loop.py — see doctor.py's note and the
         # spec's §2.1.1. pull=False for the same reason the startup gate uses
         # it: a registry blip must not stop a working agent.
-        health_check=lambda: run_checks(pull=False),
+        health_check=_blocking_problems,
         max_consecutive_failures=opts.max_consecutive_failures,
     )
 ```
