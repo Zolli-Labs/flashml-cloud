@@ -18,6 +18,7 @@ import {
 } from "@phosphor-icons/react";
 import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
+import { Shortcuts } from "@/components/shell/Shortcuts";
 import { Wordmark } from "@/components/brand/Mark";
 import { UserMenu } from "@/components/nav/UserMenu";
 
@@ -138,6 +139,9 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           <span className="flex-1">Search</span>
           <kbd className="meta rounded border border-border px-1 py-px">⌘K</kbd>
         </button>
+        <p className="meta mt-1.5 px-2.5">
+          Press <span className="text-foreground">?</span> for shortcuts
+        </p>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
@@ -187,6 +191,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-dvh">
       <CommandPalette />
+      <Shortcuts />
       {/* Desktop rail. A step DARKER than the content column, so the content
           reads as the lit surface. */}
       <aside className="hidden w-[248px] shrink-0 flex-col border-r border-border bg-bg-rail lg:flex">
