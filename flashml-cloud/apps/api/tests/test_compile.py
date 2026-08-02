@@ -14,11 +14,18 @@ unsandboxed volunteer machine.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from flashruntime.protocol.v1alpha1 import JobSpec
 
-from flashml_cloud_api.compile import CompileError, compile_to_jobspec, sanitize_job_name
+from flashml_cloud_api.compile import (
+    CompileError,
+    compile_federated_round,
+    compile_to_jobspec,
+    sanitize_job_name,
+)
 from flashml_cloud_api.flashml_yaml import parse_flashml_yaml
 from flashml_cloud_api.images import resolve_image
 
@@ -372,3 +379,143 @@ def test_a_timeout_is_carried_into_the_workload_parameters():
 def test_the_backend_is_leases_so_the_job_reaches_volunteer_nodes():
     spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
     assert spec["spec"]["execution"]["backend"] == "leases"
+
+
+# ---------------------------------------------------------------------------
+# local_inputs — carried to the placement gate, and uploaded NOWHERE
+# ---------------------------------------------------------------------------
+
+
+def _local_config(**over):
+    return _config(local_inputs=["patients"], **over)
+
+
+def test_local_inputs_reach_the_workload_parameters():
+    # This is the only channel by which the coordinator's fourth placement
+    # gate can learn what the task needs.
+    spec = compile_to_jobspec(_local_config(), PYTORCH, CODE_URI, "demo")
+    assert _params(spec)["local_inputs"] == ["patients"]
+
+
+def test_local_inputs_are_absent_when_the_job_asks_for_none():
+    # Absent, never `[]` — the same judgement `unpack_inputs` records
+    # upstream: an omitted key keeps every pre-existing job's payload byte for
+    # byte what it was, so the untouched path stays exercised.
+    assert "local_inputs" not in _params(compile_to_jobspec(
+        _config(), PYTORCH, CODE_URI, "demo"))
+
+
+def test_a_local_input_is_not_an_artifact_and_nothing_is_uploaded():
+    """Definition-of-done item 7, asserted rather than assumed.
+
+    The entire premise of the feature is that the host's directory never
+    leaves the host. If a label were ever added to `inputs`, the compiler
+    would be declaring an `artifact://` URI for it — which means the API
+    would expect the bytes to have been staged, i.e. uploaded. If it were
+    added to `unpack_inputs`, flashnode would run an archive extractor over
+    a download that must never exist. Neither may happen, and neither is
+    something a reader can confirm by looking at the compiler.
+    """
+    spec = compile_to_jobspec(_local_config(), PYTORCH, CODE_URI, "demo")
+    params = _params(spec)
+
+    # The staged code tarball is the ONLY artifact this job has.
+    assert params["inputs"] == {"code": CODE_URI}
+    assert params["unpack_inputs"] == ["code"]
+    assert "patients" not in params["inputs"]
+    assert "patients" not in params["unpack_inputs"]
+
+    # No artifact:// URI anywhere mentions the label, under any spelling.
+    for uri in params["inputs"].values():
+        assert "patients" not in uri
+    assert spec["spec"]["artifacts"]["outputPrefix"] == "artifact://jobs/{job_id}/"
+
+    # And the label appears in exactly one place in the whole compiled spec.
+    flat = json.dumps(spec)
+    assert flat.count("patients") == 1
+
+
+def test_local_inputs_do_not_change_the_argv():
+    # A local input is mounted by the agent, not passed on the command line:
+    # the job's code opens `inputs/<label>/` exactly as it would an
+    # artifact-sourced input, so argv must be identical either way.
+    plain = _params(compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo"))
+    local = _params(compile_to_jobspec(_local_config(), PYTORCH, CODE_URI, "demo"))
+    assert local["command"] == plain["command"]
+
+
+def test_several_local_inputs_keep_their_order_and_are_all_carried():
+    config = _config(local_inputs=["patients", "labs"])
+    params = _params(compile_to_jobspec(config, PYTORCH, CODE_URI, "demo"))
+    assert params["local_inputs"] == ["patients", "labs"]
+    assert params["inputs"] == {"code": CODE_URI}
+
+
+def test_a_spec_carrying_local_inputs_still_validates_upstream():
+    # `local_inputs` is an extra workload parameter; the upstream JobSpec must
+    # accept it, or the feature is unshippable regardless of everything else.
+    spec = compile_to_jobspec(_local_config(), PYTORCH, CODE_URI, "demo")
+    JobSpec.model_validate(spec)
+
+
+def test_local_inputs_survive_a_sweep_expansion():
+    spec = compile_to_jobspec(
+        _config(local_inputs=["patients"], sweep={"lr": [0.1, 0.2]}),
+        PYTORCH, CODE_URI, "demo",
+    )
+    params = _params(spec)
+    assert params["local_inputs"] == ["patients"]
+    assert len(params["task_params"]) == 2
+
+
+def test_federated_rounds_carry_local_inputs_and_upload_nothing():
+    # Federated training over data that cannot be pooled is the use case this
+    # feature exists for, so the round compiler must carry it too — and must
+    # still stage only the code tarball and the aggregated weights.
+    config = parse_flashml_yaml(
+        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        'local_inputs: ["patients"]\n'
+    )
+    spec = compile_federated_round(
+        config, PYTORCH, CODE_URI, "fed", round_index=1,
+        weights_uri="artifact://jobs/j/round-000/weights.json",
+    )
+    params = _params(spec)
+    assert params["local_inputs"] == ["patients"]
+    assert set(params["inputs"]) == {"code", "weights"}
+    assert params["unpack_inputs"] == ["code"]
+    assert json.dumps(spec).count("patients") == 1
+
+
+def test_federated_rounds_without_local_inputs_are_unchanged():
+    config = parse_flashml_yaml(
+        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+    )
+    spec = compile_federated_round(
+        config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+    )
+    assert "local_inputs" not in _params(spec)
+
+
+def test_a_local_inputs_spec_is_accepted_by_the_real_recipe():
+    """The pinned ``CommandRecipe`` must not reject the extra parameter.
+
+    A workload parameter the recipe refuses would surface as a 422 from the
+    coordinator on every local-data job — the failure mode this module's
+    docstring exists to prevent. Asserted against the real recipe, not a
+    stub, because "an unknown key is ignored" is a property of that code and
+    not a rule anyone wrote down.
+
+    Note what this does NOT assert: that ``local_inputs`` reaches
+    ``task.payload``. It does not, on the pinned runtime — ``expand`` builds
+    payloads from a fixed key list. See ``compile._local_inputs``.
+    """
+    from flashruntime.recipes.command import CommandRecipe
+
+    spec = compile_to_jobspec(_local_config(), PYTORCH, CODE_URI, "demo")
+    tasks = CommandRecipe().expand("job-1", JobSpec.model_validate(spec))
+    assert len(tasks) == 1
+    # Whatever else is true, no artifact was invented for the local dataset.
+    assert tasks[0].payload["inputs"] == {"code": CODE_URI}

@@ -15,6 +15,7 @@ something the author didn't intend.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from math import prod
 
@@ -35,7 +36,8 @@ MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
 REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
-                 "mode", "rounds", "min_participants", "shards"}
+                 "mode", "rounds", "min_participants", "shards",
+                 "local_inputs"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: Today's behaviour, and the default: one round of independent tasks (a
@@ -58,6 +60,27 @@ MODES = (MODE_INDEPENDENT, MODE_FEDERATED)
 #: a plan.
 MAX_ROUNDS = 500
 
+#: The alphabet a ``local_inputs`` label may use.
+#:
+#: **This is a deliberate duplicate** of flashnode's
+#: ``flashnode/config/local_data.py::LABEL_RE``. It cannot be imported: the
+#: agent lives in the public ``Zolli-Labs/flashml`` repo and this repo never
+#: imports it (AGENTS.md hard rule 2 — the only thing that crosses that
+#: boundary is ``flashruntime.protocol``, and a label alphabet is not a wire
+#: schema). So the rule is restated here, on purpose, with the two copies
+#: pinned to each other by this comment.
+#:
+#: Both ends must check, because they refuse at different moments. flashnode
+#: is the last line of defence — it is the process that holds the directory
+#: and joins nothing to a host path. But by the time it refuses, the job has
+#: been submitted, compiled, leased and claimed, and its author sees an
+#: opaque node-side failure. Refusing here is the earliest point at which a
+#: job author can be told they typed the label wrong.
+#:
+#: Narrower than any filesystem: ``/``, ``..`` and whitespace are exactly the
+#: characters that turn a name into a traversal, and they are not expressible.
+LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 class ConfigError(Exception):
     """Raised for any flashml.yaml that fails validation, including
@@ -75,6 +98,11 @@ class FlashmlConfig:
     sweep: dict[str, list] = field(default_factory=dict)
     resources: dict = field(default_factory=dict)
     timeout_seconds: int | None = None
+    #: Labels naming data the *host* lends to the task, mounted read-only by
+    #: the agent. Never uploaded, never an artifact, never a path: a job names
+    #: a label and the host owner alone decides what directory it means.
+    #: Empty is the default and the overwhelmingly common case.
+    local_inputs: list[str] = field(default_factory=list)
     #: ``independent`` (default, unchanged) or ``federated``.
     mode: str = MODE_INDEPENDENT
     #: Federated only. ``None`` under ``independent``, so a caller that
@@ -134,6 +162,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     sweep = _validate_sweep(raw.get("sweep", {}))
     resources = _validate_resources(raw.get("resources", {}))
     timeout_seconds = _validate_timeout_seconds(raw.get("timeout_seconds"))
+    local_inputs = _validate_local_inputs(raw.get("local_inputs", []))
     mode, rounds, min_participants, shards = _validate_mode(raw)
 
     return FlashmlConfig(
@@ -145,6 +174,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         sweep=sweep,
         resources=resources,
         timeout_seconds=timeout_seconds,
+        local_inputs=local_inputs,
         mode=mode,
         rounds=rounds,
         min_participants=min_participants,
@@ -246,6 +276,45 @@ def _validate_args(args: object) -> list[str]:
     if not all(isinstance(a, str) for a in args):
         raise ConfigError(f"flashml.yaml 'args' must be a list of strings, got {args!r}")
     return list(args)
+
+
+def _validate_local_inputs(value: object) -> list[str]:
+    """``local_inputs: ["patients"]`` → ``["patients"]``; absent → ``[]``.
+
+    A list of **labels**, never a mapping and never a path. The distinction
+    is the security property of the whole feature: a job says *what* it needs
+    by name, and the host owner alone decides which directory that name means
+    (``FLASHNODE_LOCAL_DATA`` on their machine). A mapping here would let a
+    submitter name a host path, so the type check below refuses one for the
+    same reason ``args`` refuses a shell string — the shape carries meaning.
+
+    Labels are validated against ``LABEL_RE``, flashnode's alphabet restated
+    (see its comment). Refusing at submit time is the point: the author is
+    here now, and a label rejected on a volunteer's machine ten minutes later
+    reads as a platform fault rather than a typo.
+    """
+    if not isinstance(value, list) or isinstance(value, (str, bytes)):
+        raise ConfigError(
+            f"flashml.yaml 'local_inputs' must be a list of dataset labels "
+            f"(names the host advertises, never paths), got {value!r}"
+        )
+    for label in value:
+        if not isinstance(label, str):
+            raise ConfigError(
+                f"flashml.yaml 'local_inputs' must contain only strings, got "
+                f"{label!r} in {value!r}"
+            )
+        # `.` and `..` are named explicitly as well as being unmatched by
+        # LABEL_RE: flashnode does the same, and a belt-and-braces check on
+        # the two strings that mean "a directory other than this one" is
+        # worth keeping identical at both ends.
+        if not LABEL_RE.match(label) or label in (".", ".."):
+            raise ConfigError(
+                f"flashml.yaml 'local_inputs' contains an illegal dataset "
+                f"label {label!r}: a label is a name, not a path — it must "
+                f"start with a letter or digit and use only [A-Za-z0-9._-]"
+            )
+    return list(value)
 
 
 def _validate_sweep(sweep: object) -> dict[str, list]:

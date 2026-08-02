@@ -64,6 +64,23 @@ WEIGHTS_PATH = f"{INPUTS_DIR}/weights.json"
 #: (``delta_file``) and defaults to exactly this.
 DELTA_FILE = "delta.json"
 
+#: The workload parameter carrying the host-supplied dataset labels.
+#:
+#: Deliberately **not** an entry in ``inputs``. Everything in ``inputs`` is an
+#: ``artifact://`` URI that the executor downloads, which means bytes that
+#: were uploaded to the control plane first. A local input is the opposite of
+#: that and by design: the directory stays on the host owner's machine, the
+#: agent bind-mounts it read-only at ``inputs/<label>/``, and nothing about it
+#: ever crosses the network. Adding a label to ``inputs`` would declare an
+#: artifact that does not and must not exist; adding it to ``unpack_inputs``
+#: would point an archive extractor at that non-existent download.
+#:
+#: The name matches what the coordinator's placement gate reads
+#: (``IsolationAwarePlacement``, ``task.payload["local_inputs"]``) and what
+#: flashnode's runner reads when building the mount. One string, three
+#: readers — see the caveat in ``_local_inputs`` about the middle step.
+LOCAL_INPUTS_PARAM = "local_inputs"
+
 #: A federated round's lease has to outlive local training, not a single
 #: HTTP call — ``CommandRecipe``'s 60 s default would expire mid-epoch and
 #: hand the shard to a second machine while the first was still working.
@@ -164,6 +181,33 @@ def _stringify(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
+def _local_inputs(config: FlashmlConfig, parameters: dict[str, Any]) -> None:
+    """Attach the config's local dataset labels to a workload's parameters.
+
+    Absent stays absent rather than becoming ``[]`` — the judgement
+    ``CommandRecipe`` already records for ``unpack_inputs``. The placement
+    gate reads ``payload.get("local_inputs")`` and short-circuits on ``None``,
+    so an omitted key leaves every pre-existing job's placement path byte for
+    byte what it was, and keeps that path exercised.
+
+    The labels are not re-validated here: ``parse_flashml_yaml`` already
+    refused anything outside the shared alphabet, and a second, subtly
+    different rule in a second module is how the two drift apart.
+
+    **Known gap, verified against the pinned runtime rather than assumed:**
+    ``CommandRecipe.expand`` builds each task payload from a fixed key list
+    and does not forward unrecognised workload parameters, so this value stops
+    at the JobSpec and does not yet reach ``task.payload``. That forwarding is
+    a one-line change in the public repo and is not this repo's to make (hard
+    rule 2). Until it lands, the gate sees an absent capability requirement,
+    fails open for local-data jobs, and flashnode mounts nothing — the
+    submitter's half of the contract is complete and correct, and the tasks
+    are simply not yet routed by it.
+    """
+    if config.local_inputs:
+        parameters[LOCAL_INPUTS_PARAM] = list(config.local_inputs)
+
+
 def _resources(config: FlashmlConfig) -> dict[str, Any]:
     raw = config.resources or {}
     resources: dict[str, Any] = {}
@@ -259,6 +303,7 @@ def compile_to_jobspec(
         parameters["task_params"] = task_params
     if config.timeout_seconds is not None:
         parameters["timeout_seconds"] = config.timeout_seconds
+    _local_inputs(config, parameters)
 
     repository, tag = _split_reference(image.reference)
 
@@ -394,6 +439,9 @@ def compile_federated_round(
     }
     if config.timeout_seconds is not None:
         parameters["timeout_seconds"] = config.timeout_seconds
+    # Federated averaging over data that cannot be pooled is the use case this
+    # feature exists for, so every round carries the requirement too.
+    _local_inputs(config, parameters)
 
     repository, tag = _split_reference(image.reference)
 
