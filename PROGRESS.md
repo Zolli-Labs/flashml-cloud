@@ -146,6 +146,48 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-02 — Production migrated by the runner; 0003 had never been applied
+
+What/why: prod was two migrations behind, not one. `0004_attempts` was known
+missing. Checking rather than trusting also found **`0003_contributions_unique`
+was never applied either** — `pg_indexes` had only 0001's three indexes on
+`public.contributions`.
+
+That second gap is the more interesting one. `db.record_contributions`
+documents itself as "idempotent by schema, not by convention", relying on
+`on conflict do nothing` against that unique index. **In production the index
+did not exist, so the ON CONFLICT clause had nothing to conflict against and
+the idempotency guarantee was not in force at all.** A retried round callback
+would have double-credited silently. It never bit only because
+`contributions` still had zero rows.
+
+How verified: baselined through 0002 (NOT 0003 — see gotcha 1), confirmed both
+0003 and 0004 still pending, applied, then re-verified against the database
+rather than the runner's own output: `public.attempts` present with RLS,
+`contributions_machine_job_task_idx` present, `schema_migrations` carrying 4
+rows whose checksums match `flashml-dev` byte for byte. Both environments are
+now provably identical. apps/api **441**, e2e 61, web 36.
+
+Gotchas:
+1. **The runbook I had written was wrong and would have caused the bug it was
+   meant to prevent.** It said `--baseline-through 0003_contributions_unique`,
+   on the assumption prod had 0001-0003. Running that would have recorded 0003
+   as applied without ever creating the unique index — leaving
+   `record_contributions` permanently non-idempotent while `--dry-run`
+   reported the database up to date. The `--baseline-through` argument existed
+   precisely because a bare `--baseline` was unsafe; the argument was right and
+   the *value* was wrong. Verify the artifacts a migration creates before
+   baselining it, never the changelog.
+2. The merge commit that shipped the ledger said "0004_attempts.sql runs
+   against the shared Supabase, so it lands for production and local at once".
+   It did not. Migrations only ever ran in the ephemeral test Postgres.
+3. Every table now has RLS on, including `schema_migrations`.
+
+Next: rotate the flashml-dev publishable key (in pushed history), set
+DEV_DATABASE_URL and RENDER_API_KEY, sync the blueprint to create the three
+dev services. Parking lot: no rollback automation; failed/expired attempts
+still leave no row.
+
 ### 2026-08-02 — CI, a deploy gate, and a migration runner (flashml-cloud)
 
 What/why: this repository had **no CI at all**, while all three Render services

@@ -141,7 +141,9 @@ therefore takes `--baseline`, which records versions as applied without
 executing them.
 
 **Baselining is per-prefix, not all-or-nothing** (`--baseline-through
-VERSION`), because prod is *behind*: it has 0001-0003 and not `0004_attempts`.
+VERSION`), because prod is *behind*. It had **0001-0002 only** — verified
+2026-08-02 against `pg_indexes`, which showed `0003`'s unique index had never
+been created either, contrary to what this spec originally assumed.
 A bare `--baseline` would record 0004 as applied without creating
 `public.attempts` — the ledger would credit nobody, forever, while `--dry-run`
 reported the database up to date. Recording a migration you did not run is
