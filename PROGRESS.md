@@ -146,6 +146,64 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-02 — Contributions ledger + local data binding, built by six parallel agents (all repos)
+
+What/why: the two engineering gates from `POSITIONING_LOG.md`. **The ledger** —
+`public.contributions` was documented as recording accepted work for host
+credit and nothing wrote to it; zero rows after a successful five-round run.
+Under the barter model (one of only two survivors of the laptop electricity
+maths) that table is the currency, not a metric. **Local data binding** — every
+task input was downloaded from the coordinator as an artifact, so a participant
+could not supply data that stays on their own machine, which breaks the premise
+of the only use case that is not a price competition.
+
+How verified: flashruntime 552 → **573**, flashnode 172 → **214**, apps/api
+352 → **403**, e2e **61**. And the chain proven end to end, which no per-task
+test could show:
+
+    flashml.yaml ['patients'] → JobSpec → task payload ['patients']
+      node WITH the dataset    → PLACED
+      node WITHOUT it          → refused
+      uploaded inputs          → ['code'] only — the data never leaves the host
+
+Gotchas — **three instances of one shape**, each found by an agent checking
+rather than assuming, and none named in the plan:
+1. `service/modea.py` omitted `local_datasets` from the node view handed to the
+   policy, so the gate read an absent capability on **every** node. DoD item 5
+   would have passed *vacuously* while the feature was unplaceable.
+2. Both flashnode runners had to forward `local_inputs` to `hardening`, or the
+   feature was implemented there and dead everywhere else.
+3. `CommandRecipe.expand` builds payloads from a fixed key list and dropped
+   `local_inputs` — and this one fails **OPEN**: gate sees no requirement,
+   places the task anywhere, flashnode mounts nothing, task runs without its
+   data. Fixed in `9893fef` with the hop's first test.
+
+   A gate is only as real as the data reaching it. Every one of these passed
+   both ends' tests, because each end constructs the intermediate value by hand.
+
+Two more, both mine:
+- **The unique index in the spec would have underpaid every host by 80%.** A
+  federated run is one coordinator job per round and task ids repeat, so keying
+  credit on the parent `fed-…` id collides from round 1 onward and
+  `on conflict do nothing` drops it silently. Credit is keyed on the round's
+  coordinator job id.
+- **The e2e venv held a stale NON-editable `flashruntime`**, so an earlier
+  "verified independently" check passed only because CWD shadowed it. This is
+  downstream of Plan A pinning e2e to published versions — right for release
+  verification, wrong for developing an unreleased protocol field.
+  `make e2e-setup LOCAL=1` is the escape hatch I built for exactly this and had
+  not used. Every count above is from a re-run after fixing it.
+
+Next: **release `flashruntime` 0.4.0**. Three pins in flashml-cloud reference a
+field that exists only in the working tree; until it ships, a real host
+advertises nothing and fails closed *invisibly*. Then `flashnode` 0.3.0 with
+floor `>=0.4,<0.5`. Parking lot: independent (non-federated) jobs still record
+no contributions; no credit for post-quorum work; no secure aggregation —
+gradient inversion means local data alone is not privacy.
+
+Nothing pushed. 4 unpushed commits in the public repo, 2 in flashml-cloud.
+
+
 ### 2026-08-02 — Federated averaging runs on the deployed stack, on one machine (M1 Plan 7)
 
 What/why: first end-to-end run against the deployed system. Submitted

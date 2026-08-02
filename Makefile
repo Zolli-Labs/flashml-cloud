@@ -32,11 +32,12 @@ JOB                   ?= $$(cat /tmp/flashml-last-job-id 2>/dev/null)
 # deployed path uses it. `make check-flashml` explains what to do if missing.
 # ---------------------------------------------------------------------------
 FLASHML_REPO    := https://github.com/Zolli-Labs/flashml
-RUNTIME_VERSION := 0.3.0
-# 0.2.1, not 0.2.0: 0.2.0 shipped a hardcoded __version__ of "0.1.0", so every
-# agent registered under the wrong agent_version. Pinning e2e to 0.2.0 would
-# test a version no volunteer should be running.
-NODE_VERSION    := 0.2.1
+RUNTIME_VERSION := 0.4.0
+# 0.3.0 advertises local_datasets, which needs flashruntime 0.4. Keep these two
+# in step: on an older runtime pydantic silently drops the field, the host
+# advertises nothing, and local-data work is never placed on it — fail-closed,
+# but with no error anywhere to say why.
+NODE_VERSION    := 0.3.0
 FLASHML         ?= ../flashml
 
 RUNTIME_PIN := "flashruntime[service,sklearn,dev]==$(RUNTIME_VERSION)"

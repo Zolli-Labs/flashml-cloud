@@ -61,7 +61,7 @@ services:
     # flashml-cloud/apps/api/pyproject.toml and FLASHML_PIN in the Makefile —
     # the API and the coordinator speaking different protocol versions is the
     # exact failure this consolidation exists to prevent.
-    buildCommand: pip install "flashruntime[service]==0.3.0"
+    buildCommand: pip install "flashruntime[service]==0.4.0"
     # --workers 1 is REQUIRED, not a default. See HANDOFF.md risk #5.
     startCommand: >-
       FLASHML_OPERATOR_TOKENS="flashml-api:$OPERATOR_TOKEN"
@@ -111,9 +111,11 @@ services:
     plan: starter          # must not sleep: a suspended API strands every agent
     region: oregon
     # flashruntime is an ordinary dependency now, declared in
-    # apps/api/pyproject.toml and pinned to a commit in the PUBLIC
-    # Zolli-Labs/flashml monorepo. No relative path, no second copy in this
-    # repo, nothing to keep in sync by hand.
+    # apps/api/pyproject.toml and pinned to an exact PUBLISHED version. No
+    # relative path, no second copy in this repo, nothing to keep in sync by
+    # hand. (It was briefly a commit pin, while flashruntime existed only in
+    # git; that escape hatch is documented in the foundation spec §3.3 and is
+    # forbidden in a release.)
     #
     # The previous comment here claimed the published wheel was stale and
     # predated `build_round`. That was wrong: flashruntime had NEVER been
