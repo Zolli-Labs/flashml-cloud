@@ -16,6 +16,75 @@ entry contradicts an earlier one, say so explicitly and link it.
 
 ---
 
+## 2026-08-02 (late) — Federated needs local data binding, which does not exist
+
+**Changed:** weakens the use case ranked strongest one hour earlier. The
+ranking stands; the readiness claim attached to it does not.
+
+**Trigger:** owner asked whether, on decentralised machines, there needs to be
+a way to send data or numbers "in a way people don't know".
+
+**The finding, and it is not the encryption question.** Every task input is
+downloaded from the coordinator as an artifact
+(`flashnode/executor/loop.py` — inputs unpack to `workdir/inputs/<name>/`).
+**Nothing mounts a host directory into a task.** A participant has no way to
+supply data that stays on their own machine.
+
+That breaks the federated premise. Real federated learning means the
+hospital's data never leaves the hospital. Today it would have to be uploaded
+to the platform first — at which point this is an ordinary compute service with
+extra steps, and the compliance argument, which was the entire reason that use
+case was not a price competition, evaporates.
+
+The federated example dodges this deliberately and documents it in its own
+`flashml.yaml`:
+
+> "Task containers have no network, so anything not in the image and not in
+> this repo does not exist at runtime — which is why the training data is
+> **generated** rather than downloaded."
+
+**Correction to the entry below:** "excellent fit, no blocker, works today" was
+wrong. The *mechanism* — rounds, aggregation, checkpoint resume, surviving a
+dropout — is proven. The *premise* is not, because there is no local data path.
+The blocker is **local data binding**, and it is foundational rather than
+incremental.
+
+### On the privacy question itself
+
+Two distinct problems, routinely conflated:
+
+**What the host machine can see.** Whoever runs the task controls the machine
+and can read its memory and disk. The sandbox protects the host from the
+submitter, not the reverse. Irrelevant when a participant runs on their own
+data; unavoidable for volunteer compute, where TEEs are the only real answer
+and they are expensive.
+
+**What leaks through the weights.** Sending numbers instead of data is **not
+automatically private** — gradient-inversion attacks reconstruct training
+examples from updates alone. An aggregator receiving deltas is a real exposure,
+not a theoretical one.
+
+| Mitigation | Gives | Cost |
+|---|---|---|
+| **Secure aggregation** | server sees only the SUM, never an individual update | moderate; masking protocol, dropout handling |
+| Differential privacy | provable bound on individual contribution | accuracy loss to tune |
+| Homomorphic encryption | compute on encrypted values | very expensive |
+| TEE / enclaves | hardware-enforced | needs specific hardware |
+
+Secure aggregation is what a hospital security review asks for by name, and
+what Flower and NVIDIA FLARE ship.
+
+**One architectural note for whoever builds it:** masking protocols spend most
+of their complexity on participants dropping out mid-round. This runtime
+assumes participants vanish — so the hard case for secure aggregation is the
+normal case here. Not a blocker; not a weekend either.
+
+**Ordering, deliberately:** local data binding before secure aggregation, and
+**a conversation with a real federated group before either**. Whether they need
+masking, differential privacy, or both is a ten-minute answer from a user and
+an unanswerable one from a spec. Building cryptography before that question is
+asked is how a year disappears.
+
 ## 2026-08-02 (late) — Use cases, and the one that is not a compute market
 
 **Changed:** what to sell, and to whom first. Follows directly from the
@@ -32,7 +101,7 @@ averaging — is the whole basis for the list.
 
 | Use case | Fit | Blocker |
 |---|---|---|
-| **Federated learning on data that cannot legally move** | **excellent** | none — works today |
+| **Federated learning on data that cannot legally move** | **excellent** | **local data binding — see entry above** |
 | Training on cheap preemptible capacity | strong | GPU support |
 | Hyperparameter sweeps, classic/small ML | strong | none |
 | A lab pooling its own machines | perfect | none (self-hosted flashruntime) |
@@ -51,7 +120,9 @@ That changes every axis:
 - Models are small and participants few, so the bandwidth ceiling in §3 of the
   positioning note never binds.
 - It does not compete with Vast.ai or Salad at all — different problem.
-- It needs **no GPU work**, and it is already deployed and proven.
+- It needs **no GPU work**. The mechanism is deployed and proven; the local
+  data path is not — see the entry above, which corrects the readiness claim
+  without changing the ranking.
 
 **Competition is different too:** Flower (flwr.ai), NVIDIA FLARE. Real, but a
 different set than GPU marketplaces — and neither is built around surviving a
@@ -250,19 +321,24 @@ Ordered by what unblocks the most:
    every thesis above, and it is the credit ledger the barter model runs on.
    *In progress.*
 2. **Talk to one federated-learning group.** The only use case that is not a
-   compute market, needs no new engineering, and is already deployed. Costs
-   nothing but a conversation and is the highest-information next action in
-   this whole document.
-3. **Result verification** — the gate for any PAID marketplace. Designed
+   compute market. Costs nothing but a conversation and is the
+   highest-information next action in this document — and it now answers two
+   questions at once: is local data binding the shape they need, and is secure
+   aggregation table stakes or a later ask.
+3. **Local data binding** — a participant points the agent at a directory on
+   their own machine and the task reads it without it ever being uploaded.
+   Today every input comes from the coordinator as an artifact. The gate for
+   federated, and foundational rather than incremental.
+4. **Result verification** — the gate for any PAID marketplace. Designed
    (`flashnode/benchmark/` ABCs), unimplemented. Not needed for federated,
    barter, or rent-and-resell.
-4. **Capability-aware placement** — a GPU job must not land on a laptop, and a
+5. **Capability-aware placement** — a GPU job must not land on a laptop, and a
    500-config sweep should. `IsolationAwarePlacement` reads no capabilities
    today.
-5. **GPU support** — four changes: probe, `--gpus`, a CUDA image, placement.
+6. **GPU support** — four changes: probe, `--gpus`, a CUDA image, placement.
    Testable on a rented Pod for under a dollar. Required for preemptible
    training and the gaming-PC marketplace; **not** required for federated.
-6. **Desktop app (S4)** — deferred by both 2026-08-02 notes, and further
+7. **Desktop app (S4)** — deferred by both 2026-08-02 notes, and further
    undercut by the laptop economics: an installer cannot fix a machine that
    loses money by participating. Revisit only under a donation or barter
    model, where nobody is being paid.
