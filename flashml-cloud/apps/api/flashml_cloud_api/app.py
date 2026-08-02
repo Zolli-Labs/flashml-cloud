@@ -1455,9 +1455,50 @@ def create_cloud_app(
     async def attempt_complete(
         lease_id: str, request: Request, machine: Machine = Depends(current_machine)
     ):
-        return await proxy(
+        response = await proxy(
             request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/complete"
         )
+        # ACCEPTANCE IS THE BODY FIELD, NEVER THE STATUS CODE.
+        #
+        # The coordinator answers 200 with `{"accepted": false}` in two
+        # ordinary cases: the output's sha256 did not match what was
+        # committed (the attempt is requeued elsewhere), and the commit
+        # arrived after another attempt had already won the task. Both are
+        # successful HTTP hops reporting unsuccessful WORK. Crediting on
+        # `2xx` would pay for a failed hash check and pay twice for a task
+        # two machines both finished — hard rule 4, attempted work is not
+        # accepted work.
+        if response.status_code == 200:
+            try:
+                accepted = json.loads(response.body).get("accepted") is True
+            except Exception:
+                accepted = False
+            if accepted:
+                try:
+                    with contextlib.closing(app.state.connect()) as conn:
+                        # Takes the right to credit this lease exactly once,
+                        # and only for the machine that CLAIMED it. None is
+                        # the ordinary answer for a repeated commit or a
+                        # lease this machine never held — not an error.
+                        credit = dbmod.claim_attempt_credit(
+                            conn, lease_id=lease_id, machine_id=machine.id
+                        )
+                        if credit is not None:
+                            dbmod.record_contributions(
+                                conn,
+                                job_id=credit["job_id"],
+                                entries=[{
+                                    "node_id": machine.node_id,
+                                    "task_id": credit["task_id"],
+                                    "duration_s": credit["duration_s"],
+                                }],
+                            )
+                except Exception:
+                    log.warning(
+                        "could not credit accepted attempt for machine %s",
+                        machine.id,
+                    )
+        return response
 
     @app.post("/v1alpha1/attempts/{lease_id}/fail", tags=["agent"])
     async def attempt_fail(
