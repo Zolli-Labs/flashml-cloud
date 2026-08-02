@@ -16,6 +16,40 @@ entry contradicts an earlier one, say so explicitly and link it.
 
 ---
 
+## 2026-08-02 (latest) — The credit ledger only paid federated hosts; now it pays everyone
+
+**Changed:** nothing in the thesis. This closes a gap in the *implementation*
+of open thread 1, which the entry below recorded as done.
+
+**Trigger:** checking, rather than assuming, who `record_contributions` is
+called by. Answer: exactly one caller, inside `fedavg.on_round`. So the ledger
+shipped that morning credited **federated rounds and nothing else**.
+
+**Why that mattered more than it looks.** The barter model is one of only two
+survivors of the laptop-electricity maths, and this table is its currency. But
+the workload it failed to pay for is the sweep — the 500-config job that open
+thread 5 names as the thing a laptop pool is *genuinely good at*. The ledger
+did not cover the workload the ledger exists for.
+
+**What it cost to fix:** a `public.attempts` table (migration 0004) holding the
+`lease → (job, task)` mapping, because the completion hop carries only
+`{accepted: bool}` against a lease id while `contributions` is keyed on job and
+task. Entirely inside `apps/api` — no runtime release, no pin bump.
+
+**The trap, recorded because it is the kind that ships:** the coordinator
+answers **HTTP 200 with `{"accepted": false}`** when an output fails its hash
+check and when a commit loses the race. Crediting on `2xx` would have paid for
+work that failed validation. Attempted is not accepted.
+
+**Still unchanged:** there is still no *result verification* (open thread 4).
+This credits work the coordinator accepted, where "accepted" means the hash
+matched — not that the numbers are right. A lying node whose output hashes
+correctly is still believed. And this remains supply-side reasoning: **zero
+demand evidence.** Open thread 2 is still the cheapest way to change that.
+
+---
+
+
 ## 2026-08-02 (late) — Federated needs local data binding, which does not exist
 
 **Changed:** weakens the use case ranked strongest one hour earlier. The
@@ -317,9 +351,12 @@ and because rented providers need no installer at all.
 
 Ordered by what unblocks the most:
 
-1. **Contributions ledger** — nothing records accepted work. Needed under
-   every thesis above, and it is the credit ledger the barter model runs on.
-   *In progress.*
+1. **Contributions ledger** — ~~nothing records accepted work~~ **DONE
+   2026-08-02.** Federated rounds first, then every other job via the
+   `public.attempts` mapping (migration 0004). Remaining holes, all recorded
+   in `2026-08-02-attempt-ledger-design.md` §4: failed and expired attempts
+   leave no row, so this is not yet a full attempt history; no retroactive
+   credit; no credit for work accepted after a round's quorum.
 2. **Talk to one federated-learning group.** The only use case that is not a
    compute market. Costs nothing but a conversation and is the
    highest-information next action in this document — and it now answers two

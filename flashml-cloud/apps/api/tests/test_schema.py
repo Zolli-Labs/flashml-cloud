@@ -4,6 +4,14 @@ invariants that matter rather than re-describing every column."""
 import pathlib
 import re
 
+# One test below asserts against a real, freshly-migrated database rather
+# than against the SQL text: a column list read out of `information_schema`
+# is the only check that proves the migration *applies*, not merely that it
+# was typed. The `db` fixture lives in `test_jobs_from_repo` (it is the
+# session Postgres from `conftest.py` wrapped in a dict-row connection);
+# `test_contributions.py` already borrows it the same way.
+from test_jobs_from_repo import db  # noqa: F401 - fixture
+
 MIGRATIONS = pathlib.Path(__file__).parent.parent / "migrations"
 
 SQL = (MIGRATIONS / "0001_initial.sql").read_text()
@@ -88,3 +96,34 @@ def test_machine_status_is_constrained():
 
 def test_owner_columns_cascade_from_profiles():
     assert SQL.lower().count("references public.profiles(id)") >= 2
+
+
+def test_attempts_table_exists_with_rls(db):
+    """The attempt ledger: the API's durable lease -> (job, task) mapping.
+
+    Without it the API can see that a completion was ACCEPTED but not what
+    was completed, because the coordinator's complete response carries only
+    `{"accepted": bool}`.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select column_name, data_type from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'attempts'"
+            " order by column_name"
+        )
+        cols = {r["column_name"]: r["data_type"] for r in cur.fetchall()}
+    assert cols == {
+        "accepted_at": "timestamp with time zone",
+        "claimed_at": "timestamp with time zone",
+        "job_id": "text",
+        "lease_id": "text",
+        "machine_id": "uuid",
+        "task_id": "text",
+    }
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select relrowsecurity from pg_class"
+            " where oid = 'public.attempts'::regclass"
+        )
+        assert cur.fetchone()["relrowsecurity"] is True

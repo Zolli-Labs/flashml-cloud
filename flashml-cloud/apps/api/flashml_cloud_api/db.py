@@ -645,6 +645,77 @@ def record_contributions(
         return len(cur.fetchall())
 
 
+def record_attempt(
+    db: psycopg.Connection,
+    *,
+    lease_id: str,
+    machine_id: str,
+    job_id: str,
+    task_id: str,
+) -> None:
+    """Remember that ``machine_id`` claimed ``lease_id`` for a task.
+
+    This is the mapping the credit path needs and cannot otherwise get: the
+    completion hop carries only a lease id, while ``contributions`` is keyed
+    on ``(machine_id, job_id, task_id)``.
+
+    ``on conflict do nothing`` because a claim that is forwarded twice — a
+    retry, a duplicated request — describes one lease, not two.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.attempts"
+            "            (lease_id, machine_id, job_id, task_id)"
+            "     values (%s, %s, %s, %s)"
+            " on conflict (lease_id) do nothing",
+            (lease_id, machine_id, job_id, task_id),
+        )
+
+
+def claim_attempt_credit(
+    db: psycopg.Connection,
+    *,
+    lease_id: str,
+    machine_id: str,
+) -> dict[str, Any] | None:
+    """Take the right to credit ``lease_id``, exactly once.
+
+    Returns ``{"job_id", "task_id", "duration_s"}`` for a lease this machine
+    claimed and has not yet been credited for, or ``None``. ``None`` covers
+    every "do not pay" case at once: unknown lease, already credited, or a
+    different machine asking.
+
+    One ``UPDATE ... RETURNING`` rather than a select then an update — two
+    completions arriving together must not both come back with a row, and a
+    single statement makes that the database's problem rather than this
+    process's.
+
+    ``duration_s`` is lease-held wall clock (claim to credit), which includes
+    input download and output upload. That is the honest number for a
+    contribution ledger. It is cast to ``float`` because ``extract(epoch …)``
+    is ``numeric`` and psycopg returns ``Decimal``, which would otherwise
+    reach ``record_contributions`` and land in the column as a different type
+    from every row the federated path writes.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts"
+            "   set accepted_at = now()"
+            " where lease_id = %s and machine_id = %s and accepted_at is null"
+            " returning job_id, task_id,"
+            "           extract(epoch from (now() - claimed_at)) as duration_s",
+            (lease_id, machine_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "job_id": row["job_id"],
+        "task_id": row["task_id"],
+        "duration_s": float(row["duration_s"]),
+    }
+
+
 def list_federated_jobs_for_owner(
     db: psycopg.Connection, owner_id: str
 ) -> list[dict[str, Any]]:

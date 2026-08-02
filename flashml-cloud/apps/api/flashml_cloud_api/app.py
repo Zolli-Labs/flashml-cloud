@@ -34,6 +34,7 @@ Environment (cloud): see ``settings.Settings.from_env``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -1179,6 +1180,147 @@ def create_cloud_app(
         return [_jsonable(r)
                 for r in dbmod.list_job_rounds_for_owner(db, job_id, user_id)]
 
+    @app.get("/v1alpha1/jobs/{job_id}/events", tags=["browser"])
+    async def get_job_events(
+        job_id: str,
+        since: int = 0,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The coordinator's event ledger for a job the caller owns.
+
+        This is the read side of everything the console shows about *how* a
+        job ran: which node claimed which task, which lease expired, which
+        commit was accepted, what the recovery policy decided and why. The
+        coordinator persists it (``events`` table, ordered by ``seq``), so it
+        is real history rather than a live tail, and it survives a restart.
+
+        ``since`` is an offset into that append-only list, which is what a
+        poller wants: pass back the count you already have and get only what
+        arrived after. It is an offset and not a timestamp deliberately —
+        several events share a timestamp to the millisecond (a sweep expires
+        a lease and requeues the task in one pass), so a time cursor either
+        replays them or drops them.
+
+        Ownership is checked against the ``jobs`` table before the
+        coordinator is contacted, answering 404 for a job that exists and
+        is not yours, exactly as the sibling read routes do.
+        """
+        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        if fedavgmod.is_federated_job_id(job_id):
+            # A federated run is one coordinator job PER ROUND, so there is
+            # no single ledger to forward to. Fan out over the rounds that
+            # have a coordinator job and tag each event with the round it
+            # came from, which is the only way the client can order them.
+            # Rounds without a coordinator_job_id are rounds that never
+            # reached the coordinator; they contribute nothing rather than
+            # an empty group.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            pairs = [
+                (row["round"], row["coordinator_job_id"])
+                for row in rounds
+                if row.get("coordinator_job_id")
+            ]
+            if not pairs:
+                return []
+            responses = await asyncio.gather(
+                *(
+                    coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(cid)}/events")
+                    for _, cid in pairs
+                ),
+                return_exceptions=True,
+            )
+            merged: list[dict[str, Any]] = []
+            for (round_no, _), r in zip(pairs, responses):
+                # One unreachable round must not take the whole ledger down.
+                # A partial history is useful; a 500 is not.
+                if isinstance(r, BaseException) or r.status_code >= 300:
+                    continue
+                try:
+                    events = r.json()
+                except ValueError:
+                    continue
+                if not isinstance(events, list):
+                    continue
+                for e in events:
+                    if isinstance(e, dict):
+                        merged.append({**e, "round": round_no})
+            # Round first, then the coordinator's own order within a round.
+            # Sorting by timestamp alone would interleave rounds that ran
+            # back to back.
+            merged.sort(key=lambda e: e.get("round") or 0)
+            return merged[max(since, 0):]
+
+        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/events")
+        if r.status_code >= 300:
+            return _passthrough(r)
+        try:
+            events = r.json()
+        except ValueError:
+            return _passthrough(r)
+        if not isinstance(events, list):
+            return _passthrough(r)
+        return events[max(since, 0):]
+
+    @app.get("/v1alpha1/jobs/{job_id}/tasks", tags=["browser"])
+    async def get_job_tasks(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Current task state for a job the caller owns.
+
+        Deliberately *current* state only, which is what the coordinator
+        exposes: task id, state, attempts used against the cap, the node
+        holding it now (or the last node to hold it), and the live lease
+        deadline. Attempt HISTORY is not here and cannot be, because the
+        coordinator's task view does not carry it — the console derives
+        per-attempt history from the event ledger above instead.
+
+        A federated run has one coordinator job per round, so tasks are
+        returned per round with a ``round`` key rather than flattened: task
+        ids repeat across rounds and merging them would silently collapse
+        distinct work into one row.
+        """
+        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        if fedavgmod.is_federated_job_id(job_id):
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            pairs = [
+                (row["round"], row["coordinator_job_id"])
+                for row in rounds
+                if row.get("coordinator_job_id")
+            ]
+            if not pairs:
+                return []
+            responses = await asyncio.gather(
+                *(
+                    coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(cid)}/tasks")
+                    for _, cid in pairs
+                ),
+                return_exceptions=True,
+            )
+            merged: list[dict[str, Any]] = []
+            for (round_no, _), r in zip(pairs, responses):
+                if isinstance(r, BaseException) or r.status_code >= 300:
+                    continue
+                try:
+                    tasks = r.json()
+                except ValueError:
+                    continue
+                if not isinstance(tasks, list):
+                    continue
+                for t in tasks:
+                    if isinstance(t, dict):
+                        merged.append({**t, "round": round_no})
+            return merged
+
+        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks")
+        return _passthrough(r)
+
     @app.post("/v1alpha1/jobs/{job_id}/cancel", tags=["browser"])
     async def cancel_job_route(
         job_id: str,
@@ -1275,9 +1417,31 @@ def create_cloud_app(
 
     @app.post("/v1alpha1/leases/claim", tags=["agent"])
     async def claim(request: Request, machine: Machine = Depends(current_machine)):
-        return await proxy(
+        response = await proxy(
             request, machine, "/v1alpha1/leases/claim", force_node_id=True
         )
+        # Remember what this machine was handed. The completion hop reports
+        # only `{"accepted": bool}` against a lease id, so THIS is the single
+        # point at which the API can learn which job and task a lease covers
+        # — and without that mapping no non-federated job can credit anybody.
+        # 204 ("nothing claimable right now") carries no lease and is skipped.
+        #
+        # Best-effort, exactly like last_seen_at above: an accounting row must
+        # never be the reason a machine fails to pick up work.
+        if response.status_code == 200:
+            try:
+                lease = json.loads(response.body)
+                with contextlib.closing(app.state.connect()) as conn:
+                    dbmod.record_attempt(
+                        conn,
+                        lease_id=lease["lease_id"],
+                        machine_id=machine.id,
+                        job_id=lease["job_id"],
+                        task_id=lease["task_id"],
+                    )
+            except Exception:
+                log.warning("could not record attempt for machine %s", machine.id)
+        return response
 
     @app.post("/v1alpha1/attempts/{lease_id}/heartbeat", tags=["agent"])
     async def attempt_heartbeat(
@@ -1291,9 +1455,50 @@ def create_cloud_app(
     async def attempt_complete(
         lease_id: str, request: Request, machine: Machine = Depends(current_machine)
     ):
-        return await proxy(
+        response = await proxy(
             request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/complete"
         )
+        # ACCEPTANCE IS THE BODY FIELD, NEVER THE STATUS CODE.
+        #
+        # The coordinator answers 200 with `{"accepted": false}` in two
+        # ordinary cases: the output's sha256 did not match what was
+        # committed (the attempt is requeued elsewhere), and the commit
+        # arrived after another attempt had already won the task. Both are
+        # successful HTTP hops reporting unsuccessful WORK. Crediting on
+        # `2xx` would pay for a failed hash check and pay twice for a task
+        # two machines both finished — hard rule 4, attempted work is not
+        # accepted work.
+        if response.status_code == 200:
+            try:
+                accepted = json.loads(response.body).get("accepted") is True
+            except Exception:
+                accepted = False
+            if accepted:
+                try:
+                    with contextlib.closing(app.state.connect()) as conn:
+                        # Takes the right to credit this lease exactly once,
+                        # and only for the machine that CLAIMED it. None is
+                        # the ordinary answer for a repeated commit or a
+                        # lease this machine never held — not an error.
+                        credit = dbmod.claim_attempt_credit(
+                            conn, lease_id=lease_id, machine_id=machine.id
+                        )
+                        if credit is not None:
+                            dbmod.record_contributions(
+                                conn,
+                                job_id=credit["job_id"],
+                                entries=[{
+                                    "node_id": machine.node_id,
+                                    "task_id": credit["task_id"],
+                                    "duration_s": credit["duration_s"],
+                                }],
+                            )
+                except Exception:
+                    log.warning(
+                        "could not credit accepted attempt for machine %s",
+                        machine.id,
+                    )
+        return response
 
     @app.post("/v1alpha1/attempts/{lease_id}/fail", tags=["agent"])
     async def attempt_fail(

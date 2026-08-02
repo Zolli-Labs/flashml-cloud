@@ -428,3 +428,125 @@ def test_the_round_row_still_records_the_contributor_node_ids(
 
     rounds = dbmod.list_job_rounds_for_owner(db, job_id, owner)
     assert rounds[0]["contributors"] == nodes
+
+
+# ---------------------------------------------------------------------------
+# attempts: the lease -> (job, task) mapping that lets ANY job pay out
+# ---------------------------------------------------------------------------
+
+def _lease() -> str:
+    return f"lease-{uuid.uuid4().hex[:12]}"
+
+
+def test_claim_attempt_credit_returns_the_claimed_work(db):
+    machine = _enrol(db, _node_id("credit"))
+    lease, job = _lease(), _job()
+    dbmod.record_attempt(
+        db, lease_id=lease, machine_id=machine, job_id=job, task_id="task-000"
+    )
+
+    row = dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=machine)
+
+    assert row is not None
+    assert row["job_id"] == job
+    assert row["task_id"] == "task-000"
+    # A float, not a Decimal: record_contributions writes it straight through
+    # to a numeric column and psycopg hands back Decimal for extract(epoch).
+    assert isinstance(row["duration_s"], float)
+    assert row["duration_s"] >= 0.0
+
+
+def test_claim_attempt_credit_is_once_only(db):
+    """The second completion of one lease credits nothing.
+
+    Idempotence here does NOT lean on the 0003 unique index — it is a
+    property of this UPDATE. Belt and braces: the index catches a duplicate
+    that arrives by any other route, this catches it before a row is built.
+    """
+    machine = _enrol(db, _node_id("once"))
+    lease = _lease()
+    dbmod.record_attempt(
+        db, lease_id=lease, machine_id=machine, job_id=_job(), task_id="task-000"
+    )
+
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=machine)
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=machine) is None
+
+
+def test_claim_attempt_credit_refuses_another_machine(db):
+    """Credit follows the machine that CLAIMED, never the one that asked.
+
+    The coordinator enforces lease ownership, so this is unreachable today.
+    It is written anyway: whose work this was should not depend on a remote
+    component's authorization staying correct.
+    """
+    owner = _enrol(db, _node_id("owner"))
+    thief = _enrol(db, _node_id("thief"))
+    lease = _lease()
+    dbmod.record_attempt(
+        db, lease_id=lease, machine_id=owner, job_id=_job(), task_id="task-000"
+    )
+
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=thief) is None
+    # ...and the real owner is still able to collect.
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=owner)
+
+
+def test_claim_attempt_credit_unknown_lease_is_none(db):
+    machine = _enrol(db, _node_id("unknown"))
+    assert dbmod.claim_attempt_credit(db, lease_id=_lease(), machine_id=machine) is None
+
+
+def test_record_attempt_twice_keeps_one_row(db):
+    """A retried claim forward must not create a second attempt."""
+    machine = _enrol(db, _node_id("dup"))
+    lease, job = _lease(), _job()
+    for _ in range(2):
+        dbmod.record_attempt(
+            db, lease_id=lease, machine_id=machine, job_id=job, task_id="task-000"
+        )
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.attempts where lease_id = %s", (lease,)
+        )
+        assert cur.fetchone()["n"] == 1
+
+
+def test_federated_round_credited_by_both_paths_yields_one_row(db):
+    """fedavg and the completion proxy must agree on the ledger key.
+
+    A federated run is one coordinator job PER ROUND. fedavg credits with
+    job_id = the round's coordinator job id, and the lease for that round's
+    task carries the SAME job_id — so both paths compute an identical
+    (machine_id, job_id, task_id) and the unique index from 0003 collapses
+    them to one row.
+
+    Pinned rather than merely observed: if the two ever key differently,
+    every federated host is paid twice, once per round, and nothing about a
+    green suite or a successful run would say so.
+    """
+    node_id = _node_id("fedboth")
+    machine = _enrol(db, node_id)
+    round_job = _job()          # the ROUND's coordinator job id
+    lease = _lease()
+
+    # path 1 — the completion proxy's credit, via the attempts mapping
+    dbmod.record_attempt(
+        db, lease_id=lease, machine_id=machine,
+        job_id=round_job, task_id="task-000",
+    )
+    credit = dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=machine)
+    assert credit is not None
+    dbmod.record_contributions(
+        db, job_id=credit["job_id"],
+        entries=[{"node_id": node_id, "task_id": credit["task_id"],
+                  "duration_s": credit["duration_s"]}],
+    )
+
+    # path 2 — fedavg's on_round credit for the same accepted task
+    dbmod.record_contributions(
+        db, job_id=round_job,
+        entries=[{"node_id": node_id, "task_id": "task-000", "duration_s": 1.0}],
+    )
+
+    assert len(_rows(db, round_job)) == 1

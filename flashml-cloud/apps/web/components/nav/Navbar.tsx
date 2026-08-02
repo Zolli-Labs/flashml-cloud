@@ -24,11 +24,11 @@ export function Navbar() {
             <div className="absolute inset-0 rounded-md bg-cyan/10 border border-cyan/30 group-hover:border-cyan/60 transition-colors" />
             <Lightning className="relative z-10 text-cyan w-4 h-4" weight="fill" />
           </div>
+          {/* No version chip. A "v0.1" badge next to the wordmark is a
+              stage label, not information anyone needs, and it undersells
+              the product to every first-time visitor. */}
           <span className="font-mono font-bold tracking-tight text-foreground">
             Flash<span className="text-cyan">ML</span>
-          </span>
-          <span className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-cyan/10 text-cyan border border-cyan/20">
-            v0.1
           </span>
         </Link>
 

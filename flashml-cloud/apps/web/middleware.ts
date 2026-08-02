@@ -101,9 +101,12 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   }
 
+  // Signed in and asking for /sign-in: send them to the console home, not
+  // to /machines. Landing a returning user on a single resource list was a
+  // stand-in for not having an overview page; there is one now.
   if (user && pathname === "/sign-in") {
     const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = "/machines";
+    redirectUrl.pathname = "/overview";
     redirectUrl.searchParams.delete("next");
     return NextResponse.redirect(redirectUrl);
   }

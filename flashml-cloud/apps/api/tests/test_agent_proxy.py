@@ -889,3 +889,230 @@ def _fetch_machine(db, machine_id):
     with db.cursor() as cur:
         cur.execute("select * from public.machines where id = %s", (machine_id,))
         return cur.fetchone()
+
+
+# ---------------------------------------------------------------------------
+# the attempt ledger: which work the API remembers, and who it credits
+#
+# Until these landed, `db.record_contributions` had exactly one caller —
+# inside `fedavg.on_round` — so a machine was paid for FEDERATED rounds and
+# for nothing else. A sweep, which is the workload donated laptops are
+# actually good at, credited nobody.
+#
+# The two hops are tested separately because they fail separately: `claim` is
+# where the API learns what a lease covers, and `complete` is where it learns
+# the work was accepted. Neither carries both facts.
+# ---------------------------------------------------------------------------
+
+
+def _attempt_rows(db, lease_id: str) -> list[dict]:
+    with db.cursor() as cur:
+        cur.execute(
+            "select machine_id, job_id, task_id, accepted_at"
+            "  from public.attempts where lease_id = %s",
+            (lease_id,),
+        )
+        return list(cur.fetchall())
+
+
+def _contribution_rows(db, job_id: str) -> list[dict]:
+    with db.cursor() as cur:
+        cur.execute(
+            "select machine_id, task_id, duration_s"
+            "  from public.contributions where job_id = %s",
+            (job_id,),
+        )
+        return list(cur.fetchall())
+
+
+def _lease_payload(lease_id: str, job_id: str, task_id: str = "task-000") -> dict:
+    return {
+        "schema_version": "v1alpha1",
+        "lease_id": lease_id,
+        "task_id": task_id,
+        "job_id": job_id,
+        "node_id": "whatever-the-agent-says",
+        "attempt_number": 1,
+        "deadline": "2026-08-02T00:00:00Z",
+        "payload": {},
+    }
+
+
+def _new_lease_id() -> str:
+    return f"lease-{uuid.uuid4().hex[:12]}"
+
+
+def _new_job_id() -> str:
+    return f"cjob-{uuid.uuid4().hex[:10]}"
+
+
+def test_claim_records_the_attempt(client, transport, machine, db):
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    transport.status_code = 200
+    transport.payload = _lease_payload(lease_id, job_id, "task-007")
+
+    r = client.post(
+        "/v1alpha1/leases/claim",
+        json={},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    assert r.status_code == 200
+
+    rows = _attempt_rows(db, lease_id)
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == job_id
+    assert rows[0]["task_id"] == "task-007"
+    assert str(rows[0]["machine_id"]) == machine["id"]
+    # Claiming is not doing. accepted_at is set only when work is credited.
+    assert rows[0]["accepted_at"] is None
+
+
+def test_claim_204_records_nothing(client, transport, machine, db):
+    """204 is "no work right now". There is no attempt to remember.
+
+    Asserted as a DELTA over this machine's rows, not an absolute count.
+    `machine` is module-scoped and shared with every other test in this
+    file, so an absolute count is just whatever the tests that happened to
+    run first left behind.
+    """
+    def _count() -> int:
+        with db.cursor() as cur:
+            cur.execute(
+                "select count(*) as n from public.attempts where machine_id = %s",
+                (machine["id"],),
+            )
+            return cur.fetchone()["n"]
+
+    before = _count()
+    transport.status_code = 204
+    transport.payload = None
+
+    r = client.post(
+        "/v1alpha1/leases/claim",
+        json={},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    assert r.status_code == 204
+    assert _count() == before
+
+
+def test_claim_with_unparseable_body_does_not_fail_the_claim(
+    client, transport, machine
+):
+    """The ledger is never allowed to break scheduling.
+
+    A 200 whose body is not a lease — a coordinator change, something in the
+    middle rewriting it — must cost the agent nothing. It still gets its
+    response; we simply record no attempt.
+    """
+    transport.status_code = 200
+    transport.payload = {"not": "a lease"}
+
+    r = client.post(
+        "/v1alpha1/leases/claim",
+        json={},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    assert r.status_code == 200
+
+
+def _claim_one(client, transport, machine, *, lease_id, job_id):
+    """Drive a real claim through the proxy so the attempts row exists."""
+    transport.status_code = 200
+    transport.payload = _lease_payload(lease_id, job_id)
+    r = client.post(
+        "/v1alpha1/leases/claim",
+        json={},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    assert r.status_code == 200
+
+
+def _complete(client, transport, machine, *, lease_id, body, status=200):
+    transport.status_code = status
+    transport.payload = body
+    return client.post(
+        f"/v1alpha1/attempts/{lease_id}/complete",
+        json={"output_sha256": "0" * 64},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+
+
+def test_accepted_completion_credits_the_machine(client, transport, machine, db):
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    _complete(client, transport, machine,
+              lease_id=lease_id, body={"accepted": True})
+
+    rows = _contribution_rows(db, job_id)
+    assert len(rows) == 1
+    assert str(rows[0]["machine_id"]) == machine["id"]
+    assert rows[0]["task_id"] == "task-000"
+
+
+def test_rejected_completion_credits_nobody(client, transport, machine, db):
+    """200 + accepted:false — the output's sha256 did not match, so the
+    attempt was requeued elsewhere.
+
+    This is the case that makes "credit on 2xx" wrong: the status code says
+    the HOP succeeded, the body says the WORK did not. Hard rule 4 —
+    attempted work is not accepted work.
+    """
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    _complete(
+        client, transport, machine,
+        lease_id=lease_id,
+        body={"accepted": False,
+              "detail": "output validation failed; attempt requeued"},
+    )
+
+    assert _contribution_rows(db, job_id) == []
+
+
+def test_late_commit_credits_nobody(client, transport, machine, db):
+    """200 + a bare accepted:false — another attempt already won this task.
+
+    Two machines can each finish the same task; only one commit wins. Paying
+    both would double-count the same unit of work.
+    """
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    _complete(client, transport, machine,
+              lease_id=lease_id, body={"accepted": False})
+
+    assert _contribution_rows(db, job_id) == []
+
+
+def test_error_completion_credits_nobody(client, transport, machine, db):
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    _complete(client, transport, machine, lease_id=lease_id,
+              body={"detail": "unknown lease"}, status=404)
+
+    assert _contribution_rows(db, job_id) == []
+
+
+def test_completing_twice_credits_once(client, transport, machine, db):
+    """A retried commit is one piece of work, not two."""
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    for _ in range(2):
+        _complete(client, transport, machine,
+                  lease_id=lease_id, body={"accepted": True})
+
+    assert len(_contribution_rows(db, job_id)) == 1
+
+
+def test_completion_without_a_claim_credits_nobody(client, transport, machine, db):
+    """No attempts row => nothing is known about this lease => no credit."""
+    lease_id = _new_lease_id()
+    r = _complete(client, transport, machine,
+                  lease_id=lease_id, body={"accepted": True})
+    assert r.status_code == 200
+    assert _attempt_rows(db, lease_id) == []
