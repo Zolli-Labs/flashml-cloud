@@ -244,3 +244,136 @@ services:
         sync: false
       - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
         sync: false
+
+  # ===========================================================================
+  # DEV ENVIRONMENT — three FREE services on the `develop` branch.
+  #
+  # Added 2026-08-02. Same blueprint on purpose: Render reads `render.yaml` at
+  # the repo root and nowhere else, so a separate `render.dev.yaml` would be
+  # inert documentation. One file, one diff, both environments.
+  #
+  # WHAT DEV DELIBERATELY GIVES UP, and why it is acceptable:
+  #
+  #   1. The coordinator is `type: web`, NOT `pserv`. Render's free tier has
+  #      no private services. So dev's coordinator is PUBLIC, and its operator
+  #      token — which is unscoped and can act as any machine — is reachable
+  #      by anyone who finds the URL. In dev, with throwaway data and its OWN
+  #      generated token, that is contained. It is NOT acceptable in prod, and
+  #      the prod service above stays `pserv`. Do not copy this downward.
+  #
+  #   2. No disk. Free tier has none. `leases.db` and locally-hosted artifacts
+  #      go to ephemeral storage and are LOST on every spin-down and redeploy.
+  #      A run that spans a restart dies. Accepted deliberately by the owner.
+  #      Bonus: this exercises the parked diskless-coordinator design (Plan
+  #      B2) for real, instead of settling it by argument.
+  #
+  #   3. Free services sleep after ~15 minutes idle. Not the problem it looks
+  #      like: an agent polling for leases IS inbound traffic, so the service
+  #      stays awake for as long as a test is actually running. Sleeping costs
+  #      one slow request between sessions.
+  #
+  #      It is also what keeps this free — free instances share 750 hours per
+  #      MONTH across all of them, and three always-on services would burn
+  #      that in about ten days.
+  #
+  # Dev therefore proves the multi-machine loop, which localhost cannot (no
+  # other machine can reach your laptop). It does NOT rehearse a prod deploy:
+  # different topology, no disk. Blueprint changes still get proven on prod.
+  #
+  # autoDeploy is TRUE here, unlike prod. Dev is for fast iteration and there
+  # is nothing to protect; CI still runs on the branch, so a red build is
+  # visible. Migrations are applied to dev by the `migrate-dev` job in
+  # .github/workflows/ci.yml on every push to `develop`.
+  # ===========================================================================
+
+  - type: web
+    name: flashml-dev-coordinator
+    runtime: python
+    branch: develop
+    autoDeploy: true
+    rootDir: .
+    plan: free
+    region: oregon
+    buildCommand: pip install "flashruntime[service]==0.4.0"
+    startCommand: >-
+      FLASHML_OPERATOR_TOKENS="flashml-dev-api:$OPERATOR_TOKEN"
+      uvicorn flashruntime.service.app:app
+      --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /healthz
+    envVars:
+      # Its OWN token, generated separately. Never share prod's — a public
+      # service holding the prod operator credential would let anyone act as
+      # every machine in production.
+      - key: OPERATOR_TOKEN
+        generateValue: true
+      - key: FLASHML_REQUIRE_NODE_AUTH
+        value: "1"
+      # /tmp, not /data: there is no disk. Both are lost on restart; naming
+      # them under /tmp says so honestly rather than implying persistence.
+      - key: FLASHML_LEDGER_PATH
+        value: /tmp/flashml/ledger.db
+      - key: FLASHML_LOCAL_ARTIFACTS_DIR
+        value: /tmp/flashml/artifacts
+      - key: FLASHML_ENABLE_KUBERAY
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+  - type: web
+    name: flashml-dev-api
+    runtime: python
+    branch: develop
+    autoDeploy: true
+    rootDir: flashml-cloud/apps/api
+    plan: free
+    region: oregon
+    buildCommand: pip install -e .
+    startCommand: uvicorn flashml_cloud_api.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: REQUIRE_AUTH
+        value: "1"
+      # A full URL, not `hostport`: the dev coordinator is a public `web`
+      # service, so it is reached over https like any other, not by the
+      # internal host:port a private service exposes.
+      - key: COORDINATOR_URL
+        fromService:
+          type: web
+          name: flashml-dev-coordinator
+          property: host
+      - key: COORDINATOR_OPERATOR_TOKEN
+        fromService:
+          type: web
+          name: flashml-dev-coordinator
+          envVarKey: OPERATOR_TOKEN
+      # The flashml-dev Supabase project (ktstmvgasqupeuimjrog), NOT prod.
+      - key: SUPABASE_URL
+        value: https://ktstmvgasqupeuimjrog.supabase.co
+      # sync: false => Render prompts once and never stores it in git.
+      # Get it from Supabase -> flashml-dev -> Settings -> Database ->
+      # Connection string (SESSION pooler, :5432, user postgres.<ref>).
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+  - type: web
+    name: flashml-dev-web
+    runtime: node
+    branch: develop
+    autoDeploy: true
+    rootDir: flashml-cloud/apps/web
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- -p $PORT
+    envVars:
+      # Inlined at BUILD time, so it must point at the DEV api or the dev
+      # console will talk to production.
+      - key: NEXT_PUBLIC_CLOUD_API
+        value: https://flashml-dev-api.onrender.com
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        value: https://ktstmvgasqupeuimjrog.supabase.co
+      # Only the anon/publishable key ever reaches the browser.
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        value: sb_publishable_l9_Pp5agZR0SaEHR_MAdKQ_hqozpigJ

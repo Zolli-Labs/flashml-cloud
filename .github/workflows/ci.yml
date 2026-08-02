@@ -190,6 +190,55 @@ jobs:
       - name: Scan the full history
         run: gitleaks git . --redact --verbose
 
+  # ---------------------------------------------------------------------------
+  # DEV migrations. Automatic, unlike prod — dev is for iteration and there is
+  # nothing there to protect.
+  #
+  # Only the migrations run here. The three dev services carry
+  # `autoDeploy: true` in render.yaml, so Render redeploys them on this same
+  # push without needing RENDER_API_KEY. The two are therefore concurrent
+  # rather than ordered: a deploy can briefly come up against a database that
+  # is one migration behind. That is tolerable in dev precisely because the
+  # code paths that touch new tables fail soft (the attempt ledger logs a
+  # warning and credits nobody rather than erroring), and the next request
+  # after the migration lands works. Do NOT carry this looseness into prod,
+  # where deploy-prod.yml migrates first and deploys only afterwards.
+  # ---------------------------------------------------------------------------
+  migrate-dev:
+    needs: [api]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        working-directory: flashml-cloud/apps/api
+        run: |
+          uv venv .venv
+          uv pip install -e .
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/flashml-cloud/apps/api/.venv
+
+      - name: What is pending
+        working-directory: flashml-cloud/apps/api
+        run: .venv/bin/python -m flashml_cloud_api.migrate --dry-run || true
+        env:
+          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+
+      - name: Apply
+        working-directory: flashml-cloud/apps/api
+        run: .venv/bin/python -m flashml_cloud_api.migrate
+        env:
+          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+
 # ---------------------------------------------------------------------------
 # PRODUCTION DEPLOYS ARE NOT IN THIS FILE.
 #

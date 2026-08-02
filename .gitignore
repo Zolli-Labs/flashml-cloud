@@ -14,6 +14,10 @@ __pycache__/
 .env
 .env.*
 !.env.example
+# ...and the DEV template. `.env.*` above swallows this too, so it needs its
+# own negation or the file silently never gets committed — which is how a
+# template that only exists on one laptop happens.
+!.env.dev.example
 .env.alibaba
 **/.venv/
 **/node_modules/

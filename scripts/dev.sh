@@ -10,6 +10,25 @@
 #   ./scripts/dev.sh --all      # the above plus `npm run dev`
 #
 # Ctrl-C stops everything.
+#
+# WHICH DATABASE (changed 2026-08-02). Defaults to `.env.dev`, which points at
+# the flashml-dev Supabase project. Until this change there was only `.env`,
+# and it pointed DATABASE_URL at the PRODUCTION pooler — so running this
+# script read and wrote the same rows the deployed console serves. Local
+# development was a second client of production, not a separate environment.
+#
+#   ./scripts/dev.sh --all                    # .env.dev  (default, safe)
+#   ./scripts/dev.sh --all --env .env         # refused: that is production
+#   ./scripts/dev.sh --all --env .env --i-mean-production
+#
+# BINDING (also 2026-08-02). Loopback by default. `--host 0.0.0.0` exposes the
+# coordinator and API on your LAN so a SECOND MACHINE can join and actually
+# exercise multi-machine collaboration — the one thing a loopback-only stack
+# can never test, because nothing else can reach it.
+#
+#   ./scripts/dev.sh --all --host 0.0.0.0
+#   # then on the other machine:
+#   #   flashnode work --coordinator http://<this-machine-ip>:8000
 
 set -euo pipefail
 
@@ -27,17 +46,57 @@ if [[ ! -x "$API_VENV/bin/python" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$ROOT/.env" ]]; then
-  echo "error: no .env at the repo root (copy .env.example and fill it in)" >&2
+ENV_FILE="${FLASHML_ENV_FILE:-.env.dev}"
+BIND_HOST="127.0.0.1"
+ALLOW_PRODUCTION=0
+ARGS=()
+while (( $# )); do
+  case "$1" in
+    --env)  ENV_FILE="$2"; shift 2 ;;
+    --host) BIND_HOST="$2"; shift 2 ;;
+    --i-mean-production) ALLOW_PRODUCTION=1; shift ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+if [[ ! -f "$ROOT/$ENV_FILE" ]]; then
+  echo "error: no $ENV_FILE at the repo root" >&2
+  if [[ "$ENV_FILE" == ".env.dev" ]]; then
+    echo "  cp .env.dev.example .env.dev  # then fill in DATABASE_PASSWORD" >&2
+    echo "  (Supabase -> flashml-dev -> Settings -> Database)" >&2
+  else
+    echo "  copy .env.example and fill it in" >&2
+  fi
   exit 1
 fi
 
-# SUPABASE_URL and DATABASE_URL come from the gitignored root .env, so the
-# real values live in exactly one place and never in this script.
+# SUPABASE_URL and DATABASE_URL come from a gitignored env file, so the real
+# values live in exactly one place and never in this script.
 set -a
 # shellcheck disable=SC1091
-source "$ROOT/.env"
+source "$ROOT/$ENV_FILE"
 set +a
+
+# THE PRODUCTION GUARD.
+#
+# Matching on the project ref in DATABASE_URL rather than on the filename: the
+# thing that decides which rows you mutate is the connection string, and
+# somebody will eventually paste a prod URL into .env.dev. `yualksqjjvlfscbbsygq`
+# is flashml-poc, the production project.
+if [[ "${DATABASE_URL:-}" == *"yualksqjjvlfscbbsygq"* && "$ALLOW_PRODUCTION" != "1" ]]; then
+  echo "refusing to start: $ENV_FILE points DATABASE_URL at PRODUCTION" >&2
+  echo "  (project yualksqjjvlfscbbsygq / flashml-poc)" >&2
+  echo "" >&2
+  echo "  Use the dev database:   ./scripts/dev.sh --all --env .env.dev" >&2
+  echo "  Or, if you truly mean it, add --i-mean-production" >&2
+  exit 1
+fi
+
+if [[ "$BIND_HOST" != "127.0.0.1" ]]; then
+  echo ">>> binding $BIND_HOST — reachable from other machines on this network." >&2
+  echo ">>> env: $ENV_FILE" >&2
+fi
 
 mkdir -p "$STATE/artifacts"
 
@@ -85,7 +144,7 @@ echo "coordinator  http://127.0.0.1:${COORDINATOR_PORT}   (private in production
 # --workers 1 is required, not a default: LeaseManager and SqliteLeaseStore
 # are only safe on a single event loop (HANDOFF.md risk #5).
 "$API_VENV/bin/python" -m uvicorn flashruntime.service.app:app \
-  --host 127.0.0.1 --port "$COORDINATOR_PORT" --workers 1 --log-level warning &
+  --host "$BIND_HOST" --port "$COORDINATOR_PORT" --workers 1 --log-level warning &
 pids+=($!)
 
 # Wait for it to answer rather than sleeping a guessed interval: the API
@@ -101,7 +160,7 @@ done
 echo "cloud API    http://127.0.0.1:${API_PORT}"
 cd "$ROOT/flashml-cloud/apps/api"
 "$API_VENV/bin/python" -m uvicorn flashml_cloud_api.app:app \
-  --host 127.0.0.1 --port "$API_PORT" --log-level info &
+  --host "$BIND_HOST" --port "$API_PORT" --log-level info &
 pids+=($!)
 
 if [[ "${1:-}" == "--all" ]]; then
