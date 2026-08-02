@@ -8,6 +8,24 @@ supply data that never leaves their machine (Part B).
 
 **Spec:** `../specs/2026-08-02-provenance-and-local-data-design.md`
 
+## How to run the flashruntime suite
+
+From `flashruntime/`, **with the venv's bin on PATH**:
+
+```bash
+V=/Users/phongcao/Work/Zolli-Labs/flashml-cloud/e2e/.venv/bin
+PATH="$V:$PATH" $V/python -m pytest -q
+```
+
+Without the `PATH` prefix, `test_examples_e2e.py` spawns a bare `python`,
+cannot find one, and reports 1 failure and 3 spurious skips. That is an
+invocation artefact, not a code failure — `flashruntime`'s own CI gets it right
+via `setup-python` and carries a comment warning not to override `PATH`. Do not
+"fix" the test.
+
+Baseline at `7e6e137`: **570 passed, 1 skipped, 20 deselected** (the skip is the
+CUDA-gated GPU test).
+
 ## Global constraints
 
 - **Accepted work only, never attempted.** `flashml-cloud/AGENTS.md` hard rule
@@ -132,7 +150,19 @@ entry is `{node_id, task_id, duration_s}`; called from `fedavg.on_round`.
 **Repo:** `Zolli-Labs/flashml`
 **Depends on:** Task 1
 **Files:** `flashruntime/flashruntime/scheduler/__init__.py`,
+`flashruntime/flashruntime/service/modea.py`,
 `flashruntime/tests/test_placement_local_data.py` (create)
+
+> **Plan defect, found during implementation and recorded here.** The original
+> file list omitted `service/modea.py`, where the node view handed to
+> `/v1alpha1/leases/claim` is built. It forwards `sandbox_capable`,
+> `argv_capable` and `module_capable` and stops — so without adding
+> `local_datasets` there, the gate reads an ABSENT capability on every node.
+> DoD item 5 ("never leased to a node that has not advertised it") would pass
+> **vacuously** while the feature was permanently unplaceable, and no test in
+> this plan would have caught it. A gate is only as real as the data reaching
+> it. `ModeAState.node_view()` is a separate, display-only builder and is
+> deliberately left alone.
 
 **Produces:** a task whose payload lists `local_inputs` is eligible only on a
 node advertising every one of those names.
