@@ -1,4 +1,5 @@
 import { Hero } from "@/components/landing/Hero";
+import { LedgerWall } from "@/components/landing/LedgerWall";
 import { RecoveryDemo } from "@/components/landing/RecoveryDemo";
 import { SupplyTiers } from "@/components/landing/SupplyTiers";
 import { Guarantees } from "@/components/landing/Guarantees";
@@ -17,6 +18,10 @@ export default function Home() {
       <RecoveryDemo />
       <SupplyTiers />
       <Guarantees />
+      {/* The one full-bleed moment. Placed between two container sections
+          so the break is felt: everything above and below is a centred
+          column, and this is not. */}
+      <LedgerWall />
       <HowItWorks />
       <HonestState />
       <ClosingCta />

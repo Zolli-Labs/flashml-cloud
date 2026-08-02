@@ -63,7 +63,12 @@ export function Hero() {
             {/* 52px, not 60px, and a 7/5 split rather than 6/6. At 60px in
                 a half-width column "Cheap compute disappears." wraps, which
                 makes the headline three lines. Two is the limit. */}
-            <h1 className="text-4xl font-semibold leading-[1.08] tracking-[-0.035em] md:text-5xl lg:text-[3.25rem]">
+            {/* NOT `.display`. This headline shares the row with the ledger
+                panel, so it has ~715px, and `.display` would wrap "Cheap
+                compute disappears." into two lines and the headline into
+                three. The page's display moment is the full-bleed ledger
+                wall, which has the width to carry it. */}
+            <h1 className="text-4xl font-semibold leading-[1.06] tracking-[-0.038em] md:text-5xl lg:text-[3.4rem]">
               <WipeLine>Cheap compute disappears.</WipeLine>
               <WipeLine className="text-accent-text">
                 Run on it anyway.

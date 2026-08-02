@@ -365,10 +365,14 @@
 
    Use ONE display per page. Two is a poster, three is noise.
    ─────────────────────────────────────────────────────────────────── */
+/* Max 4.5rem, not 5.5rem. At 88px a 26-character line needs ~1150px, which
+   overflows every container on the site and silently re-wraps display type
+   into three and four lines. The ceiling is set by the longest line that
+   has to fit, not by how large it can be made to look in isolation. */
 .display {
-  font-size: clamp(2.75rem, 8vw, 5.5rem);
-  line-height: 0.95;
-  letter-spacing: -0.045em;
+  font-size: clamp(2.5rem, 6.5vw, 4.5rem);
+  line-height: 0.98;
+  letter-spacing: -0.042em;
   font-weight: 600;
   text-wrap: balance;
 }

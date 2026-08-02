@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { ArrowRight, GithubLogo, Lightning } from "@phosphor-icons/react/dist/ssr";
+import { ArrowRight, GithubLogo } from "@phosphor-icons/react/dist/ssr";
+import { Mark } from "@/components/brand/Mark";
 import { Reveal } from "@/components/motion/Reveal";
 import { MagneticLink } from "@/components/motion/MagneticLink";
 
@@ -15,11 +16,7 @@ export function ClosingCta() {
     <>
       <Reveal className="mx-auto max-w-7xl px-4 py-28 text-center sm:px-6 md:py-36">
         <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-primary">
-          <Lightning
-            size={26}
-            weight="fill"
-            className="text-primary-foreground"
-          />
+          <Mark size={28} className="text-primary-foreground" />
         </div>
 
         <h2 className="mx-auto mt-8 max-w-3xl text-3xl font-semibold tracking-[-0.028em] md:text-5xl">

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Lightning } from "@phosphor-icons/react";
+import { Mark } from "@/components/brand/Mark";
 import { UserMenu } from "./UserMenu";
 
 const navLinks = [
@@ -20,10 +20,7 @@ export function Navbar() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between h-16">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2 group">
-          <div className="relative flex items-center justify-center w-8 h-8">
-            <div className="absolute inset-0 rounded-md bg-cyan/10 border border-cyan/30 group-hover:border-cyan/60 transition-colors" />
-            <Lightning className="relative z-10 text-cyan w-4 h-4" weight="fill" />
-          </div>
+          <Mark size={22} className="text-foreground" />
           {/* No version chip. A "v0.1" badge next to the wordmark is a
               stage label, not information anyone needs, and it undersells
               the product to every first-time visitor. */}
