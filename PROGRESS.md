@@ -146,6 +146,45 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-02 — Attempt ledger: every job now credits accepted work (flashml-cloud)
+
+What/why: `db.record_contributions` had exactly **one** caller — inside
+`fedavg.on_round` — so a machine was paid for federated rounds and for nothing
+else. Sweeps and `command` jobs credited nobody, which is the workload class
+`POSITIONING_LOG.md` identifies as the one donated laptops are actually good
+at. Closes §5.1 of the provenance spec. No flashruntime release and no pin
+bump: the whole change is inside `apps/api`.
+
+How verified: apps/api 403 → **419**, e2e **61** (unchanged), flashruntime
+**573** and flashnode **214** untouched. The four "credits nobody" tests were
+**mutation-checked**: replacing the acceptance test with `accepted = True`
+("credit on 2xx") fails `test_rejected_completion_credits_nobody` and
+`test_late_commit_credits_nobody`, so they guard the behaviour they name.
+
+Gotchas:
+1. **HTTP 200 does not mean accepted.** `flashruntime/service/modea.py:674`
+   answers `200 {"accepted": false}` both when the output sha256 fails
+   validation and when a commit loses the race to another attempt. Crediting
+   on `2xx` pays for a failed hash check and pays twice for one unit of work.
+   The signal is the **body field** — hard rule 4.
+2. **The complete hop cannot say what was completed.** `CompleteRequest` is
+   `{output_sha256}`, the response is `{accepted}`; neither carries `job_id`
+   or `task_id`, which `contributions` is keyed on. They exist only in the
+   `Lease` returned by the *claim* one hop earlier — hence `public.attempts`
+   (migration 0004), the durable `lease → (job, task)` mapping. That is also
+   hard rule 3's documented target ("durable state… **attempts**… in Postgres").
+3. A drafted test asserted `job_id = ''` against a `not null` column and so
+   could never fail; caught in review and replaced with a delta count.
+4. Federated runs are credited by *both* paths now. They do not double-count
+   because both key on the round's coordinator job id, which the 0003 unique
+   index collapses — pinned by a test rather than left as an observation.
+
+Next: apply migration `0004_attempts.sql` to Supabase `yualksqjjvlfscbbsygq`
+by hand (no migration runner in this service; a green suite is **not**
+evidence production has it), then deploy. Parking lot: failed and expired
+attempts still leave no row, so this is not yet a full attempt history; no
+result verification (open thread 4); no retroactive credit.
+
 ### 2026-08-02 — Contributions ledger + local data binding, built by six parallel agents (all repos)
 
 What/why: the two engineering gates from `POSITIONING_LOG.md`. **The ledger** —
