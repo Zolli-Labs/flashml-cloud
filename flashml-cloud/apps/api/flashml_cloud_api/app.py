@@ -34,6 +34,7 @@ Environment (cloud): see ``settings.Settings.from_env``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -1250,6 +1251,21 @@ def create_cloud_app(
         # itself, so the only node_id that could be correct is the token's.
         # (A heartbeat for somebody else would falsify the pool view by
         # keeping a dead node marked online.)
+        #
+        # Record liveness for the CONSOLE here, before forwarding. The
+        # coordinator keeps its own liveness view for scheduling, and the two
+        # are separate on purpose — but only the coordinator's was ever
+        # written, so `machines.last_seen_at` stayed null and every machine
+        # rendered "Offline / Last seen never" no matter how healthy it was.
+        #
+        # Best-effort: a display column must never be the reason a machine's
+        # heartbeat fails and its leases start expiring.
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                dbmod.touch_machine_last_seen(conn, machine.id)
+        except Exception:
+            log.warning("could not record last_seen_at for machine %s", machine.id)
+
         return await proxy(
             request,
             machine,

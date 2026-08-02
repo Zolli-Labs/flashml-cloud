@@ -850,3 +850,42 @@ def test_machine_token_is_never_logged(client, machine, caplog):
     logged = "\n".join(rec.getMessage() for rec in caplog.records)
     assert machine["token"] not in logged
     assert OPERATOR_TOKEN not in logged
+
+
+def test_heartbeat_records_last_seen_so_the_console_can_show_online(client, machine, db):
+    """`machines.last_seen_at` is what the console renders Online/Offline from.
+
+    Nothing ever wrote it. The column existed, the UI read it, and every
+    machine therefore showed "Offline / Last seen never" no matter how
+    healthily it was heartbeating — while the coordinator, which tracks
+    liveness separately for scheduling, saw the same machine as perfectly
+    alive. Two liveness views, only one of them written.
+
+    A host who has just enrolled and started their agent sees a dead-looking
+    dashboard, which reads as "my machine isn't working" at exactly the moment
+    they are deciding whether this thing is worth running.
+    """
+    # Establish the precondition rather than assume it: the machine fixture is
+    # shared, so an earlier test in this module may already have heartbeated.
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set last_seen_at = null where id = %s",
+            (machine["id"],),
+        )
+    assert _fetch_machine(db, machine["id"])["last_seen_at"] is None
+
+    res = client.post(
+        f"/v1alpha1/nodes/{machine['node_id']}/heartbeat",
+        json={"node_id": machine["node_id"]},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    assert res.status_code == 200
+
+    after = _fetch_machine(db, machine["id"])["last_seen_at"]
+    assert after is not None, "the console can never show this machine as online"
+
+
+def _fetch_machine(db, machine_id):
+    with db.cursor() as cur:
+        cur.execute("select * from public.machines where id = %s", (machine_id,))
+        return cur.fetchone()

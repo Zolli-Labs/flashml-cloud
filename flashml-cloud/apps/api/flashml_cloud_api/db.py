@@ -213,6 +213,26 @@ def insert_machine(
         return row["id"]
 
 
+def touch_machine_last_seen(db: psycopg.Connection, machine_id: str) -> None:
+    """Record that this machine just spoke to us.
+
+    `machines.last_seen_at` is the ONLY thing the console renders
+    Online/Offline from, and nothing wrote it — so every machine displayed
+    "Offline / Last seen never" however healthily it was heartbeating, while
+    the coordinator's own liveness view (kept separately, for scheduling) saw
+    it as alive. A host who has just enrolled and started their agent should
+    not be shown a dead-looking dashboard.
+
+    Deliberately best-effort at the call site: a machine's work must not fail
+    because a display column could not be updated.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set last_seen_at = now() where id = %s",
+            (machine_id,),
+        )
+
+
 def reactivate_machine(
     db: psycopg.Connection,
     *,
