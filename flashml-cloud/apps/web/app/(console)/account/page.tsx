@@ -2,8 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, GithubLogo, SignOut, Warning } from "@phosphor-icons/react";
+import Link from "next/link";
+import { Check, Copy, GithubLogo, SignOut, Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Avatar } from "@/components/shell/Avatar";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
 import { initialsFor, useSessionUser } from "@/lib/session-user";
@@ -115,7 +121,7 @@ export default function AccountPage() {
         </div>
       )}
 
-      <section className="mt-6 flex items-center gap-4 rounded-lg border border-border bg-surface p-5">
+      <section className="panel mt-6 flex items-center gap-4 p-5">
         <Avatar src={session?.avatarUrl ?? null} initials={initials} size={64} />
         <div className="min-w-0">
           <div className="truncate text-lg font-semibold">
@@ -130,7 +136,7 @@ export default function AccountPage() {
         </div>
       </section>
 
-      <section className="mt-4 rounded-lg border border-border bg-surface p-5">
+      <section className="panel mt-4 p-5">
         <label htmlFor="display-name" className="text-sm font-medium">
           Display name
         </label>
@@ -185,53 +191,112 @@ export default function AccountPage() {
         </div>
       </section>
 
-      <section className="mt-4 rounded-lg border border-border bg-surface p-5">
+      <section className="mt-4 panel p-5">
         <h2 className="text-sm font-semibold">Account details</h2>
-        <dl className="mt-3 divide-y divide-border text-sm">
-          <Row label="GitHub">
+        <p className="mt-1 text-xs text-muted-foreground">
+          Set by how you signed in and by what you have done. None of it is
+          editable here.
+        </p>
+        <dl className="mt-4 divide-y divide-border">
+          <Row
+            label="GitHub"
+            help="Linked when a job is submitted from a repository you own."
+          >
             {profile?.github_login ? (
-              <span className="inline-flex items-center gap-1.5 font-mono">
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm">
                 <GithubLogo size={14} weight="fill" />
                 {profile.github_login}
               </span>
             ) : (
-              <span className="text-muted-foreground">not linked</span>
+              <span className="text-sm text-muted-foreground">not linked</span>
             )}
           </Row>
-          <Row label="Roles">
-            <span className="flex flex-wrap gap-1.5">
+
+          <Row
+            label="Roles"
+            help="Granted by the platform. Not a preference you can set."
+          >
+            <span className="flex flex-wrap justify-end gap-1.5">
               {profile?.is_developer && <Tag>developer</Tag>}
               {profile?.is_host && <Tag>host</Tag>}
               {profile && !profile.is_developer && !profile.is_host && (
-                <span className="text-muted-foreground">none assigned</span>
+                <span className="text-sm text-muted-foreground">
+                  none assigned
+                </span>
               )}
             </span>
           </Row>
+
           <Row label="Member since">
-            <span className="font-mono">
+            <span className="font-mono text-sm">
               {profile?.created_at
-                ? new Date(profile.created_at).toLocaleDateString()
+                ? new Date(profile.created_at).toLocaleDateString(undefined, {
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric",
+                  })
                 : "—"}
             </span>
           </Row>
-          <Row label="User ID">
-            <span className="truncate font-mono text-xs text-muted-foreground">
-              {profile?.id ?? "—"}
-            </span>
+
+          <Row
+            label="User ID"
+            help="Quote this when reporting a problem with your account."
+          >
+            {/* Truncated with the full value in a tooltip AND a copy button.
+                A uuid that is visually cut off and cannot be copied is worse
+                than not showing it: it looks like information and is not. */}
+            {profile?.id ? (
+              <span className="flex items-center justify-end gap-1.5">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <span className="max-w-[16ch] truncate font-mono text-xs text-muted-foreground sm:max-w-none">
+                        {profile.id}
+                      </span>
+                    }
+                  />
+                  <TooltipContent>{profile.id}</TooltipContent>
+                </Tooltip>
+                <button
+                  type="button"
+                  aria-label="Copy user ID"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(profile.id);
+                      toast.success("User ID copied");
+                    } catch {
+                      toast.error("Your browser blocked clipboard access");
+                    }
+                  }}
+                  className="rounded p-1 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+                >
+                  <Copy size={12} />
+                </button>
+              </span>
+            ) : (
+              <span className="text-sm text-muted-foreground">—</span>
+            )}
           </Row>
         </dl>
       </section>
 
-      <section className="mt-4 rounded-lg border border-border bg-surface p-5">
-        <h2 className="text-sm font-semibold">Session</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Signing out here does not revoke any machine. Machines keep their own
-          tokens and are revoked from the Machines page.
+      <section className="mt-4 rounded-lg border border-destructive/25 bg-destructive/[0.04] p-5">
+        <h2 className="text-sm font-semibold text-destructive">Sign out</h2>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
+          Signing out ends this browser session only. It does{" "}
+          <span className="text-foreground">not</span> revoke any machine:
+          machines hold their own tokens and keep claiming work until you
+          revoke them from{" "}
+          <Link href="/machines" className="text-primary hover:underline">
+            Machines
+          </Link>
+          .
         </p>
         <button
           type="button"
           onClick={signOut}
-          className="mt-3 inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+          className="mt-3 inline-flex items-center gap-2 rounded-md border border-destructive/30 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10"
         >
           <SignOut size={14} />
           Sign out
@@ -243,15 +308,24 @@ export default function AccountPage() {
 
 function Row({
   label,
+  help,
   children,
 }: {
   label: string;
+  help?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-2.5">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-right">{children}</dd>
+    <div className="flex items-start justify-between gap-6 py-3.5">
+      <div className="min-w-0">
+        <dt className="text-sm">{label}</dt>
+        {help && (
+          <p className="mt-0.5 max-w-[38ch] text-xs leading-relaxed text-muted-foreground">
+            {help}
+          </p>
+        )}
+      </div>
+      <dd className="min-w-0 shrink-0 text-right">{children}</dd>
     </div>
   );
 }
