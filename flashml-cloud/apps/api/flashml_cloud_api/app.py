@@ -1417,9 +1417,31 @@ def create_cloud_app(
 
     @app.post("/v1alpha1/leases/claim", tags=["agent"])
     async def claim(request: Request, machine: Machine = Depends(current_machine)):
-        return await proxy(
+        response = await proxy(
             request, machine, "/v1alpha1/leases/claim", force_node_id=True
         )
+        # Remember what this machine was handed. The completion hop reports
+        # only `{"accepted": bool}` against a lease id, so THIS is the single
+        # point at which the API can learn which job and task a lease covers
+        # — and without that mapping no non-federated job can credit anybody.
+        # 204 ("nothing claimable right now") carries no lease and is skipped.
+        #
+        # Best-effort, exactly like last_seen_at above: an accounting row must
+        # never be the reason a machine fails to pick up work.
+        if response.status_code == 200:
+            try:
+                lease = json.loads(response.body)
+                with contextlib.closing(app.state.connect()) as conn:
+                    dbmod.record_attempt(
+                        conn,
+                        lease_id=lease["lease_id"],
+                        machine_id=machine.id,
+                        job_id=lease["job_id"],
+                        task_id=lease["task_id"],
+                    )
+            except Exception:
+                log.warning("could not record attempt for machine %s", machine.id)
+        return response
 
     @app.post("/v1alpha1/attempts/{lease_id}/heartbeat", tags=["agent"])
     async def attempt_heartbeat(
