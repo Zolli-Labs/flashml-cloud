@@ -357,11 +357,81 @@
   animation: halo 2.4s ease-out infinite;
 }
 
+/* ─── Type scale ──────────────────────────────────────────────────
+   The old scale ran 52 / 36 / 16 / 11px, which is a narrow range that
+   never surprises: every heading looked like a slightly bigger heading.
+   Contrast is what reads as art-directed, so `display` is deliberately
+   much larger than anything near it and `meta` much smaller.
+
+   Use ONE display per page. Two is a poster, three is noise.
+   ─────────────────────────────────────────────────────────────────── */
+.display {
+  font-size: clamp(2.75rem, 8vw, 5.5rem);
+  line-height: 0.95;
+  letter-spacing: -0.045em;
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+.title {
+  font-size: clamp(1.75rem, 3.4vw, 2.75rem);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+/* Machine-emitted supporting text: ids, counts, states. Small enough to
+   read as annotation rather than as content competing with the heading. */
+.meta {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Containment ─────────────────────────────────────────────────
+   ONE LEVEL OF BOXING, MAXIMUM.
+
+   The previous pass put `rounded-lg border border-border bg-surface` on
+   essentially every block on both the landing and the console. Same
+   radius, same border, same fill, everywhere. When every element is the
+   same card the eye has nothing to grip, and uniform containment is the
+   most reliable signature of a generated layout.
+
+   `panel` is for a genuinely separate object. Everything else — lists,
+   tables, stat rows, sections — sits on the page and is separated by
+   `divide-y` or whitespace. Never nest a panel inside a panel.
+   ─────────────────────────────────────────────────────────────────── */
+.panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+/* Full-bleed escape from a max-width container, for the one section per
+   page that should break the grid. */
+.bleed {
+  width: 100vw;
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+
 /* ─── Metrics ─────────────────────────────────────────────────────── */
 .metric-value {
   font-family: var(--font-geist-mono), monospace;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
+}
+
+/* Console numbers that are the point of the row, not a footnote. */
+.metric-lg {
+  font-family: var(--font-geist-mono), monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(1.75rem, 3vw, 2.25rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
 }
 
 /* Small uppercase labels need positive tracking or they set as a blur. */

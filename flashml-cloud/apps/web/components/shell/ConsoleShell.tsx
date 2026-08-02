@@ -8,8 +8,8 @@ import {
   CaretDown,
   GithubLogo,
   House,
-  Lightning,
   ListChecks,
+  MagnifyingGlass,
   Plus,
   Desktop,
   DeviceMobile,
@@ -17,6 +17,8 @@ import {
   UserCircle,
 } from "@phosphor-icons/react";
 import { FleetPill } from "@/components/shell/FleetPill";
+import { CommandPalette } from "@/components/shell/CommandPalette";
+import { Wordmark } from "@/components/brand/Mark";
 import { UserMenu } from "@/components/nav/UserMenu";
 
 // The console shell. A left rail rather than a top nav: a top bar is a
@@ -113,15 +115,29 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
 
   const rail = (
     <>
-      <div className="flex h-14 items-center gap-2 px-4">
-        <Link href="/" className="flex items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary">
-            <Lightning size={15} weight="fill" className="text-primary-foreground" />
-          </span>
-          <span className="font-mono text-sm font-bold tracking-tight">
-            Flash<span className="text-primary">ML</span>
-          </span>
+      <div className="flex h-14 items-center px-4">
+        <Link href="/" aria-label="FlashML home">
+          <Wordmark />
         </Link>
+      </div>
+
+      {/* The ⌘K affordance. It was advertised in the rail design and never
+          built; a shortcut hint that does nothing is worse than no hint. */}
+      <div className="px-3 pb-2">
+        <button
+          type="button"
+          onClick={() => {
+            // Same path the global listener takes, so there is one way in.
+            window.dispatchEvent(
+              new KeyboardEvent("keydown", { key: "k", metaKey: true })
+            );
+          }}
+          className="flex w-full items-center gap-2 rounded-md border border-border bg-background/60 px-2.5 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
+        >
+          <MagnifyingGlass size={14} />
+          <span className="flex-1">Search</span>
+          <kbd className="meta rounded border border-border px-1 py-px">⌘K</kbd>
+        </button>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
@@ -170,6 +186,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-dvh">
+      <CommandPalette />
       {/* Desktop rail. A step DARKER than the content column, so the content
           reads as the lit surface. */}
       <aside className="hidden w-[248px] shrink-0 flex-col border-r border-border bg-bg-rail lg:flex">
