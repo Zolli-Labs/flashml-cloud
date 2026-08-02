@@ -307,3 +307,25 @@ def test_cli_baseline_through_is_wired(postgres_dsn):
         assert rc == 0
         # Still pending afterwards => the CLI honoured the prefix.
         assert migrate.main(["--dry-run", "--database-url", dsn]) == 1
+
+
+def test_tracking_table_has_rls_enabled(postgres_dsn):
+    """`schema_migrations` must be locked down like every other table.
+
+    0001_initial.sql enables RLS with no policies on all five of its tables,
+    deliberately: that denies every role except the owner and BYPASSRLS
+    roles, which is what makes the database API-only. The runner creates a
+    table in the same schema, so it has to follow the same rule.
+
+    Supabase flagged this as critical on flashml-dev the first time the
+    runner ran there: with RLS off, anyone holding the ANON key — which
+    ships inside the browser bundle — could read or rewrite the migration
+    ledger, and a forged row makes the runner skip or re-apply a migration.
+    """
+    with scratch_database(postgres_dsn, auth_stub=True) as dsn, connected(dsn) as conn:
+        migrate.apply(conn, REAL_MIGRATIONS)
+        row = conn.execute(
+            "select relrowsecurity from pg_class"
+            " where oid = 'public.schema_migrations'::regclass"
+        ).fetchone()
+        assert row[0] is True, "schema_migrations is exposed to anon"

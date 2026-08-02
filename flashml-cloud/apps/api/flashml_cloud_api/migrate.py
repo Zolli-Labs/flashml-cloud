@@ -63,6 +63,21 @@ create table if not exists {TABLE} (
 )
 """
 
+# RLS on, with NO policies — the same rule 0001_initial.sql applies to every
+# table it creates. In Postgres that denies all access except the table owner
+# and BYPASSRLS roles, which is exactly the "database is API-only" design.
+#
+# This is not decoration. Supabase reported it as critical the first time the
+# runner ran against flashml-dev: a table in `public` with RLS off is readable
+# AND writable by the `anon` role, whose key ships inside the browser bundle.
+# A forged row here makes the runner skip a migration that was never applied,
+# or re-apply one that was — the ledger is the thing everything else trusts.
+#
+# Separate statement rather than part of CREATE TABLE because `create table if
+# not exists` is a no-op on an existing table, which would leave a ledger
+# created by an earlier version of this file permanently unprotected.
+ENABLE_RLS = f"alter table {TABLE} enable row level security"
+
 
 class DriftError(Exception):
     """An already-applied migration file has changed since it was applied."""
@@ -172,6 +187,7 @@ def apply(
         )
 
     conn.execute(CREATE_TABLE)
+    conn.execute(ENABLE_RLS)
     already = applied(conn)
 
     # Every applied migration, before any pending one. Drift is a property
