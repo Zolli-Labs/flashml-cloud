@@ -12,14 +12,18 @@
 # Ctrl-C stops everything.
 #
 # WHICH DATABASE (changed 2026-08-02). Defaults to `.env.dev`, which points at
-# the flashml-dev Supabase project. Until this change there was only `.env`,
-# and it pointed DATABASE_URL at the PRODUCTION pooler — so running this
-# script read and wrote the same rows the deployed console serves. Local
-# development was a second client of production, not a separate environment.
+# the flashml-dev Supabase project. Until this change there was a single
+# `.env` holding PRODUCTION values — so running this script read and wrote the
+# same rows the deployed console serves. Local development was a second client
+# of production, not a separate environment.
 #
-#   ./scripts/dev.sh --all                    # .env.dev  (default, safe)
-#   ./scripts/dev.sh --all --env .env         # refused: that is production
-#   ./scripts/dev.sh --all --env .env --i-mean-production
+# That file is now `.env.prod`, renamed so the name says what it is and so
+# reaching for it has to be deliberate. Templates: `.env.dev.example` and
+# `.env.example`.
+#
+#   ./scripts/dev.sh --all                        # .env.dev  (default, safe)
+#   ./scripts/dev.sh --all --env .env.prod        # refused: that is production
+#   ./scripts/dev.sh --all --env .env.prod --i-mean-production
 #
 # BINDING (also 2026-08-02). Loopback by default. `--host 0.0.0.0` exposes the
 # coordinator and API on your LAN so a SECOND MACHINE can join and actually
@@ -66,7 +70,9 @@ if [[ ! -f "$ROOT/$ENV_FILE" ]]; then
     echo "  cp .env.dev.example .env.dev  # then fill in DATABASE_PASSWORD" >&2
     echo "  (Supabase -> flashml-dev -> Settings -> Database)" >&2
   else
-    echo "  copy .env.example and fill it in" >&2
+    echo "  (production values live in .env.prod; copy .env.example for a" >&2
+    echo "   fresh one, but prefer .env.dev — see --help at the top of this" >&2
+    echo "   script)" >&2
   fi
   exit 1
 fi
