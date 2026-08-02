@@ -209,6 +209,23 @@ def _local_inputs(config: FlashmlConfig, parameters: dict[str, Any]) -> None:
 
 
 def _resources(config: FlashmlConfig) -> dict[str, Any]:
+    """``flashml.yaml resources:`` → the upstream ``ResourcesSpec`` fields.
+
+    **Known gap, verified against the pinned runtime rather than assumed:**
+    ``gpuPerTask`` is emitted here, but ``ResourcesSpec`` in the pinned
+    flashruntime (0.4.0) does not declare it. ``compile_to_jobspec`` returns
+    ``JobSpec.model_validate(spec).model_dump_json()``, and pydantic's default
+    ``extra="ignore"`` **drops the field silently** — no error, no warning, a
+    ``gpus: 1`` job that compiles to a CPU spec. The field lands upstream in
+    flashruntime 0.5.0; re-pinning is plan Task 10, and this repo cannot make
+    that change (hard rule 2).
+
+    So this validation is the submitter's half of the contract, complete and
+    correct, and the value simply does not yet reach the coordinator.
+    ``tests/test_compile.py`` asserts the emission here directly and gates the
+    round-trip assertion on the pin, so the day the pin moves the coverage
+    turns on by itself.
+    """
     raw = config.resources or {}
     resources: dict[str, Any] = {}
     cpus = raw.get("cpus")
@@ -227,6 +244,26 @@ def _resources(config: FlashmlConfig) -> dict[str, Any]:
                 f"resources.memory_gb must be a positive number, got {memory_gb!r}"
             )
         resources["memoryPerTask"] = f"{int(round(memory_gb * 1024))}Mi"
+    gpus = raw.get("gpus")
+    if gpus is not None:
+        # Non-negative, not positive, and int-only — deliberately unlike
+        # ``cpus``/``memory_gb`` above:
+        #
+        # * ``0`` is the meaningful default (``ResourcesSpec.gpuPerTask``
+        #   defaults to 0), so a user writing it out is not making an error.
+        # * ``bool`` is an ``int`` subclass, so ``gpus: true`` would otherwise
+        #   read as "one GPU" and route a job to a device the user never asked
+        #   for. Refused, not coerced.
+        # * A ``float`` is refused rather than rounded. The placement gate
+        #   upstream fails closed on a non-``int`` requirement, so emitting
+        #   ``1.5`` — or silently rounding it to ``2`` — produces a job that is
+        #   either unplaceable everywhere or placed against a count the user
+        #   never wrote. Better to say so at submit time.
+        if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus < 0:
+            raise CompileError(
+                f"resources.gpus must be a non-negative integer, got {gpus!r}"
+            )
+        resources["gpuPerTask"] = int(gpus)
     return resources
 
 

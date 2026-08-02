@@ -22,6 +22,7 @@ from flashruntime.protocol.v1alpha1 import JobSpec
 
 from flashml_cloud_api.compile import (
     CompileError,
+    _resources,
     compile_federated_round,
     compile_to_jobspec,
     sanitize_job_name,
@@ -367,6 +368,108 @@ def test_a_nonsensical_cpu_count_is_refused(bad):
     )
     with pytest.raises(CompileError, match="cpus"):
         compile_to_jobspec(config, PYTORCH, CODE_URI, "demo")
+
+
+# --- resources.gpus -> gpuPerTask ------------------------------------------
+#
+# ``compile_to_jobspec`` returns ``JobSpec.model_validate(...).model_dump()``,
+# so its output carries only the fields the PINNED flashruntime declares.
+# ``ResourcesSpec.gpuPerTask`` lands in flashruntime 0.5.0 (plan Task 1); the
+# pin is still 0.4.0 (plan Task 10 moves it). Pydantic's default
+# ``extra="ignore"`` means the field is dropped SILENTLY in between — no
+# error, no warning, just a GPU job that compiles to a CPU spec.
+#
+# So the emission is asserted against ``_resources``, the function that owns
+# the translation, and the survival through the round-trip is asserted
+# separately and gated on the pin, where it becomes visible the moment the pin
+# moves instead of being quietly untested.
+
+
+def _gpu_pin_supports_gpu_per_task() -> bool:
+    from flashruntime.protocol.v1alpha1 import ResourcesSpec
+
+    return "gpuPerTask" in ResourcesSpec.model_fields
+
+
+def test_a_gpu_request_is_translated_into_gpu_per_task():
+    assert _resources(_config(resources={"gpus": 1}))["gpuPerTask"] == 1
+
+
+def test_gpu_per_task_is_an_int_not_a_float():
+    # The placement gate upstream refuses a non-int requirement fail-closed,
+    # so emitting 1.0 here would make every GPU job unplaceable everywhere.
+    value = _resources(_config(resources={"gpus": 1}))["gpuPerTask"]
+    assert isinstance(value, int) and not isinstance(value, bool)
+
+
+def test_no_gpu_request_means_no_gpu_per_task():
+    # Absent stays absent — never 0. The spec for every job that exists today
+    # must stay byte-for-byte what it was, exactly as local_inputs does.
+    assert "gpuPerTask" not in _resources(_config())
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    assert "gpuPerTask" not in spec["spec"]["resources"]
+
+
+def test_an_explicit_zero_gpus_is_allowed_and_means_none():
+    # Non-negative, not positive: unlike cpus/memory_gb, 0 is the meaningful
+    # default and a user writing it out is not making an error.
+    assert _resources(_config(resources={"gpus": 0}))["gpuPerTask"] == 0
+
+
+def test_cpus_and_gpus_are_translated_side_by_side():
+    resources = _resources(_config(resources={"cpus": 2, "memory_gb": 4, "gpus": 1}))
+    assert resources == {
+        "cpuPerTask": 2.0,
+        "memoryPerTask": "4096Mi",
+        "gpuPerTask": 1,
+    }
+
+
+@pytest.mark.parametrize("bad", [-1, "one", 1.5, True])
+def test_a_nonsensical_gpu_count_is_refused(bad):
+    # `True` is in this list deliberately: bool is an int subclass, so a bare
+    # isinstance(x, int) check would read `gpus: true` as "one GPU".
+    config = parse_flashml_yaml(
+        "version: 1\nname: demo\nimage: pytorch-cpu\nentrypoint: t.py\n"
+        f"resources: {{gpus: {str(bad).lower() if isinstance(bad, bool) else repr(bad)}}}\n"
+    )
+    with pytest.raises(CompileError, match="gpus"):
+        compile_to_jobspec(config, PYTORCH, CODE_URI, "demo")
+
+
+def test_a_gpu_request_survives_the_jobspec_round_trip():
+    """The hop that is currently broken by the pin, and will not announce it.
+
+    Plan Task 10 bumps the pin to flashruntime 0.5.0. Until then this skips;
+    after it, it is the assertion that catches the field being dropped again.
+    """
+    if not _gpu_pin_supports_gpu_per_task():
+        pytest.skip(
+            "pinned flashruntime has no ResourcesSpec.gpuPerTask, so the "
+            "JobSpec round-trip in compile_to_jobspec drops it silently. "
+            "Unblocked by plan Task 10 (release flashruntime 0.5.0 and re-pin "
+            "in apps/api/pyproject.toml, render.yaml, and Makefile FLASHML_PIN)."
+        )
+    spec = compile_to_jobspec(
+        _config(resources={"gpus": 1}), PYTORCH, CODE_URI, "demo"
+    )
+    assert spec["spec"]["resources"]["gpuPerTask"] == 1
+
+
+def test_the_pin_gap_is_a_silent_drop_and_not_a_validation_error():
+    """Documents WHY the test above skips, so the gap cannot be misread.
+
+    If this ever fails, the pin has moved and
+    ``test_a_gpu_request_survives_the_jobspec_round_trip`` has taken over.
+    """
+    if _gpu_pin_supports_gpu_per_task():
+        pytest.skip("pin now carries gpuPerTask; the round-trip test asserts it")
+    # No CompileError: pydantic's default extra="ignore" drops the unknown
+    # field rather than refusing the spec. That is the whole hazard.
+    spec = compile_to_jobspec(
+        _config(resources={"gpus": 1}), PYTORCH, CODE_URI, "demo"
+    )
+    assert "gpuPerTask" not in spec["spec"]["resources"]
 
 
 def test_a_timeout_is_carried_into_the_workload_parameters():
