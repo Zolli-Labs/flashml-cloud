@@ -1,4 +1,11 @@
+# `e2e` MUST be here. There is a directory called e2e/, so without .PHONY make
+# resolves the target to that path, finds it exists with no prerequisites, and
+# reports "make: `e2e' is up to date." — running NOTHING while looking like a
+# pass. That is the worst possible failure for a test target: a green that
+# never executed. e2e-setup and e2e-demo do not collide with any path, which
+# is why only this one was silently dead.
 .PHONY: setup test check-flashml \
+	e2e e2e-setup e2e-demo \
 	poc-local-up poc-local-down poc-local-status poc-local-logs \
 	poc-local-submit poc-local-fail-worker poc-local-forward poc-reset \
 	poc-images poc-ack-bootstrap poc-acr-push poc-ack-deploy poc-ack-submit \
@@ -32,12 +39,17 @@ JOB                   ?= $$(cat /tmp/flashml-last-job-id 2>/dev/null)
 # deployed path uses it. `make check-flashml` explains what to do if missing.
 # ---------------------------------------------------------------------------
 FLASHML_REPO    := https://github.com/Zolli-Labs/flashml
-RUNTIME_VERSION := 0.4.0
+RUNTIME_VERSION := 0.4.1
 # 0.3.0 advertises local_datasets, which needs flashruntime 0.4. Keep these two
 # in step: on an older runtime pydantic silently drops the field, the host
 # advertises nothing, and local-data work is never placed on it — fail-closed,
 # but with no error anywhere to say why.
-NODE_VERSION    := 0.3.0
+#
+# 0.3.2 raises that floor to flashruntime >=0.4.1 and the failure changes
+# shape: it imports GpuInfo at module scope, so an older runtime is an
+# ImportError at startup, not a silent capability gap. Nothing to notice
+# late — the agent simply never registers.
+NODE_VERSION    := 0.3.2
 FLASHML         ?= ../flashml
 
 RUNTIME_PIN := "flashruntime[service,sklearn,dev]==$(RUNTIME_VERSION)"

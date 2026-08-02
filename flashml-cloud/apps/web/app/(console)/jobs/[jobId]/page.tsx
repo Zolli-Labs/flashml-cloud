@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, DownloadSimple, Warning } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { Swimlanes } from "@/components/jobs/Swimlanes";
+import { FleetTopology } from "@/components/jobs/FleetTopology";
 import { RoundProgress } from "@/components/jobs/RoundProgress";
 import { formatBytes } from "@/lib/utils";
 import {
@@ -383,15 +384,32 @@ function PlacementView({
   return (
     <div className="space-y-6">
       {attempts.length > 0 && (
-        <section className="rounded-lg border border-border bg-surface p-4">
-          <h2 className="text-sm font-semibold">Attempts by machine</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Reconstructed from the coordinator&apos;s lease and commit events.
-          </p>
-          <div className="mt-4">
-            <Swimlanes attempts={attempts} now={now} />
-          </div>
-        </section>
+        <>
+          {/* Two readings of the same events. The topology answers "where is
+              the work right now", the swimlanes answer "where has it been" —
+              and the topology's scrubber lets you ask the first question
+              about any past instant, which is the join between them. */}
+          <section className="panel p-4">
+            <h2 className="text-sm font-semibold">Where the work is</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Scrub or replay to see the fleet at any moment of this run.
+            </p>
+            <div className="mt-4">
+              <FleetTopology attempts={attempts} now={now} />
+            </div>
+          </section>
+
+          <section className="panel p-4">
+            <h2 className="text-sm font-semibold">Attempts by machine</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Reconstructed from the coordinator&apos;s lease and commit
+              events.
+            </p>
+            <div className="mt-4">
+              <Swimlanes attempts={attempts} now={now} />
+            </div>
+          </section>
+        </>
       )}
 
       {tasks.length > 0 && (

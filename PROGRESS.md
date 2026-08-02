@@ -140,11 +140,218 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       preflight against the real example repo returns 0 findings and resolves
       to the now-public image reference.
       **REMAINING: the §10 run-through itself**, whose real test is a friend
-      completing signup → enroll → contribute unaided. No job has yet been
-      submitted, claimed and completed against the DEPLOYED stack — only
-      locally (e2e 61).
+      completing signup → enroll → contribute unaided. A job HAS now been
+      submitted, claimed and completed against the deployed stack —
+      `fed-2e2d4d6ab57f`, 5 rounds, 2026-08-02 — but on **one** machine, so
+      item 4 (contributions from more than one machine) is still open, and
+      items 2, 5, 6, 7 and 10 with it. (This paragraph claimed no deployed job
+      had ever run; that was true when written and was not updated in the same
+      edit as the entry that disproved it — logging rule 2.)
+      Host preconditions ✅ (2026-08-02) — `flashnode doctor` and the
+      fail-closed `work` gate, because both prior attempts died on host-side
+      Docker misconfiguration rather than on anything distributed.
 
 ## Entries
+
+### 2026-08-02 — flashruntime 0.4.1 + flashnode 0.3.2 released; the four pins move together (all repos)
+
+What/why: one version string named two protocols. `flashruntime-v0.4.0` was
+tagged BEFORE the commit adding `GpuInfo`/`ResourcesSpec.gpuPerTask`, and the
+tree kept calling itself 0.4.0 — so `pip install flashruntime==0.4.0` resolved
+a wheel without the GPU fields while this repo's source had them. Nothing GPU
+could deploy until that was closed. Released 0.4.1 (additive, range unchanged)
+and 0.3.2, then moved all **four** pin sites: `Makefile` RUNTIME_VERSION and
+NODE_VERSION, `render.yaml` prod AND dev coordinators, and
+`apps/api/pyproject.toml`.
+
+How verified: against the published artifacts, not the working tree. A clean
+venv installing `flashnode==0.3.2` from PyPI alone resolves flashruntime
+0.4.1, imports the GPU probe, and runs the console script. Suites after the
+pin move: **e2e 67 passed, 0 skipped** (was 63 + 4 skipped — the GPU chain
+tests switched themselves on, which is the whole point of keying them on the
+feature), api **459**, web **43**, flashruntime **595**, flashnode **338**.
+Public CI green across the full 3.10–3.13 × ubuntu/macos matrix.
+
+Gotchas:
+1. **flashnode's floor was a release blocker, not a nicety.**
+   `inventory/capabilities.py` imports `GpuInfo` at module scope, so on 0.4.0
+   the agent raises ImportError and never registers. The release workflow's
+   `resolvable` job caught exactly this and skipped `pypi-publish` — the gate
+   worked; the floor was wrong. Fixed to `>=0.4.1,<0.5` before tagging.
+2. PyPI's simple index lags its JSON API by minutes. `resolvable` failed once
+   with "from versions: 0.3.0, 0.4.0" while 0.4.1 was already installable
+   elsewhere. Re-running the failed job published it. Not a code fault —
+   worth knowing before anyone debugs a phantom floor error.
+3. `test_no_gpu_request_means_no_gpu_per_task` asserted a property of the OLD
+   pin: with `gpuPerTask` undeclared upstream, `model_dump_json()` dropped it.
+   Declared, the default materialises as `gpuPerTask: 0` like every other
+   declared field. Verified equivalent rather than assumed —
+   `IsolationAwarePlacement` engages the gate only for `> 0`, and nothing
+   hashes or diffs a spec. The API's own contract (never inject the key) is
+   unchanged and still asserted.
+4. `flashml-pytorch-cuda:2026.08.2` **is published and correct** — uid 10001,
+   torch and numpy import, anonymously pullable — but its workflow leg is RED.
+   The `case "$cuda" in 12.4*)` check anchors at the start of a string that
+   begins with NVIDIA's entrypoint banner; the captured value's last line is
+   `12.4`. Not fixed here on purpose: any edit to `images.yml` re-triggers the
+   workflow, which would now fail the immutable-tag guard on all four images.
+
+Next: the fix belongs in the same change as the next `IMAGE_TAG` bump, when a
+rebuild happens anyway — use `--entrypoint python`, as the uid check already
+does with `--entrypoint id`. Parking lot: `docs-deploy (GitHub Pages)` fails
+on every flashruntime tag (the `github-pages` environment's protection rules
+reject tag refs), which has now made two consecutive releases read as red
+while PyPI publishing succeeded.
+
+### 2026-08-02 — The volunteer docs printed a command that can never claim work (flashml-cloud)
+
+What/why: six tasks sat PENDING across two RUNNING jobs while an enrolled,
+heartbeating node polled beside them, and every claim came back 204. A
+fail-closed placement gate and an idle queue return the SAME 204, so the
+symptom reads as "no work available" rather than as a misconfiguration.
+Console-submitted jobs carry `isolation.tier=sandboxed, allowFallback=false`;
+`sandbox_capable` is set only by `FLASHNODE_SANDBOX_CAPABLE`, a k8s label, or
+`argv_capable` — and `--runner docker` deliberately does not imply it. The
+docs page printed exactly the command that cannot work.
+
+How verified: reproduced against the dev environment, not reasoned about.
+Same node, same jobs, only the flag changed: `--runner subprocess` 0 accepted,
+`--runner docker` 0 accepted, `--runner argv` **6 accepted** (claimed,
+unpacked, trained, committed, all on attempt 1). Docs now print `--runner
+argv` with the reason, and put `flashnode doctor` ahead of it.
+
+Gotchas: `make e2e` was a **no-op that reported success** — the target
+collides with the `e2e/` directory and was absent from `.PHONY`, so make
+printed "`e2e' is up to date", ran nothing, and exited 0. The worst shape a
+test target can fail in; `e2e-setup`/`e2e-demo` collide with no path, which
+is why only this one was silently dead.
+
+Next: enforce or delete `placement.architectures` — protocol v1alpha1 defines
+it (default `["amd64"]`) and NOTHING reads it, so dev jobs demanding amd64
+were claimed by an arm64 Mac. Silently ignoring a placement constraint is
+worse than not offering one.
+
+### 2026-08-02 — A broken host stops volunteering, and its owner can see why (flashnode)
+
+What/why: the doctor gates startup, but nothing covered breakage that begins
+*mid-session* — the loop kept claiming and failing. `ExecutorLoop` now counts
+consecutive host-side failures and, at the threshold (3,
+`--max-consecutive-failures`), asks the doctor rather than deciding itself:
+nothing blocking means the JOBS are failing, so reset and carry on; blocking
+problems set `quarantined` and stop claiming. `flashnode work` also renders a
+live status block on a TTY, because an idle agent and a broken one looked
+identical to their owner.
+
+How verified: flashnode 257 → **338 passed**, 6 deselected. Status view
+verified on a real pty (redraws in place, both states render).
+
+Gotchas:
+1. Only `TaskExecutionError` implicates the machine. `LeaseLost` means someone
+   else has the work, and `complete() → accepted=False` is an HTTP 200 for a
+   failed hash check or a lost commit race. Counting those punishes a healthy
+   host — the same trap the ledger hit by crediting on 2xx.
+2. `health_check` is **injected, never imported**: `doctor.py` imports
+   `executor.hardening`, which initialises the package whose `__init__`
+   imports `loop.py`. Importing the doctor from the loop closes that cycle.
+3. Its contract is *return the blocking problems*, so the loop never inspects
+   a status. The GPU check reports `"info"` and never fails; a loop testing
+   `!= "ok"` would quarantine every CPU-only volunteer — i.e. most of them.
+4. The renderer is a daemon thread that READS the loop and never drives it. A
+   cosmetic feature stays out of correctness-critical control flow, and a
+   thread that raises exits quietly rather than stopping the machine.
+
+Next: **coordinator-side quarantine.** Only the coordinator can stop
+*routing* to a bad host; the agent can only stop volunteering.
+
+### 2026-08-02 — GPU requirements, from flashml.yaml to docker argv (all repos)
+
+What/why: D9 deferred GPU to M1.5 and named exactly three gaps —
+`capabilities.py` hardcoded `gpus=[]`, no runner passed `--gpus`, and there
+was no placement gate. All three are closed, so D9's deferral is superseded:
+typed `GpuInfo` + `ResourcesSpec.gpuPerTask` in the protocol, an
+nvidia-smi probe that advertises real GPUs, a fifth **fail-closed** placement
+gate, `--gpus` in `harden_args` forwarded by BOTH runners, `resources.gpus`
+in `flashml.yaml` compiling to `gpuPerTask`, a CUDA 12.4 `pytorch-cuda`
+curated image, and a seventh, deliberately NON-GATING doctor check.
+
+How verified: flashruntime **595 passed**, 7 skipped, 20 deselected; flashnode
+**338 passed**; api **459 passed**, 1 skipped, 1 xfail; web **43 passed**;
+e2e **63 passed, 4 skipped**. The 4 skips are the point — see gotcha 2.
+
+Gotchas:
+1. The API emitted `gpuPerTask` into a `ResourcesSpec` that, on the pinned
+   flashruntime 0.4.0, does not declare it. Pydantic's `extra="ignore"` DROPS
+   it: no error, and a GPU job placed on a GPU-less host. Known and recorded
+   at the time rather than assumed away; closed by releasing 0.4.1 (below).
+2. `e2e/test_gpu_placement.py` walks the whole chain — spec → recipe payload →
+   placement → docker argv — because `local_datasets` had green unit tests on
+   both sides of a break three separate times. It skips on a feature test
+   (`ResourcesSpec` has `gpuPerTask`), not a version string, so it switches
+   itself on the moment the pin moves.
+3. The doctor's GPU check never returns `"fail"`. A host with no GPU is the
+   normal host; `NON_BLOCKING_STATUSES = {"ok", "info"}` is now read by BOTH
+   the exit code and the `work` gate, because a second copy testing `!= "ok"`
+   would have refused to start on every GPU-less machine on upgrade.
+4. `IMAGE_TAG` moved 2026.08.1 → 2026.08.2 (registry tags are immutable, so
+   publishing `pytorch-cuda` at all requires the bump). It now lives in three
+   places — the images workflow, `flashnode/doctor.py`, flashml-cloud's
+   `images.py` — and **nothing tests that they agree**; the test that did was
+   deleted on 2026-08-01 when image sources moved to the public repo.
+
+Next: a drift test across the three `IMAGE_TAG` copies. Parking lot: no
+multi-GPU-per-task scheduling; `nvidia-smi` is the only probe.
+
+### 2026-08-02 — flashnode doctor: name the broken host instead of failing its tasks (flashnode)
+
+What/why: M1 §10 items 4 and 10 have failed twice on host-side Docker
+misconfiguration — `docker-credential-desktop` missing on macOS, engine
+`_ping` 500 on Windows. The startup gate was `shutil.which("docker")`, which
+**both** machines pass. Worse, `docker_runner` raised TaskExecutionError,
+`loop.py` called `fail()` and kept claiming, so a broken host burned task after
+task while looking healthy to its owner, the coordinator and the submitter.
+Six checks now run as `flashnode doctor` and gate `flashnode work` fail-closed.
+
+How verified: flashnode 214 → **257** unit tests, plus 2 new integration tests
+green against a real daemon (`pytest -m integration`). Both recorded field
+failures are fixtures: fed that exact stderr, the doctor fails the right check
+**and** prints the remedy. `flashnode` 0.3.1 published to PyPI (all four
+release jobs green, including the resolvable-from-PyPI gate); `NODE_VERSION`
+moved to 0.3.1 and **e2e 61** passed against the published wheel.
+
+Gotchas:
+1. **`def check_cli_on_path(which=shutil.which)` was a real bug, not a style
+   nit.** A default argument binds the original function at import, so
+   `monkeypatch.setattr("shutil.which", ...)` — the idiom this suite uses and
+   documents — could not reach it. The `work` gate ignored the patch, ran a
+   **real `docker run` inside unit tests**, and passed or failed with the
+   machine's Docker state: four tests in test_agent/test_executor passed alone
+   and failed in the suite. Resolve side effects at call time. Two regression
+   tests pin it.
+2. Check 4 **reads** a host-written probe rather than writing one. The curated
+   images end in a non-root USER and the minimal flag set has no `--user`, so a
+   write fails on a healthy Linux host — a check that fails on good machines
+   trains people to ignore it.
+3. Checks 4 and 5 are separate **on purpose**. 5 subsumes 4 mechanically;
+   keeping both localises a fault to mount-vs-flags without pattern-matching
+   stderr. On Windows, check 5 is the first thing that has ever *executed*
+   Plan 6's `--user` path, which PROGRESS recorded as argv-verified only.
+4. `flashnode work` does **not** pull (`pull=False`). A registry blip must not
+   stop a daemon whose images are cached. The cost is deliberate: a fresh
+   install must run `flashnode doctor` once.
+5. Check 6 closes gap 3 of the provenance-and-local-data spec —
+   `parse_local_data` never stats the path, so a typo advertised a dataset the
+   host could not serve, and the fail-closed placement gate then routed that
+   job to this host **and only this host**.
+6. `tests/integration/test_argv_runner_docker.py` has two failures on Docker
+   29.6.2 (`Network unreachable` vs the expected `network is unreachable`;
+   `Permission denied` vs `read-only file system`). **Pre-existing** — verified
+   by re-running them at 7a7cd54 — and in both the sandbox is working; the
+   assertions match older wording. Not fixed here, not caused here.
+
+Next: run M1 §10 with a second real machine — items 2, 4, 5, 6, 7, 10. Parking
+lot: mid-session Docker breakage still burns tasks (the fix is server-side node
+quarantine in the coordinator, deliberately out of scope); the two brittle
+integration assertions above.
 
 ### 2026-08-02 — Production migrated by the runner; 0003 had never been applied
 

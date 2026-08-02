@@ -19,9 +19,15 @@ dependencies = [
     # runtime while the other stays put, which is the drift this whole
     # migration removed, reintroduced through the back door.
     #
-    # Change this in render.yaml and the Makefile's FLASHML_PIN at the same
-    # time. See docs/superpowers/specs/2026-08-01-foundation-design.md §3.3.
-    "flashruntime==0.4.0",
+    # Change this in render.yaml (BOTH coordinators, prod and dev) and the
+    # Makefile's RUNTIME_VERSION at the same time — four sites, not three.
+    # See docs/superpowers/specs/2026-08-01-foundation-design.md §3.3.
+    #
+    # 0.4.1 is what makes `resources.gpus` real. On 0.4.0 `ResourcesSpec` had
+    # no `gpuPerTask`, so `compile_to_jobspec`'s `model_validate` dropped the
+    # field under pydantic's default `extra="ignore"` — no error, and a GPU
+    # job placed on a GPU-less host.
+    "flashruntime==0.4.1",
     "fastapi>=0.111",
     "uvicorn>=0.30",
     "httpx>=0.27",

@@ -3,6 +3,7 @@ import { LedgerWall } from "@/components/landing/LedgerWall";
 import { RecoveryDemo } from "@/components/landing/RecoveryDemo";
 import { SchedulerComparison } from "@/components/landing/SchedulerComparison";
 import { SupplyTiers } from "@/components/landing/SupplyTiers";
+import { FrameworkStack } from "@/components/landing/FrameworkStack";
 import { Guarantees } from "@/components/landing/Guarantees";
 import { HowItWorks } from "@/components/landing/HowItWorks";
 import { HonestState } from "@/components/landing/HonestState";
@@ -22,6 +23,9 @@ export default function Home() {
       <SchedulerComparison />
       <RecoveryDemo />
       <SupplyTiers />
+      {/* Answers "will it run my code" — the question a reader has before
+          any of the reliability argument matters to them. */}
+      <FrameworkStack />
       <Guarantees />
       {/* The one full-bleed moment. Placed between two container sections
           so the break is felt: everything above and below is a centred

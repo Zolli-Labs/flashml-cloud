@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!--
+    The FlashML mark as the browser-tab icon. Same four rectangles as
+    components/brand/Mark.tsx: three lanes of work, the middle one breaking
+    and resuming offset on the far side of a gap.
+
+    Hex, not oklch, and no currentColor: a favicon renders with no CSS
+    context and no stylesheet, so a var() or a currentColor here resolves to
+    black. #6B53E4 is the computed sRGB of oklch(0.55 0.21 285), the
+    --primary token.
+
+    Filled background rather than transparent bars. A tab icon sits on
+    browser chrome that is light for some users and dark for others; bare
+    indigo bars vanish against one of them, and the solid tile reads at 16px
+    where the lanes themselves are barely two pixels tall.
+
+    Bars are scaled 32/24 from the component so the proportions match, and
+    the gap stays wider than the bar height because that asymmetry IS the
+    idea and it is the first thing to disappear when shrinking.
+  -->
+  <rect width="32" height="32" rx="7" fill="#6B53E4"/>
+  <g fill="#FFFFFF">
+    <rect x="5.5" y="7"    width="21"   height="4.5" rx="2.25"/>
+    <rect x="5.5" y="13.75" width="8.5" height="4.5" rx="2.25" opacity="0.55"/>
+    <rect x="18"  y="13.75" width="8.5" height="4.5" rx="2.25"/>
+    <rect x="5.5" y="20.5"  width="15"  height="4.5" rx="2.25"/>
+  </g>
+</svg>

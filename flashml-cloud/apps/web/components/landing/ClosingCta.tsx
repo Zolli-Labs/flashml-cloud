@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, GithubLogo } from "@phosphor-icons/react/dist/ssr";
 import { Mark } from "@/components/brand/Mark";
+import { StatusPill } from "@/components/landing/StatusPill";
 import { Reveal } from "@/components/motion/Reveal";
 import { MagneticLink } from "@/components/motion/MagneticLink";
 
@@ -51,7 +52,10 @@ export function ClosingCta() {
 
       <footer className="border-t border-border">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:px-6">
-          <span>&copy; 2026 Zolli Labs</span>
+          <div className="flex flex-wrap items-center gap-4">
+            <span>&copy; 2026 Zolli Labs</span>
+            <StatusPill />
+          </div>
           <nav className="flex gap-6">
             <Link href="/jobs" className="hover:text-foreground">
               Jobs
