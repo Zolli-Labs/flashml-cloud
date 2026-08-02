@@ -121,7 +121,24 @@ build/
 .local-state/
 ```
 
-- [ ] **Step 2: Delete the dead FastAPI factory**
+- [x] **Step 2: ~~Delete the dead FastAPI factory~~ — CANCELLED 2026-08-01**
+
+**The factory is not dead.** The check below was run and it failed, exactly as
+this step's own guard intended. `create_app()` (`app.py:1402`) falls back to
+`_create_legacy_app()` whenever `SUPABASE_URL` or `COORDINATOR_URL` is absent,
+and `tests/test_agent_proxy.py:825` pins that by name. Deleting it would have
+broken a tested code path.
+
+What the check surfaced instead is a security concern for **S3**, recorded in
+spec §1.1: the fallback means a deployed API that loses one environment
+variable silently starts serving an open, unauthenticated node registry. The
+fix is not deletion — it is refusing to boot on incomplete configuration, or
+gating the legacy app behind an explicit opt-in rather than behind the
+*absence* of config.
+
+`app.py` therefore stays at 1418 lines for now. Splitting it is S3's job.
+
+*Original step, retained for the record:*
 
 `flashml-cloud/apps/api/flashml_cloud_api/app.py` is 1418 lines and defines **two** app factories: the live one at line 517 (`FastAPI(title="FlashML Cloud API", version="0.2.0")`) and a dead legacy one at line 1306 (`version="0.1.0"`). Only `create_app()` at line 1418 is exported.
 

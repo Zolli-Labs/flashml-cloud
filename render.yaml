@@ -4,11 +4,15 @@
 # Blueprint -> point at this repo. Render reads this file and provisions
 # everything.
 #
-# MONOREPO: flashruntime/, flashnode/ and flashml-cloud/ live here as git
-# subtrees with their history intact. `git subtree split --prefix=flashruntime`
-# detaches one back into its own repo when flashruntime/flashnode go public.
-# The single repo is what lets the API install flashruntime from a relative
-# path instead of authenticating to a private GitHub repo mid-build.
+# WHERE flashruntime COMES FROM (changed 2026-08-01): the public monorepo
+# github.com/Zolli-Labs/flashml. It used to live in THIS repo as a git subtree
+# alongside a second copy in a public mirror, kept in sync by hand with
+# `git subtree split` + push. That arrangement shipped a real bug — the
+# coordinator ran one copy and volunteers installed another — so it is gone.
+# Both services below install it as an ordinary pinned dependency; the repo is
+# public, so no build-time credentials are involved.
+#
+# There is exactly one copy of the runtime now. Do not add another.
 #
 # WHY A BLUEPRINT AND NOT THE DASHBOARD/API: the coordinator must be a
 # PRIVATE service with a persistent disk. Render's MCP tooling can only
@@ -47,10 +51,21 @@ services:
   - type: pserv
     name: flashml-coordinator
     runtime: python
-    rootDir: flashruntime
+    # rootDir was `flashruntime` — a directory in THIS repo. It is gone: the
+    # runtime now lives in the public Zolli-Labs/flashml monorepo and installs
+    # like any other dependency. There is no longer a copy of it here to drift.
+    rootDir: .
     plan: starter          # free tier has no private services and no disks
     region: oregon
-    buildCommand: pip install -e ".[service]"
+    # A COMMIT pin, because flashruntime is not on PyPI yet. The repo is
+    # public, so this needs no credentials at build time. Swap to
+    # `flashruntime[service]==0.3.0` once the release lands, and keep this
+    # pin identical to apps/api/pyproject.toml — the API and the coordinator
+    # speaking different protocol versions is the exact failure this
+    # consolidation exists to prevent.
+    buildCommand: >-
+      pip install "flashruntime[service] @
+      git+https://github.com/Zolli-Labs/flashml@383efaab74196c6d86bcb6517e6ee20403a00e1a#subdirectory=flashruntime"
     # --workers 1 is REQUIRED, not a default. See HANDOFF.md risk #5.
     startCommand: >-
       FLASHML_OPERATOR_TOKENS="flashml-api:$OPERATOR_TOKEN"
@@ -99,14 +114,17 @@ services:
     rootDir: flashml-cloud/apps/api
     plan: starter          # must not sleep: a suspended API strands every agent
     region: oregon
-    # flashruntime comes from THIS repo, three directories up — no network,
-    # no PyPI, no credentials. The published wheel predates the
-    # federated-averaging driver this API runs in-process (no `build_round`),
-    # and the repo is private, so neither PyPI nor `pip install git+https://`
-    # would work here. Installing it FIRST means `pip install -e .` sees
-    # flashruntime already satisfied and never reaches for PyPI.
-    buildCommand: >-
-      pip install -e ../../../flashruntime[service] && pip install -e .
+    # flashruntime is an ordinary dependency now, declared in
+    # apps/api/pyproject.toml and pinned to a commit in the PUBLIC
+    # Zolli-Labs/flashml monorepo. No relative path, no second copy in this
+    # repo, nothing to keep in sync by hand.
+    #
+    # The previous comment here claimed the published wheel was stale and
+    # predated `build_round`. That was wrong: flashruntime had NEVER been
+    # published — https://pypi.org/pypi/flashruntime/json returned 404
+    # (verified 2026-08-01). The relative-path install was working around a
+    # problem that did not exist, and in doing so created a real one.
+    buildCommand: pip install -e .
     startCommand: uvicorn flashml_cloud_api.app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
     envVars:

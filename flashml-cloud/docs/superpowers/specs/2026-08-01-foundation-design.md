@@ -59,7 +59,38 @@ Python dict, so a restart orphans checkpoint *files* that are perfectly good
 boundary between components — in the first case across repos, in the second
 between a process and its state.
 
-### 1.1 What this spec is not
+### 1.1 Correction: the second app factory is not dead code
+
+An earlier draft of this spec, and Plan A Task 2, described
+`apps/api/app.py`'s second `FastAPI` factory (`_create_legacy_app`,
+`version="0.1.0"`) as dead legacy code to delete. **That is wrong.**
+`create_app()` (`app.py:1402`) deliberately falls back to it:
+
+```python
+if os.environ.get("SUPABASE_URL") and os.environ.get("COORDINATOR_URL"):
+    ...
+    return create_cloud_app(settings, connect=connect)
+return _create_legacy_app()
+```
+
+and `tests/test_agent_proxy.py:825` pins that behaviour by name.
+
+What the investigation *did* surface is more serious than dead code, and it
+belongs to S3 rather than here: **a production deploy that loses one
+environment variable silently downgrades to the legacy app, which serves an
+open, unauthenticated node registry.** The docstring argues the all-or-nothing
+choice ("a half-authenticated API is the worst of both"), and that reasoning is
+sound — but the fallback direction is not. On a deployed control plane the
+correct response to incomplete configuration is to refuse to boot, exactly as
+`Settings.from_env` already does, not to serve an open door. `render.yaml`
+declares `SUPABASE_URL` with `sync: false`, so it is prompted at blueprint
+creation and one careless edit away from absent.
+
+S3 should decide whether `_create_legacy_app` survives at all, and if it does,
+gate it behind an explicit opt-in such as `FLASHML_ALLOW_LEGACY_APP=1` rather
+than behind the *absence* of configuration.
+
+### 1.2 What this spec is not
 
 Not a directory reshuffle. The repository layout changes as a *consequence* of
 fixing versioning, not as the goal. Not the security close-out (S3), the submit
