@@ -1,0 +1,46 @@
+-- 0003_contributions_unique.sql
+-- FlashML Cloud: make a duplicate credit row impossible at the schema level.
+--
+-- No new tables. One unique index on `public.contributions`, which 0001
+-- created with no uniqueness at all — any writer could append the same credit
+-- twice and nothing would notice. Row Level Security on that table is
+-- unchanged and still has no policies, exactly as 0001 left it; an index does
+-- not grant access, so nothing here reopens direct database access to `anon`
+-- or `authenticated`.
+--
+-- Idempotent: safe to re-run (`create unique index if not exists`).
+--
+-- Apply with the Supabase `apply_migration` MCP tool, name
+-- `contributions_unique`, against project `yualksqjjvlfscbbsygq` ONLY. Never
+-- apply to any other Supabase project.
+
+-- ---------------------------------------------------------------------------
+-- One accepted contribution per (machine, job, task).
+--
+-- Idempotency is enforced HERE, in the schema, rather than by a convention
+-- that the writer is only ever called once. That convention is not a
+-- guarantee and cannot be made into one: the round callback that credits
+-- contributors can be retried, and the in-API driver can be restarted onto a
+-- run whose rounds were already recorded — the same restart path 0002 had to
+-- defend `job_rounds` against. A credit ledger that double-counts fails
+-- silently and compounds: nothing errors, the numbers merely drift upward,
+-- and by the time anyone notices there is no way to tell a real contribution
+-- from a replayed one. `flashml-cloud/AGENTS.md` hard rule 4 requires
+-- idempotent commits and no double counting; with this index in place a
+-- writer can insert unconditionally with `on conflict do nothing` and be
+-- correct under retry, which is a property of the table rather than of the
+-- caller's discipline.
+--
+-- `coalesce(task_id, '')` rather than plain `task_id` because task_id is
+-- NULLABLE, and in a unique index NULLs never collide with each other:
+-- Postgres treats two nulls as distinct, so `(machine, job, null)` could be
+-- written an unbounded number of times for the same machine and job and the
+-- index would permit every one of them. Folding null to the empty string
+-- gives those rows a single shared key, so a null-task credit is unique per
+-- machine and job like every other. This is why the index is on an
+-- expression and not a plain `unique (machine_id, job_id, task_id)`
+-- constraint. Task ids are coordinator-assigned and never empty, so '' cannot
+-- collide with a real one.
+-- ---------------------------------------------------------------------------
+create unique index if not exists contributions_machine_job_task_idx
+    on public.contributions (machine_id, job_id, coalesce(task_id, ''));
