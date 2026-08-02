@@ -39,12 +39,17 @@ JOB                   ?= $$(cat /tmp/flashml-last-job-id 2>/dev/null)
 # deployed path uses it. `make check-flashml` explains what to do if missing.
 # ---------------------------------------------------------------------------
 FLASHML_REPO    := https://github.com/Zolli-Labs/flashml
-RUNTIME_VERSION := 0.4.0
+RUNTIME_VERSION := 0.4.1
 # 0.3.0 advertises local_datasets, which needs flashruntime 0.4. Keep these two
 # in step: on an older runtime pydantic silently drops the field, the host
 # advertises nothing, and local-data work is never placed on it — fail-closed,
 # but with no error anywhere to say why.
-NODE_VERSION    := 0.3.1
+#
+# 0.3.2 raises that floor to flashruntime >=0.4.1 and the failure changes
+# shape: it imports GpuInfo at module scope, so an older runtime is an
+# ImportError at startup, not a silent capability gap. Nothing to notice
+# late — the agent simply never registers.
+NODE_VERSION    := 0.3.2
 FLASHML         ?= ../flashml
 
 RUNTIME_PIN := "flashruntime[service,sklearn,dev]==$(RUNTIME_VERSION)"

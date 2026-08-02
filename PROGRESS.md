@@ -153,6 +153,56 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-02 — flashruntime 0.4.1 + flashnode 0.3.2 released; the four pins move together (all repos)
+
+What/why: one version string named two protocols. `flashruntime-v0.4.0` was
+tagged BEFORE the commit adding `GpuInfo`/`ResourcesSpec.gpuPerTask`, and the
+tree kept calling itself 0.4.0 — so `pip install flashruntime==0.4.0` resolved
+a wheel without the GPU fields while this repo's source had them. Nothing GPU
+could deploy until that was closed. Released 0.4.1 (additive, range unchanged)
+and 0.3.2, then moved all **four** pin sites: `Makefile` RUNTIME_VERSION and
+NODE_VERSION, `render.yaml` prod AND dev coordinators, and
+`apps/api/pyproject.toml`.
+
+How verified: against the published artifacts, not the working tree. A clean
+venv installing `flashnode==0.3.2` from PyPI alone resolves flashruntime
+0.4.1, imports the GPU probe, and runs the console script. Suites after the
+pin move: **e2e 67 passed, 0 skipped** (was 63 + 4 skipped — the GPU chain
+tests switched themselves on, which is the whole point of keying them on the
+feature), api **459**, web **43**, flashruntime **595**, flashnode **338**.
+Public CI green across the full 3.10–3.13 × ubuntu/macos matrix.
+
+Gotchas:
+1. **flashnode's floor was a release blocker, not a nicety.**
+   `inventory/capabilities.py` imports `GpuInfo` at module scope, so on 0.4.0
+   the agent raises ImportError and never registers. The release workflow's
+   `resolvable` job caught exactly this and skipped `pypi-publish` — the gate
+   worked; the floor was wrong. Fixed to `>=0.4.1,<0.5` before tagging.
+2. PyPI's simple index lags its JSON API by minutes. `resolvable` failed once
+   with "from versions: 0.3.0, 0.4.0" while 0.4.1 was already installable
+   elsewhere. Re-running the failed job published it. Not a code fault —
+   worth knowing before anyone debugs a phantom floor error.
+3. `test_no_gpu_request_means_no_gpu_per_task` asserted a property of the OLD
+   pin: with `gpuPerTask` undeclared upstream, `model_dump_json()` dropped it.
+   Declared, the default materialises as `gpuPerTask: 0` like every other
+   declared field. Verified equivalent rather than assumed —
+   `IsolationAwarePlacement` engages the gate only for `> 0`, and nothing
+   hashes or diffs a spec. The API's own contract (never inject the key) is
+   unchanged and still asserted.
+4. `flashml-pytorch-cuda:2026.08.2` **is published and correct** — uid 10001,
+   torch and numpy import, anonymously pullable — but its workflow leg is RED.
+   The `case "$cuda" in 12.4*)` check anchors at the start of a string that
+   begins with NVIDIA's entrypoint banner; the captured value's last line is
+   `12.4`. Not fixed here on purpose: any edit to `images.yml` re-triggers the
+   workflow, which would now fail the immutable-tag guard on all four images.
+
+Next: the fix belongs in the same change as the next `IMAGE_TAG` bump, when a
+rebuild happens anyway — use `--entrypoint python`, as the uid check already
+does with `--entrypoint id`. Parking lot: `docs-deploy (GitHub Pages)` fails
+on every flashruntime tag (the `github-pages` environment's protection rules
+reject tag refs), which has now made two consecutive releases read as red
+while PyPI publishing succeeded.
+
 ### 2026-08-02 — The volunteer docs printed a command that can never claim work (flashml-cloud)
 
 What/why: six tasks sat PENDING across two RUNNING jobs while an enrolled,

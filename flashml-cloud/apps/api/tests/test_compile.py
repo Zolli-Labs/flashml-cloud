@@ -403,11 +403,25 @@ def test_gpu_per_task_is_an_int_not_a_float():
 
 
 def test_no_gpu_request_means_no_gpu_per_task():
-    # Absent stays absent — never 0. The spec for every job that exists today
-    # must stay byte-for-byte what it was, exactly as local_inputs does.
+    # THE API never injects the key. That is this module's contract and it
+    # holds regardless of what the pinned runtime declares.
     assert "gpuPerTask" not in _resources(_config())
+
+    # The compiled SPEC is a different question, and the answer changed with
+    # the pin. `compile_to_jobspec` returns `JobSpec.model_validate(...)
+    # .model_dump_json()`, which materialises every DECLARED field's default.
+    # On flashruntime 0.4.0 `ResourcesSpec` had no `gpuPerTask`, so the field
+    # vanished; on 0.4.1 it is declared `int = Field(ge=0, default=0)` and
+    # surfaces as 0 — the same way `cpuPerTask` and `minimumWorkers` already
+    # did. The `local_inputs` analogy this test used to draw does not hold:
+    # that one lives in the free-form payload, not in the model.
+    #
+    # 0 is not a weaker absent. `IsolationAwarePlacement` engages the GPU gate
+    # only for `required_gpus > 0`; the runtime's own docstring says `gpus: 0`
+    # "requires nothing and runs anywhere". Nothing hashes or diffs a spec, so
+    # a materialised default perturbs no existing job.
     spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
-    assert "gpuPerTask" not in spec["spec"]["resources"]
+    assert spec["spec"]["resources"]["gpuPerTask"] == 0
 
 
 def test_an_explicit_zero_gpus_is_allowed_and_means_none():
