@@ -4,6 +4,18 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowClockwise, Warning } from "@phosphor-icons/react";
+import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import { isOnline, relativeTime } from "@/lib/machine-status";
 import {
@@ -167,25 +179,30 @@ function MachineRow({
   machine: Machine;
   onRevoke: (id: string) => Promise<void>;
 }) {
-  const [confirming, setConfirming] = useState(false);
   const [revoking, setRevoking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const revoked = machine.status === "revoked";
   const online = !revoked && isOnline(machine.last_seen_at);
+  const label = machine.name || machine.node_id;
 
+  // Revoking is irreversible from this screen, so it gets a real modal
+  // rather than the previous inline swap where "Revoke" quietly became
+  // "Confirm" in the same few pixels — easy to click twice by accident on a
+  // row you did not mean.
   async function confirm() {
     setRevoking(true);
-    setError(null);
     try {
       await onRevoke(machine.id);
+      toast.success("Machine revoked", {
+        description: `${label} can no longer claim work.`,
+      });
     } catch {
-      setError("Couldn't revoke this machine.");
+      toast.error("Couldn't revoke that machine", {
+        description: "The machine is unchanged. Try again.",
+      });
+    } finally {
       setRevoking(false);
-      return;
     }
-    setRevoking(false);
-    setConfirming(false);
   }
 
   return (
@@ -220,37 +237,40 @@ function MachineRow({
       <td className="px-3 py-3 text-right">
         {revoked ? (
           <span className="meta">revoked</span>
-        ) : confirming ? (
-          <span className="inline-flex items-center gap-2">
-            {error && <span className="text-[10px] text-destructive">{error}</span>}
-            <button
-              type="button"
-              disabled={revoking}
-              onClick={confirm}
-              className="rounded-md bg-destructive/15 px-2.5 py-1 text-xs text-destructive hover:bg-destructive/25 disabled:opacity-50"
-            >
-              {revoking ? "Revoking…" : "Confirm"}
-            </button>
-            <button
-              type="button"
-              disabled={revoking}
-              onClick={() => {
-                setConfirming(false);
-                setError(null);
-              }}
-              className="text-xs text-muted-foreground hover:text-foreground"
-            >
-              Cancel
-            </button>
-          </span>
         ) : (
-          <button
-            type="button"
-            onClick={() => setConfirming(true)}
-            className="rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-          >
-            Revoke
-          </button>
+          <AlertDialog>
+            <AlertDialogTrigger
+              render={
+                <button
+                  type="button"
+                  className="rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                >
+                  Revoke
+                </button>
+              }
+            />
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Revoke {label}?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Its token stops working immediately and it can no longer
+                  claim work. Any task it currently holds keeps running until
+                  the lease expires, then requeues elsewhere. Re-enrolling
+                  needs a new device code.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep it</AlertDialogCancel>
+                <AlertDialogAction
+                  disabled={revoking}
+                  onClick={confirm}
+                  className="bg-destructive/15 text-destructive hover:bg-destructive/25"
+                >
+                  {revoking ? "Revoking…" : "Revoke"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         )}
       </td>
     </tr>

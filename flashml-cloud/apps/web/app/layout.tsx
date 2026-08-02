@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -70,7 +72,27 @@ export default function RootLayout({
         {/* No chrome here. The landing and the console wear different
             chrome (a top nav vs a left rail), so each route group supplies
             its own layout and its own <main id="content">. */}
-        {children}
+        {/* `delay`, not `delayDuration`. This project's shadcn style is
+            base-nova, which builds on Base UI rather than Radix, and the two
+            libraries name this prop differently. */}
+        <TooltipProvider delay={250}>{children}</TooltipProvider>
+
+        {/* Toasts. Until now every async action was silent or reported
+            itself with inline text that vanished on the next poll: cancel a
+            job, revoke a machine, save a display name, and the only way to
+            know it worked was to notice a row change. `richColors` is off
+            deliberately — sonner's own palette would introduce a second
+            green and a second red alongside the semantic ones this app
+            already defines. */}
+        <Toaster
+          theme="dark"
+          position="bottom-right"
+          closeButton
+          toastOptions={{
+            className:
+              "!bg-surface !text-foreground !border !border-border !font-sans",
+          }}
+        />
       </body>
     </html>
   );

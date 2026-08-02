@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, GithubLogo, SignOut, Warning } from "@phosphor-icons/react";
+import { toast } from "sonner";
 import { Avatar } from "@/components/shell/Avatar";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
 import { initialsFor, useSessionUser } from "@/lib/session-user";
@@ -73,14 +74,18 @@ export default function AccountPage() {
       setProfile(updated);
       setName(updated.display_name ?? "");
       setSaved(true);
+      toast.success("Display name saved");
     } catch (err) {
       if (err instanceof NotAuthenticated) {
         router.push("/sign-in?next=/account");
         return;
       }
-      setSaveError(
-        err instanceof ApiError ? err.detail : "Couldn't save your name."
-      );
+      const detail =
+        err instanceof ApiError ? err.detail : "Couldn't save your name.";
+      setSaveError(detail);
+      // Both: the toast is noticed, the inline message persists next to the
+      // field the user has to fix.
+      toast.error("Couldn't save your name", { description: detail });
     } finally {
       setSaving(false);
     }

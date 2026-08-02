@@ -1,16 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
+import { ArrowRight, CheckCircle, Warning } from "@phosphor-icons/react";
 import {
-  CheckCircle,
-  Lightning,
-  Warning,
-  ArrowRight,
-} from "@phosphor-icons/react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
+  InputOTP,
+  InputOTPGroup,
+  InputOTPSeparator,
+  InputOTPSlot,
+} from "@/components/ui/input-otp";
+import { Spinner } from "@/components/ui/spinner";
+import { Mark } from "@/components/brand/Mark";
 import {
   ApiError,
   NotAuthenticated,
@@ -20,48 +20,41 @@ import {
   type Machine,
 } from "@/lib/cloud-api";
 
+// A device code is exactly what a one-time-code input is for, and this page
+// was a single wide text box. `input-otp` gives per-character slots, paste
+// handling and mobile keyboards that behave — this screen exists to be used
+// on a phone while reading a code off a laptop.
+//
 // The device-code alphabet (enrolment.py) already excludes O/0/I/1, so the
-// only normalization needed here is the formatting a person actually
-// produces when reading eight characters off a laptop screen and typing
-// them into a phone: stray case, spaces, and dashes. The server itself
-// only strips leading/trailing whitespace and upper-cases, so internal
-// spaces/dashes have to be stripped here or a perfectly correct code fails.
-function normalizeCode(raw: string): string {
-  return raw.replace(/[\s-]/g, "").toUpperCase();
-}
+// only normalisation left is case: the slots cannot contain spaces or
+// dashes, which is what the old free-text field had to strip. Validation
+// still belongs to the server; this only stops an obviously wrong shape
+// being sent.
+const CODE_LENGTH = 8;
 
 type Status = "idle" | "submitting" | "success" | "error";
 
 export default function ActivatePage() {
-  const [rawCode, setRawCode] = useState("");
+  const [code, setCode] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [machine, setMachine] = useState<Machine | null>(null);
   const [machineId, setMachineId] = useState<string | null>(null);
 
-  const code = normalizeCode(rawCode);
-  const canSubmit = code.length >= 6 && status !== "submitting";
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!canSubmit) return;
+  const submit = useCallback(async (value: string) => {
+    if (value.length !== CODE_LENGTH) return;
     setStatus("submitting");
     setErrorMessage(null);
-
     try {
-      const result = await approveDeviceCode(code);
+      const result = await approveDeviceCode(value);
       setMachineId(result.machine_id);
       setStatus("success");
-
-      // The approve response only carries a machine_id — fetch the list to
-      // name what was just approved, so the success screen can say what
-      // happened rather than a bare "OK". Best-effort: if this fails, the
-      // approval itself still succeeded and the generic success copy
-      // still tells the person what to do next.
+      // The approve response carries only a machine_id, so name what was
+      // just approved rather than saying a bare "OK". Best effort: the
+      // approval already succeeded if this lookup fails.
       try {
         const machines = await listMachines();
-        const found = machines.find((m) => m.id === result.machine_id) ?? null;
-        setMachine(found);
+        setMachine(machines.find((m) => m.id === result.machine_id) ?? null);
       } catch {
         setMachine(null);
       }
@@ -73,15 +66,15 @@ export default function ActivatePage() {
         );
       } else if (err instanceof NotFound) {
         setErrorMessage(
-          "We couldn't find that code. Double-check it against your laptop's screen — codes are only valid for a few minutes."
+          "We couldn't find that code. Check it against the laptop's screen — codes are only valid for a few minutes."
         );
       } else if (err instanceof ApiError && err.status === 410) {
         setErrorMessage(
-          "That code has expired. On the laptop, run `flashnode login` again to get a fresh one."
+          "That code has expired. Run flashnode login again on the laptop for a fresh one."
         );
       } else if (err instanceof ApiError && err.status === 409) {
         setErrorMessage(
-          "That machine is already enrolled under a different code. If this isn't expected, revoke it from /machines first."
+          "That machine is already enrolled under a different code. Revoke it from Machines first if this isn't expected."
         );
       } else if (err instanceof ApiError) {
         setErrorMessage(err.detail);
@@ -89,10 +82,10 @@ export default function ActivatePage() {
         setErrorMessage("Something went wrong. Try again.");
       }
     }
-  }
+  }, []);
 
   function reset() {
-    setRawCode("");
+    setCode("");
     setStatus("idle");
     setErrorMessage(null);
     setMachine(null);
@@ -102,123 +95,147 @@ export default function ActivatePage() {
   if (status === "success") {
     const label = machine?.name || machine?.node_id || machineId;
     return (
-      <div className="min-h-[calc(100dvh-4rem)] flex items-center justify-center px-4 py-10">
-        <Card className="w-full max-w-sm">
-          <CardContent className="flex flex-col items-center text-center gap-4 pt-6 pb-2">
-            <div className="flex items-center justify-center w-14 h-14 rounded-full bg-node-green/10 border border-node-green/30">
-              <CheckCircle
-                className="w-8 h-8 text-node-green"
-                weight="fill"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <h1 className="text-lg font-bold font-mono text-foreground">
-                Machine approved
-              </h1>
-              <p className="text-sm text-muted-foreground">
-                {label ? (
-                  <>
-                    <span className="font-mono text-foreground">{label}</span>{" "}
-                    is now linked to your account.
-                  </>
-                ) : (
-                  "That machine is now linked to your account."
-                )}
-              </p>
-            </div>
-            <div className="w-full rounded-lg border border-border/60 bg-surface-elevated/50 px-4 py-3 text-left text-xs text-muted-foreground space-y-1">
-              <p className="font-medium text-foreground">What happens next</p>
-              <p>
-                It will show up in{" "}
-                <Link href="/machines" className="text-cyan underline underline-offset-2">
-                  My Machines
-                </Link>{" "}
-                and can start picking up work as soon as it finishes
-                signing in on that laptop.
-              </p>
-            </div>
-            <Button
-              size="lg"
-              className="w-full mt-1"
-              render={
-                <Link href="/machines">
-                  Go to My Machines
-                  <ArrowRight className="w-4 h-4" data-icon="inline-end" />
-                </Link>
-              }
+      <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+        <div className="w-full max-w-sm text-center">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-[var(--node-green)]/30 bg-[var(--node-green)]/10">
+            <CheckCircle
+              className="h-7 w-7 text-[var(--node-green)]"
+              weight="fill"
             />
-          </CardContent>
-        </Card>
+          </div>
+          <h1 className="mt-5 text-lg font-semibold">Machine approved</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {label ? (
+              <>
+                <span className="font-mono text-foreground">{label}</span> is
+                linked to your account.
+              </>
+            ) : (
+              "That machine is linked to your account."
+            )}
+          </p>
+
+          <div className="panel mt-6 p-4 text-left">
+            <p className="text-sm font-medium">What happens next</p>
+            <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+              It appears under{" "}
+              <Link href="/machines" className="text-primary hover:underline">
+                Machines
+              </Link>{" "}
+              and starts claiming work once the agent is running on that
+              laptop.
+            </p>
+          </div>
+
+          <Link
+            href="/machines"
+            className="interactive mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:brightness-110"
+          >
+            Go to Machines
+            <ArrowRight className="h-4 w-4" weight="bold" />
+          </Link>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-[calc(100dvh-4rem)] flex items-center justify-center px-4 py-10">
-      <Card className="w-full max-w-sm">
-        <CardHeader className="items-center text-center gap-2 pt-2">
-          <div className="relative flex items-center justify-center w-10 h-10">
-            <div className="absolute inset-0 rounded-md bg-cyan/10 border border-cyan/30" />
-            <Lightning className="relative z-10 text-cyan w-5 h-5" weight="fill" />
+    <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+      <div className="w-full max-w-sm">
+        <div className="text-center">
+          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-primary">
+            <Mark size={22} className="text-primary-foreground" />
           </div>
-          <CardTitle className="text-lg">Approve a machine</CardTitle>
-          <p className="text-sm text-muted-foreground max-w-72">
+          <h1 className="mt-4 text-lg font-semibold">Approve a machine</h1>
+          <p className="mx-auto mt-2 max-w-72 text-sm leading-relaxed text-muted-foreground">
             Enter the code shown on the laptop running{" "}
-            <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
               flashnode login
             </code>
             .
           </p>
-        </CardHeader>
-        <CardContent className="pb-2">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="user-code" className="sr-only">
-                Device code
-              </Label>
-              <input
-                id="user-code"
-                name="user-code"
-                type="text"
-                inputMode="text"
-                autoCapitalize="characters"
-                autoCorrect="off"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="XXXX XXXX"
-                value={rawCode}
-                onChange={(e) => setRawCode(e.target.value)}
-                disabled={status === "submitting"}
-                className="w-full rounded-xl border border-input bg-transparent px-4 py-4 text-center font-mono text-3xl sm:text-4xl tracking-[0.2em] uppercase outline-none placeholder:text-muted-foreground/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
-              />
-              <p className="text-xs text-muted-foreground text-center">
-                Spaces, dashes, and lowercase are fine.
-              </p>
-            </div>
+        </div>
 
-            {status === "error" && errorMessage ? (
-              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
-                <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
-                <span>{errorMessage}</span>
-              </div>
-            ) : null}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit(code);
+          }}
+          className="mt-8 flex flex-col items-center gap-5"
+        >
+          <InputOTP
+            maxLength={CODE_LENGTH}
+            value={code}
+            // Uppercased on the way in so the slots always show what will be
+            // sent. The server upper-cases too, but a lowercase character
+            // sitting visibly in a slot looks like it is about to be
+            // rejected.
+            onChange={(v) => {
+              setCode(v.toUpperCase());
+              if (status === "error") {
+                setStatus("idle");
+                setErrorMessage(null);
+              }
+            }}
+            // Submitting on the last character is the point of a code input:
+            // nobody wants to type eight characters and then hunt for a
+            // button.
+            onComplete={(v) => submit(v.toUpperCase())}
+            disabled={status === "submitting"}
+            aria-label="Device code"
+            containerClassName="justify-center"
+          >
+            <InputOTPGroup>
+              {[0, 1, 2, 3].map((i) => (
+                <InputOTPSlot key={i} index={i} className="h-12 w-11 text-lg" />
+              ))}
+            </InputOTPGroup>
+            <InputOTPSeparator />
+            <InputOTPGroup>
+              {[4, 5, 6, 7].map((i) => (
+                <InputOTPSlot key={i} index={i} className="h-12 w-11 text-lg" />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
 
-            <Button
-              type="submit"
-              size="lg"
-              className="w-full h-12 text-base"
-              disabled={!canSubmit}
+          <p className="meta text-center">Paste works. Lowercase is fine.</p>
+
+          {status === "error" && errorMessage && (
+            <div
+              role="alert"
+              className="flex w-full items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive"
             >
-              {status === "submitting" ? "Approving…" : "Approve machine"}
-            </Button>
-            {status === "error" ? (
-              <Button type="button" variant="ghost" size="sm" onClick={reset}>
-                Start over
-              </Button>
-            ) : null}
-          </form>
-        </CardContent>
-      </Card>
+              <Warning className="mt-0.5 h-4 w-4 shrink-0" weight="fill" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={code.length !== CODE_LENGTH || status === "submitting"}
+            className="interactive inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-primary text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {status === "submitting" ? (
+              <>
+                <Spinner className="size-4" />
+                Approving…
+              </>
+            ) : (
+              "Approve machine"
+            )}
+          </button>
+
+          {status === "error" && (
+            <button
+              type="button"
+              onClick={reset}
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
+              Start over
+            </button>
+          )}
+        </form>
+      </div>
     </div>
   );
 }
