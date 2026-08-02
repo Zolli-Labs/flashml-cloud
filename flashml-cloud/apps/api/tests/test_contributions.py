@@ -428,3 +428,85 @@ def test_the_round_row_still_records_the_contributor_node_ids(
 
     rounds = dbmod.list_job_rounds_for_owner(db, job_id, owner)
     assert rounds[0]["contributors"] == nodes
+
+
+# ---------------------------------------------------------------------------
+# attempts: the lease -> (job, task) mapping that lets ANY job pay out
+# ---------------------------------------------------------------------------
+
+def _lease() -> str:
+    return f"lease-{uuid.uuid4().hex[:12]}"
+
+
+def test_claim_attempt_credit_returns_the_claimed_work(db):
+    machine = _enrol(db, _node_id("credit"))
+    lease, job = _lease(), _job()
+    dbmod.record_attempt(
+        db, lease_id=lease, machine_id=machine, job_id=job, task_id="task-000"
+    )
+
+    row = dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=machine)
+
+    assert row is not None
+    assert row["job_id"] == job
+    assert row["task_id"] == "task-000"
+    # A float, not a Decimal: record_contributions writes it straight through
+    # to a numeric column and psycopg hands back Decimal for extract(epoch).
+    assert isinstance(row["duration_s"], float)
+    assert row["duration_s"] >= 0.0
+
+
+def test_claim_attempt_credit_is_once_only(db):
+    """The second completion of one lease credits nothing.
+
+    Idempotence here does NOT lean on the 0003 unique index — it is a
+    property of this UPDATE. Belt and braces: the index catches a duplicate
+    that arrives by any other route, this catches it before a row is built.
+    """
+    machine = _enrol(db, _node_id("once"))
+    lease = _lease()
+    dbmod.record_attempt(
+        db, lease_id=lease, machine_id=machine, job_id=_job(), task_id="task-000"
+    )
+
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=machine)
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=machine) is None
+
+
+def test_claim_attempt_credit_refuses_another_machine(db):
+    """Credit follows the machine that CLAIMED, never the one that asked.
+
+    The coordinator enforces lease ownership, so this is unreachable today.
+    It is written anyway: whose work this was should not depend on a remote
+    component's authorization staying correct.
+    """
+    owner = _enrol(db, _node_id("owner"))
+    thief = _enrol(db, _node_id("thief"))
+    lease = _lease()
+    dbmod.record_attempt(
+        db, lease_id=lease, machine_id=owner, job_id=_job(), task_id="task-000"
+    )
+
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=thief) is None
+    # ...and the real owner is still able to collect.
+    assert dbmod.claim_attempt_credit(db, lease_id=lease, machine_id=owner)
+
+
+def test_claim_attempt_credit_unknown_lease_is_none(db):
+    machine = _enrol(db, _node_id("unknown"))
+    assert dbmod.claim_attempt_credit(db, lease_id=_lease(), machine_id=machine) is None
+
+
+def test_record_attempt_twice_keeps_one_row(db):
+    """A retried claim forward must not create a second attempt."""
+    machine = _enrol(db, _node_id("dup"))
+    lease, job = _lease(), _job()
+    for _ in range(2):
+        dbmod.record_attempt(
+            db, lease_id=lease, machine_id=machine, job_id=job, task_id="task-000"
+        )
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.attempts where lease_id = %s", (lease,)
+        )
+        assert cur.fetchone()["n"] == 1
