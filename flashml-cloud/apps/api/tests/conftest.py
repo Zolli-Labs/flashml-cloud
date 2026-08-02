@@ -7,8 +7,14 @@ missing cloud credential is not a regression guard (see
 docs/superpowers/plans/.task-3-report.md for the history here). Instead
 this spins up a throwaway PostgreSQL server per test session using the
 `initdb`/`pg_ctl` binaries already on this machine, applies the real,
-unmodified migration, and tears the whole thing down afterward. These
+unmodified migrations, and tears the whole thing down afterward. These
 tests never reach Supabase.
+
+The schema is built by `flashml_cloud_api.migrate` — the same runner that
+migrates dev and prod — rather than by a `psql` loop of its own. That is
+deliberate: the runner is deploy-critical, and this way every test in the
+suite exercises it on every run instead of it being covered only by its
+own tests.
 
 Version note: this runs whatever local PostgreSQL `initdb` resolves to
 (Homebrew ships 14; Supabase runs 17). For this schema — uuid, jsonb,
@@ -27,15 +33,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import psycopg
 import pytest
 
-MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
-
-#: Every migration, in the order the numeric prefix says. Globbed rather
-#: than listed so a new migration is exercised by this fixture the moment it
-#: is written — a checked-in migration nothing ever applies is a migration
-#: nobody has run.
-MIGRATION_PATHS = sorted(MIGRATIONS_DIR.glob("*.sql"))
+from flashml_cloud_api import migrate
 
 REQUIRED_BINARIES = ("initdb", "pg_ctl", "pg_isready", "psql")
 
@@ -123,32 +124,31 @@ def postgres_dsn(tmp_path_factory):
         if stub.returncode != 0:
             raise RuntimeError(f"auth schema stub failed:\n{stub.stdout}\n{stub.stderr}")
 
-        # Apply the real migrations, unmodified and in order — applying the
-        # actual migration files is what makes this test meaningful.
-        for migration in MIGRATION_PATHS:
-            applied = _run(["psql", dsn, "-v", "ON_ERROR_STOP=1",
-                            "-f", str(migration)])
-            if applied.returncode != 0 and "pgcrypto" in applied.stderr.lower():
-                # pgcrypto ships with a standard Postgres install (verified
-                # present locally), but if some other machine's build lacks
-                # the contrib module, gen_random_uuid() — the only thing this
-                # schema actually needs from it — has been a core builtin
-                # since Postgres 13 regardless. Rather than editing the
-                # checked-in migration to drop that line, tolerate *this one
-                # statement* failing and re-apply non-strictly so the rest of
-                # the (unmodified) file still runs and is still checked.
-                retry = _run(["psql", dsn, "-v", "ON_ERROR_STOP=0",
-                              "-f", str(migration)])
-                if retry.returncode != 0:
-                    raise RuntimeError(
-                        f"migration {migration.name} failed even tolerating "
-                        f"pgcrypto:\n{retry.stdout}\n{retry.stderr}"
+        # Apply the real migrations, unmodified and in order, through the
+        # production migration runner. Each one lands in its own
+        # transaction and is recorded in public.schema_migrations, exactly
+        # as it would be against dev or prod.
+        with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as conn:
+            try:
+                migrate.apply(conn, migrate.MIGRATIONS_DIR)
+            except psycopg.Error as exc:
+                # `0001_initial.sql` opens with `create extension if not
+                # exists pgcrypto`. It ships with a standard PostgreSQL
+                # install, so a failure there is a broken install rather
+                # than a tolerable difference — and unlike the old psql
+                # loop the runner cannot skip one statement and carry on,
+                # because a migration is one transaction. Name the likely
+                # cause rather than surfacing a bare libpq error.
+                hint = ""
+                if "extension" in str(exc).lower():
+                    hint = (
+                        " This PostgreSQL install may be missing its contrib "
+                        "modules, which `create extension pgcrypto` needs "
+                        "(`brew install postgresql@14` ships them)."
                     )
-            elif applied.returncode != 0:
                 raise RuntimeError(
-                    f"migration {migration.name} failed:\n"
-                    f"{applied.stdout}\n{applied.stderr}"
-                )
+                    f"Applying the migrations failed: {exc}{hint}"
+                ) from exc
 
         yield dsn
     finally:
