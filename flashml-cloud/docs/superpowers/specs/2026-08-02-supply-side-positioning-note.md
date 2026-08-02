@@ -66,7 +66,61 @@ Not "run your 70B fine-tune across strangers' machines". That claim would not
 survive contact with a first customer, and making it would burn the credibility
 the fault-tolerance story earns.
 
-## 4. Three supply tiers, honestly rated
+## 4. The axis was wrong: workload class, not machine class
+
+**Revised 2026-08-02, later the same day, after the owner pushed back.**
+
+The first version of this note rated supply by machine type and concluded that
+volunteer laptops carry "near-zero compute value". That is true **only for deep
+learning**, and it was the wrong yardstick.
+
+The owner's counter-thesis — *CPUs at scale can beat GPUs* — is correct for a
+specific and important class of work, and it is the class this runtime is
+already good at.
+
+### 4.1 The arithmetic, both directions
+
+Raw FP32 throughput, roughly: an RTX 4090 is ~80 TFLOPS (~165 with tensor
+cores at lower precision); a modern 8-core laptop CPU is ~0.3–0.5 TFLOPS. So
+**~200 laptops ≈ one gaming GPU on paper** — which, against 200 free machines,
+is not a bad trade.
+
+The trade collapses only when machines must **talk to each other**. Compute
+scales with N; so does communication, because every participant ships weights
+each round. Home upload is ~10–50 Mbps. A 100 MB model across 200 machines is
+~20 GB of transfer per round, through one coordinator. The network saturates
+long before the compute does. That ceiling is physics, not an engineering gap.
+
+### 4.2 So it depends on the job, not the machine
+
+| Workload | Communication per unit | Verdict |
+|---|---|---|
+| **Hyperparameter sweep** | a few floats — one score | **CPU pool wins, scales ~linearly** |
+| **Sharded K-means** | centroids only | CPU pool wins |
+| Simulation / RL rollouts | trajectories | CPU pool good |
+| Classic ML (sklearn, GBMs) | small models | CPU fine; GPU barely helps |
+| **Deep learning, real model** | full gradients, every step | **GPU wins by 100–1000×** |
+
+**The e2e suite already proves the top half**: sharded K-means and
+hyperparameter search. For a 500-config sweep, 200 laptops finish in the time
+one GPU finishes 200 runs sequentially — because the competition is
+*independent trials per hour*, where a GPU has no special advantage.
+
+So there are two products sharing one runtime:
+
+- **Low-communication, high-parallelism** — sweeps, simulation, federated
+  rounds on small models. Laptops are legitimate supply. Already works.
+- **Deep learning on real models** — GPUs, rented or home rigs, small numbers.
+  Needs the four changes in §5.1.
+
+The mistake to avoid is claiming one market and demonstrating the other.
+
+### 4.3 Supply tiers, rated FOR DEEP LEARNING
+
+The table below is the original one, kept because it is still correct for the
+workload it was silently assuming. "Value per machine" is not a property of the
+machine — read the column as *value for deep learning*. For a sweep, the
+laptop row would read "high".
 
 | Tier | Reliability | Cost to us | Support burden | Value per machine | Available |
 |---|---|---|---|---|---|
@@ -74,7 +128,7 @@ the fault-tolerance story earns.
 | **Home rigs** (4090s, ex-mining, enthusiast desktops) | medium | cheap | medium | high | needs GPU support |
 | **Volunteer laptops** | low | free | **high** | **very low** | today |
 
-### 4.1 The laptop tier is the one we built, and it is worth the least
+#### The laptop tier, for deep learning
 
 Evidence from the 2026-08-02 acceptance run, not speculation: a MacBook Air
 ran **all three shards of every round** and a toy MLP still took 101 seconds
@@ -86,10 +140,11 @@ produced two unrelated Docker failures on two machines — a missing
 neither of which means anything to a non-expert, and both of which landed on
 us to diagnose.
 
-**High support cost, near-zero compute value.** That is the worst cell in the
-table, and it is the tier the current plan optimises hardest for.
+**High support cost, near-zero deep-learning value.** That is the worst cell in
+the table — *for deep learning*. For a hyperparameter sweep the same machine is
+a perfectly good unit of supply, which §4.2 is the correction to.
 
-### 4.2 Rented providers work today and need almost nothing
+#### Rented providers work today and need almost nothing
 
 A rented Pod runs `pip install flashnode` and starts claiming work. No ToS
 problem — renting compute and using it for compute is the product being sold.
@@ -107,7 +162,7 @@ This is also the **"rent your own fleet"** model, which sidesteps the two
 hardest business problems at once: no payouts to individuals (no identity
 verification, tax forms, fraud, chargebacks), and no host support burden.
 
-### 4.3 Home rigs are the interesting middle
+#### Home rigs are the interesting middle
 
 Someone running a 4090 in a spare room has a real GPU, already has drivers,
 probably already has Docker, and is not intimidated by a terminal. High value

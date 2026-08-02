@@ -90,6 +90,13 @@ resolves, and renaming it would only invalidate the docs citing it.
 - `flashml-cloud/docs/superpowers/specs/2026-08-01-foundation-design.md` —
   the current architecture work: repo topology, releases, and the diskless
   control plane. Plans A/B1/B2 sit beside it in `plans/`.
+- `flashml-cloud/docs/superpowers/specs/POSITIONING_LOG.md` — **READ THIS
+  BEFORE re-opening any product-direction question.** One dated trail through
+  what FlashML is for and whose machines supply it, newest first, including
+  the turns that were later corrected. Direction moved three times on
+  2026-08-02 alone; the log records what triggered each move so nobody
+  re-argues a settled point or re-adopts a discarded one. Append, never
+  rewrite.
 - Two strategy notes from 2026-08-02, both of which **disagree with that
   spec's S4-first ordering**. Read them before scheduling the desktop app:
   - `2026-08-02-supply-side-positioning-note.md` — rented providers and home
