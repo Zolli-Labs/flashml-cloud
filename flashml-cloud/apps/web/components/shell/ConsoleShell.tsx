@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import {
+  BookOpen,
   CaretDown,
   GithubLogo,
   House,
@@ -13,6 +14,7 @@ import {
   Desktop,
   DeviceMobile,
   SidebarSimple,
+  UserCircle,
 } from "@phosphor-icons/react";
 import { FleetPill } from "@/components/shell/FleetPill";
 import { UserMenu } from "@/components/nav/UserMenu";
@@ -140,7 +142,19 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
         )}
       </nav>
 
-      <div className="border-t border-border px-3 py-3">
+      <div className="space-y-0.5 border-t border-border px-3 py-3">
+        <NavItem
+          href="/docs"
+          label="Docs"
+          icon={BookOpen}
+          active={isActive("/docs")}
+        />
+        <NavItem
+          href="/account"
+          label="Account"
+          icon={UserCircle}
+          active={isActive("/account")}
+        />
         <a
           href={REPO}
           target="_blank"

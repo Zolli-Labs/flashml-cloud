@@ -367,6 +367,21 @@ export function getMe(): Promise<Profile> {
   return request<Profile>("/v1alpha1/me");
 }
 
+/** `PATCH /v1alpha1/me` — sets the display name, the only profile field a
+ * user owns. Email and avatar belong to the identity provider, `github_login`
+ * is written by enrolment, and the role flags are roles rather than
+ * preferences, so none of them are editable here.
+ *
+ * The API rejects an empty string rather than treating it as "leave it
+ * alone", because clearing a field and not touching it are different
+ * intentions and the underlying upsert coalesces null to the latter. */
+export function updateMe(displayName: string): Promise<Profile> {
+  return request<Profile>("/v1alpha1/me", {
+    method: "PATCH",
+    body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
 export function listMachines(): Promise<Machine[]> {
   return request<Machine[]>("/v1alpha1/machines");
 }

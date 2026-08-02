@@ -769,6 +769,42 @@ def create_cloud_app(
     ):
         return _jsonable(dbmod.upsert_profile(db, user_id))
 
+    # Display name is the ONE profile field a user owns. Email and avatar come
+    # from the identity provider and are not ours to edit; github_login is set
+    # by enrolment; is_host/is_developer are roles, not preferences. So this
+    # takes exactly one field and ignores anything else in the body rather
+    # than letting a client hand us a role.
+    @app.patch("/v1alpha1/me", tags=["browser"])
+    async def update_me(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        payload = await _json_object(request)
+        raw = payload.get("display_name")
+        if raw is not None and not isinstance(raw, str):
+            raise HTTPException(
+                status_code=400, detail="display_name must be a string or null"
+            )
+
+        name: str | None = None
+        if isinstance(raw, str):
+            name = raw.strip()
+            if len(name) > 80:
+                raise HTTPException(
+                    status_code=400, detail="display_name is limited to 80 characters"
+                )
+            # An empty string is a user clearing the field, not a request to
+            # leave it alone. `upsert_profile` coalesces null to "keep the
+            # existing value", so an empty submission has to be rejected
+            # rather than silently doing nothing the user can see.
+            if name == "":
+                raise HTTPException(
+                    status_code=400, detail="display_name cannot be empty"
+                )
+
+        return _jsonable(dbmod.upsert_profile(db, user_id, display_name=name))
+
     @app.get("/v1alpha1/machines", tags=["browser"])
     async def list_machines(
         user_id: str = Depends(current_user),

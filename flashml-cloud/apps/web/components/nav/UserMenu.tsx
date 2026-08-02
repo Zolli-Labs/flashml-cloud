@@ -1,32 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { SignOut } from "@phosphor-icons/react";
-import { Button } from "@/components/ui/button";
+import { Avatar } from "@/components/shell/Avatar";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
+import { initialsFor, useSessionUser } from "@/lib/session-user";
+import { getMe, NotAuthenticated } from "@/lib/cloud-api";
 
-/** Sign-in status in the nav: a "Sign in" link when signed out, an email +
- * sign-out button when signed in. Subscribes to Supabase's auth state so it
- * updates immediately after the OAuth redirect completes, without a full
- * page reload. */
+/** Sign-in status: a "Sign in" link when signed out, the user's avatar and a
+ * sign-out control when signed in. The avatar is the link to /account, which
+ * is where every app of this shape puts it. */
 export function UserMenu() {
   const router = useRouter();
-  const [email, setEmail] = useState<string | null | undefined>(undefined);
+  const session = useSessionUser();
+  const [displayName, setDisplayName] = useState<string | null>(null);
 
   useEffect(() => {
-    const supabase = createBrowserSupabaseClient();
-    supabase.auth.getUser().then(({ data }) => {
-      setEmail(data.user?.email ?? null);
-    });
-    const { data: subscription } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setEmail(session?.user?.email ?? null);
-      }
-    );
-    return () => subscription.subscription.unsubscribe();
-  }, []);
+    if (!session) return;
+    // Best effort. The nav must render from the Supabase session alone: if
+    // the API is unreachable the header should still show who is signed in
+    // rather than collapsing to "Sign in", which would look like a logout.
+    getMe()
+      .then((p) => setDisplayName(p.display_name))
+      .catch((err) => {
+        if (err instanceof NotAuthenticated) setDisplayName(null);
+      });
+  }, [session]);
 
   async function signOut() {
     const supabase = createBrowserSupabaseClient();
@@ -35,32 +36,44 @@ export function UserMenu() {
     router.refresh();
   }
 
-  if (email === undefined) {
-    // Session not resolved yet — render nothing rather than flash the
-    // wrong state.
-    return <div className="w-16" />;
-  }
+  // undefined = session not resolved. Reserve the space rather than flash
+  // "Sign in" at a signed-in user on every navigation.
+  if (session === undefined) return <div className="h-7 w-7" />;
 
-  if (!email) {
+  if (session === null) {
     return (
       <Link
         href="/sign-in"
-        className="px-3 py-1.5 rounded-md text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"
+        className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
       >
         Sign in
       </Link>
     );
   }
 
+  const label = displayName || session.providerName || session.email || "Account";
+  const initials = initialsFor(displayName, session.providerName, session.email);
+
   return (
     <div className="flex items-center gap-2">
-      <span className="hidden lg:inline text-xs text-muted-foreground max-w-40 truncate">
-        {email}
-      </span>
-      <Button type="button" variant="ghost" size="sm" onClick={signOut}>
-        <SignOut className="w-3.5 h-3.5" data-icon="inline-start" />
-        Sign out
-      </Button>
+      <Link
+        href="/account"
+        title={session.email ?? undefined}
+        className="flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors hover:bg-white/[0.06]"
+      >
+        <Avatar src={session.avatarUrl} initials={initials} size={26} />
+        <span className="hidden max-w-40 truncate text-xs text-muted-foreground lg:inline">
+          {label}
+        </span>
+      </Link>
+      <button
+        type="button"
+        onClick={signOut}
+        aria-label="Sign out"
+        className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground"
+      >
+        <SignOut className="h-4 w-4" />
+      </button>
     </div>
   );
 }
