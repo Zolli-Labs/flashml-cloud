@@ -30,7 +30,7 @@ torch = pytest.importorskip(
 
 import flashruntime as flash
 from flashml_workloads import fedavg_worker
-from flashml_workloads.fedavg_driver import HttpCoordinator, run_fedavg
+from flashml_workloads.fedavg_driver import HttpCoordinator, resume_state, run_fedavg
 from flashnode.executor import CoordinatorClient, ExecutorLoop, SubprocessRunner
 from flashruntime.protocol.v1alpha1 import NodeCapabilities, NodeRegistration
 
@@ -104,8 +104,30 @@ def test_fedavg_rounds_reduce_loss_with_two_real_agents(coordinator):
 
 
 def test_fedavg_survives_a_closed_laptop(coordinator):
-    """One agent stops after round 1 (closed laptop); with
-    `min_participants=1` the remaining rounds still complete, solo."""
+    """One agent stops after round 0 (closed laptop); with
+    `min_participants=1` the remaining rounds still complete, solo.
+
+    Driven as TWO `run_fedavg` calls rather than one with an `on_round`
+    hook, because the single-call version was flaky on CI (PROGRESS
+    2026-08-03): it ran every round at `min_participants=1` and then
+    asserted round 0 had two participants. Quorum of 1 is reached by
+    whichever agent commits first, so on a contended runner round 0
+    aggregated before the second agent had claimed anything, and the
+    assertion — which is correct and must not be weakened — lost the race.
+
+    Splitting the run puts the requirement where it can be enforced instead
+    of hoped for: round 0 runs at `min_participants=2`, so the driver
+    *cannot* aggregate until two shards have committed. It waits for the
+    second agent, or it raises `QuorumNotMet`. The closed laptop then
+    happens between the two calls, where it is an ordinary sequential step.
+
+    What round 0 pins is "two contributions were aggregated", not "two
+    distinct machines contributed" — a single agent that claimed both
+    shards in sequence would also satisfy it. That is deliberate: asserting
+    distinct node ids would re-introduce exactly the race this removes,
+    since a badly enough stalled agent B is indistinguishable from one that
+    never started.
+    """
     reg_a = _register(coordinator, "fn-e2e-solo-a")
     reg_b = _register(coordinator, "fn-e2e-solo-b")
 
@@ -123,21 +145,36 @@ def test_fedavg_survives_a_closed_laptop(coordinator):
     thread_a.start()
     thread_b.start()
 
-    rounds_seen: list[dict] = []
-
-    def _on_round(result: dict) -> None:
-        rounds_seen.append(result)
-        if result["round"] == 0:
-            # The laptop closes: node-b stops claiming any further work.
-            loop_b.stop_event.set()
-
+    coord = HttpCoordinator(coordinator.base_url)
     try:
-        result = run_fedavg(
-            HttpCoordinator(coordinator.base_url), rounds=3, num_shards=2,
-            min_participants=1, worker_params=WORKER_PARAMS,
+        first = run_fedavg(
+            coord, rounds=1, num_shards=2,
+            min_participants=2, worker_params=WORKER_PARAMS,
             initial_weights=_initial_weights(),
             round_timeout_s=120.0, poll_seconds=0.25,
-            on_round=_on_round,
+        )
+
+        # The laptop closes. JOIN, don't just signal: a still-running node-b
+        # can commit a shard into round 1 and make it a two-participant
+        # round, which is the same race one step later.
+        loop_b.stop_event.set()
+        thread_b.join(timeout=15)
+        assert not thread_b.is_alive(), (
+            "node-b did not stop; the rounds that follow are supposed to be solo"
+        )
+
+        # Pick up where round 0 left off, through the driver's own documented
+        # resume path rather than by hand-building the weights URI — so this
+        # test also exercises the contract a restarted driver depends on.
+        start_round, weights, weights_uri = resume_state(coord, first["job_ids"])
+        assert start_round == 1, f"round 0 should be the last completed round, got {start_round}"
+
+        rest = run_fedavg(
+            coord, rounds=3, num_shards=2,
+            min_participants=1, worker_params=WORKER_PARAMS,
+            initial_weights=weights, weights_uri=weights_uri,
+            start_round=start_round, prior_job_ids=first["job_ids"],
+            round_timeout_s=120.0, poll_seconds=0.25,
         )
     finally:
         loop_a.stop_event.set()
@@ -145,9 +182,10 @@ def test_fedavg_survives_a_closed_laptop(coordinator):
         thread_a.join(timeout=10)
         thread_b.join(timeout=15)
 
-    losses = [h["mean_loss"] for h in result["history"]]
+    history = first["history"] + rest["history"]
+    losses = [h["mean_loss"] for h in history]
     assert len(losses) == 3
-    assert result["history"][0]["participants"] == 2, "round 0 ran with both agents up"
-    assert all(h["participants"] == 1 for h in result["history"][1:]), (
-        f"rounds after the closed laptop should complete solo: {result['history']}"
+    assert history[0]["participants"] == 2, "round 0 ran with both agents up"
+    assert all(h["participants"] == 1 for h in history[1:]), (
+        f"rounds after the closed laptop should complete solo: {history}"
     )

@@ -172,7 +172,49 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — Fix the fedavg closed-laptop flake by enforcing round 0's quorum
+
+What/why: closes the flake logged below, which gated production CI and failed
+4 of 5 runs. The test drove all three rounds in ONE `run_fedavg` call at
+`min_participants=1`, then asserted round 0 had two participants. Quorum of 1
+is reached by whichever agent commits first, so round 0 aggregated before the
+second agent had claimed anything and the assertion lost the race.
+
+Root cause, stated exactly: **the test asked for a quorum of 1 and asserted a
+quorum of 2.** Nothing in the system was wrong; the fixture's request and its
+expectation disagreed.
+
+Fix: split into two `run_fedavg` calls. Round 0 runs at
+`min_participants=2`, so the driver *cannot* aggregate until two shards have
+committed — it waits for the second agent, or raises `QuorumNotMet`. The
+closed laptop then happens between the calls, as an ordinary sequential step,
+and rounds 1–2 resume at `min_participants=1` through the driver's own
+`resume_state` → `start_round`/`weights_uri`/`prior_job_ids` path. **The
+assertion is unchanged.** The requirement moved from hoped-for to enforced.
+
+How verified: not by "it passes now" — it passed locally before. Reproduced
+the failure first by running under 2× core-count CPU spinners on a 10-core
+machine, which is what a contended CI runner is. **Pre-fix 0/5 passed,
+post-fix 5/5**, same load, same command; the pre-fix failures carry the exact
+CI signature (`AssertionError: round 0 ran with both agents up / assert 1 ==
+2`). Full e2e suite **67 passed** (2m07s).
+
+Gotchas:
+1. **Signalling node-b to stop is not enough — the thread must be joined.** A
+   still-running agent-b can commit a shard into round 1 and make it a
+   two-participant round: the same race one step later. The test now asserts
+   `not thread_b.is_alive()`.
+2. Round 0 pins "two contributions were aggregated", NOT "two distinct
+   machines contributed" — one agent claiming both shards in sequence also
+   satisfies it. Deliberate: asserting distinct node ids re-introduces exactly
+   this race, because an agent stalled badly enough is indistinguishable from
+   one that never started.
+
+Next: release flashruntime 0.4.2 / flashnode 0.3.3 from `bounded-influence`.
+
 ### 2026-08-03 — e2e `test_fedavg_survives_a_closed_laptop` is FLAKY on CI
+
+**RESOLVED 2026-08-03 — see the entry above.** Kept for the diagnosis trail.
 
 What/why: recorded because it will fail again and the next person should not
 spend an hour deciding whether they broke it.
