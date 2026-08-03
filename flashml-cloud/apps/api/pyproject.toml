@@ -27,7 +27,14 @@ dependencies = [
     # no `gpuPerTask`, so `compile_to_jobspec`'s `model_validate` dropped the
     # field under pydantic's default `extra="ignore"` — no error, and a GPU
     # job placed on a GPU-less host.
-    "flashruntime==0.4.1",
+    #
+    # 0.4.2 carries `ExecutionEvidence` on `CompleteRequest`, which is what
+    # makes verification slice 2 more than dead code: agents on flashnode
+    # 0.3.3 send it, and a coordinator on 0.4.1 drops it under that same
+    # `extra="ignore"` — evidence collected on the host and discarded on
+    # arrival, with nothing to say so. It also carries the fedavg influence
+    # cap and node exclusion, the sixth placement gate.
+    "flashruntime==0.4.2",
     "fastapi>=0.111",
     "uvicorn>=0.30",
     "httpx>=0.27",

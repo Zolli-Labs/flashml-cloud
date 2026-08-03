@@ -172,6 +172,54 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — Release flashruntime 0.4.2 + flashnode 0.3.3; four pins moved
+
+What/why: verification slice 2, the fedavg influence cap, the clipped-contribution
+report and node exclusion were all built and all inert — `ExecutionEvidence`
+only exists on the wire once both sides carry it. This is the release that
+turns them on.
+
+How verified, at each hop against the published artifact rather than the tree:
+
+- Suites before tagging: flashruntime **661 passed**, 7 skipped, 20 deselected;
+  flashnode **392 passed**, 6 deselected. CI green on `bounded-influence`
+  (run 30797814156). `main` fast-forwarded to `01f029b`.
+- `flashruntime-v0.4.2` → `pypi-publish` success; confirmed on PyPI's JSON API
+  AND simple index, then installed into a clean venv and `ExecutionEvidence`
+  imported from it before the agent was tagged.
+- `flashnode-v0.3.3` → all four jobs green **including `resolvable`**, the one
+  that installs the built wheel against PyPI alone. Clean-venv install resolves
+  `flashnode 0.3.3 / flashruntime 0.4.2` and the agent reports 0.3.3.
+- Pins moved (four sites): `apps/api/pyproject.toml`, `render.yaml` ×2 (dev +
+  prod coordinators), `Makefile` `RUNTIME_VERSION`; plus `NODE_VERSION 0.3.3`.
+- Against the PUBLISHED wheels, not the working tree: e2e **67 passed**
+  (2m55s), apps/api **504 passed**, 1 skipped, 1 xfailed.
+
+Gotchas:
+1. **PyPI's JSON API and simple index are Fastly-cached, and a plain query can
+   read stale for minutes after a successful upload.** The first check said
+   "0.4.2 does not exist" while the publish job's own log showed two 200 OKs
+   and the release URL. Do not conclude a release failed from a single
+   uncached-looking read — check the job log, then re-query with
+   `Cache-Control: no-cache`. Same root cause as the `uv pip install
+   --refresh` gotcha from 0.3.1.
+2. **`release-flashruntime` reports overall FAILURE on a successful release.**
+   `docs-deploy (GitHub Pages)` has failed for both 0.4.1 and 0.4.2, *after*
+   `pypi-publish` succeeded. Judge the release by the publish job. The Pages
+   deploy is genuinely broken and is now the oldest un-triaged red.
+3. `.venv/bin/python -m pytest` does NOT put `python` on PATH, so
+   `test_sklearn_sweep_end_to_end` fails with `No such file or directory:
+   'python'` — the example's argv is a bare `python`. Export
+   `PATH=$PWD/.venv/bin:$PATH` instead; it is a harness artifact, not a
+   regression.
+
+Next: Blueprint-sync then deploy, so the coordinator that receives evidence is
+the one that understands it. Parking lot: the `pytorch-cuda` image build's
+CUDA-verify step is red on `main` while the image itself is proven good (the
+RTX 4090 run pulled `2026.08.2` and reported cu124) — a broken check, not a
+broken image. flashruntime's `CHANGELOG.md` still reads `[0.2.0] - Unreleased`
+at package version 0.4.2, and it ships in the wheel.
+
 ### 2026-08-03 — Fix the fedavg closed-laptop flake by enforcing round 0's quorum
 
 What/why: closes the flake logged below, which gated production CI and failed
