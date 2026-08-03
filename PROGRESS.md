@@ -172,6 +172,55 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — GPU support validated on real hardware (RTX 4090, ~$0.15)
+
+What/why: GPU detection, advertisement and placement had never met an NVIDIA
+driver. Task 11 of the GPU plan, run against a rented RunPod RTX 4090 using
+the RELEASED artifacts from PyPI (flashnode 0.3.2, flashruntime 0.4.1) — not a
+working tree.
+
+How verified — five things, each of which could only be shown here:
+
+1. `nvidia-smi --query-gpu=index,name,memory.total,driver_version,compute_cap`
+   returned all five fields on driver 570.169, so the probe's fallback query
+   (for older drivers that reject `compute_cap` outright) was not needed.
+2. `probe_gpus()` → `index=0, 'NVIDIA GeForce RTX 4090', 24564 MB,
+   driver '570.169', compute_capability '8.9'`.
+3. The full `NodeRegistration` carried
+   `capabilities.gpus = [{index: 0, name: ..., memory_total_mb: 24564, ...}]`
+   — the shape the coordinator actually receives.
+4. `IsolationAwarePlacement` against that REAL registration:
+   `gpus:1` on the GPU host → True; on a CPU-only host → False;
+   `gpus:2` on the 1-GPU host → False; a no-GPU task → True. 4/4.
+5. `ghcr.io/zolli-labs/flashml-pytorch-cuda:2026.08.2` pulled **anonymously**
+   (RunPod holds no credential for our registry) and reported
+   `TORCH 2.4.1+cu124 / CUDA_BUILD 12.4 / CUDA_AVAILABLE True /
+   DEVICE NVIDIA GeForce RTX 4090`.
+
+Gotchas:
+1. **RunPod pods are themselves containers and have NO Docker daemon**
+   (`docker: NOT INSTALLED`). So `--gpus` reaching a real daemon, and the full
+   claim → run-in-container → commit path, remain UNPROVEN. That needs a host
+   with both an NVIDIA GPU and Docker; the owner's Ubuntu box is CPU-only.
+   This is the honest remaining gap — the gate and the probe are proven, the
+   executor half is not.
+2. **The image is heavier than the spec assumed.** The pull took ~4.5 minutes
+   on a datacenter connection before the container could start. On a
+   volunteer's home upload that is materially worse, which strengthens the
+   case for `nvidia/cuda:12.4.1-base` (92 MB) over `-runtime-` (1466 MB) —
+   torch's cu124 wheels ship their own CUDA libraries anyway. Still not
+   changed: it is a spec decision and guessing wrong fails only on someone
+   else's machine.
+3. **`list-gpu-types` availability is misleading.** RTX 4090 reports
+   `availability: HIGH` in aggregate while nearly every datacenter reads
+   `NONE`; community stock also evaporated between query and create three
+   times running. Secure cloud ($0.69/hr vs $0.34) worked first try. Budget
+   the difference rather than retrying community.
+
+Next: the executor half needs GPU+Docker hardware. Parking lot: `-base-` image
+switch; result verification (still ABCs); a friend completing the §10
+run-through unaided.
+
 ### 2026-08-03 — Two machines, two architectures, credited in production (verified)
 
 What/why: M1 item 4 — "contributions from more than one machine" — has been
