@@ -16,6 +16,7 @@ Runs against the same migrated Postgres as the rest of the suite, reusing
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from flashml_cloud_api.auth import (
     hash_invite_token,
@@ -72,6 +73,25 @@ def _invite(client, owner: str, pool_id: str, **body):
     return client.post(
         f"/v1alpha1/pools/{pool_id}/invites", json=body, headers=_auth(owner)
     )
+
+
+def _invite_count(db, pool_id: str) -> int:
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.pool_invites where pool_id = %s",
+            (pool_id,),
+        )
+        return cur.fetchone()["n"]
+
+
+def _invite_expires_at(db, token: str):
+    with db.cursor() as cur:
+        cur.execute(
+            "select expires_at from public.pool_invites where token_hash = %s",
+            (hash_invite_token(token),),
+        )
+        row = cur.fetchone()
+        return row["expires_at"] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +225,95 @@ def test_owner_creating_an_invite_on_an_unknown_pool_is_404(make_client, db):
     owner = _new_user(db)
     r = _invite(client, owner, str(uuid.uuid4()))
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# invite creation: expires_hours boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_a_custom_expires_hours_is_honored_in_the_stored_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    r = _invite(client, owner, pool["id"], expires_hours=1)
+    assert r.status_code == 201, r.text
+    token = r.json()["token"]
+
+    expires_at = _invite_expires_at(db, token)
+    assert expires_at is not None
+    now = datetime.now(timezone.utc)
+    # Close to now + 1h — and, just as importantly, nowhere near the 168h
+    # (7 day) default, which is what would come back if expires_hours were
+    # silently ignored.
+    assert now + timedelta(minutes=50) < expires_at < now + timedelta(minutes=70)
+
+
+def test_expires_hours_zero_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], expires_hours=0)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_expires_hours_negative_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], expires_hours=-5)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_expires_hours_non_numeric_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], expires_hours="soon")
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_expires_hours_boolean_is_rejected_and_creates_no_row(make_client, db):
+    """``bool`` is an ``int`` subclass in Python — ``True`` must not sneak
+    past the numeric check and silently become a 1-hour invite."""
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], expires_hours=True)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_expires_hours_over_the_cap_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], expires_hours=2161)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_expires_hours_exactly_at_the_cap_is_accepted(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    r = _invite(client, owner, pool["id"], expires_hours=2160)
+    assert r.status_code == 201, r.text
 
 
 # ---------------------------------------------------------------------------

@@ -120,6 +120,13 @@ MEDIA_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]{1,64}/[A-Za-z0-9!#$&^_.+-]{1,
 #: and completions are a few hundred bytes; nothing legitimate is close.
 MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
 
+#: Bounds on POST /v1alpha1/pools/{id}/invites' expires_hours. A week by
+#: default — long enough to actually reach a teammate, short enough that a
+#: forgotten link does not stay live indefinitely; the cap keeps a caller
+#: from minting a de-facto permanent credential by mistake.
+DEFAULT_INVITE_EXPIRES_HOURS = 24 * 7
+MAX_INVITE_EXPIRES_HOURS = 24 * 90
+
 #: Largest artifact body the API will buffer, overridable per deployment.
 #: Every proxied upload is read fully into memory before it is forwarded, so
 #: without a ceiling one authenticated volunteer could exhaust the API's
@@ -931,13 +938,6 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown pool")
         members = dbmod.list_pool_members(db, pool_id)
         return {**_jsonable(pool), "members": [_jsonable(m) for m in members]}
-
-    #: Bounds on POST /v1alpha1/pools/{id}/invites' expires_hours. A week by
-    #: default — long enough to actually reach a teammate, short enough that
-    #: a forgotten link does not stay live indefinitely; the cap keeps a
-    #: caller from minting a de-facto permanent credential by mistake.
-    DEFAULT_INVITE_EXPIRES_HOURS = 24 * 7
-    MAX_INVITE_EXPIRES_HOURS = 24 * 90
 
     @app.post("/v1alpha1/pools/{pool_id}/invites", status_code=201, tags=["browser"])
     async def create_pool_invite_route(
