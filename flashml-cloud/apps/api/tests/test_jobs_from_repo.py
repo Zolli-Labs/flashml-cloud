@@ -636,3 +636,128 @@ def test_a_refused_submission_writes_no_jobs_row(make_client, db, transport):
     r = _post(client, _jwt(alice))
     assert r.status_code == 422
     assert _job_rows(db, alice) == []
+
+
+# ---------------------------------------------------------------------------
+# 8. pool-scoped submission — the waiver exists iff the pool does
+# ---------------------------------------------------------------------------
+
+
+def test_a_pool_member_submits_with_pool_and_the_row_carries_it(
+    make_client, db, transport
+):
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    alice = _new_user(db)
+    pool = dbmod.create_pool(db, name="Ada's Team", owner_id=alice)
+    pool_id = str(pool["id"])
+
+    r = _post(client, _jwt(alice), pool=pool_id)
+    assert r.status_code == 201, r.text
+
+    row = _job_rows(db, alice)[0]
+    assert str(row["pool_id"]) == pool_id
+    assert row["source"]["pool"] == pool_id
+
+    spec = transport.submitted[0]["spec"]
+    assert spec["isolation"] == {"tier": "sandboxed", "allowFallback": True}
+    assert spec["placement"]["pool"] == pool_id
+
+
+def test_a_non_member_submitting_to_a_pool_is_404(make_client, db, transport):
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    owner = _new_user(db)
+    outsider = _new_user(db)
+    pool_id = str(dbmod.create_pool(db, name="Ada's Team", owner_id=owner)["id"])
+
+    r = _post(client, _jwt(outsider), pool=pool_id)
+    assert r.status_code == 404
+    assert transport.requests == []
+    assert _job_rows(db, outsider) == []
+
+
+def test_an_unknown_pool_id_is_404(make_client, db, transport):
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice), pool=str(uuid.uuid4()))
+    assert r.status_code == 404
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
+def test_an_unadmitted_user_submitting_with_a_pool_is_403_not_404(make_client, db):
+    """Admission is checked before the pool lookup — same ordering as every
+    other route here: an un-admitted account never learns whether the pool
+    id it guessed is even real."""
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    owner = _new_user(db)
+    pool_id = str(dbmod.create_pool(db, name="Ada's Team", owner_id=owner)["id"])
+    stranger = _new_user(db, admitted=False)
+
+    r = _post(client, _jwt(stranger), pool=pool_id)
+    assert r.status_code == 403
+
+
+def test_no_pool_field_is_unchanged(make_client, db, transport):
+    """The regression guard: a plain from-repo submission with no `pool`
+    key carries no pool_id and no placement waiver, exactly as before."""
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+
+    row = _job_rows(db, alice)[0]
+    assert row["pool_id"] is None
+    assert "pool" not in row["source"]
+
+    spec = transport.submitted[0]["spec"]
+    assert spec["isolation"] == {"tier": "sandboxed", "allowFallback": False}
+
+
+def test_raw_job_submission_refuses_an_allow_fallback_spec(make_client, db, transport):
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={"spec": {"isolation": {"allowFallback": True}}},
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 400
+    assert "from-repo" in r.json()["detail"]
+    assert transport.requests == []
+
+
+def test_raw_job_submission_refuses_a_pool_placement(make_client, db, transport):
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={"spec": {"placement": {"pool": "some-pool"}}},
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 400
+    assert "from-repo" in r.json()["detail"]
+    assert transport.requests == []
+
+
+def test_raw_job_submission_with_placement_pool_any_is_still_allowed(
+    make_client, db, transport
+):
+    """`placement.pool: "any"` is the same as omitting it — the explicit
+    default, not a waiver request — so the raw route must not refuse it."""
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={
+            "metadata": {"name": "demo", "labels": {}},
+            "spec": {"placement": {"pool": "any"}},
+        },
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 201, r.text

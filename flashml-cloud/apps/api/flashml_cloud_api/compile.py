@@ -15,13 +15,20 @@ that recipe shape everything here:
   user's own code reaches a volunteer node (see the plan's "Why no image
   build").
 
-**Isolation is fixed at ``sandboxed`` with ``allowFallback: false``, and
-that is not configurable from ``flashml.yaml``.** ``CommandRecipe`` refuses
-any other tier for a command job and rejects the ``allowFallback`` waiver
-outright: a submitter can never downgrade the isolation their own arbitrary
-code runs under. This module does not expose a knob for it, does not read
-one from the config, and does not try — the only correct value is the one
-the recipe would accept anyway.
+**Isolation is fixed at ``sandboxed``, and that is not configurable from
+``flashml.yaml``.** ``CommandRecipe`` refuses any other tier for a command
+job: a submitter can never downgrade the isolation their own arbitrary code
+runs under. This module does not expose a knob for it, does not read one
+from the config, and does not try — the only correct value is the one the
+recipe would accept anyway.
+
+The one caller-settable exception is ``allowFallback``, and it is not a
+``flashml.yaml`` key either — it is the ``pool`` keyword both compilers
+below take, threaded in from the API route after ``fetch_pool_for_member``
+has confirmed the submitter belongs to the pool named. ``CommandRecipe``
+refuses the waiver on its own unless ``placement.pool`` is also set, so the
+two are coupled bidirectionally: allowFallback iff pool, enforced upstream
+and pinned by tests here both ways.
 
 The compiled spec is validated through the real ``JobSpec`` model before it
 is returned, so a spec this module could not have built correctly fails
@@ -289,12 +296,17 @@ def compile_to_jobspec(
     image: CuratedImage,
     code_artifact_uri: str,
     job_name: str,
+    *,
+    pool: str | None = None,
 ) -> dict[str, Any]:
     """Compile a validated config into the JobSpec dict the coordinator takes.
 
     ``code_artifact_uri`` is the ``artifact://`` URI the repo tarball was
     staged at; it becomes the ``code`` input the executor downloads to
     ``/work/inputs/`` before the command runs.
+
+    ``pool`` is the one exception to "fixed and not configurable" — see the
+    ``isolation``/``placement`` lines below.
     """
     if not str(code_artifact_uri).startswith("artifact://"):
         # CommandRecipe.validate_params refuses anything else; catching it
@@ -356,11 +368,14 @@ def compile_to_jobspec(
             "image": {"repository": repository, "tag": tag},
             "workload": {"type": "command", "parameters": parameters},
             "resources": _resources(config),
-            # Fixed, and deliberately not configurable — see the module
-            # docstring. CommandRecipe refuses any other tier and rejects
-            # the allowFallback waiver; a submitter must never be able to
-            # choose where their own arbitrary code runs unsandboxed.
-            "isolation": {"tier": "sandboxed", "allowFallback": False},
+            # The one exception to "fixed and not configurable": a POOL job
+            # carries the waiver, because the seventh placement gate confines
+            # it to machines whose owners joined the submitter's team. The
+            # invariant is bidirectional and pinned by tests both ways:
+            # allowFallback iff pool. CommandRecipe enforces the same rule
+            # upstream, so a spec that violates it cannot even expand.
+            "isolation": {"tier": "sandboxed", "allowFallback": pool is not None},
+            "placement": {"pool": pool if pool is not None else "any"},
             "artifacts": {"outputPrefix": "artifact://jobs/{job_id}/"},
         },
     }
@@ -397,6 +412,7 @@ def compile_federated_round(
     *,
     round_index: int,
     weights_uri: str | None,
+    pool: str | None = None,
 ) -> dict[str, Any]:
     """Compile **one round** of a ``mode: federated`` config into a JobSpec.
 
@@ -504,10 +520,12 @@ def compile_federated_round(
             "image": {"repository": repository, "tag": tag},
             "workload": {"type": "command", "parameters": parameters},
             "resources": _resources(config),
-            # Same fixed isolation as every other repo job — see the module
-            # docstring. Federation changes what the tasks compute, not what
-            # they are allowed to run as.
-            "isolation": {"tier": "sandboxed", "allowFallback": False},
+            # Same coupling as compile_to_jobspec — see its comment. A
+            # federated round is an ordinary command job, and pool-scoping
+            # changes what the tasks compute, not the rule that governs
+            # where they may run unsandboxed.
+            "isolation": {"tier": "sandboxed", "allowFallback": pool is not None},
+            "placement": {"pool": pool if pool is not None else "any"},
             "artifacts": {"outputPrefix": "artifact://jobs/{job_id}/"},
         },
     }

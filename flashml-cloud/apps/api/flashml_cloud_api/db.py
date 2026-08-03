@@ -373,6 +373,7 @@ def insert_job(
     source: dict[str, Any] | None,
     spec: dict[str, Any] | None,
     status: str,
+    pool_id: str | None = None,
 ) -> None:
     """Record a job as owned by ``owner_id``.
 
@@ -382,12 +383,18 @@ def insert_job(
     consults it before ever forwarding to the coordinator, so a job the
     coordinator knows about but this table doesn't is simply invisible to
     every caller, including its nominal owner.
+
+    ``pool_id`` is ``None`` for every job outside a pool — which is every
+    job before pools existed and every raw ``/v1alpha1/jobs`` submission
+    today (that route refuses a pool spec outright). Only the from-repo
+    route ever passes one, and only after ``fetch_pool_for_member`` has
+    already confirmed the caller belongs to it.
     """
     with db.cursor() as cur:
         cur.execute(
             """
-            insert into public.jobs (id, owner_id, name, source, spec, status)
-            values (%s, %s, %s, %s, %s, %s)
+            insert into public.jobs (id, owner_id, name, source, spec, status, pool_id)
+            values (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 job_id,
@@ -396,6 +403,7 @@ def insert_job(
                 Json(source) if source is not None else None,
                 Json(spec) if spec is not None else None,
                 status,
+                pool_id,
             ),
         )
 

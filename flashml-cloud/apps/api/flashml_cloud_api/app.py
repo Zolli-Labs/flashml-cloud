@@ -1106,6 +1106,22 @@ def create_cloud_app(
         # owner_id is never accepted from the body — whatever the caller
         # put there (if anything) is simply not forwarded or looked at.
         payload.pop("owner_id", None)
+        # A pool waiver requires `fetch_pool_for_member` to have confirmed
+        # membership first, and this route never looks the caller up in
+        # `pool_members` — only /v1alpha1/jobs/from-repo does. So a raw spec
+        # carrying either half of the pool coupling is refused outright,
+        # named at the path that CAN grant it, rather than forwarded to a
+        # coordinator that would place a stranger's arbitrary code on a
+        # volunteer machine sandboxed only because the placement gate never
+        # got the chance to confine it to a team.
+        spec_inner = payload.get("spec") if isinstance(payload.get("spec"), dict) else {}
+        isolation = spec_inner.get("isolation") or {}
+        placement = spec_inner.get("placement") or {}
+        if isolation.get("allowFallback") or placement.get("pool", "any") != "any":
+            raise HTTPException(
+                status_code=400,
+                detail="pool jobs must be submitted via /v1alpha1/jobs/from-repo",
+            )
         r = await coordinator.forward(
             "POST",
             "/v1alpha1/jobs",
@@ -1162,6 +1178,15 @@ def create_cloud_app(
             raise HTTPException(status_code=413, detail="request body too large")
         payload = await _json_object(request)
         owner, name, ref = _parse_repo_ref(payload.get("repo"), payload.get("ref"))
+
+        # Optional pool scoping. Checked before a single network call: a
+        # pool id the caller does not belong to (or that does not exist —
+        # 404 in both cases, same doctrine as `fetch_pool_for_member`
+        # itself, so a guess cannot distinguish them) must not spend the
+        # cost of fetching and preflighting the repo first.
+        pool = _opt_str(payload.get("pool"))
+        if pool is not None and dbmod.fetch_pool_for_member(db, pool, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
 
         with tempfile.TemporaryDirectory(prefix="flashml-repo-") as tmpdir:
             dest = Path(tmpdir) / "src"
@@ -1228,10 +1253,12 @@ def create_cloud_app(
             if config.is_federated:
                 spec = compile_federated_round(
                     config, image, code_uri, config.name,
-                    round_index=0, weights_uri=None,
+                    round_index=0, weights_uri=None, pool=pool,
                 )
             else:
-                spec = compile_to_jobspec(config, image, code_uri, config.name)
+                spec = compile_to_jobspec(
+                    config, image, code_uri, config.name, pool=pool
+                )
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
 
@@ -1256,27 +1283,31 @@ def create_cloud_app(
             # request at all — the driver submits round 0 itself, so a run
             # can never end up with a round the driver does not know it owns.
             job_id = fedavgmod.new_federated_job_id()
+            federated_source: dict[str, Any] = {
+                "type": "github",
+                "owner": owner,
+                "repo": name,
+                "ref": ref,
+                "code_artifact": code_uri,
+                # Only a federated row carries these. An independent
+                # row's `source` is byte-identical to what it has always
+                # been, so nothing reading it has to learn a new shape.
+                "mode": config.mode,
+                "rounds": config.rounds,
+                "shards": config.shards,
+                "min_participants": config.min_participants,
+            }
+            if pool is not None:
+                federated_source["pool"] = pool
             dbmod.insert_job(
                 db,
                 job_id=job_id,
                 owner_id=user_id,
                 name=spec["metadata"]["name"],
-                source={
-                    "type": "github",
-                    "owner": owner,
-                    "repo": name,
-                    "ref": ref,
-                    "code_artifact": code_uri,
-                    # Only a federated row carries these. An independent
-                    # row's `source` is byte-identical to what it has always
-                    # been, so nothing reading it has to learn a new shape.
-                    "mode": config.mode,
-                    "rounds": config.rounds,
-                    "shards": config.shards,
-                    "min_participants": config.min_participants,
-                },
+                source=federated_source,
                 spec=spec,
                 status="PENDING",
+                pool_id=pool,
             )
             start_federated_job(
                 fedavgmod.FederatedRun(
@@ -1285,6 +1316,7 @@ def create_cloud_app(
                     config=config,
                     image=image,
                     code_artifact_uri=code_uri,
+                    pool=pool,
                 ),
                 settings=settings,
                 connect=request.app.state.connect,
@@ -1320,6 +1352,15 @@ def create_cloud_app(
             log.error(json.dumps({"text": "job accepted with no job_id in response"}))
             raise HTTPException(status_code=502, detail="coordinator returned no job id")
 
+        independent_source: dict[str, Any] = {
+            "type": "github",
+            "owner": owner,
+            "repo": name,
+            "ref": ref,
+            "code_artifact": code_uri,
+        }
+        if pool is not None:
+            independent_source["pool"] = pool
         dbmod.insert_job(
             db,
             job_id=job_id,
@@ -1327,15 +1368,10 @@ def create_cloud_app(
             # and there is no branch here that could give it one.
             owner_id=user_id,
             name=spec["metadata"]["name"],
-            source={
-                "type": "github",
-                "owner": owner,
-                "repo": name,
-                "ref": ref,
-                "code_artifact": code_uri,
-            },
+            source=independent_source,
             spec=spec,
             status=str(job.get("state") or "PENDING"),
+            pool_id=pool,
         )
         return Response(
             content=json.dumps({**job, "findings": rendered}),

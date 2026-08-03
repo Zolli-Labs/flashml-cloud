@@ -187,6 +187,61 @@ def test_the_compiled_spec_is_accepted_by_the_real_command_recipe():
 
 
 # ---------------------------------------------------------------------------
+# pool: the one exception to "fixed and not configurable" — allowFallback
+# iff pool, bidirectional and pinned both ways.
+# ---------------------------------------------------------------------------
+
+
+def test_pool_sets_placement_and_couples_the_waiver():
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo", pool="p-1")
+    assert spec["spec"]["placement"]["pool"] == "p-1"
+    assert spec["spec"]["isolation"] == {"tier": "sandboxed", "allowFallback": True}
+
+
+def test_no_pool_is_byte_identical_to_before():
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    assert spec["spec"]["isolation"] == {"tier": "sandboxed", "allowFallback": False}
+    assert spec["spec"]["placement"]["pool"] == "any"
+
+
+def test_the_pool_spec_is_accepted_by_the_real_command_recipe():
+    from flashruntime.recipes.command import CommandRecipe
+
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo", pool="p-1")
+    tasks = CommandRecipe().expand("job-123", JobSpec.model_validate(spec))
+    assert tasks[0].payload["pool"] == "p-1"
+    assert tasks[0].payload["isolation"]["allowFallback"] is True
+
+
+def test_federated_round_pool_sets_placement_and_couples_the_waiver():
+    """Both compilers carry the same rule — a federated round is an
+    ordinary command job, and the pool coupling is not special-cased away
+    for it."""
+    config = parse_flashml_yaml(
+        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+    )
+    spec = compile_federated_round(
+        config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+        pool="p-1",
+    )
+    assert spec["spec"]["placement"]["pool"] == "p-1"
+    assert spec["spec"]["isolation"] == {"tier": "sandboxed", "allowFallback": True}
+
+
+def test_federated_round_without_pool_is_byte_identical_to_before():
+    config = parse_flashml_yaml(
+        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+    )
+    spec = compile_federated_round(
+        config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+    )
+    assert spec["spec"]["isolation"] == {"tier": "sandboxed", "allowFallback": False}
+    assert spec["spec"]["placement"]["pool"] == "any"
+
+
+# ---------------------------------------------------------------------------
 # sweeps
 # ---------------------------------------------------------------------------
 
