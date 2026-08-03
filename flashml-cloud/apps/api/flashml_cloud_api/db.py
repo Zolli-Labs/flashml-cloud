@@ -731,6 +731,63 @@ def claim_attempt_credit(
 # verifications
 # ---------------------------------------------------------------------------
 
+#: Most peer samples one verdict will read. The timing slice runs on the
+#: credit hot path, so its cost must not scale with the size of the job: a
+#: sweep with ten thousand tasks would otherwise pull ten thousand rows to
+#: compute one median. Newest first, because "how long does this work take"
+#: is a question about now.
+PEER_SAMPLE_LIMIT = 200
+
+
+def peer_task_durations(
+    db: psycopg.Connection,
+    *,
+    job_id: str,
+    machine_id: str,
+    limit: int = PEER_SAMPLE_LIMIT,
+) -> list[float]:
+    """Other machines' recorded durations on ``job_id``. Never this one's.
+
+    **The exclusion is the point of the function.** A machine's own history
+    must not form its own baseline: return in 0.3s often enough and 0.3s
+    becomes the median it is measured against, so a consistently fast liar
+    passes forever while the first honest machine to join is the one that
+    looks anomalous. The degenerate case is worse still — a machine that has
+    worked a job alone would be compared only against itself, which always
+    passes, and "nobody has ever checked this" would be recorded as ``pass``.
+
+    Rows with no ``duration_s`` are excluded rather than returned as
+    ``None``. ``fedavg.on_round`` credits from the coordinator's task view,
+    which reports no duration, so those rows are real contributions and
+    useless as timing evidence; letting them through would count toward the
+    peer minimum on a sample of nothing.
+
+    Cast to ``float`` here for the same reason ``claim_attempt_credit``
+    casts: ``duration_s`` is ``numeric`` and psycopg returns ``Decimal``,
+    which would otherwise be mixed with float thresholds in the verdict.
+
+    The peer group is one ``job_id``. For a federated run that is one
+    *round's* coordinator job — the same key ``record_contributions`` uses —
+    so a round's peer group is only as large as its quorum, which on a small
+    fleet means the timing slice usually answers ``unknown`` for federated
+    work. That is the correct answer, not a bug to route around.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select duration_s
+              from public.contributions
+             where job_id = %s
+               and machine_id <> %s
+               and duration_s is not null
+             order by accepted_at desc
+             limit %s
+            """,
+            (job_id, machine_id, limit),
+        )
+        return [float(row["duration_s"]) for row in cur.fetchall()]
+
+
 def record_verification(
     db: psycopg.Connection,
     *,

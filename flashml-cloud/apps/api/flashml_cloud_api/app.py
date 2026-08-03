@@ -60,6 +60,7 @@ from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api import repo as repomod
+from flashml_cloud_api import verify as verifymod
 from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
     AuthError,
@@ -1529,6 +1530,56 @@ def create_cloud_app(
                                     "duration_s": credit["duration_s"],
                                 }],
                             )
+                            # VERIFICATION, SLICE 1 — advisory, and it stays
+                            # advisory. The verdict is written to a row and
+                            # that is the whole of its effect: the credit
+                            # above has already been written and is never
+                            # taken back, the response below is the
+                            # coordinator's unaltered, and no lease, no
+                            # placement and no payout consults this. A
+                            # verifier that can refuse work takes the fleet
+                            # down on a false positive, and the API cannot
+                            # tell "cheated" from "the input was cached and
+                            # the machine is fast".
+                            #
+                            # Its own try/except rather than leaning on the
+                            # outer one, for two reasons: an exception here
+                            # would otherwise be logged as a failure to
+                            # CREDIT, which by this point is a lie; and
+                            # nesting makes it structurally impossible for
+                            # this block to skip anything the agent depends
+                            # on. Best-effort, exactly like
+                            # `touch_machine_last_seen` above.
+                            #
+                            # Ordering matters and is deliberate: this runs
+                            # AFTER `record_contributions`, and the peer
+                            # query excludes this machine — so the row just
+                            # written cannot become part of the baseline this
+                            # machine is measured against.
+                            try:
+                                peers = dbmod.peer_task_durations(
+                                    conn,
+                                    job_id=credit["job_id"],
+                                    machine_id=machine.id,
+                                )
+                                verdict, detail = verifymod.timing_verdict(
+                                    peers, credit["duration_s"]
+                                )
+                                dbmod.record_verification(
+                                    conn,
+                                    machine_id=machine.id,
+                                    job_id=credit["job_id"],
+                                    task_id=credit["task_id"],
+                                    slice_name="timing",
+                                    verdict=verdict,
+                                    detail=detail,
+                                )
+                            except Exception:
+                                log.warning(
+                                    "could not record a timing verdict for "
+                                    "machine %s; the credit above stands",
+                                    machine.id,
+                                )
                 except Exception:
                     log.warning(
                         "could not credit accepted attempt for machine %s",

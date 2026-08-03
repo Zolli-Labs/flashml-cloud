@@ -27,11 +27,15 @@ import psycopg
 import pytest
 
 from flashml_cloud_api import db as dbmod
+from flashml_cloud_api import verify
 
 from test_jobs_from_repo import (
     _new_user,
     db,  # noqa: F401 - fixture
 )
+
+NAN = float("nan")
+INF = float("inf")
 
 RUN_MARKER = uuid.uuid4().hex[:8]
 
@@ -242,3 +246,256 @@ def test_two_verdicts_for_one_task_both_survive(db):
     assert {(r["slice"], r["verdict"]) for r in rows} == {
         ("timing", "pass"), ("evidence", "flag")
     }
+
+
+# ---------------------------------------------------------------------------
+# 2. timing_verdict — slice 1, and the wrong-`pass` paths it must not take
+#
+# Peers are OTHER machines' `duration_s` on the same job. The function is
+# pure: given a peer sample and one observation it returns a verdict and
+# what it saw. Every test below that ends in `unknown` is a test that a
+# particular kind of ignorance did not get written down as `pass`.
+# ---------------------------------------------------------------------------
+
+BASELINE = [8.0, 9.0, 10.0]      # median 9.0 -> floor 1.8 at floor_ratio 0.2
+
+
+def test_an_ordinary_duration_against_a_real_baseline_passes():
+    verdict, detail = verify.timing_verdict(BASELINE, 9.4)
+    assert verdict == "pass"
+    assert detail["peer_median_s"] == 9.0
+
+
+def test_a_fast_but_honest_machine_at_half_the_median_passes():
+    """The false positive this slice must not produce.
+
+    A desktop finishing in half the time a laptop takes is the fleet working
+    as intended — the observed range on real work is 5.5s to 37.5s, a 7x
+    spread, and a floor anywhere near the median would flag the fast half of
+    an honest fleet.
+    """
+    assert verify.timing_verdict(BASELINE, 4.5)[0] == "pass"
+
+
+def test_an_instant_return_at_a_twentieth_of_the_median_is_flagged():
+    """The attack: a result committed 0.45s after the claim is not a fast
+    machine, it is a machine that did not download the input."""
+    verdict, detail = verify.timing_verdict(BASELINE, 0.45)
+    assert verdict == "flag"
+    assert detail["floor_s"] == 1.8
+
+
+def test_exactly_at_the_floor_is_not_a_flag():
+    """`<` and not `<=`, pinned: the boundary belongs to the machine."""
+    assert verify.timing_verdict(BASELINE, 9.0 * 0.2)[0] == "pass"
+
+
+def test_two_peers_are_not_a_baseline():
+    """One sample short of `min_peers` and the answer is `unknown`, however
+    suspicious the observation looks. This is the rule that costs the most
+    signal and is worth every bit of it."""
+    verdict, detail = verify.timing_verdict([9.0, 9.0], 0.01)
+    assert verdict == "unknown"
+    assert detail["reason"] == "too_few_peers"
+
+
+def test_no_peers_at_all_is_unknown_never_pass():
+    """A first-of-its-kind task has no distribution to compare against
+    (§8.8). A cold-start fleet verifies nothing by timing, and must say so."""
+    assert verify.timing_verdict([], 0.01)[0] == "unknown"
+    assert verify.timing_verdict([], 9.0)[0] == "unknown"
+
+
+def test_peers_that_are_all_zero_are_no_baseline_at_all():
+    """The wrong-`pass` path the naive formula takes.
+
+    `observed < median(peers) * floor_ratio` with a peer median of 0.0 is
+    `0.01 < 0.0`, which is False, which reads as `pass` — so a job on which
+    every other machine also returned instantly would certify the next liar
+    as honest. A distribution of zeros is not a distribution.
+    """
+    verdict, detail = verify.timing_verdict([0.0, 0.0, 0.0, 0.0], 0.01)
+    assert verdict == "unknown"
+    assert verdict != "pass"
+    assert detail["peers"] == 0
+
+
+def test_non_finite_peers_are_no_baseline_either():
+    """`statistics.median` of a list containing NaN returns whichever value
+    the sort happened to leave in the middle — a number with no meaning that
+    would then be compared against as if it had one."""
+    for junk in ([NAN] * 4, [INF] * 4, [NAN, INF, NAN, INF]):
+        assert verify.timing_verdict(junk, 0.01)[0] == "unknown"
+
+
+def test_unusable_peers_do_not_count_toward_the_baseline():
+    """Four peer rows, two usable — that is two peers, not four. Counting
+    the unusable ones would clear the `min_peers` gate on a sample that
+    cannot support a median."""
+    verdict, detail = verify.timing_verdict([9.0, 9.0, NAN, 0.0], 0.01)
+    assert verdict == "unknown"
+    assert detail["peers"] == 2
+
+
+def test_a_zero_duration_is_flagged_not_a_crash():
+    verdict, detail = verify.timing_verdict(BASELINE, 0.0)
+    assert verdict == "flag"
+    assert detail["reason"] == "non_positive_observed"
+
+
+def test_a_negative_duration_is_flagged_not_a_crash():
+    assert verify.timing_verdict(BASELINE, -3.0)[0] == "flag"
+
+
+def test_a_zero_duration_is_flagged_even_with_no_peers():
+    """Ordering decision, pinned because both orderings are defensible.
+
+    A non-positive elapsed is impossible *without reference to any peer*:
+    both timestamps are the API's own, and no machine downloads an input,
+    computes and uploads a result in zero seconds. So the impossibility
+    check runs before the baseline gate. It cannot produce a wrong `pass`
+    either way; it can only turn an `unknown` into a `flag`, and nothing is
+    enforced from a flag.
+    """
+    assert verify.timing_verdict([], 0.0)[0] == "flag"
+
+
+def test_an_observation_that_is_not_a_finite_number_is_unknown():
+    """NaN loses every comparison, so `NaN < floor` is False and the naive
+    formula answers `pass` — certifying a machine on a duration we never
+    actually learned."""
+    for junk in (NAN, INF, -INF):
+        verdict, detail = verify.timing_verdict(BASELINE, junk)
+        assert verdict == "unknown", junk
+        assert detail["reason"] == "no_observation"
+
+
+def test_the_detail_records_what_the_check_actually_saw():
+    """A verdict nobody can argue with is not evidence. The row has to carry
+    enough to re-derive it: the observation, the baseline, how many samples
+    it rested on, and the thresholds in force at the time — which are
+    tunable, so a row read a year later must not assume today's values."""
+    _, detail = verify.timing_verdict(BASELINE, 0.45)
+    assert detail == {
+        "observed_s": 0.45,
+        "peer_median_s": 9.0,
+        "peers": 3,
+        "floor_s": 1.8,
+        "floor_ratio": 0.2,
+        "min_peers": 3,
+    }
+
+
+def test_a_floor_ratio_that_disables_the_check_is_refused():
+    """`floor_ratio=0` makes the floor 0, which nothing can fall below, so
+    every observation would be recorded as `pass`. A verifier misconfigured
+    into certifying everything is worse than one that is switched off, so
+    this raises rather than returning a comfortable answer."""
+    for bad in (0.0, -0.1):
+        with pytest.raises(ValueError):
+            verify.timing_verdict(BASELINE, 0.45, floor_ratio=bad)
+
+
+def test_a_floor_ratio_above_one_is_refused():
+    """A floor above the peer median flags the median machine itself."""
+    with pytest.raises(ValueError):
+        verify.timing_verdict(BASELINE, 9.0, floor_ratio=1.5)
+
+
+def test_min_peers_below_one_is_refused():
+    """`min_peers=0` would take the median of an empty sample."""
+    with pytest.raises(ValueError):
+        verify.timing_verdict(BASELINE, 9.0, min_peers=0)
+
+
+def test_the_thresholds_are_tunable_and_the_verdict_follows_them():
+    strict = verify.timing_verdict(BASELINE, 3.0, floor_ratio=0.5)
+    assert strict[0] == "flag"
+    assert verify.timing_verdict(BASELINE, 3.0, floor_ratio=0.2)[0] == "pass"
+    assert verify.timing_verdict([9.0, 9.0], 9.0, min_peers=2)[0] == "pass"
+
+
+def test_the_verdict_is_only_ever_one_of_the_three_the_schema_allows():
+    """`record_verification` hands the verdict straight to a check
+    constraint. A fourth string here is an exception on the credit path."""
+    observations = [0.0, -1.0, 0.01, 1.8, 4.5, 9.0, 1e9, NAN, INF]
+    peer_sets = [[], [9.0], [9.0, 9.0], BASELINE, [0.0] * 4, [NAN] * 4]
+    for peers in peer_sets:
+        for observed in observations:
+            verdict, detail = verify.timing_verdict(peers, observed)
+            assert verdict in {"pass", "flag", "unknown"}, (peers, observed)
+            assert isinstance(detail, dict)
+
+
+# ---------------------------------------------------------------------------
+# 3. who counts as a peer
+# ---------------------------------------------------------------------------
+
+
+def _credit(db, *, machine_id: str, job_id: str, task_id: str, duration):
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.contributions"
+            "            (machine_id, job_id, task_id, duration_s)"
+            "     values (%s, %s, %s, %s)",
+            (machine_id, job_id, task_id, duration),
+        )
+
+
+def test_a_machines_own_history_is_not_its_own_peer_group(db):
+    """The decision this slice turns on.
+
+    Counting a machine's own past durations as peers hands a consistently
+    fast liar its own baseline: return in 0.3s often enough and 0.3s becomes
+    the median it is measured against, so it passes forever — and the first
+    honest machine to join is the one that looks anomalous. Worse, a machine
+    that has worked a job alone would be compared only against itself, which
+    always passes; that is "nobody has ever checked" recorded as `pass`.
+    """
+    mine, job = _enrol(db), _job()
+    _credit(db, machine_id=mine, job_id=job, task_id="task-000", duration=0.3)
+    _credit(db, machine_id=mine, job_id=job, task_id="task-001", duration=0.3)
+    _credit(db, machine_id=mine, job_id=job, task_id="task-002", duration=0.3)
+
+    assert dbmod.peer_task_durations(db, job_id=job, machine_id=mine) == []
+
+
+def test_peers_are_the_other_machines_on_the_same_job(db):
+    mine, job = _enrol(db), _job()
+    for i, seconds in enumerate((8.0, 9.0, 10.0)):
+        _credit(db, machine_id=_enrol(db), job_id=job,
+                task_id=f"task-{i:03d}", duration=seconds)
+    _credit(db, machine_id=mine, job_id=job, task_id="task-003", duration=0.3)
+
+    peers = dbmod.peer_task_durations(db, job_id=job, machine_id=mine)
+    assert sorted(peers) == [8.0, 9.0, 10.0]
+    # Floats, not Decimals: `duration_s` is numeric and psycopg hands back
+    # Decimal, which `statistics.median` would happily mix with the floats
+    # the verdict thresholds are computed in.
+    assert all(isinstance(p, float) for p in peers)
+
+
+def test_a_peer_row_with_no_recorded_duration_is_not_a_peer(db):
+    """`fedavg.on_round` credits from the coordinator's task view, which
+    reports no duration, so it writes `duration_s = null`. Those rows are
+    real contributions and useless as timing evidence — and counting them
+    toward `min_peers` would clear the baseline gate on a sample of
+    nothing."""
+    mine, job = _enrol(db), _job()
+    for i in range(3):
+        _credit(db, machine_id=_enrol(db), job_id=job,
+                task_id=f"task-{i:03d}", duration=None)
+
+    assert dbmod.peer_task_durations(db, job_id=job, machine_id=mine) == []
+
+
+def test_peers_never_come_from_another_job(db):
+    """Task cost varies by orders of magnitude between jobs, which is the
+    whole reason the floor is a fraction of a peer median rather than a
+    constant. A peer group that crossed jobs would be comparing a sweep
+    shard against a federated round."""
+    mine, job, other = _enrol(db), _job(), _job()
+    _credit(db, machine_id=_enrol(db), job_id=other, task_id="task-000",
+            duration=9.0)
+
+    assert dbmod.peer_task_durations(db, job_id=job, machine_id=mine) == []

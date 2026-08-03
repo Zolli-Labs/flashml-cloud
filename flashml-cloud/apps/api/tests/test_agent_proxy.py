@@ -37,6 +37,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
+from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api.app import DELEGATION_HEADER, create_cloud_app
 from flashml_cloud_api.settings import Settings
@@ -1116,3 +1117,218 @@ def test_completion_without_a_claim_credits_nobody(client, transport, machine, d
                   lease_id=lease_id, body={"accepted": True})
     assert r.status_code == 200
     assert _attempt_rows(db, lease_id) == []
+
+
+# ---------------------------------------------------------------------------
+# the verification layer, slice 1: timing anomalies on the credit path
+#
+# ADVISORY ONLY. Every test below asserts twice: what verdict was recorded,
+# and that the agent's completion was unaffected by it. The second assertion
+# is the one that matters — a verifier that can refuse work takes the fleet
+# down on a false positive, so a flag must withhold no credit, change no
+# response body and fail no commit.
+#
+# Design: docs/superpowers/specs/2026-08-03-result-verification-design.md §2.
+# ---------------------------------------------------------------------------
+
+
+def _verification_rows(db, job_id: str) -> list[dict]:
+    with db.cursor() as cur:
+        cur.execute(
+            "select machine_id, task_id, slice, verdict, detail"
+            "  from public.verifications where job_id = %s",
+            (job_id,),
+        )
+        return list(cur.fetchall())
+
+
+def _seed_peer_credits(db, job_id: str, durations: list[float]) -> None:
+    """Credit `len(durations)` OTHER machines on `job_id`, so the job has a
+    peer baseline this test's machine can be measured against."""
+    for i, seconds in enumerate(durations):
+        owner = _new_user(db)
+        peer = dbmod.insert_machine(
+            db, owner_id=owner, node_id=_node_id(f"peer-{uuid.uuid4().hex[:6]}"),
+            name="peer", platform="linux",
+        )
+        with db.cursor() as cur:
+            cur.execute(
+                "insert into public.contributions"
+                "            (machine_id, job_id, task_id, duration_s)"
+                "     values (%s, %s, %s, %s)",
+                (peer, job_id, f"peer-task-{i:03d}", seconds),
+            )
+
+
+def _backdate_claim(db, lease_id: str, seconds: int) -> None:
+    """Make the lease look as though it was claimed `seconds` ago.
+
+    `claim_attempt_credit` computes `now() - claimed_at`, so this is the only
+    way to give a test an observation of realistic length — a completion
+    driven through the client takes milliseconds.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts set claimed_at = now() - %s * interval '1 second'"
+            " where lease_id = %s",
+            (seconds, lease_id),
+        )
+
+
+def test_a_first_of_its_kind_task_is_unknown_never_pass(
+    client, transport, machine, db
+):
+    """No peers, so no distribution, so no verdict — and `unknown` is what
+    that gets written as (§8.8). A cold-start fleet verifies nothing by
+    timing, and recording `pass` here would turn every brand-new job into a
+    clean bill of health for whoever happened to run it first."""
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    _complete(client, transport, machine,
+              lease_id=lease_id, body={"accepted": True})
+
+    rows = _verification_rows(db, job_id)
+    assert len(rows) == 1
+    assert rows[0]["slice"] == "timing"
+    assert rows[0]["verdict"] == "unknown"
+    assert rows[0]["verdict"] != "pass"
+    assert rows[0]["detail"]["reason"] == "too_few_peers"
+    assert str(rows[0]["machine_id"]) == machine["id"]
+    assert rows[0]["task_id"] == "task-000"
+
+
+def test_an_instant_return_against_a_real_baseline_is_flagged_and_still_paid(
+    client, transport, machine, db
+):
+    """The whole point of the slice, and the whole point of it being advisory.
+
+    Three peers took ~9s on this job; this completion lands in milliseconds.
+    That is flagged — and the machine is credited anyway, because the API
+    cannot tell "cheated" from "input was cached and the machine is fast",
+    and refusing on that guess would cost a volunteer their machine.
+    """
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _seed_peer_credits(db, job_id, [8.0, 9.0, 10.0])
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    r = _complete(client, transport, machine,
+                  lease_id=lease_id, body={"accepted": True})
+
+    verdicts = _verification_rows(db, job_id)
+    assert [v["verdict"] for v in verdicts] == ["flag"]
+    assert verdicts[0]["detail"]["peer_median_s"] == 9.0
+
+    # Nothing enforced: the response is the coordinator's, unaltered...
+    assert r.status_code == 200
+    assert r.json() == {"accepted": True}
+    # ...and the credit was written exactly as it would have been.
+    credits = [row for row in _contribution_rows(db, job_id)
+               if str(row["machine_id"]) == machine["id"]]
+    assert len(credits) == 1
+
+
+def test_an_ordinary_duration_against_a_real_baseline_passes(
+    client, transport, machine, db
+):
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _seed_peer_credits(db, job_id, [8.0, 9.0, 10.0])
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+    _backdate_claim(db, lease_id, 10)
+
+    _complete(client, transport, machine,
+              lease_id=lease_id, body={"accepted": True})
+
+    rows = _verification_rows(db, job_id)
+    assert [r["verdict"] for r in rows] == ["pass"]
+    assert rows[0]["detail"]["observed_s"] >= 10.0
+
+
+def test_a_machines_own_earlier_work_is_not_its_own_baseline(
+    client, transport, machine, db
+):
+    """Self-as-peer, end to end, because getting this wrong is invisible.
+
+    This machine has three prior credits on the job at 0.3s each — the
+    profile of a node that has been returning instantly all along. If its own
+    history counted as peers, the median would be 0.3s, the floor 0.06s, and
+    the next instant return would be certified `pass`: a consistently fast
+    liar becomes its own baseline. With self excluded there are no peers at
+    all, and the honest answer is `unknown`.
+    """
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    with db.cursor() as cur:
+        for i in range(3):
+            cur.execute(
+                "insert into public.contributions"
+                "            (machine_id, job_id, task_id, duration_s)"
+                "     values (%s, %s, %s, %s)",
+                (machine["id"], job_id, f"earlier-{i:03d}", 0.3),
+            )
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    _complete(client, transport, machine,
+              lease_id=lease_id, body={"accepted": True})
+
+    rows = _verification_rows(db, job_id)
+    assert [r["verdict"] for r in rows] == ["unknown"]
+    assert rows[0]["detail"]["peers"] == 0
+
+
+def test_a_verification_write_that_fails_never_fails_the_completion(
+    client, transport, machine, db, monkeypatch
+):
+    """Best-effort, exactly like `last_seen_at` and the attempt ledger.
+
+    Verification must never break the thing it observes: if the ledger is
+    unreachable the agent still gets its answer, and — because the verdict is
+    written after the credit — the credit still lands too.
+    """
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _seed_peer_credits(db, job_id, [8.0, 9.0, 10.0])
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("verification ledger unavailable")
+
+    monkeypatch.setattr(dbmod, "record_verification", explode)
+
+    r = _complete(client, transport, machine,
+                  lease_id=lease_id, body={"accepted": True})
+
+    assert r.status_code == 200
+    assert r.json() == {"accepted": True}
+    assert _verification_rows(db, job_id) == []
+    credits = [row for row in _contribution_rows(db, job_id)
+               if str(row["machine_id"]) == machine["id"]]
+    assert len(credits) == 1, "a failed verdict must not cost the machine credit"
+
+
+def test_work_that_was_not_accepted_is_not_verified(client, transport, machine, db):
+    """`accepted: false` means the output failed its hash check or another
+    attempt already won the task. There is no accepted work to have an
+    opinion about, and a row here would put a verdict against a machine for
+    work the system threw away."""
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _seed_peer_credits(db, job_id, [8.0, 9.0, 10.0])
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    _complete(client, transport, machine,
+              lease_id=lease_id, body={"accepted": False})
+
+    assert _verification_rows(db, job_id) == []
+
+
+def test_completing_twice_records_one_verdict(client, transport, machine, db):
+    """The second completion of a lease credits nothing, so it also judges
+    nothing. `verifications` has no unique index, so this rests entirely on
+    `claim_attempt_credit` handing out the right to record a lease once —
+    which is why that dependency is written down in the migration header."""
+    lease_id, job_id = _new_lease_id(), _new_job_id()
+    _claim_one(client, transport, machine, lease_id=lease_id, job_id=job_id)
+
+    for _ in range(2):
+        _complete(client, transport, machine,
+                  lease_id=lease_id, body={"accepted": True})
+
+    assert len(_verification_rows(db, job_id)) == 1
