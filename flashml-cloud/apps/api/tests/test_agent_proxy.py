@@ -454,16 +454,21 @@ def test_register_body_pools_is_stamped_from_membership(client, db, transport):
     assert "forged-pool" not in json.dumps(body)
 
 
-def test_register_with_no_membership_stamps_empty(client, machine, transport):
+def test_register_with_no_membership_stamps_empty(client, db, transport):
     """``[]`` not absent: an agent-supplied value must be OVERWRITTEN even
-    when the truthful answer is 'no pools'. Uses the module's shared
-    ``machine`` fixture, which no other test in this file ever gives pool
-    membership to."""
+    when the truthful answer is 'no pools'. A fresh owner/machine, not the
+    module's shared ``machine`` fixture — relying on "no other test ever
+    gives the shared fixture a pool" is a latent order dependency, not a
+    guarantee."""
+    owner = _new_user(db)
+    node_id = _node_id("pool-register-empty")
+    _, token = _enrol(db, owner, node_id)
+
     client.post(
         "/v1alpha1/nodes/register",
-        json={"schema_version": "v1alpha1", "node_id": machine["node_id"],
+        json={"schema_version": "v1alpha1", "node_id": node_id,
               "hostname": "h", "capabilities": {"pools": ["forged-pool"]}},
-        headers={"Authorization": f"Bearer {machine['token']}"},
+        headers={"Authorization": f"Bearer {token}"},
     )
     body = json.loads(transport.last.read())
     assert body["capabilities"]["pools"] == []
@@ -482,6 +487,72 @@ def test_heartbeat_carries_the_membership_refresh(client, db, transport):
     )
     body = json.loads(transport.last.read())
     assert body["pools"] == [str(pool["id"])]
+
+
+def test_heartbeat_scrubs_a_forged_nested_capabilities_pools_too(client, db, transport):
+    """``NodeHeartbeat`` has no ``capabilities.pools`` field today, but an
+    agent that includes one anyway must not get it forwarded unscrubbed —
+    today's schema is the only thing standing between that and a real
+    forgery landing wherever the coordinator adds the field next."""
+    owner = _new_user(db)
+    node_id = _node_id("pool-heartbeat-nested")
+    _, token = _enrol(db, owner, node_id)
+    pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+
+    client.post(
+        f"/v1alpha1/nodes/{node_id}/heartbeat",
+        json={"schema_version": "v1alpha1", "node_id": node_id,
+              "capabilities": {"pools": ["forged-pool"]}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["pools"] == [str(pool["id"])]
+    assert body["capabilities"]["pools"] == [str(pool["id"])]
+    assert "forged-pool" not in json.dumps(body)
+
+
+def test_register_fails_closed_when_pools_lookup_raises(
+    client, machine, transport, monkeypatch
+):
+    """Pins the except branch as a STAMP, not a skip. `dbmod` is imported by
+    name in `app.py` and the attribute is resolved at call time, so
+    monkeypatching it here reaches the same lookup the route calls —
+    without this, a refactor that turned `except: pools = []` into
+    `except: pass` would forward the agent's forged pools untouched and
+    every other test in this file would stay green."""
+    def raiser(*_a, **_kw):
+        raise RuntimeError("simulated pool lookup failure")
+
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+
+    client.post(
+        "/v1alpha1/nodes/register",
+        json={"schema_version": "v1alpha1", "node_id": machine["node_id"],
+              "hostname": "h", "capabilities": {"pools": ["forged-pool"]}},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["capabilities"]["pools"] == []
+    assert "forged-pool" not in json.dumps(body)
+
+
+def test_heartbeat_fails_closed_when_pools_lookup_raises(
+    client, machine, transport, monkeypatch
+):
+    def raiser(*_a, **_kw):
+        raise RuntimeError("simulated pool lookup failure")
+
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+
+    client.post(
+        f"/v1alpha1/nodes/{machine['node_id']}/heartbeat",
+        json={"schema_version": "v1alpha1", "node_id": machine["node_id"],
+              "pools": ["forged-pool"]},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["pools"] == []
+    assert "forged-pool" not in json.dumps(body)
 
 
 def test_artifact_put_forwards_raw_bytes_with_delegation(client, machine, transport):

@@ -395,6 +395,17 @@ def _stamp_pools(
     """
     if where == "top":
         parsed["pools"] = list(pools)
+        # NodeHeartbeat has no `capabilities.pools` field today, but an
+        # agent that rides a `capabilities` object along on a heartbeat body
+        # anyway must not get to smuggle a forged nested copy through
+        # unscrubbed — same overwrite rule as the top-level field, so a
+        # future NodeHeartbeat.capabilities field cannot silently revive
+        # this hole.
+        caps = parsed.get("capabilities")
+        if isinstance(caps, dict):
+            caps["pools"] = list(pools)
+        elif caps is not None:
+            parsed["capabilities"] = {}
         return
     caps = parsed.get("capabilities")
     if not isinstance(caps, dict):
@@ -1664,22 +1675,25 @@ def create_cloud_app(
         # written, so `machines.last_seen_at` stayed null and every machine
         # rendered "Offline / Last seen never" no matter how healthy it was.
         #
-        # The pool membership refresh rides the same connection open: both
-        # are best-effort, so neither one — a display column, or a pool
-        # stamp that fails CLOSED anyway — is ever the reason a heartbeat
-        # fails and its leases start expiring.
+        # The pool membership refresh rides the same connection open, but
+        # its own try/except, separate from `touch_machine_last_seen`'s: a
+        # display-column failure is best-effort and must never fail the
+        # pools stamp CLOSED — only a genuine membership-lookup failure
+        # does that, below.
         try:
             with contextlib.closing(app.state.connect()) as conn:
-                dbmod.touch_machine_last_seen(conn, machine.id)
+                try:
+                    dbmod.touch_machine_last_seen(conn, machine.id)
+                except Exception:
+                    log.warning(
+                        "could not record last_seen_at for machine %s", machine.id
+                    )
                 pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
         except Exception:
             # Fail CLOSED: a node we cannot vouch for serves no pool this
             # cycle. Never skip the stamp — skipping would forward whatever
             # the agent claimed.
-            log.warning(
-                "could not record last_seen_at / resolve pools for machine %s",
-                machine.id,
-            )
+            log.warning("could not resolve pools for machine %s", machine.id)
             pools = []
 
         return await proxy(
