@@ -29,15 +29,9 @@ import {
   type PreflightFinding,
   type SubmitFromRepoResult,
 } from "@/lib/cloud-api";
+import { NO_POOL, hasNoWorkersOnline, isPoolSelected } from "@/lib/pool-selection";
 
 type Status = "idle" | "submitting" | "rejected" | "submitted" | "error";
-
-// The sentinel for "no pool — public queue", the default. Not `null`: a
-// controlled Base UI `Select<string>` wants a value of the same type as
-// every item, and this keeps `poolId` a plain string everywhere it is read
-// (the `poolId || undefined` handoff into `submitFromRepo` below in
-// particular) rather than threading `string | null` through the form.
-const NO_POOL = "";
 
 export default function SubmitPage() {
   const router = useRouter();
@@ -64,7 +58,7 @@ export default function SubmitPage() {
       });
   }, [router]);
 
-  const selectedPool = poolId
+  const selectedPool = isPoolSelected(poolId)
     ? pools.find((p) => p.id === poolId) ?? null
     : null;
 
@@ -242,7 +236,7 @@ export default function SubmitPage() {
                   ))}
                 </SelectContent>
               </Select>
-              {poolId !== NO_POOL && (
+              {isPoolSelected(poolId) && (
                 <p className="text-xs text-muted-foreground">
                   Pool jobs run without a container sandbox on your
                   team&apos;s machines. Every member you invited can run
@@ -251,7 +245,7 @@ export default function SubmitPage() {
               )}
             </div>
 
-            {selectedPool && selectedPool.machines_online === 0 ? (
+            {hasNoWorkersOnline(selectedPool) ? (
               <div className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5 text-sm text-amber-400">
                 <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
                 <span>

@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { createServerSupabaseClient } from "@/lib/supabase";
+import { safeNext } from "@/lib/safe-next";
 
 // Supabase redirects here with a PKCE code after Google's OAuth consent
 // screen. Exchanging that code for a session is what sets the auth cookies;
@@ -18,10 +19,15 @@ import { createServerSupabaseClient } from "@/lib/supabase";
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/machines";
   // Only ever redirect within this app — an open `next` param would make
-  // this endpoint an open redirect off a trusted auth flow.
-  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/machines";
+  // this endpoint an open redirect off a trusted auth flow. `safeNext` is
+  // the one guard every `next` read in this app shares (`lib/safe-next.ts`)
+  // — this route used to carry its own inline copy of the same check,
+  // which (like `SignInCard`'s former default) missed that a browser
+  // resolves a leading backslash the same as a leading slash, so
+  // `/\evil.com` passed a plain `startsWith("/") && !startsWith("//")`
+  // test and still left the site.
+  const next = safeNext(searchParams.get("next"));
 
   if (code) {
     const cookieStore = await cookies();
@@ -37,7 +43,7 @@ export async function GET(request: NextRequest) {
     });
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
-      return NextResponse.redirect(`${origin}${safeNext}`);
+      return NextResponse.redirect(`${origin}${next}`);
     }
   }
 

@@ -1,9 +1,11 @@
 /**
- * Sanitizes the `next` query param before it ever reaches a real browser
+ * Sanitizes a `next` query param before it ever reaches a real browser
  * navigation — `SignInCard`'s `window.location.assign(next)` after a
- * successful sign-in, and the `next` this app's own `middleware.ts` writes
- * onto its `/sign-in` redirect (which `SignInCard` then reads straight
- * back).
+ * successful sign-in, `app/auth/callback/route.ts`'s post-OAuth redirect,
+ * and the `next` this app's own `middleware.ts` writes onto its
+ * `/sign-in` redirect (which the two routes above then read straight
+ * back). One guard, used everywhere `next` is read, so a fix here fixes
+ * every caller at once.
  *
  * `next` is attacker-controlled: anyone can mint a sign-in link with
  * `?next=https://evil.com`, and — the case a plain `startsWith("/")` check
@@ -16,14 +18,32 @@
  * `window.location.assign("//evil.com/foo")` leaves this site exactly as
  * surely as `https://evil.com` would.
  *
- * Returns `value` unchanged when it is a legitimate same-origin path
- * (starts with exactly one `/`), and `"/machines"` — the fallback
- * `SignInCard` already used for a missing `next` — for anything else,
- * including empty, null, or undefined.
+ * A single leading `/` is not enough either: `/\evil.com/steal` also
+ * starts with exactly one `/`, but a browser's URL parser treats a
+ * backslash the same as a forward slash when RESOLVING a relative
+ * reference, so `window.location.assign("/\\evil.com/steal")` *also*
+ * leaves the site — it resolves identically to `//evil.com/steal`. This is
+ * purely a client-side hazard: a real browser navigation normalizes `\` to
+ * `/` in the address bar before the request ever reaches `middleware.ts`,
+ * so the backslash form of the attack only ever shows up in a query-param
+ * VALUE (`SignInCard`, the callback route), never in a request pathname —
+ * but this guard is the one both channels share, so it closes both without
+ * either caller needing to know which case applies to it.
+ *
+ * The fix generalizes to: the character immediately after the leading `/`
+ * must be neither `/` nor `\`. That single rule also correctly rejects a
+ * bare `"/"` (no second character to satisfy it at all) and a value with no
+ * leading `/` at all (fails the same regex from the front).
+ *
+ * Returns `value` unchanged when it passes that check, and `fallback`
+ * (`"/machines"` by default — the fallback every current caller wants) for
+ * anything else, including empty, null, or undefined.
  */
-export function safeNext(value: string | null | undefined): string {
-  if (!value) return "/machines";
-  if (!value.startsWith("/")) return "/machines";
-  if (value.startsWith("//")) return "/machines";
+export function safeNext(
+  value: string | null | undefined,
+  fallback: string = "/machines"
+): string {
+  if (!value) return fallback;
+  if (!/^\/[^/\\]/.test(value)) return fallback;
   return value;
 }
