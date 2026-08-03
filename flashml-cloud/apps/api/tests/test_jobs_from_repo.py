@@ -688,6 +688,19 @@ def test_an_unknown_pool_id_is_404(make_client, db, transport):
     assert _job_rows(db, alice) == []
 
 
+def test_a_pool_that_is_not_even_a_uuid_is_404_not_500(make_client, db, transport):
+    """Same answer as 'not found' — three sibling routes already guard this
+    exact case (revoke, get_pool_route, create_pool_invite_route) so a
+    malformed pool id must not become a distinguishable third answer that
+    breaks the 404 doctrine every member-scoped lookup here relies on."""
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice), pool="not-a-uuid")
+    assert r.status_code == 404
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
 def test_an_unadmitted_user_submitting_with_a_pool_is_403_not_404(make_client, db):
     """Admission is checked before the pool lookup — same ordering as every
     other route here: an un-admitted account never learns whether the pool
@@ -730,6 +743,28 @@ def test_raw_job_submission_refuses_an_allow_fallback_spec(make_client, db, tran
     assert r.status_code == 400
     assert "from-repo" in r.json()["detail"]
     assert transport.requests == []
+
+
+def test_raw_job_submission_with_a_non_dict_isolation_or_placement_does_not_500(
+    make_client, db, transport
+):
+    """A malformed (non-dict) `isolation`/`placement` value must not crash
+    the refusal guard with an AttributeError from `.get` on a string — it is
+    treated as absent, the same `isinstance(..., dict) else {}` guard the
+    line above already applies to `spec` itself. Neither condition can then
+    be true, so the request is not refused; the point of this test is the
+    absence of a 500, not any particular status code."""
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={
+            "metadata": {"name": "demo", "labels": {}},
+            "spec": {"isolation": "x", "placement": "y"},
+        },
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 201, r.text
 
 
 def test_raw_job_submission_refuses_a_pool_placement(make_client, db, transport):

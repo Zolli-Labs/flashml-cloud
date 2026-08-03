@@ -537,6 +537,50 @@ def test_a_run_with_no_pool_passes_none_and_no_waiver(
     assert captured["allow_fallback"] is False
 
 
+def test_a_pool_scoped_run_stamps_every_submitted_round_body(
+    db, settings, postgres_dsn
+):
+    """The functional half of pool confinement, exercised end to end with
+    the REAL ``run_fedavg`` (no monkeypatch): ``run_fedavg``'s own
+    ``pool``/``allow_fallback`` kwargs are inert once ``build_round`` is
+    supplied (``fedavg.py`` always supplies one) — what actually stamps
+    ``placement.pool``/``isolation.allowFallback`` onto a round is
+    ``build_round_for`` threading ``run.pool`` into
+    ``compile_federated_round``. The two tests above patch ``run_fedavg``
+    away and would stay green even if that thread were deleted; this one
+    would not, because it asserts on the bodies the stub coordinator
+    actually received across every round of a multi-round run."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    coordinator = StubCoordinator()
+
+    _run(job_id, settings, postgres_dsn, coordinator, rounds=2, pool="p-1")
+
+    assert len(coordinator.submitted) == 2
+    for body in coordinator.submitted:
+        assert body["spec"]["placement"]["pool"] == "p-1"
+        assert body["spec"]["isolation"]["allowFallback"] is True
+
+
+def test_a_run_with_no_pool_stamps_any_on_every_submitted_round_body(
+    db, settings, postgres_dsn
+):
+    """The regression guard for the test above: an independent run's round
+    bodies are unchanged — ``placement.pool: "any"``,
+    ``isolation.allowFallback: false`` — on every round, not just the
+    first."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    coordinator = StubCoordinator()
+
+    _run(job_id, settings, postgres_dsn, coordinator, rounds=2)
+
+    assert len(coordinator.submitted) == 2
+    for body in coordinator.submitted:
+        assert body["spec"]["placement"]["pool"] == "any"
+        assert body["spec"]["isolation"]["allowFallback"] is False
+
+
 # ---------------------------------------------------------------------------
 # 5. submitting a federated repo
 # ---------------------------------------------------------------------------

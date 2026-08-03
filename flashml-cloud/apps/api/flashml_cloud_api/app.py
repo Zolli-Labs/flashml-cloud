@@ -1115,8 +1115,10 @@ def create_cloud_app(
         # volunteer machine sandboxed only because the placement gate never
         # got the chance to confine it to a team.
         spec_inner = payload.get("spec") if isinstance(payload.get("spec"), dict) else {}
-        isolation = spec_inner.get("isolation") or {}
-        placement = spec_inner.get("placement") or {}
+        isolation_raw = spec_inner.get("isolation")
+        isolation = isolation_raw if isinstance(isolation_raw, dict) else {}
+        placement_raw = spec_inner.get("placement")
+        placement = placement_raw if isinstance(placement_raw, dict) else {}
         if isolation.get("allowFallback") or placement.get("pool", "any") != "any":
             raise HTTPException(
                 status_code=400,
@@ -1185,8 +1187,13 @@ def create_cloud_app(
         # itself, so a guess cannot distinguish them) must not spend the
         # cost of fetching and preflighting the repo first.
         pool = _opt_str(payload.get("pool"))
-        if pool is not None and dbmod.fetch_pool_for_member(db, pool, user_id) is None:
-            raise HTTPException(status_code=404, detail="unknown pool")
+        if pool is not None:
+            try:
+                pool_row = dbmod.fetch_pool_for_member(db, pool, user_id)
+            except psycopg.errors.InvalidTextRepresentation:
+                pool_row = None  # not even a uuid; same answer as "not found"
+            if pool_row is None:
+                raise HTTPException(status_code=404, detail="unknown pool")
 
         with tempfile.TemporaryDirectory(prefix="flashml-repo-") as tmpdir:
             dest = Path(tmpdir) / "src"
