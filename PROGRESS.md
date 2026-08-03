@@ -172,6 +172,38 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — e2e `test_fedavg_survives_a_closed_laptop` is FLAKY on CI
+
+What/why: recorded because it will fail again and the next person should not
+spend an hour deciding whether they broke it.
+
+`e2e/test_fedavg_loop.py:150` asserts
+`result["history"][0]["participants"] == 2` — "round 0 ran with both agents
+up". On a contended CI runner the second agent sometimes has not claimed a
+shard by the time round 0 reaches quorum, and the round completes with one
+participant. Locally it passes consistently.
+
+How verified as flaky, not broken: **the same commit `7a5d250` both failed and
+succeeded** (runs 91584912549 and 91584910816). Re-running the failed job on
+`39f03f1` turned it green with no code change. `7740288` failed the same way
+earlier.
+
+It cannot be caused by the verification work: `test_fedavg_loop.py` imports
+only `flashruntime` and `flashml_workloads`, never `flashml_cloud_api`, and
+e2e runs against the PINNED 0.4.1/0.3.2 artifacts, which tonight's unreleased
+public changes do not touch.
+
+Gotchas: **do not "fix" this by weakening the assertion.** What it pins is
+real — a round that begins with two agents up should aggregate two
+contributions, and a system that silently proceeds on one has lost a
+participant without noticing. The bug is the test's setup racing the quorum,
+not the expectation. The fix is to make round 0 wait until both agents have
+registered before the driver starts, rather than to assert less.
+
+Next: make the two-agent start deterministic in that fixture. Parking lot:
+a retry decorator would hide exactly the class of bug the test exists to
+catch.
+
 ### 2026-08-03 — Verification layer: two slices shipped, thread 4 still open
 
 What/why: nothing distinguished a correct result from a plausible wrong one.
