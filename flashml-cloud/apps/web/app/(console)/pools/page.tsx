@@ -19,14 +19,14 @@ import {
   NotAuthenticated,
   createPool,
   listPools,
-  type Pool,
+  type PoolSummary,
 } from "@/lib/cloud-api";
 
 const POLL_MS = 15_000;
 
 export default function PoolsPage() {
   const router = useRouter();
-  const [pools, setPools] = useState<Pool[]>([]);
+  const [pools, setPools] = useState<PoolSummary[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
 
@@ -42,7 +42,7 @@ export default function PoolsPage() {
           // 401 means signed out, not "you have no pools". Rendering the
           // empty state here would tell a signed-out user their pools are
           // gone.
-          router.push("/sign-in?next=/pools");
+          router.push(`/sign-in?next=${encodeURIComponent("/pools")}`);
           return;
         }
         setError(
@@ -147,7 +147,7 @@ export default function PoolsPage() {
   );
 }
 
-function PoolRow({ pool }: { pool: Pool }) {
+function PoolRow({ pool }: { pool: PoolSummary }) {
   return (
     <tr>
       <td className="px-3 py-3">
@@ -189,7 +189,7 @@ function CreatePoolCard({ onCreated }: { onCreated: () => void }) {
       toast.success("Pool created", { description: pool.name });
     } catch (err) {
       if (err instanceof NotAuthenticated) {
-        router.push("/sign-in?next=/pools");
+        router.push(`/sign-in?next=${encodeURIComponent("/pools")}`);
         return;
       }
       setError(

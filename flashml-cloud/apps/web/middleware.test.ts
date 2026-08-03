@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 import { middleware } from "./middleware";
@@ -59,5 +59,76 @@ describe("auth code forwarding", () => {
     const res = await get("http://localhost:3000/sign-in");
     const location = res.headers.get("location");
     expect(location === null || !location.includes("/auth/callback")).toBe(true);
+  });
+});
+
+/**
+ * A signed-out visitor on a protected path gets redirected to `/sign-in`
+ * before any of it renders. `next` has to carry the FULL path — pathname
+ * plus query string — or `/pools/join?token=...` (an invite link, which
+ * exists specifically for a signed-out visitor) loses its token on the
+ * round trip: it would survive only as a sibling `?token=...` on
+ * `/sign-in` itself, which `SignInCard` never reads before calling
+ * `window.location.assign(next)`.
+ *
+ * This branch only runs once the middleware gets past its own
+ * "Supabase not configured" bailout, so — unlike the `code`-forwarding
+ * tests above, which return before that check runs at all — these stub
+ * NEXT_PUBLIC_SUPABASE_URL/ANON_KEY. The fake project is never actually
+ * reached: `getUser()` with no session cookie on the request resolves
+ * `{ user: null }` from `@supabase/ssr`'s local session check alone
+ * (`AuthSessionMissingError`, no `access_token` to even attempt a fetch
+ * with), so this stays a fast, offline unit test.
+ */
+describe("signed-out redirect to /sign-in", () => {
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://fake-project.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "fake-anon-key");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function get(url: string) {
+    return middleware(new NextRequest(new Request(url)));
+  }
+
+  it("carries the query string into next for a protected path", async () => {
+    const res = await get("http://localhost:3000/pools/join?token=fmi_abc");
+    expect(res.status).toBe(307);
+    const location = new URL(res.headers.get("location")!);
+    expect(location.pathname).toBe("/sign-in");
+    expect(location.searchParams.get("next")).toBe("/pools/join?token=fmi_abc");
+  });
+
+  it("does not leave the token riding as a sibling param on /sign-in", async () => {
+    const res = await get("http://localhost:3000/pools/join?token=fmi_abc");
+    const location = new URL(res.headers.get("location")!);
+    expect(location.searchParams.has("token")).toBe(false);
+    // Exactly one param: `next`. Nothing else rode along from the original
+    // request.
+    expect([...location.searchParams.keys()]).toEqual(["next"]);
+  });
+
+  it("still works for a protected path with no query string at all", async () => {
+    const res = await get("http://localhost:3000/machines");
+    const location = new URL(res.headers.get("location")!);
+    expect(location.searchParams.get("next")).toBe("/machines");
+  });
+
+  it("preserves multiple query params, not just the first", async () => {
+    const res = await get(
+      "http://localhost:3000/pools/join?token=fmi_abc&ref=email"
+    );
+    const location = new URL(res.headers.get("location")!);
+    expect(location.searchParams.get("next")).toBe(
+      "/pools/join?token=fmi_abc&ref=email"
+    );
+  });
+
+  it("does not redirect a public path", async () => {
+    const res = await get("http://localhost:3000/");
+    expect(res.status).not.toBe(307);
   });
 });

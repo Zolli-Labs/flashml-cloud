@@ -48,7 +48,7 @@ export default function PoolDetailPage({
       })
       .catch((err) => {
         if (err instanceof NotAuthenticated) {
-          router.push(`/sign-in?next=/pools/${poolId}`);
+          router.push(`/sign-in?next=${encodeURIComponent(`/pools/${poolId}`)}`);
           return;
         }
         if (err instanceof NotFound) {

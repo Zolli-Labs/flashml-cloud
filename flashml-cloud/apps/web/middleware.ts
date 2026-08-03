@@ -95,9 +95,23 @@ export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (!user && !isPublicPath(pathname)) {
-    const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = "/sign-in";
-    redirectUrl.searchParams.set("next", pathname);
+    // `pathname` alone drops the query string — for most routes that is
+    // nothing worth keeping, but `/pools/join?token=...` is exactly a
+    // route whose entire reason for existing is that one query param. Build
+    // `next` from the full path so it survives the round trip through
+    // sign-in.
+    //
+    // A FRESH URL, not `request.nextUrl.clone()`: cloning carries every
+    // param on the original request along as a SIBLING of `next` on
+    // `/sign-in` (e.g. `/sign-in?token=fmi_abc&next=%2Fpools%2Fjoin`) —
+    // `token` would ride there unused (`SignInCard` only ever reads
+    // `next`) while `next` itself still lost the query string, so the
+    // token effectively vanishes for a signed-out invitee: it survives on
+    // the wrong param, unreachable, while the one param that's read gets
+    // handed a bare path.
+    const next = pathname + request.nextUrl.search;
+    const redirectUrl = new URL("/sign-in", request.nextUrl.origin);
+    redirectUrl.searchParams.set("next", next);
     return NextResponse.redirect(redirectUrl);
   }
 

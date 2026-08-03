@@ -281,26 +281,34 @@ export interface JobTask {
   round?: number;
 }
 
-/** A row of `public.pools`, as `GET /v1alpha1/pools` — the LIST route —
- * returns it. `member_count` and `machines_online` are aggregates computed
- * there in one query (`list_pools_for_user`, `db.py`), the same
- * single-query-not-N reasoning `listJobRounds` documents elsewhere.
+/** A row of `public.pools` — exactly `POOL_PUBLIC_COLUMNS` in `db.py` — as
+ * every pool route returns it: `GET /v1alpha1/pools/{id}` (flattened
+ * alongside `members`, see `getPool()`) and `POST /v1alpha1/pools` both
+ * return precisely this, no more.
  *
- * `GET /v1alpha1/pools/{id}` and `POST /v1alpha1/pools` return the same
- * four base columns (`id`, `name`, `owner_id`, `created_at`) but NOT these
- * two counts (`POOL_PUBLIC_COLUMNS` in `db.py` has no aggregate columns to
- * return). `getPool()` and `createPool()` below still type their result as
- * `Pool`, for one shape across this whole client, but
- * `member_count`/`machines_online` are genuinely absent — `undefined` at
- * runtime, not stale-zero — on those two responses specifically. Only
- * `listPools()`'s result actually populates them. */
+ * `GET /v1alpha1/pools` (the LIST route) returns MORE than this per pool —
+ * see `PoolSummary` below — so this base type deliberately does not carry
+ * `member_count`/`machines_online`: a route that cannot supply them no
+ * longer has to lie about it with a runtime-`undefined` field the type
+ * claims is a `number`. */
 export interface Pool {
   id: string;
   name: string;
   owner_id: string;
+  created_at: string;
+}
+
+/** `GET /v1alpha1/pools`'s row shape: `Pool` plus the two aggregates
+ * `list_pools_for_user` (`db.py`) computes in the same query —
+ * `member_count`, `machines_online` — the same single-query-not-N
+ * reasoning `listJobRounds` documents elsewhere. Only this route populates
+ * them; do not reach for these two fields off a `getPool()` or
+ * `createPool()` result, which are typed as the plain `Pool` above
+ * specifically so the compiler catches that instead of a comment having
+ * to. */
+export interface PoolSummary extends Pool {
   member_count: number;
   machines_online: number;
-  created_at: string;
 }
 
 /** A row of `public.pool_members` joined to the member's profile, as
@@ -445,8 +453,8 @@ export function revokeMachine(machineId: string): Promise<RevokeMachineResult> {
 
 // -- pools and invites -------------------------------------------------
 
-export function listPools(): Promise<Pool[]> {
-  return request<Pool[]>("/v1alpha1/pools");
+export function listPools(): Promise<PoolSummary[]> {
+  return request<PoolSummary[]>("/v1alpha1/pools");
 }
 
 /** `POST /v1alpha1/pools` requires admission (creating a pool is state
@@ -461,32 +469,22 @@ export function createPool(name: string): Promise<Pool> {
   });
 }
 
-/** The shape `GET /v1alpha1/pools/{id}` actually returns: the pool's own
- * (count-less — see `Pool`'s docstring) columns flattened alongside
- * `members`, e.g. `{id, name, owner_id, created_at, members: [...]}` — NOT
+/** `GET /v1alpha1/pools/{id}` actually returns the pool's own columns
+ * flattened alongside `members` — `{...Pool fields, members: [...]}` — NOT
  * `{pool: {...}, members: [...]}`. */
-interface PoolDetailResponse {
-  id: string;
-  name: string;
-  owner_id: string;
-  created_at: string;
-  members: PoolMember[];
-}
+type PoolDetailResponse = Pool & { members: PoolMember[] };
 
 /** Reshapes that flat response into `{pool, members}` so callers get one
  * nested shape, matching every other place this client separates "the
- * thing" from "the list attached to it". */
+ * thing" from "the list attached to it". No cast needed on the way out:
+ * `Pool` (unlike `PoolSummary`) has no fields this route fails to supply. */
 export async function getPool(
   poolId: string
 ): Promise<{ pool: Pool; members: PoolMember[] }> {
   const { members, ...pool } = await request<PoolDetailResponse>(
     `/v1alpha1/pools/${encodeURIComponent(poolId)}`
   );
-  // Cast: this route's `pool` genuinely lacks member_count/machines_online
-  // (see `Pool`'s docstring) — nested here as `Pool` anyway so this client
-  // exposes one type for "a pool" rather than a second, detail-only
-  // interface nothing else needs.
-  return { pool: pool as Pool, members };
+  return { pool, members };
 }
 
 /** Mints a one-time invite link's token. The API returns the raw token

@@ -252,12 +252,14 @@ describe("cloud-api", () => {
     });
 
     it("creates a pool by POSTing the trimmed-by-the-server name and returns it", async () => {
+      // POST /v1alpha1/pools returns exactly POOL_PUBLIC_COLUMNS — no
+      // member_count/machines_online (see Pool's docstring in
+      // cloud-api.ts) — so this fixture omits them too, rather than
+      // asserting against a shape the real route never sends.
       const pool = {
         id: "pool-1",
         name: "Lab",
         owner_id: "user-1",
-        member_count: 1,
-        machines_online: 0,
         created_at: "2026-08-03T00:00:00Z",
       };
       const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
