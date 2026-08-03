@@ -199,7 +199,51 @@ Rules this design follows:
 RunPod needs no such caveat: renting compute to run compute is the product
 being sold.
 
-## 9. Deliberately not in v1
+## 9. Corrections (2026-08-03, found while planning — recorded, not rewritten)
+
+Three claims above did not survive contact with the code. The intent stands;
+the mechanism moved. Implementation plan:
+`../plans/2026-08-03-team-pools.md`.
+
+1. **§3/§7 "rides the pending 0.4.2 release" — stale the same day.** A
+   concurrent session released flashruntime 0.4.2 and flashnode 0.3.3 and
+   moved the pins while this spec was being written. The pool fields and
+   gate land in **flashruntime 0.4.3** instead (additive-in-0.4.x precedent:
+   local_datasets 0.4.0, GpuInfo 0.4.1, ExecutionEvidence 0.4.2). §7's
+   prerequisite items 1–2 are already done.
+
+2. **§3 "no new tier logic" is wrong for repo jobs, which are argv jobs.**
+   Two released rules block the trusted-pool path as written:
+   `CommandRecipe.expand` refuses `allowFallback` for command jobs
+   outright, and the placement argv gate is deliberately NOT waived by
+   `allowFallback` — argv places only on `argv_capable` (containerised)
+   nodes. So `allowFallback` alone can never put a repo job on a Docker-less
+   Colab/RunPod worker. The mechanism becomes a **host-side opt-in**:
+   `NodeRegistration.unsandboxed_argv_capable` (fail-closed, default
+   False), set only by `flashnode work --runner trusted`, plus a
+   `TrustedArgvRunner` that executes argv payloads without a container
+   (rewriting the `/work` prefix onto the real workdir). The argv gate
+   accepts the trusted alternative only when all three legs hold: task is
+   pool-scoped AND carries the waiver AND the node opted in.
+   `CommandRecipe` keeps refusing the waiver for non-pool jobs — the
+   coupled invariant of §3, enforced upstream too. Consequence: **flashnode
+   0.3.4 ships after all** (floor >=0.4.3). §3's "released agents work
+   unchanged" narrows to Docker-capable hosts on 0.3.3; Docker-less hosts
+   need 0.3.4, which is what a fresh `pip install flashnode` resolves
+   anyway.
+
+3. **§5 "membership propagates at next heartbeat" needed a wire field.**
+   `NodeHeartbeat` carries no capabilities, so there was nothing to stamp.
+   0.4.3 adds `NodeHeartbeat.pools: list[str] | None` (None = no statement;
+   a list replaces the registration's pools wholesale), stamped by the same
+   proxy hop.
+
+Also recorded: the wire already had a dead `PlacementSpec.pool` (a closed
+Literal of infrastructure names, read by nothing) and a singular
+`NodeRegistration.pool` deployment label. The JobSpec carrier is the former,
+widened to `str`; the latter is unrelated to teams and stays untouched.
+
+## 10. Deliberately not in v1
 
 Roles beyond owner/member; per-machine pool assignment; pool quotas or
 billing; lease revocation on leave; Kaggle; any change to result
