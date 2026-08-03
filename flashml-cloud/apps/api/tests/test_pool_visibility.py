@@ -27,6 +27,16 @@ for the same reason: the production route for a *pool-scoped* submission is
 ``/v1alpha1/jobs/from-repo`` (Task 12), full repo-tarball machinery the read
 side under test here has no need to exercise.
 
+The federated-jobs-list section below (added in the fix-loop pass —
+``list_federated_jobs_for_viewer``) seeds its rows the same way
+``test_federated.py``'s own ``_seed_job`` does — ``fedavgmod.new_federated_job_id``
+plus ``dbmod.insert_job`` directly, ``pool_id`` included — rather than
+running the actual driver (``StubCoordinator``/``run_federated_job``): these
+tests are about listing visibility, not the run itself, and a federated
+job's presence in ``GET /v1alpha1/jobs`` never touches the coordinator at
+all (it comes from the ``jobs`` table alone), so there is nothing here for
+a live driver to add.
+
 No skips in this file, same rule ``test_jobs_from_repo.py`` states: a
 security test that skips reads as green in CI and is worse than no test at
 all.
@@ -43,6 +53,7 @@ from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
 from flashml_cloud_api import db as dbmod
+from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api.app import create_cloud_app
 
 from test_jobs_from_repo import (  # noqa: F401 - fixtures
@@ -219,6 +230,28 @@ def _seed_pool_job(client, owner_id: str, pool_id: str, db, name: str) -> str:
             "update public.jobs set pool_id = %s where id = %s",
             (pool_id, job_id),
         )
+    return job_id
+
+
+def _seed_federated_job(
+    db, owner_id: str, name: str, pool_id: str | None = None
+) -> str:
+    """A federated ``jobs`` row via the same two production helpers
+    ``test_federated.py``'s own ``_seed_job`` uses —
+    ``fedavgmod.new_federated_job_id`` (so ``fedavgmod.is_federated_job_id``
+    recognizes it, exactly as it would a real run's id) and
+    ``dbmod.insert_job`` (the real write path, ``pool_id`` included) —
+    without running the actual driver. A federated job's presence in
+    ``GET /v1alpha1/jobs`` is read straight from this table
+    (``list_federated_jobs_for_viewer``); no coordinator round trip is
+    involved, so there is nothing a live driver run would add here.
+    """
+    job_id = fedavgmod.new_federated_job_id()
+    dbmod.insert_job(
+        db, job_id=job_id, owner_id=owner_id, name=name,
+        source={"type": "github", "mode": "federated", "rounds": 2},
+        spec=None, status="PENDING", pool_id=pool_id,
+    )
     return job_id
 
 
@@ -404,3 +437,74 @@ def test_jobs_list_includes_a_pool_mates_job_for_the_member_only(client, db):
     stranger_ids = [j.get("job_id") for j in r.json() if isinstance(j, dict)]
     assert pool_job_id not in stranger_ids
     assert private_job_id not in stranger_ids
+
+
+# ---------------------------------------------------------------------------
+# 4. the jobs list: federated runs, the flagship pool-visible workload
+#
+# Fix-loop pass: a federated run has no coordinator job id at all (one
+# coordinator job per ROUND, never one for the parent), so its presence in
+# GET /v1alpha1/jobs comes entirely from `list_federated_jobs_for_viewer` —
+# the `owned`/`pool_ids`/`seen` union above never sees it (federated ids are
+# filtered out of both, since they can never match the coordinator's list
+# anyway). Before this pass that federated listing function was
+# `..._for_owner`, so a pool member could open a teammate's federated run
+# directly by id (`fetch_job_for_viewer` already admitted them) but could
+# never discover it here — exactly backwards for federated learning, the
+# design doc's flagship workload.
+# ---------------------------------------------------------------------------
+
+
+def test_jobs_list_lets_a_pool_member_discover_a_teammates_federated_job(client, db):
+    owner = _new_user(db)
+    member = _new_user(db)
+    stranger = _new_user(db)
+    pool_id = _pool(db, owner)
+    _add_member(db, pool_id, member)
+    job_id = _seed_federated_job(db, owner, "shared-federated-run", pool_id=pool_id)
+
+    # The member discovers it, exactly once.
+    r = client.get("/v1alpha1/jobs", headers=_auth(member))
+    assert r.status_code == 200, r.text
+    member_ids = [j.get("job_id") for j in r.json() if isinstance(j, dict)]
+    assert member_ids.count(job_id) == 1
+
+    # The owner still sees it exactly once — the widened query is one flat
+    # `WHERE owner_id = %s OR EXISTS(...)` select, not a second source that
+    # could double it the way the coordinator-sourced half's `owned` and
+    # `pool_ids` sets could without their `seen` union.
+    r = client.get("/v1alpha1/jobs", headers=_auth(owner))
+    assert r.status_code == 200, r.text
+    owner_ids = [j.get("job_id") for j in r.json() if isinstance(j, dict)]
+    assert owner_ids.count(job_id) == 1
+
+    # A stranger in no pool never sees it.
+    r = client.get("/v1alpha1/jobs", headers=_auth(stranger))
+    assert r.status_code == 200, r.text
+    stranger_ids = [j.get("job_id") for j in r.json() if isinstance(j, dict)]
+    assert job_id not in stranger_ids
+
+
+def test_a_federated_job_with_no_pool_stays_owner_only_in_the_list(client, db):
+    """Every pre-pools federated run (and every federated run submitted
+    with no ``pool``) keeps exactly its old, owner-only visibility here —
+    the null-``pool_id`` NULL-semantics note ``fetch_job_for_viewer``
+    documents applies just as much to this query. ``pool_mate`` is
+    deliberately a real member of a real pool ``owner`` belongs to, to
+    prove the null ``pool_id`` on *this* job — not merely "no shared pool
+    exists at all" — is what keeps them out."""
+    owner = _new_user(db)
+    pool_mate = _new_user(db)
+    pool_id = _pool(db, owner)
+    _add_member(db, pool_id, pool_mate)
+    job_id = _seed_federated_job(db, owner, "solo-federated-run", pool_id=None)
+
+    r = client.get("/v1alpha1/jobs", headers=_auth(owner))
+    assert r.status_code == 200, r.text
+    owner_ids = [j.get("job_id") for j in r.json() if isinstance(j, dict)]
+    assert job_id in owner_ids
+
+    r = client.get("/v1alpha1/jobs", headers=_auth(pool_mate))
+    assert r.status_code == 200, r.text
+    pool_mate_ids = [j.get("job_id") for j in r.json() if isinstance(j, dict)]
+    assert job_id not in pool_mate_ids

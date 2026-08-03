@@ -1414,6 +1414,16 @@ def create_cloud_app(
         # the coordinator's list at all and has to be added from this table.
         # Empty for every user who has never submitted one, which is what
         # keeps this list byte-identical to before for them.
+        #
+        # `list_federated_jobs_for_viewer`, not `..._for_owner`: a pool
+        # member must be able to *discover* a teammate's federated run here,
+        # not merely open it once they already have its id.
+        # `fetch_job_for_viewer` already admits that direct-by-id read; this
+        # is the other half — without it the run would never surface in the
+        # list at all for anyone but its owner. One flat `WHERE owner_id = %s
+        # OR EXISTS(...)` select, so — unlike the coordinator-sourced half
+        # above — no separate dedup is needed here: a job id appears in this
+        # table once, and this query returns each matching row once.
         federated = [
             {
                 "job_id": row["id"],
@@ -1421,7 +1431,7 @@ def create_cloud_app(
                 "state": row.get("status"),
                 "mode": "federated",
             }
-            for row in dbmod.list_federated_jobs_for_owner(db, user_id)
+            for row in dbmod.list_federated_jobs_for_viewer(db, user_id)
         ]
         if not seen:
             # Nothing to scope down to; skip the coordinator round trip

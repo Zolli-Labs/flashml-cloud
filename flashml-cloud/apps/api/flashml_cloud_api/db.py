@@ -1270,6 +1270,46 @@ def list_federated_jobs_for_owner(
         return list(cur.fetchall())
 
 
+def list_federated_jobs_for_viewer(
+    db: psycopg.Connection, user_id: str
+) -> list[dict[str, Any]]:
+    """Every federated run ``user_id`` can see — as owner, or as a member of
+    the run's pool — widened from ``list_federated_jobs_for_owner`` exactly
+    as ``fetch_job_for_viewer`` widens ``fetch_job_for_owner``.
+
+    Without this, a pool member could still *open* a teammate's federated
+    job directly by id (``fetch_job_for_viewer`` already admits them) but
+    could never *discover* it through ``GET /v1alpha1/jobs`` — federated ids
+    never appear in the coordinator's own list, and
+    ``list_federated_jobs_for_owner`` is owner-only, so the run would be
+    invisible to exactly the teammates it was submitted to share.
+
+    A job with a null ``pool_id`` (every pre-pools federated run, and every
+    federated run submitted with no ``pool``) can never match the
+    ``pool_members`` half of the check — there is no pool to be a member of
+    — so it stays reachable by its owner only, the same null-``pool_id``
+    behaviour ``fetch_job_for_viewer`` documents.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select id, name, status, created_at, finished_at
+              from public.jobs j
+             where source->>'mode' = 'federated'
+               and (
+                     j.owner_id = %s
+                  or exists (
+                       select 1 from public.pool_members pm
+                        where pm.pool_id = j.pool_id and pm.user_id = %s
+                     )
+               )
+             order by created_at
+            """,
+            (user_id, user_id),
+        )
+        return list(cur.fetchall())
+
+
 def list_job_ids_for_owner(db: psycopg.Connection, owner_id: str) -> set[str]:
     """Every job id belonging to owner_id, and nothing else. Used to filter
     the coordinator's (unscoped, operator-token) job list down to exactly
