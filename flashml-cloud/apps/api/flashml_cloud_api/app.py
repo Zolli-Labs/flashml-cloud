@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -64,6 +65,8 @@ from flashml_cloud_api import verify as verifymod
 from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
     AuthError,
+    hash_invite_token,
+    new_invite_token,
     verify_supabase_jwt,
 )
 from flashml_cloud_api.compile import (
@@ -619,6 +622,19 @@ def create_cloud_app(
             # oracle, and the caller can do nothing different either way.
             raise HTTPException(status_code=401, detail="sign-in required") from None
 
+    def admitted_user(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ) -> str:
+        """current_user plus the alpha's invite gate. Reads (jobs, machines,
+        /me) stay open to un-admitted accounts — the console needs /me to
+        know to SHOW the enter-invite screen — but everything that creates
+        state requires admission. 403, not 404: unlike a resource id, the
+        gate's existence is not a secret."""
+        if not dbmod.profile_is_admitted(db, user_id):
+            raise HTTPException(status_code=403, detail="invite required")
+        return user_id
+
     async def proxy(
         request: Request,
         machine: Machine,
@@ -768,7 +784,13 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        return _jsonable(dbmod.upsert_profile(db, user_id))
+        # Additive: every existing key from upsert_profile is unchanged, and
+        # this is the one route an un-admitted account MUST be able to
+        # read — it is how the console learns to show the enter-invite
+        # screen instead of the product itself.
+        profile = _jsonable(dbmod.upsert_profile(db, user_id))
+        profile["admitted"] = dbmod.profile_is_admitted(db, user_id)
+        return profile
 
     # Display name is the ONE profile field a user owns. Email and avatar come
     # from the identity provider and are not ours to edit; github_login is set
@@ -816,7 +838,7 @@ def create_cloud_app(
     @app.post("/v1alpha1/device/approve", tags=["browser"])
     async def approve(
         request: Request,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(admitted_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
         payload = await _json_object(request)
@@ -858,6 +880,150 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown machine")
         return {"machine_id": machine_id, "status": "revoked"}
 
+    # -- browser-facing: pools and invites -----------------------------------
+    #
+    # A pool is a team; membership is what every read below scopes on, never
+    # ``pools.owner_id`` alone (see ``create_pool``'s own docstring on that).
+    # Creating a pool requires admission — it is state creation, the thing
+    # the alpha gate exists to block — but reading one you already belong to
+    # does not, the same "reads stay open" rule ``admitted_user`` documents.
+
+    @app.post("/v1alpha1/pools", status_code=201, tags=["browser"])
+    async def create_pool_route(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        payload = await _json_object(request)
+        raw_name = payload.get("name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise HTTPException(status_code=400, detail="name is required")
+        name = raw_name.strip()
+        if len(name) > 200:
+            raise HTTPException(
+                status_code=400, detail="name is limited to 200 characters"
+            )
+        pool = dbmod.create_pool(db, name=name, owner_id=user_id)
+        return _jsonable(pool)
+
+    @app.get("/v1alpha1/pools", tags=["browser"])
+    async def list_pools_route(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        return [_jsonable(p) for p in dbmod.list_pools_for_user(db, user_id)]
+
+    @app.get("/v1alpha1/pools/{pool_id}", tags=["browser"])
+    async def get_pool_route(
+        pool_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # Authorize BEFORE listing: list_pool_members takes no viewer
+        # param by design, so membership has to be established here, first,
+        # or it would list any pool's roster to anyone who could guess an
+        # id. 404, not 403 — see fetch_pool_for_member's own docstring.
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None  # not even a uuid; same answer as "not found"
+        if pool is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        members = dbmod.list_pool_members(db, pool_id)
+        return {**_jsonable(pool), "members": [_jsonable(m) for m in members]}
+
+    #: Bounds on POST /v1alpha1/pools/{id}/invites' expires_hours. A week by
+    #: default — long enough to actually reach a teammate, short enough that
+    #: a forgotten link does not stay live indefinitely; the cap keeps a
+    #: caller from minting a de-facto permanent credential by mistake.
+    DEFAULT_INVITE_EXPIRES_HOURS = 24 * 7
+    MAX_INVITE_EXPIRES_HOURS = 24 * 90
+
+    @app.post("/v1alpha1/pools/{pool_id}/invites", status_code=201, tags=["browser"])
+    async def create_pool_invite_route(
+        pool_id: str,
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Mint a one-time invite link. Owner only — checked here, against
+        this pool's row, before anything is written. 404, not 403, whether
+        the pool does not exist, the caller is a stranger to it, or the
+        caller is a member who simply isn't its owner: a 403 for the last
+        case would confirm the pool is real to someone who isn't in it at
+        all, and the caller here has no way to tell the three apart from
+        each other regardless.
+
+        Not gated by ``admitted_user``: minting an invite already requires
+        owning a pool, and owning a pool already required admission at
+        create time. The four routes that need the gate directly are named
+        exhaustively on ``admitted_user`` itself.
+        """
+        payload = await _json_object(request)
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None or str(pool["owner_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="unknown pool")
+
+        raw_hours = payload.get("expires_hours")
+        if raw_hours is None:
+            hours = DEFAULT_INVITE_EXPIRES_HOURS
+        elif (
+            isinstance(raw_hours, (int, float))
+            and not isinstance(raw_hours, bool)
+            and 0 < raw_hours <= MAX_INVITE_EXPIRES_HOURS
+        ):
+            hours = raw_hours
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"expires_hours must be a positive number, at most "
+                       f"{MAX_INVITE_EXPIRES_HOURS}",
+            )
+
+        token = new_invite_token()
+        dbmod.create_pool_invite(
+            db,
+            pool_id=pool_id,
+            created_by=user_id,
+            token_hash=hash_invite_token(token),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=hours),
+            uses=1,
+        )
+        # The raw token appears in a response exactly this once. It is
+        # never stored (only its hash is), so this is also the only place
+        # it could ever be recovered from.
+        return {"token": token}
+
+    @app.post("/v1alpha1/invites/accept", tags=["browser"])
+    async def accept_invite(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The admission bootstrap itself — deliberately on ``current_user``,
+        not ``admitted_user``: the entire point of this route is that an
+        un-admitted, possibly brand-new account can call it.
+        """
+        payload = await _json_object(request)
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            raise HTTPException(status_code=400, detail="token required")
+        # The account may be signing in for the very first time — upsert
+        # the profile row before consuming the invite, since consume_pool_
+        # invite's membership/admission writes both carry a FK to it.
+        dbmod.upsert_profile(db, user_id)
+        result = dbmod.consume_pool_invite(
+            db, token_hash=hash_invite_token(token), user_id=user_id
+        )
+        if result is None:
+            # Unknown, expired, and exhausted all land here, indistinguishably
+            # — same fold consume_pool_invite itself documents.
+            raise HTTPException(status_code=404, detail="invalid or expired invite")
+        return {"pool_id": str(result["pool_id"]), "name": result["name"]}
+
     # -- browser-facing: job ownership --------------------------------------
     #
     # A developer submits a job with a Supabase JWT; the row this writes is
@@ -871,7 +1037,7 @@ def create_cloud_app(
     @app.post("/v1alpha1/jobs", status_code=201, tags=["browser"])
     async def submit_job(
         request: Request,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(admitted_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
         raw = await request.body()
@@ -919,7 +1085,7 @@ def create_cloud_app(
     @app.post("/v1alpha1/jobs/from-repo", status_code=201, tags=["browser"])
     async def submit_job_from_repo(
         request: Request,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(admitted_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
         """Paste a GitHub repo, get a job — or get told exactly what is

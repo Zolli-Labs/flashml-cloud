@@ -211,11 +211,29 @@ def make_client(settings, postgres_dsn, transport):
         client.__exit__(None, None, None)
 
 
-def _new_user(db) -> str:
+def _new_user(db, *, admitted: bool = True) -> str:
+    """A real ``auth.users`` + ``public.profiles`` pair.
+
+    Admitted by default: this file (and everything that imports this
+    helper — ``test_profile.py``, ``test_contributions.py``,
+    ``test_federated.py``, ``test_verification.py``, ``test_db_pools.py``)
+    submits jobs and otherwise exercises routes gated by the invite-only
+    admission dependency (Task 10), and pre-alpha-gate accounts are exactly
+    what most fixtures here are meant to model. ``admitted=False`` is the
+    one deliberate exception, for the handful of tests whose point IS the
+    gate (see ``test_pools_api.py`` and
+    ``test_db_pools.test_consume_pool_invite_admits_the_profile``).
+    """
     user_id = str(uuid.uuid4())
     with db.cursor() as cur:
         cur.execute("insert into auth.users (id) values (%s)", (user_id,))
-        cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
+        if admitted:
+            cur.execute(
+                "insert into public.profiles (id, admitted_at) values (%s, now())",
+                (user_id,),
+            )
+        else:
+            cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
     return user_id
 
 

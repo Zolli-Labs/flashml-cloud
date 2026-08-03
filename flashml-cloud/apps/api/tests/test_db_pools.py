@@ -293,7 +293,11 @@ def test_consume_pool_invite_admits_the_profile(db):
     """Consuming an invite is the alpha gate's *only* other door besides
     being grandfathered at migration time — see 0007's header."""
     owner = _new_user(db)
-    joiner = _new_user(db)
+    # Unadmitted on purpose: `_new_user` marks its profile admitted by
+    # default now (Task 10 — most fixtures across the suite need that), so
+    # this is the one call site that opts back out to keep exercising the
+    # property this test is actually named for.
+    joiner = _new_user(db, admitted=False)
     pool_id = _pool(db, owner)
     token_hash = _invite(db, pool_id, owner, uses=1)
 

@@ -137,11 +137,19 @@ def client(settings, postgres_dsn, transport):
 def _new_user(db) -> str:
     """A real ``auth.users`` + ``public.profiles`` pair. profiles.id is an
     FK to auth.users, and machines.owner_id an FK to profiles, so a machine
-    cannot exist without both."""
+    cannot exist without both.
+
+    Admitted at creation: this file's device-approve tests go through the
+    invite-gated ``POST /v1alpha1/device/approve`` route (Task 10), and this
+    fixture models an ordinary, already-onboarded account rather than the
+    admission gate itself."""
     user_id = str(uuid.uuid4())
     with db.cursor() as cur:
         cur.execute("insert into auth.users (id) values (%s)", (user_id,))
-        cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
+        cur.execute(
+            "insert into public.profiles (id, admitted_at) values (%s, now())",
+            (user_id,),
+        )
     return user_id
 
 
