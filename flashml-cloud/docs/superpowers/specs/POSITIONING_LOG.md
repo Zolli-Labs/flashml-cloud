@@ -16,6 +16,49 @@ entry contradicts an earlier one, say so explicitly and link it.
 
 ---
 
+## 2026-08-03 — Thread 4 was never designed, and what shipped is not it
+
+**Changed:** nothing in the thesis. Two claims in the written record were
+false, and one narrow defence now exists.
+
+**Trigger:** starting thread 4 (result verification) and going to read the
+design it was said to have.
+
+**There is no design.** This log said thread 4 was "Designed
+(`flashnode/benchmark/` ABCs), unimplemented", and
+`docs/guides/donate-a-machine.md` told volunteers that "spot-check
+verification and a reputation system are designed but not built". Neither is
+true. `flashnode/benchmark/` is **admission capability probing** —
+`cpu_hash_mbps`, `mem_bandwidth_mbps`, `disk_write_mbps` — which measures how
+fast a host is, never whether its answers are correct. Both claims are now
+corrected in place; the guide's version matters more, because volunteers were
+reading a reassurance that referred to nothing.
+
+**What the state actually was.** Better than expected on one axis:
+`reduce_deltas` already rejected every *malformed* contribution, including a
+documented poisoning primitive where `(delta=-999, n=-999)` alongside
+`(delta=1.0, n=1000)` yields a healthy total of 1 but an "average" of
+**999001.0**. What passed untouched was a contribution that is entirely
+well-formed and adversarial: `delta = 1e6` with an honest sample count.
+
+**What shipped:** median-anchored magnitude capping, at 3× the round's median
+norm. An honest round is byte-identical to before — verified, not assumed.
+
+**Thread 4 stays OPEN, and this is the point of the entry.** Bounded
+influence caps *magnitude*, not *direction*. It does not detect a lazy node —
+zeros, or last round's delta replayed, have an ordinary norm and still earn
+credit. It verifies no computation. It is federated-only. And at
+`min_participants = 2` — most runs today — it is weak by construction,
+because the median of two values is their mean, which an attacker moves
+directly.
+
+The thing thread 4 asks for is spot-check re-execution: re-run a sample
+elsewhere and compare. That is unbuilt and now, at least, undesigned in the
+open rather than undesigned while claiming otherwise.
+
+---
+
+
 ## 2026-08-02 (latest) — The credit ledger only paid federated hosts; now it pays everyone
 
 **Changed:** nothing in the thesis. This closes a gap in the *implementation*
@@ -366,9 +409,14 @@ Ordered by what unblocks the most:
    their own machine and the task reads it without it ever being uploaded.
    Today every input comes from the coordinator as an artifact. The gate for
    federated, and foundational rather than incremental.
-4. **Result verification** — the gate for any PAID marketplace. Designed
-   (`flashnode/benchmark/` ABCs), unimplemented. Not needed for federated,
-   barter, or rent-and-resell.
+4. **Result verification** — the gate for any PAID marketplace. **OPEN.**
+   ~~Designed (`flashnode/benchmark/` ABCs)~~ — that citation was wrong;
+   `benchmark/` is admission capability probing, and no design for result
+   verification exists (2026-08-03 entry). Federated deltas are now
+   magnitude-capped, which is NOT verification: it bounds how far one
+   contributor moves the model, detects no lie, and is weak at a
+   two-participant quorum. Spot-check re-execution remains unbuilt.
+   Not needed for federated, barter, or rent-and-resell.
 5. **Capability-aware placement** — a GPU job must not land on a laptop, and a
    500-config sweep should. `IsolationAwarePlacement` reads no capabilities
    today.
