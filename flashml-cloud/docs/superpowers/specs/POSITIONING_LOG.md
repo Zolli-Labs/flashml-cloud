@@ -409,7 +409,12 @@ Ordered by what unblocks the most:
    their own machine and the task reads it without it ever being uploaded.
    Today every input comes from the coordinator as an artifact. The gate for
    federated, and foundational rather than incremental.
-4. **Result verification** — the gate for any PAID marketplace. **OPEN.**
+4. **Result verification** — the gate for any PAID marketplace. **PARTIAL
+   (2026-08-03), not done.** Slices 1 (timing) and 2 (execution evidence) are
+   built; slice 3 (re-execution) is not — only its placement gate. Nothing is
+   enforced anywhere, by design: a mismatch does not name the liar. Collusion,
+   tie-breaking, and GPU verification remain unsolved; sleeping defeats slice
+   1 outright. Previously:
    ~~Designed (`flashnode/benchmark/` ABCs)~~ — that citation was wrong;
    `benchmark/` is admission capability probing, and no design for result
    verification exists (2026-08-03 entry). Federated deltas are now

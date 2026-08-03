@@ -172,6 +172,74 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — Verification layer: two slices shipped, thread 4 still open
+
+What/why: nothing distinguished a correct result from a plausible wrong one.
+A node returning zeros passed every check in the system — the file existed,
+the hash matched (it hashed what it uploaded), the values were finite, the
+counts sane, the shapes agreed, the norm unremarkable — and earned a
+`contributions` row identical to an honest node's.
+
+Design: `docs/superpowers/specs/2026-08-03-result-verification-design.md`.
+Three slices, cheapest first. The ordering came from the owner asking why we
+re-compute instead of checking the harness around the computation. The
+structural answer is that anything the agent self-reports it can fabricate;
+the useful answer is that the POINT of lying is to save compute, so
+verification need not be a proof — it needs to make a convincing fake cost
+about as much as doing the work.
+
+How verified: apps/api 464 → **504**, flashruntime 620 → **661**,
+flashnode 338 → **392**. Slice 1's six wrong-`pass` paths each pinned by a
+test after being confirmed against the original formula side by side.
+
+**Slice 1 — timing (shipped, free).** `attempts.claimed_at` is written by the
+API and duration computed at credit time, so observed elapsed is OURS. A node
+can only inflate it by sleeping, never shrink it. Flags a result committed a
+fraction of a second after claim.
+
+**Slice 2 — execution evidence (shipped, needs the release).**
+`CompleteRequest` was `{output_sha256}` and nothing else; it now carries
+optional CPU/GPU utilisation, wall clock, image digest and exit code.
+
+**Slice 3 — re-execution (NOT shipped).** Only its placement gate exists.
+
+Gotchas:
+1. **My own timing formula produced SIX wrong `pass` verdicts.** Worst: peers
+   `[0.0, 0.0, 0.0]` → median 0.0 → `0.01 < 0.0` is False → **pass**. A job
+   where every machine returned instantly would certify the next liar. A
+   verifier that does that is worse than none. Also non-finite peers, unusable
+   peers padding `min_peers`, NaN/inf observed losing every comparison, and
+   `floor_ratio=0` flooring at zero.
+2. **A machine is never its own peer.** Otherwise a consistently fast liar
+   becomes its own baseline, and a machine that worked a job alone would be
+   compared only against itself — always passing, writing "nobody has ever
+   checked this" as `pass`.
+3. **My exclusion-gate snippet was incomplete twice over**: it checked the
+   list but not its members, and never checked that the node view could
+   answer "are you the node to avoid?". Either would let a verification twin
+   land on the node it was meant to avoid — which produces a MATCH, i.e. a
+   false `pass`, not a missing check.
+4. **`exit_code` carries almost no information as built** — a non-zero exit
+   raises `TaskExecutionError` and never reaches `complete`. Implemented from
+   the real `returncode` and documented, so nobody reads meaning into it.
+5. **`image_digest` uses `.Id`, not `RepoDigests[0]`** — a locally built image
+   has no `RepoDigests`, so the registry digest would be empty on exactly the
+   hosts most worth checking.
+6. **Slice 1 is mostly `unknown` for federated work.** `contributions.job_id`
+   is the ROUND's coordinator job, so the peer group is only as big as the
+   quorum. It effectively covers sweeps and command jobs today.
+
+**Nothing is enforced, and that is structural, not provisional.** No lease
+refused, no credit withheld, no commit failed. A mismatch does not identify
+the liar — two results disagree with no third opinion — so auto-punishing
+punishes the honest node half the time.
+
+Next: release flashruntime 0.4.2 / flashnode 0.3.3 (slice 2 is inert until
+then — `ExecutionEvidence` is imported at module scope, so an agent on 0.4.1
+raises ImportError and never registers). Parking lot: slice 3's dispatch
+half; collusion; tie-breaking a mismatch; GPU work, which slice 3 cannot
+verify at all because two honest CUDA runs differ.
+
 ### 2026-08-03 — GPU support validated on real hardware (RTX 4090, ~$0.15)
 
 What/why: GPU detection, advertisement and placement had never met an NVIDIA
