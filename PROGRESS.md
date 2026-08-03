@@ -153,6 +153,48 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — GPU support deployed to production (all repos)
+
+What/why: the release chain finished. flashruntime 0.4.1 and flashnode 0.3.2
+on PyPI, curated images at 2026.08.2 including the new pytorch-cuda, all four
+pins moved, Blueprint synced, and all six Render services live on `82a5a00`.
+`resources.gpus` in a `flashml.yaml` now survives every hop it used to be
+dropped on.
+
+How verified: at each hop, against the deployed artifact rather than the tree.
+Dev coordinator `/openapi.json` carries `gpuPerTask` (it did not before the
+sync). deploy-prod ran preflight → migrate → deploy, all green, and Render
+reports all three prod services `live` on 82a5a00 —
+`dep-d9o05me417fc73e943ig` (coordinator), `dep-d9o05me417fc73e94410` (api),
+`dep-d9o05mlaeets73cpo8rg` (web). Prod API `/healthz` and web both 200. CI
+green on main for the deployed commit, which the preflight independently
+re-checks.
+
+Gotchas:
+1. **The Blueprint tracks `main`.** A sync from a branch that does not yet
+   carry the change reports "Resources already up to date" and does nothing —
+   correctly, and confusingly. Merge to main FIRST, then sync. This cost a
+   round trip.
+2. The coordinators needed a sync, not a deploy. Once synced, Render itself
+   redeploys them (`trigger: blueprint_sync`), so the pin lands before
+   deploy-prod ever runs — which is the safe order anyway: a 0.4.1
+   coordinator accepts specs from an older API, the reverse silently drops
+   `gpuPerTask`.
+
+Next: `test_fedavg_survives_a_closed_laptop` failed 4 of 5 CI runs today and
+passed every re-run — it gates production and it is racy by construction.
+`min_participants=1` lets round 0 close on the FIRST commit, so
+`participants == 2` is a coin flip. It has never failed locally (3/3 on the
+new pins) and the flashnode 0.3.1→0.3.2 loop diff contains nothing that
+delays a claim (`_should_stop_volunteering` returns False immediately when
+`health_check is None`, which is how the test builds the loop) — but every
+occurrence is post-pin-move and zero precede it, so a timing nudge is not
+ruled out. Fix: split into two `run_fedavg` calls — round 0 with
+`min_participants=2` so it must wait for both agents, then rounds 1–2 with 1
+via `start_round`/`weights_uri`/`prior_job_ids`. That preserves exactly what
+the test proves and removes the race. Parking lot: a deploy-time assertion
+that the running coordinator's version equals RUNTIME_VERSION.
+
 ### 2026-08-02 — render.yaml is not the deployed truth: autoDeploy never re-reads the blueprint (flashml-cloud)
 
 What/why: found while verifying the dev deploy after the 0.4.1 pin move. The
