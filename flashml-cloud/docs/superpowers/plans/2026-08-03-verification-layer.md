@@ -67,10 +67,32 @@ def timing_verdict(peers: list[float], observed: float,
     """('pass'|'flag'|'unknown', detail)."""
 ```
 
-- fewer than `min_peers` peer samples ⇒ `unknown`, never `pass`
-- `observed < median(peers) * floor_ratio` ⇒ `flag`
+⚠️ **CORRECTED 2026-08-03 — the snippet below produced SIX wrong `pass`
+verdicts and was rightly refused.** Verified side by side against the
+implementation. The worst: with peers `[0.0, 0.0, 0.0]` the median is 0.0, so
+`0.01 < 0.0` is False and the answer is **`pass`** — a job where every other
+machine also returned instantly certifies the next liar. A verifier that
+does that is worse than none.
+
+The others: non-finite peers compared against a meaningless median; unusable
+peers counted toward `min_peers` so `[9, 9, NaN, 0.0]` clears a 3-sample gate
+on a 2-sample baseline; NaN or ±inf `observed` losing every comparison and
+passing; and `floor_ratio=0` putting the floor at zero so nothing can ever
+fall below it.
+
+The rules that actually hold:
+
+- peers are **OTHER machines'** `duration_s` for the same `job_id` — never the
+  machine's own history, or a consistently fast liar becomes its own baseline
+- **filter unusable peers first**, then count: non-finite and non-positive
+  samples are not evidence and must not pad `min_peers`
+- fewer than `min_peers` usable peers ⇒ `unknown`, never `pass`
+- a non-finite `observed` ⇒ `unknown`; a non-positive `observed` ⇒ `flag`
+  (both timestamps are the API's own, so it needs no peer to be impossible)
+- `observed < median(usable peers) * floor_ratio` ⇒ `flag`
 - otherwise `pass`
-- peers are OTHER machines' `duration_s` for the same `job_id`
+- `floor_ratio` outside `(0, 1]` raises — a verifier misconfigured into
+  certifying everything is worse than one switched off
 
 Tests: the three verdicts; a fast-but-honest machine at 0.5× median passes;
 0.05× flags; two peers ⇒ unknown; an empty peer list ⇒ unknown; a zero or
