@@ -42,7 +42,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
 import tempfile
 import uuid
@@ -379,7 +379,42 @@ def _passthrough(r: httpx.Response) -> Response:
     )
 
 
-def _scrub_identity(body: bytes, node_id: str, *, force: bool) -> tuple[bytes, str]:
+def _stamp_pools(
+    parsed: dict[str, Any],
+    pools: list[str],
+    where: Literal["capabilities", "top"],
+) -> None:
+    """OVERWRITE — never merge — whatever the agent claimed about its own
+    pool membership. ``where`` picks the shape: register nests it under
+    ``capabilities.pools`` (matching ``NodeRegistration.capabilities``);
+    heartbeat carries it top-level (matching ``NodeHeartbeat.pools``).
+
+    Always assigns, including ``[]`` — the caller (route handlers) resolves
+    "no pools" and "lookup failed" to the same empty list on purpose, and
+    this function has no way to tell them apart nor any reason to.
+    """
+    if where == "top":
+        parsed["pools"] = list(pools)
+        return
+    caps = parsed.get("capabilities")
+    if not isinstance(caps, dict):
+        # A forged/malformed `capabilities` (not a dict at all) is replaced
+        # outright rather than merged into — there is nothing sane to merge
+        # with, and leaving it in place would ship it to the coordinator
+        # unexamined.
+        caps = {}
+    caps["pools"] = list(pools)
+    parsed["capabilities"] = caps
+
+
+def _scrub_identity(
+    body: bytes,
+    node_id: str,
+    *,
+    force: bool,
+    pools: list[str] | None = None,
+    pools_where: Literal["capabilities", "top"] = "capabilities",
+) -> tuple[bytes, str]:
     """Replace any ``node_id`` the agent put in its own body with the one
     its token resolves to. Returns ``(body, media_type)``.
 
@@ -393,11 +428,19 @@ def _scrub_identity(body: bytes, node_id: str, *, force: bool) -> tuple[bytes, s
     ``force`` inserts the field on the identity-bearing calls (register /
     heartbeat / claim) even when the agent omitted it, so the coordinator
     never has to fall back to a default.
+
+    ``pools``, when not ``None``, is stamped onto the body the same way:
+    OVERWRITTEN, never merged with whatever the agent sent, and stamped even
+    onto an otherwise-empty body (the ``force`` branch) — a node that skips
+    the field must not thereby dodge the stamp.
     """
     if not body.strip():
         if not force:
             return body, "application/json"
-        return json.dumps({"node_id": node_id}).encode(), "application/json"
+        parsed: dict[str, Any] = {"node_id": node_id}
+        if pools is not None:
+            _stamp_pools(parsed, pools, pools_where)
+        return json.dumps(parsed).encode(), "application/json"
     try:
         parsed = json.loads(body)
     except (ValueError, UnicodeDecodeError):
@@ -406,6 +449,8 @@ def _scrub_identity(body: bytes, node_id: str, *, force: bool) -> tuple[bytes, s
         return body, "application/json"
     if force or "node_id" in parsed:
         parsed["node_id"] = node_id
+    if pools is not None:
+        _stamp_pools(parsed, pools, pools_where)
     return json.dumps(parsed).encode(), "application/json"
 
 
@@ -648,6 +693,8 @@ def create_cloud_app(
         path: str,
         *,
         force_node_id: bool = False,
+        pools: list[str] | None = None,
+        pools_where: Literal["capabilities", "top"] = "capabilities",
     ) -> Response:
         is_artifact = path.startswith("/v1alpha1/artifacts/")
         limit = max_upload_bytes if is_artifact else MAX_JSON_BODY_BYTES
@@ -672,7 +719,8 @@ def create_cloud_app(
             )
         elif request.method in ("POST", "PUT", "PATCH"):
             body, media_type = _scrub_identity(
-                body, machine.node_id, force=force_node_id
+                body, machine.node_id, force=force_node_id,
+                pools=pools, pools_where=pools_where,
             )
         else:
             media_type = None
@@ -1583,8 +1631,21 @@ def create_cloud_app(
     async def register_node(
         request: Request, machine: Machine = Depends(current_machine)
     ):
+        # Resolved BEFORE proxying and stamped onto the body — never trust
+        # what the agent claims about its own pool membership.
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
+        except Exception:
+            # Fail CLOSED: a node we cannot vouch for serves no pool this
+            # cycle. Never skip the stamp — skipping would forward whatever
+            # the agent claimed.
+            log.warning("could not resolve pools for machine %s", machine.id)
+            pools = []
+
         return await proxy(
-            request, machine, "/v1alpha1/nodes/register", force_node_id=True
+            request, machine, "/v1alpha1/nodes/register", force_node_id=True,
+            pools=pools, pools_where="capabilities",
         )
 
     @app.post("/v1alpha1/nodes/{node_id}/heartbeat", tags=["agent"])
@@ -1603,19 +1664,31 @@ def create_cloud_app(
         # written, so `machines.last_seen_at` stayed null and every machine
         # rendered "Offline / Last seen never" no matter how healthy it was.
         #
-        # Best-effort: a display column must never be the reason a machine's
-        # heartbeat fails and its leases start expiring.
+        # The pool membership refresh rides the same connection open: both
+        # are best-effort, so neither one — a display column, or a pool
+        # stamp that fails CLOSED anyway — is ever the reason a heartbeat
+        # fails and its leases start expiring.
         try:
             with contextlib.closing(app.state.connect()) as conn:
                 dbmod.touch_machine_last_seen(conn, machine.id)
+                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
         except Exception:
-            log.warning("could not record last_seen_at for machine %s", machine.id)
+            # Fail CLOSED: a node we cannot vouch for serves no pool this
+            # cycle. Never skip the stamp — skipping would forward whatever
+            # the agent claimed.
+            log.warning(
+                "could not record last_seen_at / resolve pools for machine %s",
+                machine.id,
+            )
+            pools = []
 
         return await proxy(
             request,
             machine,
             f"/v1alpha1/nodes/{machine.node_id}/heartbeat",
             force_node_id=True,
+            pools=pools,
+            pools_where="top",
         )
 
     @app.post("/v1alpha1/leases/claim", tags=["agent"])
