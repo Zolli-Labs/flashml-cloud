@@ -110,6 +110,13 @@ export interface Profile {
   is_host: boolean;
   is_developer: boolean;
   created_at: string;
+  /** Whether this account has redeemed an invite (or predates the gate —
+   * see the migration's grandfather clause). `GET /v1alpha1/me` stays
+   * reachable for an un-admitted account on purpose (`admitted_user`'s own
+   * docstring: "reads stay open") specifically so the console can read
+   * this flag and show the invite gate instead of a silent 403 on every
+   * other route. */
+  admitted: boolean;
 }
 
 /** A row of `public.machines`, restricted to `MACHINE_PUBLIC_COLUMNS` —
@@ -274,6 +281,40 @@ export interface JobTask {
   round?: number;
 }
 
+/** A row of `public.pools`, as `GET /v1alpha1/pools` — the LIST route —
+ * returns it. `member_count` and `machines_online` are aggregates computed
+ * there in one query (`list_pools_for_user`, `db.py`), the same
+ * single-query-not-N reasoning `listJobRounds` documents elsewhere.
+ *
+ * `GET /v1alpha1/pools/{id}` and `POST /v1alpha1/pools` return the same
+ * four base columns (`id`, `name`, `owner_id`, `created_at`) but NOT these
+ * two counts (`POOL_PUBLIC_COLUMNS` in `db.py` has no aggregate columns to
+ * return). `getPool()` and `createPool()` below still type their result as
+ * `Pool`, for one shape across this whole client, but
+ * `member_count`/`machines_online` are genuinely absent — `undefined` at
+ * runtime, not stale-zero — on those two responses specifically. Only
+ * `listPools()`'s result actually populates them. */
+export interface Pool {
+  id: string;
+  name: string;
+  owner_id: string;
+  member_count: number;
+  machines_online: number;
+  created_at: string;
+}
+
+/** A row of `public.pool_members` joined to the member's profile, as
+ * `GET /v1alpha1/pools/{id}` returns each entry of `members`. Per-MEMBER
+ * machine counts (their own enrolled machines), not the pool's aggregate —
+ * see `list_pool_members`, `db.py`. */
+export interface PoolMember {
+  user_id: string;
+  display_name: string | null;
+  joined_at: string;
+  machine_count: number;
+  machines_online: number;
+}
+
 // ---------------------------------------------------------------------------
 // request plumbing
 // ---------------------------------------------------------------------------
@@ -399,6 +440,77 @@ export function revokeMachine(machineId: string): Promise<RevokeMachineResult> {
   return request<RevokeMachineResult>(
     `/v1alpha1/machines/${encodeURIComponent(machineId)}/revoke`,
     { method: "POST" }
+  );
+}
+
+// -- pools and invites -------------------------------------------------
+
+export function listPools(): Promise<Pool[]> {
+  return request<Pool[]>("/v1alpha1/pools");
+}
+
+/** `POST /v1alpha1/pools` requires admission (creating a pool is state
+ * creation, the thing the alpha gate exists to block) — a 401-shaped
+ * `NotAuthenticated` never fires here for "not admitted"; that case
+ * surfaces as a plain `ApiError` with the API's own detail
+ * ("invite required"), same as any other refusal. */
+export function createPool(name: string): Promise<Pool> {
+  return request<Pool>("/v1alpha1/pools", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** The shape `GET /v1alpha1/pools/{id}` actually returns: the pool's own
+ * (count-less — see `Pool`'s docstring) columns flattened alongside
+ * `members`, e.g. `{id, name, owner_id, created_at, members: [...]}` — NOT
+ * `{pool: {...}, members: [...]}`. */
+interface PoolDetailResponse {
+  id: string;
+  name: string;
+  owner_id: string;
+  created_at: string;
+  members: PoolMember[];
+}
+
+/** Reshapes that flat response into `{pool, members}` so callers get one
+ * nested shape, matching every other place this client separates "the
+ * thing" from "the list attached to it". */
+export async function getPool(
+  poolId: string
+): Promise<{ pool: Pool; members: PoolMember[] }> {
+  const { members, ...pool } = await request<PoolDetailResponse>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}`
+  );
+  // Cast: this route's `pool` genuinely lacks member_count/machines_online
+  // (see `Pool`'s docstring) — nested here as `Pool` anyway so this client
+  // exposes one type for "a pool" rather than a second, detail-only
+  // interface nothing else needs.
+  return { pool: pool as Pool, members };
+}
+
+/** Mints a one-time invite link's token. The API returns the raw token
+ * exactly once — it is hashed for storage and never kept in the clear, so
+ * this is the only place it could ever be recovered — and this function
+ * does nothing with it but hand it back: no logging, no persistence, no
+ * echoing anywhere else in this client. */
+export function createPoolInvite(poolId: string): Promise<{ token: string }> {
+  return request<{ token: string }>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/invites`,
+    { method: "POST" }
+  );
+}
+
+/** `POST /v1alpha1/invites/accept` — deliberately callable by a
+ * signed-in-but-not-yet-admitted account (the API's `accept_invite` sits on
+ * `current_user`, not `admitted_user`): this call IS the admission
+ * bootstrap, not something gated behind having already passed it. */
+export function acceptInvite(
+  token: string
+): Promise<{ pool_id: string; name: string }> {
+  return request<{ pool_id: string; name: string }>(
+    "/v1alpha1/invites/accept",
+    { method: "POST", body: JSON.stringify({ token }) }
   );
 }
 
