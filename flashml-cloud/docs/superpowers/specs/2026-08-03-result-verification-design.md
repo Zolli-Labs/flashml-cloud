@@ -127,24 +127,46 @@ never as `pass`.
 
 The only mechanism that requires the liar to actually compute.
 
-**Dispatched UPFRONT, not after the fact.** Draft 1 specified a post-hoc
-shadow job: wait for a task to be accepted, then re-run it. The owner
-proposed dispatching the sample to two machines from the start, which is the
-same compute cost and strictly better:
+**Dispatched POST-HOC: after a task is accepted, re-run it elsewhere.**
 
-| | post-hoc (draft 1) | upfront (this) |
+Draft 2 specified upfront redundancy — dispatch the sampled task to two
+machines from the start, so a bad result is caught *before* it is aggregated
+or credited. That is strictly better on correctness, and it is **deferred**,
+not discarded (§4.3).
+
+The reason is the fleet we actually have. Upfront redundancy makes every
+sampled round wait for the **slower of two machines**. On a homogeneous
+rented fleet that is a rounding error. On this one — laptops and a desktop,
+5.5s to 37.5s for the same class of work, a 7× spread — it means the round
+runs at the speed of the slowest volunteer, on top of an already small
+quorum. The cost is paid in wall-clock on every sampled round, forever, to
+buy earlier detection of an attack nobody has yet mounted.
+
+| | post-hoc (this) | upfront (deferred) |
 |---|---|---|
+| latency | **none added** | round waits for the slower of two |
+| compute | `f` × | `f` × (same) |
 | credit | already paid when the check runs | withheld until both agree |
-| a poisoned federated delta | already aggregated into the weights | **never enters the model** |
-| latency | none added | the round waits for the slower of the two |
+| a poisoned federated delta | already aggregated — but **magnitude-capped** | never enters the model |
 
-For federated the difference is the whole point. Bounded influence limits how
-much damage a bad delta does; not aggregating it at all is a different thing
-from limiting it. The latency cost is real and is the trade-off accepted
-(§8.4).
+The last row is why post-hoc is tolerable rather than merely cheaper:
+bounded influence already caps what a single bad delta can do to the model.
+Post-hoc detection plus a bound is a reasonable posture; post-hoc detection
+with no bound would not be.
 
-At sampling rate `f`, `f` of the tasks in a round are dispatched twice, to two
-different machines, and their results compared before the round aggregates.
+### 4.3 When to revisit upfront redundancy
+
+It becomes the right design when the fleet stops being small and
+heterogeneous — rented datacenter capacity, or hosts selected for comparable
+throughput. The trigger is measurable rather than a matter of taste:
+
+- the p95/p50 spread of task duration within a peer group is small (say < 2×),
+  so waiting for the slower machine costs little; **and**
+- work is being paid for, so crediting a result before checking it is a real
+  loss rather than an accounting note.
+
+Neither holds today. Both plausibly hold for the rented-provider tier the
+positioning log identifies as where the compute actually is.
 
 ### 4.1 The determinism problem, which GPU support made worse
 
@@ -259,10 +281,12 @@ fleet.
 other and agree on a wrong answer. Mitigations (reputation-weighted pairing,
 a trusted third run) all need a fleet larger than two.
 
-**8.4 Redundancy adds latency.** A federated round now waits for the slower
-of two machines on `f` of its shards. At `f=0.05` and a 2-shard quorum this
-is frequently *every* round. Accepted deliberately: catching a poisoned delta
-before aggregation is worth a slower round. Revisit if rounds get long.
+**8.4 Post-hoc detection is after the fact.** The result is already
+committed, already credited, and — for federated — already aggregated by the
+time the check runs. Bounded influence caps the damage, but the bad delta did
+enter the model. Upfront redundancy fixes this and was deferred on latency
+grounds (§4.3); the revisit trigger is written down there rather than left to
+memory.
 
 **8.5 A mismatch does not name the liar.** Two results disagree with no third
 opinion. This is why nothing is enforced (§5), and it is the single biggest
