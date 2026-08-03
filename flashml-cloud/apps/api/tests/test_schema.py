@@ -153,3 +153,53 @@ def test_attempts_table_exists_with_rls(db):
             " where oid = 'public.attempts'::regclass"
         )
         assert cur.fetchone()["relrowsecurity"] is True
+
+
+def test_verifications_table_exists_with_rls(db):
+    """The verification ledger. Nothing is enforced from it (design spec
+    §5), so — exactly as with `job_rounds.clipped` — this table *is* the
+    feature, and a migration that failed to apply would leave the whole
+    verification layer silently doing nothing at all."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select column_name, data_type, is_nullable"
+            "  from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'verifications'"
+            " order by column_name"
+        )
+        cols = {r["column_name"]: r for r in cur.fetchall()}
+    assert {c: r["data_type"] for c, r in cols.items()} == {
+        "created_at": "timestamp with time zone",
+        "detail": "jsonb",
+        "id": "uuid",
+        "job_id": "text",
+        "machine_id": "uuid",
+        "slice": "text",
+        "task_id": "text",
+        "verdict": "text",
+    }
+    # A redundancy mismatch is about a PAIR and names neither member as the
+    # liar (§8.5), so a row may legitimately blame no machine.
+    assert cols["machine_id"]["is_nullable"] == "YES"
+    # ...but never "we do not know whose task this was", or "no verdict".
+    for column in ("job_id", "task_id", "slice", "verdict", "detail"):
+        assert cols[column]["is_nullable"] == "NO", column
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select relrowsecurity from pg_class"
+            " where oid = 'public.verifications'::regclass"
+        )
+        assert cur.fetchone()["relrowsecurity"] is True
+
+
+def test_unknown_is_one_of_the_three_verdicts_the_schema_allows():
+    """`unknown` must be storable as itself. If the constraint listed only
+    `pass` and `flag`, every "we could not tell" would have to be squeezed
+    into one of them — and the one it would be squeezed into is `pass`."""
+    match = re.search(
+        r"verdict\s+text\s+not null\s+check\s*\(([^)]*)\)", ALL_SQL, re.I
+    )
+    assert match, "verifications.verdict is not constrained at all"
+    allowed = set(re.findall(r"'(\w+)'", match.group(1)))
+    assert allowed == {"pass", "flag", "unknown"}

@@ -727,6 +727,68 @@ def claim_attempt_credit(
     }
 
 
+# ---------------------------------------------------------------------------
+# verifications
+# ---------------------------------------------------------------------------
+
+def record_verification(
+    db: psycopg.Connection,
+    *,
+    machine_id: str | None,
+    job_id: str,
+    task_id: str,
+    slice_name: str,
+    verdict: str,
+    detail: Mapping[str, Any] | None = None,
+) -> None:
+    """Record one slice's verdict on one task. Advisory, always.
+
+    Nothing in this system reads what this writes to refuse a lease, withhold
+    a credit, fail a commit or change placement — see the design spec §5 and
+    the header of migration 0006. This function exists so an operator can
+    look; it is not a gate and must never become one by accident.
+
+    ``verdict`` is one of ``pass`` / ``flag`` / ``unknown`` and is passed
+    straight to the database, which constrains it. Deliberately not
+    normalised, defaulted or coerced here: the one mistake this whole layer
+    is built to avoid is a "could not tell" arriving as a ``pass``, and a
+    tolerant writer is exactly how that happens. A caller with nothing to say
+    says ``unknown``, and an invalid verdict raises rather than being quietly
+    rewritten into a valid one.
+
+    ``slice_name`` rather than ``slice`` for the same reason
+    ``insert_job_round`` takes ``round_index``: the column name is a Python
+    builtin, and shadowing it inside the function is worse than the small
+    asymmetry at the call site.
+
+    ``machine_id`` may be ``None``. A redundancy mismatch is about a pair and
+    names neither as the liar (§8.5); a row forced to blame one of the two
+    would be a fabricated accusation.
+
+    No ``on conflict`` clause, because there is no unique index to conflict
+    with: three slices judge one task independently and each gets a row. The
+    once-only guarantee for the timing slice comes from
+    ``claim_attempt_credit``, which hands out the right to record a lease
+    exactly once — a second writer added later must bring its own guard.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.verifications
+                (machine_id, job_id, task_id, slice, verdict, detail)
+            values (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                machine_id,
+                job_id,
+                task_id,
+                slice_name,
+                verdict,
+                Json(dict(detail or {})),
+            ),
+        )
+
+
 def list_federated_jobs_for_owner(
     db: psycopg.Connection, owner_id: str
 ) -> list[dict[str, Any]]:
