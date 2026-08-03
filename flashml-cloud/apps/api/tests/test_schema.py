@@ -98,6 +98,32 @@ def test_owner_columns_cascade_from_profiles():
     assert SQL.lower().count("references public.profiles(id)") >= 2
 
 
+def test_job_rounds_records_what_the_aggregation_clipped(db):
+    """Bounded influence is RECORDED, never enforced (design spec §4): no
+    machine is quarantined, no credit withheld, no lease refused. So this
+    column *is* the mechanism as far as this repo is concerned, and a
+    migration that failed to apply would leave the whole feature silently
+    doing nothing.
+
+    `not null default '[]'` because every round has an answer to "what did
+    the cap bind?", and on an honest round — which is every round unless
+    somebody tried — that answer is the empty list. A nullable column would
+    make every reader distinguish two kinds of nothing.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select data_type, is_nullable, column_default"
+            "  from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'job_rounds'"
+            "   and column_name = 'clipped'"
+        )
+        row = cur.fetchone()
+    assert row is not None, "migration 0005 did not apply"
+    assert row["data_type"] == "jsonb"
+    assert row["is_nullable"] == "NO"
+    assert row["column_default"] == "'[]'::jsonb"
+
+
 def test_attempts_table_exists_with_rls(db):
     """The attempt ledger: the API's durable lease -> (job, task) mapping.
 

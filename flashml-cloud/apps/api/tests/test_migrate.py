@@ -80,14 +80,23 @@ def table_exists(conn: psycopg.Connection, qualified: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def test_discover_finds_the_four_real_migrations_in_order():
+def test_discover_finds_every_real_migration_in_order():
+    """Ordering and completeness, NOT a fixed list.
+
+    This asserted a hardcoded list of four until 2026-08-03, when adding
+    `0005_job_rounds_clipped` broke it — along with four other tests here.
+    A guard that fails on every new migration gets "fixed" by pasting the
+    new name in, which is editing the expectation to match the code and
+    proves nothing. What actually matters is that discovery finds ALL of
+    them and hands them back in the order they must be applied.
+    """
     versions = [m.version for m in migrate.discover(REAL_MIGRATIONS)]
-    assert versions == [
-        "0001_initial",
-        "0002_job_rounds",
-        "0003_contributions_unique",
-        "0004_attempts",
-    ]
+    on_disk = sorted(p.stem for p in REAL_MIGRATIONS.glob("*.sql"))
+
+    assert versions == on_disk, "discover() must find every migration on disk"
+    assert versions == sorted(versions), "and hand them back in applied order"
+    # The first is load-bearing: everything else has a foreign key into it.
+    assert versions[0] == "0001_initial"
 
 
 # ---------------------------------------------------------------------------
@@ -113,12 +122,7 @@ def test_all_four_real_migrations_apply_to_an_empty_database(postgres_dsn):
     with scratch_database(postgres_dsn, auth_stub=True) as dsn, connected(dsn) as conn:
         applied = migrate.apply(conn, REAL_MIGRATIONS)
 
-        assert applied == [
-            "0001_initial",
-            "0002_job_rounds",
-            "0003_contributions_unique",
-            "0004_attempts",
-        ]
+        assert applied == sorted(p.stem for p in REAL_MIGRATIONS.glob("*.sql"))
         for table in ("profiles", "machines", "device_codes", "jobs",
                       "contributions", "job_rounds", "attempts"):
             assert table_exists(conn, f"public.{table}"), table
@@ -194,17 +198,12 @@ def test_an_edited_applied_migration_raises_drift_and_applies_nothing(
 
 
 def test_baseline_records_versions_without_executing_their_sql(postgres_dsn):
-    """The one-time prod operation: the four migrations are already in
+    """The one-time prod operation: the migrations are already in
     `flashml-poc`, and `0001` would fail against live tables."""
     with scratch_database(postgres_dsn) as dsn, connected(dsn) as conn:
         recorded = migrate.apply(conn, REAL_MIGRATIONS, baseline=True)
 
-        assert recorded == [
-            "0001_initial",
-            "0002_job_rounds",
-            "0003_contributions_unique",
-            "0004_attempts",
-        ]
+        assert recorded == sorted(p.stem for p in REAL_MIGRATIONS.glob("*.sql"))
         assert set(migrate.applied(conn)) == set(recorded)
         # Not merely "no error": the tables the SQL would have created
         # must not exist. This database never had an `auth` schema, so
@@ -260,9 +259,13 @@ def test_baseline_through_stops_after_the_named_version(postgres_dsn):
         # Recorded, never executed.
         assert not table_exists(conn, "public.machines")
         # 0004 is untouched and still pending — the whole point.
-        assert [m.version for m in migrate.pending(conn, REAL_MIGRATIONS)] == [
-            "0004_attempts"
-        ]
+        # Everything AFTER the baselined prefix stays pending — expressed
+        # against the directory so a new migration does not break this.
+        expected_pending = [v for v in
+                            sorted(p.stem for p in REAL_MIGRATIONS.glob("*.sql"))
+                            if v > BASELINE_TO]
+        assert [m.version for m in
+                migrate.pending(conn, REAL_MIGRATIONS)] == expected_pending
 
 
 def test_baseline_through_then_apply_runs_only_the_remainder(postgres_dsn):
@@ -272,12 +275,23 @@ def test_baseline_through_then_apply_runs_only_the_remainder(postgres_dsn):
         migrate.apply(
             conn, REAL_MIGRATIONS, baseline=True, baseline_through=BASELINE_TO
         )
-        # Baselining did not run 0001, so give 0004 the table it references.
-        conn.execute("create table public.machines (id uuid primary key)")
+        # Baselining RECORDS without EXECUTING, so nothing the skipped
+        # migrations create actually exists. Every later migration that
+        # references one of those objects needs a stand-in here.
+        #
+        # This is not test scaffolding for its own sake — it is the real
+        # hazard of the baseline flow in miniature. Baseline too far and the
+        # next migration fails on a missing object, which is the *good*
+        # outcome; the bad one is `--baseline` over a migration that creates
+        # nothing later code references, where the gap stays invisible.
+        conn.execute("create table public.machines (id uuid primary key)")   # 0001, for 0004
+        conn.execute("create table public.job_rounds (id uuid primary key)") # 0002, for 0005
 
         done = migrate.apply(conn, REAL_MIGRATIONS)
 
-        assert done == ["0004_attempts"]
+        assert done == [v for v in
+                        sorted(p.stem for p in REAL_MIGRATIONS.glob("*.sql"))
+                        if v > BASELINE_TO]
         assert table_exists(conn, "public.attempts")
         assert migrate.pending(conn, REAL_MIGRATIONS) == []
 

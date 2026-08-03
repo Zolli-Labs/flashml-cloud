@@ -456,6 +456,7 @@ def insert_job_round(
     mean_loss: float | None,
     contributors: list[str],
     coordinator_job_id: str | None,
+    clipped: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     """Record one completed federated-averaging round.
 
@@ -464,14 +465,23 @@ def insert_job_round(
     must be able to re-report it without either crashing or appending a
     second, contradictory row. Idempotent commits, same rule as everywhere
     else money and metrics are counted.
+
+    ``clipped`` is the round's bounded-influence report — the contributions
+    whose norm exceeded the round's own cap, as
+    ``{task_id, norm, cap, scale, node_id}`` — and is empty on an honest
+    round. Stored the same way ``contributors`` is, as one jsonb document
+    rather than rows of its own: it is read straight back out as JSON and is
+    never joined on. Optional because it is evidence, not accounting: a
+    caller that has none to report (or a runtime older than the feature)
+    records the round with the column's own ``[]``, and never a null.
     """
     with db.cursor() as cur:
         cur.execute(
             """
             insert into public.job_rounds
                 (job_id, round, participants, mean_loss, contributors,
-                 coordinator_job_id)
-            values (%s, %s, %s, %s, %s, %s)
+                 coordinator_job_id, clipped)
+            values (%s, %s, %s, %s, %s, %s, %s)
             on conflict (job_id, round) do nothing
             """,
             (
@@ -481,6 +491,7 @@ def insert_job_round(
                 mean_loss,
                 Json(list(contributors)),
                 coordinator_job_id,
+                Json(list(clipped)),
             ),
         )
 

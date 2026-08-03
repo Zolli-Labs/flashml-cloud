@@ -45,6 +45,7 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any, Callable
 
 import psycopg
@@ -246,6 +247,54 @@ def _contributors(accepted: list[dict[str, Any]]) -> list[str]:
     return seen
 
 
+def _clip_events(
+    result: RoundResult, accepted: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The round's clip events, each attributed to the node that sent it.
+
+    Bounded influence caps how far one contributor can move the shared model
+    (design spec §2): a contribution whose L2 norm exceeds
+    ``median(norms) × 3`` is scaled back to the cap, and the aggregation
+    reports that it did. The runtime reports positional indices; the driver
+    resolves them to **task ids**, which is the only identity it holds; the
+    node id is joined here.
+
+    Here rather than in the driver because resolving a task to a machine
+    means deciding which attempts count as ACCEPTED, and that judgement
+    lives in exactly one place — ``_accepted_tasks``, whose filter was moved
+    rather than copied so provenance and the credit ledger can never
+    disagree. A driver re-deriving node ids from ``coord.tasks()`` would be
+    a second opinion about who did the work.
+
+    A task with no accepted node id gets ``node_id: None``; it is never
+    dropped. ``_accepted_tasks`` filters on COMPLETED *and* on having a node
+    id, so a contribution that was clipped and then re-leased elsewhere — or
+    one whose task view was momentarily unreadable — has nothing to join
+    against. An attempt to steer the model that left no trace at all is
+    worse than one recorded against an unknown machine: the entire purpose
+    of this record is that the operator can look.
+
+    ``.get`` rather than ``result["clipped"]``: the key is newer than the
+    runtime this API may be pinned to, and a KeyError here would fail a
+    round that has already been aggregated and had its weights committed.
+    """
+    reported = result.get("clipped") or []  # type: ignore[misc]
+    node_by_task = {
+        task["task_id"]: task["node_id"] for task in accepted if task["task_id"]
+    }
+    events: list[dict[str, Any]] = []
+    for event in reported:
+        if not isinstance(event, Mapping):
+            # An unrecognised shape from a newer runtime is still evidence.
+            # Recorded verbatim rather than dropped or raised on.
+            events.append(event)
+            continue
+        task_id = event.get("task_id")
+        node_id = node_by_task.get(task_id) if isinstance(task_id, str) else None
+        events.append({**event, "node_id": node_id})
+    return events
+
+
 def _record_contributions(
     db: psycopg.Connection, coordinator_job_id: str, accepted: list[dict[str, Any]]
 ) -> None:
@@ -322,6 +371,11 @@ def run_federated_job(
                 mean_loss=float(result["mean_loss"]),
                 contributors=_contributors(accepted),
                 coordinator_job_id=coordinator_job_id,
+                # Same `accepted` read as the contributors list, for the same
+                # reason: a second fetch could see a different accepted set,
+                # and then the round's provenance and its clip record would
+                # be talking about two different sets of machines.
+                clipped=_clip_events(result, accepted),
             )
             # Same connection as the round row, and keyed on the ROUND's
             # coordinator job rather than the parent run: task ids repeat

@@ -684,6 +684,136 @@ def test_start_federated_job_runs_on_a_background_thread(settings, postgres_dsn,
     assert dbmod.fetch_job_for_owner(db, job_id, owner)["status"] == "SUCCEEDED"
 
 
+# ---------------------------------------------------------------------------
+# 7. bounded influence: recording which contributions the cap bound
+# ---------------------------------------------------------------------------
+
+
+def _clipped_rows(db, job_id: str) -> list[list[dict]]:
+    """``job_rounds.clipped``, oldest round first.
+
+    Read with SQL rather than through ``list_job_rounds_for_owner``: the
+    clip record is deliberately NOT in ``JOB_ROUND_PUBLIC_COLUMNS``. Nothing
+    is enforced from it and no console screen shows it — decision 2 of the
+    design spec is "record, do not act", and the row exists so the operator
+    can look. Putting it in the owner-facing response is a separate product
+    decision, not a side effect of storing it.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select round, clipped from public.job_rounds"
+            " where job_id = %s order by round",
+            (job_id,),
+        )
+        return [r["clipped"] for r in cur.fetchall()]
+
+
+def _run_reporting(job_id, settings, postgres_dsn, coordinator, clipped, monkeypatch):
+    """Drive one round whose driver reports ``clipped``, and record it.
+
+    The runtime pinned into this venv is 0.4.1, which predates
+    ``RoundResult``'s ``clipped`` key entirely, so the real ``run_fedavg``
+    cannot produce one to join against. What is under test here is the
+    *cloud's* join — task id to node id — not the driver's clipping, which
+    is pinned by flashruntime's own suite. So the driver is replaced by one
+    that reports exactly the shape the real one now emits, and everything
+    downstream of ``on_round`` is the production path.
+    """
+    def fake_run_fedavg(coord, **kwargs):
+        kwargs["on_round"]({
+            "round": 0,
+            "participants": 2,
+            "mean_loss": 0.25,
+            "job_id": "cjob-000",
+            "clipped": clipped,
+        })
+        return {"weights": {}, "history": [], "job_ids": ["cjob-000"]}
+
+    monkeypatch.setattr(fedavgmod, "run_fedavg", fake_run_fedavg)
+    _run(job_id, settings, postgres_dsn, coordinator, rounds=1)
+
+
+def test_an_honest_round_records_no_clip_events(db, settings, postgres_dsn):
+    """The governing property, cloud-side: a round nobody tried to steer
+    stores the empty list.
+
+    This runs the *real* driver from the installed runtime, which does not
+    report a ``clipped`` key at all — so it also pins that a round from a
+    runtime older than this feature is recorded normally rather than
+    raising a KeyError inside ``on_round`` and failing an aggregation that
+    already succeeded.
+    """
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    _run(job_id, settings, postgres_dsn, StubCoordinator(), rounds=2)
+    assert _clipped_rows(db, job_id) == [[], []]
+
+
+def test_a_clipped_round_names_the_node_that_sent_it(
+    db, settings, postgres_dsn, monkeypatch
+):
+    """The join this task exists for. The driver reports a task id — it has
+    no node ids at all — and the node id is added here, from the same
+    accepted-task list that feeds the credit ledger, so provenance and
+    credit can never name different machines for the same task.
+    """
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    _run_reporting(
+        job_id, settings, postgres_dsn, StubCoordinator(),
+        [{"task_id": "task-001", "norm": 1000.0, "cap": 3.15, "scale": 0.00315}],
+        monkeypatch,
+    )
+    assert _clipped_rows(db, job_id) == [[
+        {"task_id": "task-001", "norm": 1000.0, "cap": 3.15,
+         "scale": 0.00315, "node_id": "node-1"},
+    ]]
+
+
+def test_a_clip_event_whose_task_has_no_accepted_node_is_kept_with_a_null(
+    db, settings, postgres_dsn, monkeypatch
+):
+    """A missed join stores ``node_id: None``; it never drops the event.
+
+    ``_accepted_tasks`` filters on COMPLETED *and* on having a node id, so
+    a task that was clipped and then re-leased, or whose task view was
+    momentarily unreadable, has no node to name. An event that vanished
+    because the join missed would be an attempt to steer the model that
+    left no trace anywhere — strictly worse than one recorded against an
+    unknown machine, because the whole point is that the operator can look.
+    The honest event beside it must still be attributed.
+    """
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    _run_reporting(
+        job_id, settings, postgres_dsn, StubCoordinator(),
+        [
+            {"task_id": "task-009", "norm": 1e6, "cap": 3.15, "scale": 3.15e-6},
+            {"task_id": "task-000", "norm": 9.0, "cap": 3.15, "scale": 0.35},
+        ],
+        monkeypatch,
+    )
+    assert _clipped_rows(db, job_id) == [[
+        {"task_id": "task-009", "norm": 1e6, "cap": 3.15,
+         "scale": 3.15e-6, "node_id": None},
+        {"task_id": "task-000", "norm": 9.0, "cap": 3.15,
+         "scale": 0.35, "node_id": "node-0"},
+    ]]
+
+
+def test_a_round_recorded_without_clip_events_stores_an_empty_list(db):
+    """``insert_job_round``'s argument is optional, and omitting it stores
+    ``[]`` rather than null — the column's own default, not a second
+    convention invented in Python."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    dbmod.insert_job_round(
+        db, job_id=job_id, round_index=0, participants=1, mean_loss=0.5,
+        contributors=["node-0"], coordinator_job_id="cjob-000",
+    )
+    assert _clipped_rows(db, job_id) == [[]]
+
+
 def test_cancelling_a_federated_run_says_so_instead_of_lying_with_404(
     make_client, db, transport
 ):
