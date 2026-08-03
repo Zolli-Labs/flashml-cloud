@@ -172,6 +172,52 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — Both coordinators on 0.4.2; prod API still 0.4.1, so the cap is NOT live
+
+What/why: the state after the pin move, recorded precisely because "we
+released it" and "production runs it" are different claims and this is exactly
+where they diverge.
+
+How verified: against the running services, not the dashboard's word.
+
+- **Blueprint auto-synced on the push to `main`** — it did not need a manual
+  dashboard sync this time. Both coordinators' stored `buildCommand` moved to
+  `flashruntime[service]==0.4.2` at 17:07:44Z, seconds after the push.
+- **Prod coordinator `srv-d9mts2u417fc73c7l5g0` is LIVE on `cf193da`**,
+  `dep-d9oclnrl550s73a97r20`, `trigger: blueprint_sync`. A sync redeploys the
+  coordinators even though prod is `autoDeploy: false` — as gotcha #2 of the
+  2026-08-03 deploy entry predicted.
+- **Dev coordinator serves `CompleteRequest.evidence`** in its live
+  `/openapi.json`. Control first: a local 0.4.2 service exposes
+  `['output_sha256', 'evidence']`, a 0.4.1 one does not — so the field is a
+  real version discriminator and not a guess.
+- CI **green on `main`** for `cf193da` (run 30835333711), the first green main
+  run since the flake started gating it.
+
+**What this does and does not activate in production:**
+
+| | live in prod? | why |
+|---|---|---|
+| Verification slice 2 (evidence) | **yes** | coordinator understands it, and the API's `/complete` is an opaque proxy |
+| Node exclusion (6th gate) | **yes** | coordinator-side |
+| Fedavg influence cap | **NO** | `fedavg.py` imports `run_fedavg` from `flashml_workloads`, so the cap ships with the API's runtime — and prod API is still built on 0.4.1 (`82a5a00`) |
+
+Gotchas:
+1. **The prod API being a version behind does NOT break evidence.** Every
+   cloud route takes a raw `Request`, never a pydantic body (`_json_object`
+   explains why: a declared body parses before auth dependencies finish, so a
+   malformed body could answer 422 to someone who should only see 401), and
+   `_scrub_identity` is a `json.loads` → touch `node_id` → `json.dumps`
+   round-trip. Unknown keys survive. Worth knowing in both directions: the
+   proxy is transparent to protocol additions, so an API pin lagging is not
+   automatically a dropped field — but it is also not automatically safe,
+   because anything the API *parses* (job compilation, the fedavg driver) does
+   move with its pin.
+2. So the remaining production step is the `deploy-prod` dispatch, which is
+   what puts the API and web on `cf193da`. Not run here.
+
+Next: `deploy-prod` (workflow_dispatch, confirm `deploy`) to finish the chain.
+
 ### 2026-08-03 — Release flashruntime 0.4.2 + flashnode 0.3.3; four pins moved
 
 What/why: verification slice 2, the fedavg influence cap, the clipped-contribution
