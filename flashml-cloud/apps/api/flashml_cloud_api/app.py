@@ -1397,6 +1397,19 @@ def create_cloud_app(
         # lets a user whose only jobs are federated skip the round trip
         # entirely instead of fetching a list to throw all of it away.
         owned = {j for j in owned if not fedavgmod.is_federated_job_id(j)}
+        # The third source: jobs the caller can see through pool membership
+        # but does not own outright. Same federated-id drop as `owned`, same
+        # reason — a pool-scoped federated parent id is still not anything
+        # the coordinator's list can match.
+        pool_ids = {
+            j for j in dbmod.list_pool_job_ids_for_member(db, user_id)
+            if not fedavgmod.is_federated_job_id(j)
+        }
+        # A plain set union, not two separate membership checks against the
+        # coordinator's list: a viewer who is also the owner has their job
+        # id in both `owned` and `pool_ids`, and this is what collapses that
+        # back to exactly one entry rather than two.
+        seen = owned | pool_ids
         # A federated run is one coordinator job per round, so it is not in
         # the coordinator's list at all and has to be added from this table.
         # Empty for every user who has never submitted one, which is what
@@ -1410,7 +1423,7 @@ def create_cloud_app(
             }
             for row in dbmod.list_federated_jobs_for_owner(db, user_id)
         ]
-        if not owned:
+        if not seen:
             # Nothing to scope down to; skip the coordinator round trip
             # rather than fetch a list of jobs we would only throw away.
             return federated
@@ -1424,10 +1437,11 @@ def create_cloud_app(
         if not isinstance(jobs, list):
             return _passthrough(r)
         # The coordinator has no notion of accounts and returns every job
-        # unscoped behind the operator token; this table is the only place
-        # the owner filter can be applied.
+        # unscoped behind the operator token; this table (owned or reachable
+        # through a shared pool) is the only place that filter can be
+        # applied.
         return [
-            j for j in jobs if isinstance(j, dict) and j.get("job_id") in owned
+            j for j in jobs if isinstance(j, dict) and j.get("job_id") in seen
         ] + federated
 
     @app.get("/v1alpha1/jobs/{job_id}", tags=["browser"])
@@ -1436,10 +1450,12 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        row = dbmod.fetch_job_for_owner(db, job_id, user_id)
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
         if row is None:
             # Not found and not yours look identical: a 403 here would
-            # confirm to a guesser that the id exists.
+            # confirm to a guesser that the id exists. "Yours" now means
+            # "owned by you, or in a pool you belong to" — fetch_job_for_viewer
+            # is the one place that widened scope is applied.
             raise HTTPException(status_code=404, detail="unknown job")
         if fedavgmod.is_federated_job_id(job_id):
             # A federated run has no single coordinator job — it is one job
@@ -1448,7 +1464,14 @@ def create_cloud_app(
             # the user does own. The local row plus the round history IS the
             # job here. Unreachable for every non-federated id, so the
             # forwarding path below is unchanged.
-            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            #
+            # `row["owner_id"]` here, not `user_id`: list_job_rounds_for_owner
+            # is scoped to the job's actual owner, and a viewing pool member
+            # is not that owner. fetch_job_for_viewer above is the
+            # authorization check; this is a data query for a job already
+            # confirmed visible, so it must use the id that query actually
+            # requires to return anything.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])
             source = row.get("source") or {}
             return {
                 "job_id": job_id,
@@ -1471,19 +1494,26 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The federated-averaging history of a job the caller owns.
+        """The federated-averaging history of a job the caller can see.
 
-        Ownership is checked exactly as the rest of this block does it —
+        Visibility is checked exactly as the rest of this block does it —
         against the ``jobs`` table, before anything else, answering 404 (not
-        403) for a job that exists but belongs to someone else, so this
-        route cannot be used to learn which job ids are real. The listing
-        query joins on ownership a second time (``list_job_rounds_for_owner``)
-        rather than trusting this check to have happened.
+        403) for a job that exists but the caller cannot see, so this route
+        cannot be used to learn which job ids are real. The owner, or any
+        member of the job's pool, may read it; only the owner may cancel it.
+
+        The listing query itself (``list_job_rounds_for_owner``) is still
+        owner-scoped, not viewer-scoped — it has no notion of pools — so it
+        is called with the job's own ``owner_id`` from the row just fetched,
+        not with ``user_id``. A viewing pool member is not that owner, and
+        passing ``user_id`` through here would silently return an empty
+        list to every teammate instead of the job's real history.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
         return [_jsonable(r)
-                for r in dbmod.list_job_rounds_for_owner(db, job_id, user_id)]
+                for r in dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])]
 
     @app.get("/v1alpha1/jobs/{job_id}/events", tags=["browser"])
     async def get_job_events(
@@ -1492,7 +1522,7 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The coordinator's event ledger for a job the caller owns.
+        """The coordinator's event ledger for a job the caller can see.
 
         This is the read side of everything the console shows about *how* a
         job ran: which node claimed which task, which lease expired, which
@@ -1507,11 +1537,13 @@ def create_cloud_app(
         a lease and requeues the task in one pass), so a time cursor either
         replays them or drops them.
 
-        Ownership is checked against the ``jobs`` table before the
+        Visibility is checked against the ``jobs`` table before the
         coordinator is contacted, answering 404 for a job that exists and
-        is not yours, exactly as the sibling read routes do.
+        the caller cannot see, exactly as the sibling read routes do. The
+        owner, or any member of the job's pool, may read it.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
 
         if fedavgmod.is_federated_job_id(job_id):
@@ -1522,7 +1554,11 @@ def create_cloud_app(
             # Rounds without a coordinator_job_id are rounds that never
             # reached the coordinator; they contribute nothing rather than
             # an empty group.
-            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            #
+            # `row["owner_id"]`, not `user_id`: same reason as the rounds
+            # route — the listing query is owner-scoped and a viewing pool
+            # member is not that owner.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])
             pairs = [
                 (row["round"], row["coordinator_job_id"])
                 for row in rounds
@@ -1575,7 +1611,7 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """Current task state for a job the caller owns.
+        """Current task state for a job the caller can see.
 
         Deliberately *current* state only, which is what the coordinator
         exposes: task id, state, attempts used against the cap, the node
@@ -1589,15 +1625,18 @@ def create_cloud_app(
         ids repeat across rounds and merging them would silently collapse
         distinct work into one row.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
 
         if fedavgmod.is_federated_job_id(job_id):
-            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            # `row["owner_id"]`, not `user_id` — same reason as the rounds
+            # and events routes.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])
             pairs = [
-                (row["round"], row["coordinator_job_id"])
-                for row in rounds
-                if row.get("coordinator_job_id")
+                (r["round"], r["coordinator_job_id"])
+                for r in rounds
+                if r.get("coordinator_job_id")
             ]
             if not pairs:
                 return []
@@ -1625,6 +1664,25 @@ def create_cloud_app(
 
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks")
         return _passthrough(r)
+
+    @app.get("/v1alpha1/jobs/{job_id}/contributions", tags=["browser"])
+    async def get_job_contributions(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The per-machine credit view for a job the caller can see.
+
+        Visibility is checked exactly as the sibling read routes do it — the
+        owner, or any member of the job's pool, may see who did the work —
+        answering 404 (not 403) for a job that exists and the caller cannot
+        see. ``list_job_contributions`` itself takes no viewer argument by
+        design (Task 9): it trusts its caller to have authorized first, so
+        this check must run before it, never after or not at all.
+        """
+        if dbmod.fetch_job_for_viewer(db, job_id, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return [_jsonable(r) for r in dbmod.list_job_contributions(db, job_id)]
 
     @app.post("/v1alpha1/jobs/{job_id}/cancel", tags=["browser"])
     async def cancel_job_route(
@@ -1662,11 +1720,13 @@ def create_cloud_app(
         """The one deliberate residual the Task 5 report flagged: agent
         artifact reads stay open at the coordinator (an agent legitimately
         reads inputs for the task it holds), but a *browser* must only be
-        able to read artifacts under a job it owns. Ownership is checked
+        able to read artifacts under a job it can see. Visibility is checked
         here, against this table, before the key is ever forwarded — same
-        404-not-403 rule as the rest of this block.
+        404-not-403 rule as the rest of this block. This is a read, so it
+        uses ``fetch_job_for_viewer`` like its siblings: the owner, or any
+        member of the job's pool, may fetch a job's artifacts.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        if dbmod.fetch_job_for_viewer(db, job_id, user_id) is None:
             raise HTTPException(status_code=404, detail="unknown job")
         full_key = _artifact_key(f"{_seg(job_id)}/{key}")
         coordinator_key = f"jobs/{full_key}"
