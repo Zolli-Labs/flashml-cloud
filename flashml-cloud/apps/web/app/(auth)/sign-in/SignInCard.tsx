@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
+import { safeNext } from "@/lib/safe-next";
 import { GoogleMark } from "./GoogleMark";
 
 type Pending = "password" | "google" | null;
@@ -48,7 +49,11 @@ export function SignInCard() {
   const [password, setPassword] = useState("");
   const [revealed, setRevealed] = useState(false);
 
-  const next = searchParams.get("next") || "/machines";
+  // `safeNext`, not a bare `|| "/machines"`: `next` is attacker-controlled
+  // (a crafted sign-in link, or middleware forwarding a crafted pathname),
+  // and this value goes straight to `window.location.assign` below. See
+  // `lib/safe-next.ts`.
+  const next = safeNext(searchParams.get("next"));
 
   function reset() {
     setError(null);

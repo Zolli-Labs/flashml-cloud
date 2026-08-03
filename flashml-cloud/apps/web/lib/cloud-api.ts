@@ -323,6 +323,25 @@ export interface PoolMember {
   machines_online: number;
 }
 
+/** `GET /v1alpha1/jobs/{id}/contributions`'s row shape — the per-machine
+ * credit view for a job: which machine did the work, whose it is, and how
+ * much. Mirrors `list_job_contributions`'s query in `db.py` exactly (join
+ * of `contributions` -> `machines` -> `profiles`), one row per machine that
+ * was credited, not per task.
+ *
+ * `machine_name` and `member_display_name` are nullable because `Machine.name`
+ * and `Profile.display_name` both are — a machine enrolled without a name,
+ * or a member who never set one, still gets a credit row, just with a null
+ * label rather than a missing one. An independent (non-pool) job has no
+ * contributions at all and this route returns `[]` for it, never an error. */
+export interface JobContribution {
+  node_id: string;
+  machine_name: string | null;
+  member_display_name: string | null;
+  tasks_credited: number;
+  total_duration_s: number;
+}
+
 // ---------------------------------------------------------------------------
 // request plumbing
 // ---------------------------------------------------------------------------
@@ -557,6 +576,17 @@ export function listJobTasks(jobId: string): Promise<JobTask[]> {
   );
 }
 
+/** `GET /v1alpha1/jobs/{id}/contributions` — visibility matches the
+ * sibling read routes above: the owner, or any member of the job's pool,
+ * may see who did the work; a job that exists and the caller cannot see
+ * 404s here too, same as `getJob`. An independent (non-pool) job returns
+ * `[]`, not an error — there is nobody to credit. */
+export function listJobContributions(jobId: string): Promise<JobContribution[]> {
+  return request<JobContribution[]>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/contributions`
+  );
+}
+
 /** The relative key a result artifact's `uri` maps to under
  * `/v1alpha1/jobs/{jobId}/artifacts/{key}` — the only artifact route a
  * browser may call (`apps/api/flashml_cloud_api/compile.py` sets every
@@ -603,13 +633,23 @@ export function submitJob(spec: unknown): Promise<JobRecord> {
 }
 
 /** `POST /v1alpha1/jobs/from-repo` — throws `PreflightRejected` (never a
- * plain `ApiError`) when the API's preflight finds a blocking error. */
+ * plain `ApiError`) when the API's preflight finds a blocking error.
+ *
+ * `pool` rides in the body only when set, exactly like `ref` already did:
+ * omitting the key (rather than sending `pool: undefined`, which
+ * `JSON.stringify` also drops, or `pool: null`, which it would not) keeps
+ * the request identical to what this client sent before pools existed for
+ * every submission that leaves the selector on "No pool — public queue". */
 export function submitFromRepo(
   repo: string,
-  ref?: string
+  ref?: string,
+  pool?: string
 ): Promise<SubmitFromRepoResult> {
+  const body: { repo: string; ref?: string; pool?: string } = { repo };
+  if (ref) body.ref = ref;
+  if (pool) body.pool = pool;
   return request<SubmitFromRepoResult>("/v1alpha1/jobs/from-repo", {
     method: "POST",
-    body: JSON.stringify(ref ? { repo, ref } : { repo }),
+    body: JSON.stringify(body),
   });
 }

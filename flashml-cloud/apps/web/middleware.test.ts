@@ -131,4 +131,17 @@ describe("signed-out redirect to /sign-in", () => {
     const res = await get("http://localhost:3000/");
     expect(res.status).not.toBe(307);
   });
+
+  // `https://this-site.com//evil.com/foo` parses with pathname
+  // `//evil.com/foo` — no scheme, so a naive check would wave it through,
+  // but the leading `//` makes it protocol-relative. Unsanitized, this
+  // pathname would ride into `next` verbatim and `SignInCard` would later
+  // hand it straight to `window.location.assign`, leaving the site. See
+  // `lib/safe-next.ts`.
+  it("does not let a //evil.com pathname become an open redirect through next", async () => {
+    const res = await get("http://localhost:3000//evil.com/foo");
+    const location = new URL(res.headers.get("location")!);
+    expect(location.pathname).toBe("/sign-in");
+    expect(location.searchParams.get("next")).toBe("/machines");
+  });
 });

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { safeNext } from "@/lib/safe-next";
 
 // Routes that render without a signed-in Supabase session. Everything else
 // is private: a page rendering without a session is a bug (the API will
@@ -109,7 +110,13 @@ export async function middleware(request: NextRequest) {
     // token effectively vanishes for a signed-out invitee: it survives on
     // the wrong param, unreachable, while the one param that's read gets
     // handed a bare path.
-    const next = pathname + request.nextUrl.search;
+    //
+    // `safeNext`, not `pathname` raw: `pathname` is normally safe, but a
+    // request URL like `https://this-site.com//evil.com/foo` parses with
+    // `pathname === "//evil.com/foo"` — a protocol-relative value that
+    // `SignInCard` would later hand straight to `window.location.assign`,
+    // leaving the site. See `lib/safe-next.ts`.
+    const next = safeNext(pathname + request.nextUrl.search);
     const redirectUrl = new URL("/sign-in", request.nextUrl.origin);
     redirectUrl.searchParams.set("next", next);
     return NextResponse.redirect(redirectUrl);

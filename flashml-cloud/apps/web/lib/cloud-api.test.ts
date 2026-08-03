@@ -22,9 +22,11 @@ import {
   createPoolInvite,
   getJob,
   getPool,
+  listJobContributions,
   listJobRounds,
   listMachines,
   listPools,
+  submitFromRepo,
 } from "./cloud-api";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -151,6 +153,100 @@ describe("cloud-api", () => {
 
     const err: unknown = await listJobRounds("not-mine").catch((e) => e);
     expect(err).toBeInstanceOf(NotFound);
+  });
+
+  describe("submitFromRepo", () => {
+    const okResponse = { job_id: "job-1", state: "PENDING", findings: [] };
+
+    it("POSTs {repo} alone when neither ref nor pool is given", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/from-repo`);
+      expect(JSON.parse(init.body)).toEqual({ repo: "owner/repo" });
+    });
+
+    it("includes ref but omits pool when no pool is selected", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", "main");
+
+      const [, init] = fetchMock.mock.calls[0];
+      const body = JSON.parse(init.body);
+      expect(body).toEqual({ repo: "owner/repo", ref: "main" });
+      expect(body).not.toHaveProperty("pool");
+    });
+
+    it("includes pool in the body when a pool is selected", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", "main", "pool-1");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        repo: "owner/repo",
+        ref: "main",
+        pool: "pool-1",
+      });
+    });
+
+    it("includes pool even when ref is left blank", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", undefined, "pool-1");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        repo: "owner/repo",
+        pool: "pool-1",
+      });
+    });
+  });
+
+  describe("listJobContributions", () => {
+    it("attaches the bearer token and returns the per-machine credit rows", async () => {
+      const rows = [
+        {
+          node_id: "node-0",
+          machine_name: "Ada's laptop",
+          member_display_name: "Ada Lovelace",
+          tasks_credited: 3,
+          total_duration_s: 120.5,
+        },
+      ];
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, rows));
+
+      const result = await listJobContributions("job-1");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/job-1/contributions`);
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(result).toEqual(rows);
+    });
+
+    it("returns an empty list for a non-pool job rather than an error", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+      const result = await listJobContributions("job-1");
+      expect(result).toEqual([]);
+    });
+
+    it("raises NotFound for a job the caller cannot see, never a 403-style message", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "unknown job" }));
+
+      const err: unknown = await listJobContributions("not-mine").catch((e) => e);
+      expect(err).toBeInstanceOf(NotFound);
+    });
   });
 
   it("names the URL it could not reach when fetch rejects", async () => {
