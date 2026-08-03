@@ -139,19 +139,73 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       Submission pipeline dry-run ✅ — fetch → extract → parse → resolve →
       preflight against the real example repo returns 0 findings and resolves
       to the now-public image reference.
-      **REMAINING: the §10 run-through itself**, whose real test is a friend
-      completing signup → enroll → contribute unaided. A job HAS now been
-      submitted, claimed and completed against the deployed stack —
-      `fed-2e2d4d6ab57f`, 5 rounds, 2026-08-02 — but on **one** machine, so
-      item 4 (contributions from more than one machine) is still open, and
-      items 2, 5, 6, 7 and 10 with it. (This paragraph claimed no deployed job
-      had ever run; that was true when written and was not updated in the same
-      edit as the entry that disproved it — logging rule 2.)
+      **Item 4 — contributions from more than one machine ✅ (2026-08-03).**
+      Two machines, two ARCHITECTURES, both credited in the production ledger:
+
+          Phongs-MacBook-Air   macOS arm64      16 attempts  26 credits  15 jobs
+          nes-pc-ubuntu        Linux x86_64     14 attempts  14 credits  10 jobs
+
+      Queried from `public.attempts` / `public.contributions` in
+      `flashml-poc`, not asserted. `attempts` went 0 → 30, so this is also the
+      first production evidence that the attempt ledger works at all.
+
+      The Mac's 26 credits against 16 attempts is not a discrepancy and is
+      worth keeping: the 10-credit gap is exactly the pre-existing federated
+      contributions from before the attempt ledger existed. Ubuntu is 14/14,
+      all through the new path. So both credit paths write, and the 0003
+      unique index stops them double-counting where they overlap — the
+      invariant `test_federated_round_credited_by_both_paths_yields_one_row`
+      pins, confirmed against real data for the first time.
+
+      This claim was made once before and was WRONG (2026-08-02: "federated
+      training across two machines" when only the Mac had contributed). It is
+      made again only because the ledger now answers it as a query.
+
+      **STILL REMAINING:** the §10 run-through's real test — a friend
+      completing signup → enroll → contribute unaided. Both machines here are
+      the owner's. The Windows host (`DESKTOP-034SGSG`) has still never
+      completed a task: 0 attempts, 0 credits, last seen 2026-08-02. Items 2,
+      5, 6, 7 and 10 remain open.
       Host preconditions ✅ (2026-08-02) — `flashnode doctor` and the
       fail-closed `work` gate, because both prior attempts died on host-side
       Docker misconfiguration rather than on anything distributed.
 
 ## Entries
+
+### 2026-08-03 — Two machines, two architectures, credited in production (verified)
+
+What/why: M1 item 4 — "contributions from more than one machine" — has been
+open since July and was asserted once, wrongly, on 2026-08-02. The owner ran
+the deployed stack against a second host (Ubuntu x86_64) alongside the Mac.
+This entry records what the production ledger says, not what the run felt like.
+
+How verified: queried `flashml-poc` directly.
+
+    machine              platform          attempts  credits  jobs
+    Phongs-MacBook-Air   macOS arm64             16       26    15
+    nes-pc-ubuntu        Linux x86_64            14       14    10
+    DESKTOP-034SGSG      Windows 11               0        0     -
+
+`public.attempts` 0 → **30 rows**: the attempt ledger shipped on 2026-08-02 is
+proven in production, not merely by construction. `contributions` 10 → 40.
+
+Gotchas:
+1. **The 26-vs-16 gap on the Mac is the proof, not a bug.** Credits come from
+   two independent writers — `fedavg.on_round` (federated, writes no attempt
+   row) and the completion proxy (writes one). 26 − 16 = 10 is exactly the
+   federated credits that predate the ledger. Ubuntu, which only ever used the
+   new path, is 14/14. Both writers work and neither double-counts.
+2. **Cross-architecture, which nothing had shown before.** arm64 macOS and
+   x86_64 Linux claimed from the same coordinator and were credited from the
+   same schema. The curated images and the `--user` platform conditional both
+   held on a host that is not the one they were written on.
+3. Windows remains unproven — it has never completed a task.
+
+Next: finish GPU support, which is 7/8 commits deep on
+`feat/host-status-quarantine` and unreleased. Half-shipped is its worst state:
+a `gpus: 1` job currently compiles to a CPU spec with no error anywhere.
+Parking lot: result verification (still ABCs); a friend completing the §10
+run-through unaided, which is the only thing that closes Plan 7.
 
 ### 2026-08-03 — GPU support deployed to production (all repos)
 
