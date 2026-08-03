@@ -728,6 +728,399 @@ def claim_attempt_credit(
 
 
 # ---------------------------------------------------------------------------
+# pools
+# ---------------------------------------------------------------------------
+
+#: The columns of ``public.pools`` that may ever leave the API. Nothing on
+#: this table is sensitive today — unlike ``machines`` there is no
+#: ``token_hash`` sitting next to it — but the tuple is spelled out anyway,
+#: same discipline as ``MACHINE_PUBLIC_COLUMNS``, so a column added to the
+#: table later does not silently start leaving the API by default.
+#: ``public.pool_invites`` (below) deliberately never gets a tuple like
+#: this one: it has a ``token_hash`` column, and the day someone adds a
+#: "list my invites" endpoint is the day a careless ``select *`` there would
+#: leak a credential digest the way ``MACHINE_PUBLIC_COLUMNS`` exists to
+#: prevent.
+POOL_PUBLIC_COLUMNS = ("id", "name", "owner_id", "created_at")
+
+#: The one server-side home of "is this machine online" for pool counts —
+#: matching the console's client-side ``ONLINE_WITHIN_MS``. Every
+#: ``machines_online`` count below uses this exact predicate (same ``m``
+#: alias in both queries) so the number shown in a user's pool list and the
+#: number shown inside one pool's member list can never silently drift
+#: apart by one query changing the threshold and the other not.
+MACHINE_ONLINE_PREDICATE = (
+    "m.status = 'active' and m.last_seen_at > now() - interval '90 seconds'"
+)
+
+
+def create_pool(
+    db: psycopg.Connection, *, name: str, owner_id: str
+) -> dict[str, Any]:
+    """Create a pool and seat its owner as a member, atomically.
+
+    Every reachability check below — ``fetch_pool_for_member``,
+    ``is_pool_member``, ``pool_ids_for_machine_owner``, ``list_pools_for_user``
+    — is a join through ``pool_members``, not ``pools.owner_id``. A pool
+    whose owner had no membership row would be invisible to its own creator:
+    absent from their pool list, 404 on fetch, and contributing none of
+    their machines to its online count. The membership insert is therefore
+    not a follow-up call a route could forget — it happens inside the same
+    transaction as the pool row, so the two can never be observed apart.
+    """
+    columns = ", ".join(POOL_PUBLIC_COLUMNS)
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                f"""
+                insert into public.pools (name, owner_id)
+                values (%s, %s)
+                returning {columns}
+                """,
+                (name, owner_id),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            cur.execute(
+                """
+                insert into public.pool_members (pool_id, user_id)
+                values (%s, %s)
+                """,
+                (row["id"], owner_id),
+            )
+    return row
+
+
+def list_pools_for_user(
+    db: psycopg.Connection, user_id: str
+) -> list[dict[str, Any]]:
+    """Every pool ``user_id`` belongs to (as owner or plain member), with
+    the two counts the console's pool list renders.
+
+    ``member_count`` and ``machines_online`` are aggregates computed here,
+    in one query, rather than one query per pool plus a Python loop — the
+    same reasoning ``record_contributions`` gives for its single resolve
+    query: per-pool round trips become O(pool count) load exactly when a
+    user belongs to enough pools for that to matter.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select p.id, p.name, p.owner_id,
+                   count(distinct pm.user_id) as member_count,
+                   count(distinct m.id) filter (
+                       where {MACHINE_ONLINE_PREDICATE}
+                   ) as machines_online,
+                   p.created_at
+              from public.pools p
+              join public.pool_members pm on pm.pool_id = p.id
+              left join public.machines m on m.owner_id = pm.user_id
+             where p.id in (
+                 select pool_id from public.pool_members where user_id = %s
+             )
+             group by p.id, p.name, p.owner_id, p.created_at
+             order by p.created_at
+            """,
+            (user_id,),
+        )
+        return list(cur.fetchall())
+
+
+def fetch_pool_for_member(
+    db: psycopg.Connection, pool_id: str, user_id: str
+) -> dict[str, Any] | None:
+    """Member-scoped read: returns None if pool_id does not exist *or*
+    user_id is not a member of it. Callers must not distinguish those two
+    cases in a response — same 404 doctrine as ``fetch_machine_for_owner``:
+    a 403 for "exists but you're not in it" would confirm to a guesser that
+    the id is real."""
+    columns = ", ".join(f"p.{c}" for c in POOL_PUBLIC_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {columns}
+              from public.pools p
+              join public.pool_members pm
+                on pm.pool_id = p.id and pm.user_id = %s
+             where p.id = %s
+            """,
+            (user_id, pool_id),
+        )
+        return cur.fetchone()
+
+
+def list_pool_members(
+    db: psycopg.Connection, pool_id: str
+) -> list[dict[str, Any]]:
+    """Every member of ``pool_id``, with their own machine counts.
+
+    ``machine_count``/``machines_online`` are per-member, not per-pool: a
+    member's machines are resolved the same way ``pool_members`` documents
+    machine-pool membership works everywhere else in this schema —
+    ``machines.owner_id -> pool_members.user_id`` — because a machine is
+    never a member in its own right.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select pm.user_id, pr.display_name, pm.joined_at,
+                   count(distinct m.id) as machine_count,
+                   count(distinct m.id) filter (
+                       where {MACHINE_ONLINE_PREDICATE}
+                   ) as machines_online
+              from public.pool_members pm
+              join public.profiles pr on pr.id = pm.user_id
+              left join public.machines m on m.owner_id = pm.user_id
+             where pm.pool_id = %s
+             group by pm.user_id, pr.display_name, pm.joined_at
+             order by pm.joined_at
+            """,
+            (pool_id,),
+        )
+        return list(cur.fetchall())
+
+
+def is_pool_member(db: psycopg.Connection, pool_id: str, user_id: str) -> bool:
+    with db.cursor() as cur:
+        cur.execute(
+            "select 1 from public.pool_members where pool_id = %s and user_id = %s",
+            (pool_id, user_id),
+        )
+        return cur.fetchone() is not None
+
+
+def pool_ids_for_machine_owner(
+    db: psycopg.Connection, owner_id: str
+) -> list[str]:
+    """Sorted pool ids ``owner_id`` belongs to, for the agent proxy's
+    per-request pool stamp.
+
+    Sorted (not merely "in some order") because that stamp is compared
+    across requests — an unordered list would make two calls that returned
+    the identical set of pools look like a change when nothing moved.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select pool_id from public.pool_members where user_id = %s",
+            (owner_id,),
+        )
+        return sorted(str(row["pool_id"]) for row in cur.fetchall())
+
+
+def create_pool_invite(
+    db: psycopg.Connection,
+    *,
+    pool_id: str,
+    created_by: str,
+    token_hash: str,
+    expires_at: datetime,
+    uses: int,
+) -> None:
+    """Persist one invite link's hash. Never the raw token.
+
+    Same discipline as ``set_machine_token``: only the sha256 digest is
+    ever written, and the raw token is handed to the caller exactly once,
+    by the route that generated it, and never stored anywhere this
+    function can see it again.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.pool_invites
+                (token_hash, pool_id, created_by, expires_at, uses_remaining)
+            values (%s, %s, %s, %s, %s)
+            """,
+            (token_hash, pool_id, created_by, expires_at, uses),
+        )
+
+
+def consume_pool_invite(
+    db: psycopg.Connection, *, token_hash: str, user_id: str
+) -> dict[str, Any] | None:
+    """Redeem an invite: decrement its use, join the pool, admit the
+    profile — or refuse all three at once.
+
+    Returns ``{"pool_id", "name"}`` on success, or ``None`` for every
+    do-not-admit case together (unknown token, expired, already exhausted)
+    without distinguishing which — the same reason
+    ``claim_attempt_credit`` and ``claim_device_code_for_redemption`` fold
+    their refusal cases into one ``None``: telling a guesser *which* reason
+    an invite failed for is a small oracle for free.
+
+    The decrement is one ``UPDATE ... WHERE ... RETURNING`` — the
+    ``claim_attempt_credit`` idiom — so that two redemptions of the same
+    one-use invite arriving together cannot both win the row; only one
+    ``UPDATE`` can match ``uses_remaining > 0`` before the other sees the
+    decremented value.
+
+    Decrement, membership, and admission are one transaction
+    (``db.transaction()``, explicit despite this connection being
+    autocommit — psycopg supports that). A membership joined without the
+    matching admission would leave a still-gated account sitting inside a
+    team it cannot otherwise reach; a decrement that "succeeded" without
+    either would burn a one-use invite for nothing. All three commit
+    together or none do.
+    """
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                update public.pool_invites
+                   set uses_remaining = uses_remaining - 1
+                 where token_hash = %s
+                   and expires_at > now()
+                   and uses_remaining > 0
+                returning pool_id
+                """,
+                (token_hash,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            pool_id = row["pool_id"]
+
+            cur.execute(
+                """
+                insert into public.pool_members (pool_id, user_id)
+                values (%s, %s)
+                on conflict do nothing
+                """,
+                (pool_id, user_id),
+            )
+            cur.execute(
+                """
+                update public.profiles
+                   set admitted_at = coalesce(admitted_at, now())
+                 where id = %s
+                """,
+                (user_id,),
+            )
+            cur.execute(
+                "select name from public.pools where id = %s",
+                (pool_id,),
+            )
+            pool_row = cur.fetchone()
+            assert pool_row is not None
+            return {"pool_id": pool_id, "name": pool_row["name"]}
+
+
+def profile_is_admitted(db: psycopg.Connection, user_id: str) -> bool:
+    """Whether ``user_id`` has cleared the alpha signup gate.
+
+    Distinct from "does a profile row exist" — every profile row exists
+    from the moment a JWT is first seen (``upsert_profile``), so the gate
+    lives in one nullable column on that same row, not in a separate
+    allow-list table. An unknown ``user_id`` reads as not admitted, the
+    same refusal as an expired invite.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select admitted_at from public.profiles where id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        return row is not None and row["admitted_at"] is not None
+
+
+def fetch_job_for_viewer(
+    db: psycopg.Connection, job_id: str, user_id: str
+) -> dict[str, Any] | None:
+    """Viewer-scoped read: the owner, or any member of the job's pool, may
+    see it. Anyone else gets None indistinguishably from a job that does
+    not exist — same 404 doctrine as ``fetch_job_for_owner``, widened from
+    "the owner" to "the owner or a teammate" now that a job can opt into
+    pool scoping.
+
+    A job with a null ``pool_id`` (every pre-pools job) can never match the
+    ``pool_members`` half of the check — there is no pool to be a member
+    of — so it is reachable by its owner only, exactly the pre-pools
+    behaviour ``fetch_job_for_owner`` still provides.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select * from public.jobs j
+             where j.id = %s
+               and (
+                     j.owner_id = %s
+                  or exists (
+                       select 1 from public.pool_members pm
+                        where pm.pool_id = j.pool_id and pm.user_id = %s
+                     )
+               )
+            """,
+            (job_id, user_id, user_id),
+        )
+        return cur.fetchone()
+
+
+def list_pool_job_ids_for_member(
+    db: psycopg.Connection, user_id: str
+) -> list[str]:
+    """Every pool-scoped job id visible to ``user_id`` through pool
+    membership — the ids ``fetch_job_for_viewer`` would admit them to that
+    ``list_job_ids_for_owner`` (owner-only) would not.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select j.id
+              from public.jobs j
+              join public.pool_members pm
+                on pm.pool_id = j.pool_id and pm.user_id = %s
+             order by j.created_at
+            """,
+            (user_id,),
+        )
+        return [row["id"] for row in cur.fetchall()]
+
+
+def list_job_contributions(
+    db: psycopg.Connection, job_id: str
+) -> list[dict[str, Any]]:
+    """Per-machine credit summary for ``job_id``, with the names a pool's
+    contribution view renders: which machine, whose machine, how much work.
+
+    ``contributions`` only knows ``machine_id``; ``machines`` only knows
+    ``node_id``/``name``/``owner_id``. Getting from a credit row to
+    "Ada's laptop, 12 tasks, 340s" needs both joins in one query — the same
+    reasoning ``list_job_rounds_for_owner`` gives for joining ``jobs`` into
+    its own scoping check, done here for display instead of authorization.
+
+    ``total_duration_s`` is cast to ``float`` for the same reason
+    ``claim_attempt_credit`` casts its single duration: ``sum(numeric)`` is
+    ``numeric``, and psycopg returns ``Decimal`` for it, which must not
+    reach a JSON response as a type the rest of this module never produces.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select m.node_id, m.name as machine_name,
+                   pr.display_name as member_display_name,
+                   count(c.id) as tasks_credited,
+                   coalesce(sum(c.duration_s), 0) as total_duration_s
+              from public.contributions c
+              join public.machines m on m.id = c.machine_id
+              join public.profiles pr on pr.id = m.owner_id
+             where c.job_id = %s
+             group by m.node_id, m.name, pr.display_name
+             order by m.node_id
+            """,
+            (job_id,),
+        )
+        return [
+            {
+                "node_id": row["node_id"],
+                "machine_name": row["machine_name"],
+                "member_display_name": row["member_display_name"],
+                "tasks_credited": row["tasks_credited"],
+                "total_duration_s": float(row["total_duration_s"]),
+            }
+            for row in cur.fetchall()
+        ]
+
+
+# ---------------------------------------------------------------------------
 # verifications
 # ---------------------------------------------------------------------------
 
