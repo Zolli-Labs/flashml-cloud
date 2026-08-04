@@ -126,12 +126,21 @@ def test_list_pools_counts_members_and_online_machines(db):
     pool_id = _pool(db, owner)
     _add_member(db, pool_id, member)
 
-    # A fresh heartbeat from the owner's machine, a stale one from the
-    # member's — only the fresh one should count as online.
-    _enrol(db, owner, _node_id("fresh"), last_seen_at=datetime.now(timezone.utc))
-    _enrol(
+    # A fresh heartbeat from the owner's machine, bound to the pool — this
+    # is the one that should count. A stale one from the member's, also
+    # bound, must not count (offline). A fresh but UNBOUND machine from the
+    # owner must not count either — pool capacity is bindings, not
+    # ownership — and member_count must stay unaffected by any of this.
+    fresh = _enrol(db, owner, _node_id("fresh"), last_seen_at=datetime.now(timezone.utc))
+    dbmod.bind_machine_pool(db, machine_id=fresh, pool_id=pool_id)
+    stale = _enrol(
         db, member, _node_id("stale"),
         last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=200),
+    )
+    dbmod.bind_machine_pool(db, machine_id=stale, pool_id=pool_id)
+    _enrol(
+        db, owner, _node_id("unbound-online"),
+        last_seen_at=datetime.now(timezone.utc),
     )
 
     rows = dbmod.list_pools_for_user(db, owner)
@@ -147,6 +156,26 @@ def test_list_pools_counts_members_and_online_machines(db):
     assert member_rows[0]["machines_online"] == 1
 
 
+def test_list_pools_for_user_excludes_unbound_machines_from_online_count(db):
+    """Regression pin: ``machines_online`` used to join machines straight
+    off ownership, with no ``machine_pools`` intersection — so a machine
+    that was merely owned, never bound to the pool, still inflated
+    'Workers online'. An unbound online machine must contribute 0; binding
+    it must flip it to 1."""
+    owner = _new_user(db)
+    pool_id = _pool(db, owner)
+    machine_id = _enrol(
+        db, owner, _node_id("unbound-then-bound"),
+        last_seen_at=datetime.now(timezone.utc),
+    )
+
+    assert dbmod.list_pools_for_user(db, owner)[0]["machines_online"] == 0
+
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=pool_id)
+
+    assert dbmod.list_pools_for_user(db, owner)[0]["machines_online"] == 1
+
+
 def test_list_pools_for_user_only_returns_own_pools(db):
     owner = _new_user(db)
     stranger = _new_user(db)
@@ -157,13 +186,15 @@ def test_list_pools_for_user_only_returns_own_pools(db):
 
 def test_a_revoked_machine_never_counts_as_online(db):
     """``machines_online`` requires ``status = 'active'`` — a fresh
-    heartbeat timestamp left over from before revocation must not count."""
+    heartbeat timestamp left over from before revocation must not count,
+    even for a machine that is bound to the pool."""
     owner = _new_user(db)
     pool_id = _pool(db, owner)
-    _enrol(
+    machine_id = _enrol(
         db, owner, _node_id("revoked"),
         last_seen_at=datetime.now(timezone.utc), status="revoked",
     )
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=pool_id)
 
     assert dbmod.list_pools_for_user(db, owner)[0]["machines_online"] == 0
 
@@ -194,10 +225,17 @@ def test_list_pool_members_reports_names_and_machine_counts(db):
     owner = _new_user(db)
     dbmod.upsert_profile(db, owner, display_name="Ada")
     pool_id = _pool(db, owner)
-    _enrol(db, owner, _node_id("m1"), last_seen_at=datetime.now(timezone.utc))
-    _enrol(
+    m1 = _enrol(db, owner, _node_id("m1"), last_seen_at=datetime.now(timezone.utc))
+    dbmod.bind_machine_pool(db, machine_id=m1, pool_id=pool_id)
+    m2 = _enrol(
         db, owner, _node_id("m2"),
         last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=200),
+    )
+    dbmod.bind_machine_pool(db, machine_id=m2, pool_id=pool_id)
+    # Owned but never bound to this pool — must not inflate either count.
+    _enrol(
+        db, owner, _node_id("m3-unbound"),
+        last_seen_at=datetime.now(timezone.utc),
     )
 
     members = dbmod.list_pool_members(db, pool_id)
@@ -206,6 +244,27 @@ def test_list_pool_members_reports_names_and_machine_counts(db):
     assert str(member["user_id"]) == owner
     assert member["display_name"] == "Ada"
     assert member["machine_count"] == 2
+    assert member["machines_online"] == 1
+
+
+def test_list_pool_members_excludes_unbound_machines_from_both_counts(db):
+    """Same regression, per-member: an owned-but-unbound machine must not
+    inflate ``machine_count`` or ``machines_online`` for that member."""
+    owner = _new_user(db)
+    pool_id = _pool(db, owner)
+    machine_id = _enrol(
+        db, owner, _node_id("member-unbound-then-bound"),
+        last_seen_at=datetime.now(timezone.utc),
+    )
+
+    member = dbmod.list_pool_members(db, pool_id)[0]
+    assert member["machine_count"] == 0
+    assert member["machines_online"] == 0
+
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=pool_id)
+
+    member = dbmod.list_pool_members(db, pool_id)[0]
+    assert member["machine_count"] == 1
     assert member["machines_online"] == 1
 
 

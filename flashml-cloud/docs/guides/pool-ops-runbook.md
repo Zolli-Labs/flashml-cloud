@@ -1,30 +1,33 @@
 # Pool ops runbook: removing a member, revoking invites, un-admitting an account
 
-**There is no route for any of this yet.** Membership is the boundary in
-front of unsandboxed trusted workers (`--runner trusted` — see
-[join-a-pool-colab.md](join-a-pool-colab.md) and
-[join-a-pool-runpod.md](join-a-pool-runpod.md)), and for the alpha the only
-way to revoke it is direct SQL against the database. This is deliberate,
-not an oversight: shipping the runbook now and the routes later keeps the
-alpha unblocked without pretending a self-serve admin surface exists. If you
-find yourself running these often, that is the signal to build the routes.
+**Member removal and un-admitting an account have no console route yet.**
+Membership is the boundary in front of unsandboxed trusted workers
+(`--runner trusted` — see [join-a-pool-colab.md](join-a-pool-colab.md) and
+[join-a-pool-runpod.md](join-a-pool-runpod.md)), and for those two actions
+the only way today is direct SQL against the database. Invite revocation is
+the exception — the console now has a route for it (see below); this is
+deliberate, not an oversight: routes ship as they're built, and the SQL
+fallback stays documented for whichever of these three doesn't have one yet,
+or for whenever the console itself isn't reachable.
 
-Every statement below runs in the **Supabase SQL editor**, signed in with
-the **service role** (the project's Supabase dashboard → SQL Editor — not
-the app's own Postgres user, and not anything exposed to the console or the
-API). That is the same privilege level the API's own `service_key` runs
+Every SQL statement below runs in the **Supabase SQL editor**, signed in
+with the **service role** (the project's Supabase dashboard → SQL Editor —
+not the app's own Postgres user, and not anything exposed to the console or
+the API). That is the same privilege level the API's own `service_key` runs
 with; there is no narrower path today.
 
 ## What happens after you run one of these
 
 None of this is instant in the sense of "the worker stops mid-task." The
-proxy re-resolves pool membership from the database and stamps it onto
-**every** `register` and `heartbeat` call a machine makes
-(`pool_ids_for_machine`, read fresh on each call — see
-`apps/api/flashml_cloud_api/app.py`'s `register_node` and `node_heartbeat`).
-So the removal reaches a worker at its **next heartbeat**, not on a fixed
-schedule and not requiring an agent restart. This is the same mechanism
-`e2e/test_pool_scoping.py`'s
+proxy re-resolves, for each machine, its explicit pool **bindings**
+(`machine_pools`) intersected with its owner's live pool **membership** —
+not membership alone; a binding to a pool the owner has since left (or was
+just removed from) is already inert — and stamps the result onto **every**
+`register` and `heartbeat` call a machine makes (`pool_ids_for_machine`,
+read fresh on each call — see `apps/api/flashml_cloud_api/app.py`'s
+`register_node` and `node_heartbeat`). So a member-removal reaches a
+worker at its **next heartbeat**, not on a fixed schedule and not requiring
+an agent restart. This is the same mechanism `e2e/test_pool_scoping.py`'s
 `test_pool_membership_revoked_by_heartbeat_is_refused_on_next_claim` proves
 end to end: a heartbeat that drops a pool from `capabilities.pools` is
 refused on its very next claim for that pool's work.
@@ -67,20 +70,28 @@ can still be re-invited later; this only removes the one membership row.
 ## Revoke all outstanding invites for a pool
 
 Use this when an invite link may have leaked, or you're locking a pool down
-and don't want any pending link to still work:
+and don't want any pending link to still work.
+
+**Console, preferred:** open the pool at `/pools/<id>` and use **Revoke**
+under "Invite a teammate." It is owner-only, asks for confirmation before
+doing anything, and calls `DELETE /v1alpha1/pools/{pool_id}/invites` — the
+exact statement below, run for you.
+
+**SQL fallback**, for when the console isn't reachable or you need to act
+from the service role directly:
 
 ```sql
 delete from pool_invites
  where pool_id = '<pool-uuid>';
 ```
 
-What happens next: every invite link minted for that pool stops working
-immediately — invite consumption checks the row at request time, so there
-is no propagation delay the way there is for machine membership. Anyone
-already admitted through a since-deleted invite keeps their membership;
-this does not remove existing members, only unused/future invite links. To
-also remove someone already in the pool, use the member-removal statement
-above.
+What happens next, either way: every invite link minted for that pool stops
+working immediately — invite consumption checks the row at request time, so
+there is no propagation delay the way there is for machine membership.
+Anyone already admitted through a since-deleted invite keeps their
+membership; this does not remove existing members, only unused/future
+invite links. To also remove someone already in the pool, use the
+member-removal statement above (still SQL-only).
 
 ## Un-admit an account
 
@@ -121,9 +132,12 @@ to remove the account from every pool it is in, in one statement.
 | Action | Statement | Where | Takes effect |
 |---|---|---|---|
 | Remove one member from one pool | `delete from pool_members where pool_id = ... and user_id = ...;` | Supabase SQL editor, service role | At that machine's next heartbeat (proven by the e2e revocation test); in-flight leases finish or expire |
-| Revoke all invites for a pool | `delete from pool_invites where pool_id = ...;` | Supabase SQL editor, service role | Immediately — checked at consumption time |
+| Revoke all invites for a pool | `delete from pool_invites where pool_id = ...;` | **Console** (`/pools/<id>` → Revoke, owner-only) or Supabase SQL editor, service role | Immediately — checked at consumption time |
 | Un-admit an account | `update public.profiles set admitted_at = null where id = ...;` | Supabase SQL editor, service role | Immediately on the account's next API request; does not itself touch pool membership or running machines |
 
-**Routes for all of the above are future work.** Nothing in this document
-should be read as a promise that the console can do this today — it
-cannot.
+**Invite revocation has a console route today** (owner-only `DELETE
+/v1alpha1/pools/{pool_id}/invites`, wired to the Revoke button above); the
+SQL statement is a fallback, not the only path. **Member removal and
+un-admitting an account are still SQL-only** — routes for those two are
+future work, and nothing in this document should be read as a promise that
+the console can do either of them today.

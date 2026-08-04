@@ -964,6 +964,22 @@ def create_cloud_app(
                     machine_id = enrolment.approve_device_code(
                         db, user_code.strip().upper(), user_id
                     )
+                    # approve_device_code short-circuits on an already-approved
+                    # code, returning its machine_id with no ownership check —
+                    # by design, so re-approving your own code stays a no-op.
+                    # But that means machine_id here is not guaranteed to be
+                    # one user_id owns: without this check, any admitted user
+                    # who ever saw this user_code (already redeemed by someone
+                    # else) could bind that stranger's machine into their own
+                    # pool. Same 404 fold as every other pool/machine lookup
+                    # in this file — this route must not distinguish "no such
+                    # code" from "that code's machine isn't yours".
+                    if dbmod.fetch_machine_for_owner(
+                        db, str(machine_id), user_id
+                    ) is None:
+                        raise HTTPException(
+                            status_code=404, detail="unknown code"
+                        )
                     dbmod.bind_machine_pool(
                         db, machine_id=str(machine_id), pool_id=pool_id
                     )

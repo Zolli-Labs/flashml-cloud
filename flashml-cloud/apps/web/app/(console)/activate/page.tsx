@@ -21,6 +21,7 @@ import {
   listMachines,
   type Machine,
 } from "@/lib/cloud-api";
+import { approveNotFoundMessage } from "@/lib/activate-errors";
 
 // A device code is exactly what a one-time-code input is for, and this page
 // was a single wide text box. `input-otp` gives per-character slots, paste
@@ -104,9 +105,7 @@ function ActivateInner() {
             "Your sign-in expired. Sign in again, then re-enter the code."
           );
         } else if (err instanceof NotFound) {
-          setErrorMessage(
-            "We couldn't find that code. Check it against the laptop's screen — codes are only valid for a few minutes."
-          );
+          setErrorMessage(approveNotFoundMessage(err.message));
         } else if (err instanceof ApiError && err.status === 410) {
           setErrorMessage(
             "That code has expired. Run flashnode login again on the laptop for a fresh one."

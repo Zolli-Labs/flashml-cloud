@@ -237,9 +237,10 @@ function MemberRow({
 // ---------------------------------------------------------------------------
 
 /** `listMachines()` is scoped to the caller by the API itself, so this is
- * always "your machines", never every machine in the pool — the pool's
- * fleet is what the member table's "Machines"/"Online" columns already
- * summarise in aggregate. */
+ * always "your machines", never every machine bound to the pool — the
+ * member table's "Machines"/"Online" columns already summarise that in
+ * aggregate, one row per member, counting only machines actually bound to
+ * this pool (not every machine the member happens to own). */
 function YourMachinesSection({
   poolId,
   poolName,
@@ -373,7 +374,10 @@ function YourMachinesSection({
               <MachineToggleRow
                 key={m.id}
                 machine={m}
-                bound={m.pools.some((p) => p.id === poolId)}
+                // `?? []`: same api/web deploy-race insurance as
+                // machines/page.tsx's pool-chip list — a response missing
+                // `pools` must read as "not bound", never throw.
+                bound={(m.pools ?? []).some((p) => p.id === poolId)}
                 pending={pendingIds.has(m.id)}
                 onToggle={toggle}
               />
@@ -477,15 +481,28 @@ function InviteSection({ poolId }: { poolId: string }) {
     setCopied(false);
     try {
       await revokePoolInvites(poolId);
+      // The revoke above just succeeded, so whatever invite state and
+      // link were on screen before this call now describe something
+      // dead. Clear them here — immediately, before the mint even
+      // starts — rather than in the catch below: if the revoke itself
+      // had thrown, execution would never reach this line, and the
+      // still-valid previous link stays displayed instead of vanishing
+      // for a failure that didn't actually touch it. But once we're
+      // past the revoke, a mint failure below must not leave a "N uses
+      // left" description or a Copy button in front of a link that no
+      // longer works.
+      setInviteState(null);
+      setLink(null);
       const { token } = await createPoolInvite(poolId, { uses: 10 });
       setLink(`${window.location.origin}/pools/join?token=${token}`);
       // Best effort: the new link is already in hand even if this refresh
       // fails, so a failure here doesn't roll anything back — it just
-      // leaves the state line stale until the next load.
+      // leaves the state line reading "no active invite" until the next
+      // load, rather than a stale description of the revoked one.
       try {
         setInviteState(await getPoolInviteState(poolId));
       } catch {
-        // leave the previous state line in place
+        // leave inviteState null
       }
     } catch (err) {
       setError(
