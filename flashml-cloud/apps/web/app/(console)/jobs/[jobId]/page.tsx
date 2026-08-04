@@ -175,8 +175,8 @@ export default function JobDetailPage({
 
   const name = job.spec?.metadata?.name ?? job.name ?? job.job_id;
   const backHref =
-    job.pool_id != null ? workspacePath(job.pool_id, "jobs") : "/account/earlier-jobs";
-  const backLabel = job.pool_id != null ? "Jobs" : "Earlier jobs";
+    job.pool_id != null ? workspacePath(job.pool_id, "jobs") : "/workspaces";
+  const backLabel = job.pool_id != null ? "Jobs" : "Workspaces";
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">

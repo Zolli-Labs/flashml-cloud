@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  earlierJobs,
   isActiveJob,
-  isEarlierJob,
   isInWorkspace,
   jobsInWorkspace,
 } from "./job-scope";
@@ -26,20 +24,7 @@ describe("isInWorkspace", () => {
   });
 });
 
-describe("isEarlierJob", () => {
-  it("treats both null and absent as having no workspace", () => {
-    // null: an API that has the column and this job has no pool.
-    // undefined: an API deployed before the field existed. Same answer.
-    expect(isEarlierJob(job({ pool_id: null }))).toBe(true);
-    expect(isEarlierJob(job())).toBe(true);
-  });
-
-  it("is false for a job in a workspace", () => {
-    expect(isEarlierJob(job({ pool_id: "vision" }))).toBe(false);
-  });
-});
-
-describe("partitioning", () => {
+describe("jobsInWorkspace", () => {
   const jobs = [
     job({ job_id: "a", pool_id: "vision" }),
     job({ job_id: "b", pool_id: "robotics" }),
@@ -47,14 +32,14 @@ describe("partitioning", () => {
     job({ job_id: "d" }),
   ];
 
-  it("splits into this workspace and the earlier pile", () => {
+  it("selects only jobs matching the given pool_id", () => {
     expect(jobsInWorkspace(jobs, "vision").map((j) => j.job_id)).toEqual(["a"]);
-    expect(earlierJobs(jobs).map((j) => j.job_id)).toEqual(["c", "d"]);
   });
 
-  it("never puts one job in both halves", () => {
-    const inWs = new Set(jobsInWorkspace(jobs, "vision").map((j) => j.job_id));
-    for (const j of earlierJobs(jobs)) expect(inWs.has(j.job_id)).toBe(false);
+  it("never includes a job with no pool_id", () => {
+    const inWs = jobsInWorkspace(jobs, "vision").map((j) => j.job_id);
+    expect(inWs).not.toContain("c");
+    expect(inWs).not.toContain("d");
   });
 });
 

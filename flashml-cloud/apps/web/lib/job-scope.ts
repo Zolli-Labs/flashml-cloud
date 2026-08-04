@@ -20,21 +20,9 @@ export function isInWorkspace(job: JobRecord, poolId: string): boolean {
   return job.pool_id === poolId;
 }
 
-/** Jobs with no workspace at all: the pre-pools rows that surface read-only
- * under My account. `null` and `undefined` both count — `null` is an API
- * that has the field and a job with no pool, `undefined` is an API that
- * predates the field — and neither is a workspace job. */
-export function isEarlierJob(job: JobRecord): boolean {
-  return job.pool_id === null || job.pool_id === undefined;
-}
-
 export function jobsInWorkspace(
   jobs: JobRecord[],
   poolId: string
 ): JobRecord[] {
   return jobs.filter((j) => isInWorkspace(j, poolId));
-}
-
-export function earlierJobs(jobs: JobRecord[]): JobRecord[] {
-  return jobs.filter(isEarlierJob);
 }

@@ -5,7 +5,6 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   BookOpen,
-  ChartBar,
   Gear,
   GithubLogo,
   House,
@@ -227,13 +226,10 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             )}
 
             {/* Personal section: always shown, independent of whether the
-                current route is workspace-scoped. `/account/machines` and
-                `/account/earlier-jobs` are built by the next two tasks in
-                this plan, immediately after this one — a deliberate,
-                time-boxed exception to "a nav item leading nowhere is worse
-                than a missing one". They are the correct destinations, and
-                wiring the rail to them now is what makes them reachable the
-                moment they land. */}
+                current route is workspace-scoped. It holds the fleet of
+                machines the signed-in user personally owns, so it stays
+                reachable from every screen, not just workspace-scoped
+                ones. */}
             <div className="mt-5 space-y-0.5">
               <p className="label-caps px-2.5 pb-1">My account</p>
               <NavItem
@@ -241,12 +237,6 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                 label="My machines"
                 icon={Desktop}
                 active={isActive("/account/machines")}
-              />
-              <NavItem
-                href="/account/earlier-jobs"
-                label="Earlier jobs"
-                icon={ChartBar}
-                active={isActive("/account/earlier-jobs")}
               />
             </div>
 
