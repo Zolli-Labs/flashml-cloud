@@ -3,13 +3,19 @@
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Warning } from "@phosphor-icons/react";
+import { toast } from "sonner";
 import {
   Card,
+  CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { NotAuthenticated, acceptInvite } from "@/lib/cloud-api";
+import { Input } from "@/components/ui/input";
+import { ApiError, NotAuthenticated, NotFound, acceptInvite } from "@/lib/cloud-api";
+import { bankedJoinTail } from "@/lib/invite-outcome";
+import { tokenFromInput } from "@/lib/invite-token";
 
 // This route is the one path every access state can reach (`INVITE_ROUTE`
 // in `lib/access-screen.ts`): a signed-in-but-not-yet-admitted account has
@@ -33,22 +39,145 @@ function Loading() {
   );
 }
 
-function LinkProblem() {
+/** Rendered once `acceptInvite` has succeeded but `joined` came back
+ * `false` — the join is banked, not applied. Shared by both ways to land
+ * here: a clicked link (the auto-redeem effect below) and a pasted code
+ * (`JoinByCode`), so the confirmation reads identically either way.
+ *
+ * For a brand-new invited user this is not the end of the road: they have
+ * banked a pool join but have not yet asked for access, and their row in
+ * the admin queue is an all-NULL stub until they do. The "Finish your
+ * request" link sends them to `/overview`, which is correct for either
+ * state they can be in — `needs_onboarding` renders the form there,
+ * `pending` renders the waiting screen. It cannot go directly to the form
+ * itself: `screenFor` short-circuits `INVITE_ROUTE` to `"console"` so this
+ * page stays reachable in every access state, which means the shell will
+ * never render onboarding here. */
+function InviteSaved({ name }: { name: string }) {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle>That invite link didn&apos;t work</CardTitle>
+          <CardTitle>Invite saved</CardTitle>
+          <CardDescription>{bankedJoinTail(name)}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Link
+            href="/overview"
+            className="text-sm text-primary hover:underline"
+          >
+            Finish your request
+          </Link>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/** No-token / failed-token fallback — the paste-a-code affordance
+ * `InviteGate` used to own before it was deleted (Task 11). This route is
+ * the right home for it: `screenFor` (`lib/access-screen.ts`) returns
+ * `"console"` for `INVITE_ROUTE` in every access state, so it is the one
+ * page guaranteed reachable by the people who need to redeem a code they
+ * typed rather than clicked — including a `"pending"` account, for whom
+ * `/pools` itself renders the waiting screen instead. */
+function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
+  const router = useRouter();
+  const [value, setValue] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [banked, setBanked] = useState<string | null>(null);
+
+  async function submit() {
+    const token = tokenFromInput(value);
+    if (!token) {
+      setError("Paste your invite link or code.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await acceptInvite(token);
+      if (!result.joined) {
+        // Say so honestly instead of claiming membership: nothing joined
+        // yet, the membership is banked on the access request.
+        toast.success(`Saved. ${bankedJoinTail(result.name)}`);
+        setBanked(result.name);
+        return;
+      }
+      toast.success(`Joined ${result.name}`);
+      router.push("/pools");
+    } catch (err) {
+      // NotAuthenticated is not handled specially here: reaching this page
+      // already required a session, so a 401 mid-submit means the session
+      // just expired. The generic message below is honest about that
+      // without a special-cased redirect this one corner doesn't need.
+      if (err instanceof NotFound) {
+        setError("That invite link isn't valid, or it's already been used.");
+      } else {
+        setError(
+          err instanceof ApiError
+            ? err.detail
+            : "Couldn't redeem that invite. Try again."
+        );
+      }
+      setSubmitting(false);
+    }
+  }
+
+  if (banked) return <InviteSaved name={banked} />;
+
+  return (
+    <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>
+            {invalidLink ? "That invite link didn't work" : "Join with a code"}
+          </CardTitle>
           <CardDescription>
-            It may be mistyped, expired, or already used — the API folds all
-            three into one answer, so we cannot say which. Ask whoever invited
-            you for a fresh link, or find the workspace under{" "}
-            <Link href="/pools" className="text-foreground underline">
-              Pools
-            </Link>
-            .
+            {invalidLink
+              ? "It may be mistyped, expired, or already used — the API folds all three into one answer, so we cannot say which. Paste a fresh invite link or code below."
+              : "Paste the invite link or code someone on FlashML sent you."}
           </CardDescription>
         </CardHeader>
+        <CardContent>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              submit();
+            }}
+            className="flex flex-col gap-3"
+          >
+            <Input
+              autoFocus
+              value={value}
+              onChange={(e) => {
+                setValue(e.target.value);
+                setError(null);
+              }}
+              placeholder="Invite link or code"
+              aria-label="Invite link or code"
+              aria-invalid={!!error || undefined}
+              className="font-mono"
+            />
+            {error && (
+              <p
+                role="alert"
+                className="flex items-start gap-1.5 text-xs text-destructive"
+              >
+                <Warning className="mt-0.5 h-3 w-3 shrink-0" weight="fill" />
+                <span>{error}</span>
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={submitting || value.trim().length === 0}
+              className="interactive rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {submitting ? "Joining…" : "Join"}
+            </button>
+          </form>
+        </CardContent>
       </Card>
     </div>
   );
@@ -59,6 +188,7 @@ function JoinPoolInner() {
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
   const [failed, setFailed] = useState(false);
+  const [banked, setBanked] = useState<string | null>(null);
 
   useEffect(() => {
     // No token to redeem — handled by the render-time check below instead
@@ -76,6 +206,10 @@ function JoinPoolInner() {
         // admitted and is now a member of this pool; when it is `false`,
         // nothing joined — the membership is queued behind admin approval
         // and materializes only once someone decides this account.
+        if (!result.joined) {
+          setBanked(result.name);
+          return;
+        }
         window.location.href = `/pools/${result.pool_id}`;
       })
       .catch((err) => {
@@ -95,12 +229,13 @@ function JoinPoolInner() {
     };
   }, [token, router]);
 
+  if (banked) return <InviteSaved name={banked} />;
+
   // A missing, stale, mistyped, or already-used link must still leave the
-  // visitor somewhere they can act instead of a dead end. This used to fall
-  // back to `InviteGate`'s paste-a-token card, which is gone with the gate
-  // (Task 11); Task 13 moves that affordance onto the pools page, which is
-  // where this points in the meantime.
-  if (!token || failed) return <LinkProblem />;
+  // visitor somewhere they can act instead of a dead end: `JoinByCode`,
+  // the paste-a-code affordance `InviteGate` used to own before it was
+  // deleted (Task 11).
+  if (!token || failed) return <JoinByCode invalidLink={!!token && failed} />;
 
   return <Loading />;
 }

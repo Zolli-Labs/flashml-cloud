@@ -16,6 +16,45 @@ entry contradicts an earlier one, say so explicitly and link it.
 
 ---
 
+## 2026-08-04 — A workspace invite no longer grants access to the product
+
+**Changed:** how someone gets into FlashML. Since pools shipped (2026-08-03),
+`admitted_at` meant two things at once — allowed into the product, and member
+of a pool — and `pool_invites`' own table comment said so: "Consuming an
+invite both ADMITS the account through the alpha signup gate and joins it to
+the pool." Redeeming an invite was therefore the only door, and an uninvited
+signup was a dead end: you landed in the console, were told to paste a code
+you did not have, and nothing queued, notified, or recorded that you existed.
+
+Those are now separate. **Access is an account property an admin decides**,
+through a new `public.access_requests` table and an admin queue. **Pool
+membership stays a workspace property its owner decides**, like a GitHub org
+invite. An invite redeemed by a not-yet-admitted account BANKS the join; it
+materialises in the same transaction that admits them.
+
+**Trigger:** the owner's question, 2026-08-04 — "how do people sign up for
+our application in a manageable way?" — followed by the explicit correction
+that "the invite link is mostly for people to join the same workspace like
+github, but the account creation or sign in should work like normal." The
+2026-08-03 entry chose team pools as the tester release; it did not decide
+that pool invites should be the admission mechanism, which is what had been
+built. This entry corrects that, and does not reopen the team-pools choice.
+
+**What it implies:** one door, and the owner holds it. An invited teammate
+still waits for approval — chosen deliberately over GitHub's "a member's
+vouch is enough", because result verification still enforces nothing (see
+thread 4, 2026-08-03, still open). The onboarding form doubles as the access
+request, so screening data and product analytics are the same rows.
+
+**What it costs, accepted:** approval is silent — there is no email provider
+and Supabase's built-in SMTP is ~2/hour project-wide, the same constraint
+that removed magic links. The owner notifies people by hand. That holds at
+tester scale and breaks somewhere around fifty pending requests. A real
+provider is the exit, and would also give this deployment password reset,
+which it still lacks.
+
+Design: `2026-08-04-signup-profile-and-access-requests-design.md`.
+
 ## 2026-08-03 — The tester release is team pools, not the volunteer network
 
 **Changed:** the first thing real outsiders touch. The foundation design
