@@ -49,6 +49,14 @@ function FleetRow({ machine }: { machine: PoolMachine }) {
   const online = isMachineOnline(machine);
   const label = machine.name || machine.node_id;
   const badge = machineBadge(machine);
+  // `list_pool_machines` deliberately does NOT filter revoked machines, on
+  // the stated grounds that the console renders their status. It did not:
+  // `isMachineOnline` is false for a revoked machine exactly as it is for a
+  // sleeping one, so a dead machine read as merely offline and nothing on
+  // screen distinguished "asleep, will come back" from "token destroyed,
+  // never will". Hence this badge — the thing that makes that docstring
+  // true.
+  const revoked = machine.status === "revoked";
 
   return (
     <tr>
@@ -64,6 +72,14 @@ function FleetRow({ machine }: { machine: PoolMachine }) {
             }}
           />
           <span className="min-w-0 truncate font-mono text-sm">{label}</span>
+          {revoked && (
+            <Badge
+              variant="outline"
+              className="shrink-0 border-destructive/30 bg-destructive/10 text-destructive"
+            >
+              Revoked
+            </Badge>
+          )}
         </div>
       </td>
       <td className="meta px-3 py-3">

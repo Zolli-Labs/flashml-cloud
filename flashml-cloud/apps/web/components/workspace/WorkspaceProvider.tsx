@@ -136,6 +136,15 @@ export function WorkspaceProvider({
   // component.
   useEffect(() => {
     return () => {
+      // The rule assumes a cleanup READS a ref and warns that the value may
+      // have moved on; its advice is to copy `requestIdRef.current` into a
+      // local at mount and use that. This cleanup WRITES the ref, and it
+      // has to write the live cell — `load`'s stale check compares against
+      // `requestIdRef.current`, so bumping a mount-time copy would leave
+      // the real token untouched and silently disable the whole
+      // post-unmount guard. The "changed by now" the rule warns about is
+      // exactly the value this needs.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       requestIdRef.current++;
     };
   }, []);

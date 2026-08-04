@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { ArrowClockwise, Plus } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
+import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import { isActiveJob } from "@/lib/job-scope";
 import { workspacePath } from "@/lib/workspace-scope";
@@ -56,40 +57,37 @@ export default function WorkspaceJobsPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      {/* Same header as the other four tabs. This one used to hand-build its
+          own `<h1>Jobs</h1>` plus a second "New job" button — a duplicate of
+          the one `WorkspaceHeader` already renders, and the only tab of the
+          five whose heading did not say which workspace you were in. */}
+      <WorkspaceHeader />
+
+      <div className="mt-8 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="title">Jobs</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">
+          <h2 className="text-sm font-semibold">Jobs</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
             Everything submitted in this workspace.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {/* No spin-while-loading here, unlike the source page: this tab
-              only ever mounts while `useWorkspace().state === "ready"` —
-              WorkspaceGate swaps in a skeleton for every other state — so
-              `state === "loading"` inside this component is always false.
-              Wiring the spin to it would be a condition that can never
-              fire, which reads as intentional and is not. */}
-          <button
-            type="button"
-            onClick={reload}
-            aria-label="Refresh"
-            className="rounded-md p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
-          >
-            <ArrowClockwise size={15} />
-          </button>
-          <Link
-            href={workspacePath(pool.id, "submit")}
-            className="interactive inline-flex items-center gap-2 rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
-          >
-            <Plus size={15} weight="bold" />
-            New job
-          </Link>
-        </div>
+        {/* No spin-while-loading here, unlike the source page: this tab
+            only ever mounts while `useWorkspace().state === "ready"` —
+            WorkspaceGate swaps in a skeleton for every other state — so
+            `state === "loading"` inside this component is always false.
+            Wiring the spin to it would be a condition that can never
+            fire, which reads as intentional and is not. */}
+        <button
+          type="button"
+          onClick={reload}
+          aria-label="Refresh"
+          className="rounded-md p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+        >
+          <ArrowClockwise size={15} />
+        </button>
       </div>
 
       {jobs.length > 0 && (
-        <div className="mt-6 flex gap-1">
+        <div className="mt-4 flex gap-1">
           {FILTERS.map((f) => (
             <button
               key={f.id}
