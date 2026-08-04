@@ -20,6 +20,7 @@ import {
 import {
   ApiError,
   NotAuthenticated,
+  NotFound,
   approveAccessRequest,
   declineAccessRequest,
   listAccessRequests,
@@ -98,6 +99,16 @@ export default function AdminRequestsPage() {
       // than implying otherwise.
       toast.success("Approved — they're in. Let them know yourself.");
     } catch (err) {
+      if (err instanceof NotFound) {
+        // 404 here means "no pending request for this user" — the
+        // double-decide race (another admin, or a retry, got there
+        // first). The row is genuinely gone server-side, so don't put it
+        // back; resync the whole queue instead, since other rows may
+        // have moved too.
+        toast.error("Already decided — someone got there first. Refreshing.");
+        load();
+        return;
+      }
       setRows((prev) => restoreRequest(prev, row));
       const detail =
         err instanceof ApiError ? err.detail : "This request is unchanged.";
@@ -111,6 +122,12 @@ export default function AdminRequestsPage() {
       await declineAccessRequest(row.user_id);
       toast.success("Request declined");
     } catch (err) {
+      if (err instanceof NotFound) {
+        // Same double-decide race as handleApprove above.
+        toast.error("Already decided — someone got there first. Refreshing.");
+        load();
+        return;
+      }
       setRows((prev) => restoreRequest(prev, row));
       const detail =
         err instanceof ApiError ? err.detail : "This request is unchanged.";

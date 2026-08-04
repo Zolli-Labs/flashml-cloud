@@ -109,4 +109,20 @@ describe("restoreRequest", () => {
     const only = row();
     expect(restoreRequest([], only)).toEqual([only]);
   });
+
+  it("is idempotent when the row is already present — no duplicate, same length", () => {
+    // The realistic failure sequence: Approve is clicked (optimistic
+    // filter removes the row), a manual Refresh completes first and
+    // re-fetches the queue — the row is still pending server-side, so it
+    // comes back — and only THEN does the original Approve call's catch
+    // run and try to restore what it removed. Without this guard that
+    // restore appends a second copy of the same user_id, and two
+    // `RequestCard`s end up sharing one React key.
+    const already = row({ user_id: "a" });
+    const other = row({ user_id: "b", requested_at: "2026-08-02T00:00:00Z" });
+    const restored = restoreRequest([already, other], already);
+    expect(restored).toHaveLength(2);
+    expect(restored.filter((r) => r.user_id === "a")).toHaveLength(1);
+    expect(restored).toEqual([already, other]);
+  });
 });

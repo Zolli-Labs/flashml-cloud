@@ -53,11 +53,20 @@ export function inviteLine(
  * queue, keeping `requested_at` order — so a failed action restores the
  * list to how it looked, rather than bumping the row to wherever a plain
  * push/unshift would land it. Matches the API's own `order by
- * ar.requested_at` (oldest first, `list_access_requests` in `db.py`). */
+ * ar.requested_at` (oldest first, `list_access_requests` in `db.py`).
+ *
+ * Idempotent: if a row with this `user_id` is already present, returns
+ * `rows` unchanged rather than appending a second copy. That case is real,
+ * not defensive filler — a manual Refresh while an Approve/Decline call is
+ * still in flight re-fetches the queue and can put the row back on screen
+ * (it is still pending server-side) before the original call's `catch`
+ * runs, so the restore here would otherwise append a duplicate `user_id`
+ * and hand React two `RequestCard`s sharing one key. */
 export function restoreRequest(
   rows: AccessRequestRow[],
   row: AccessRequestRow
 ): AccessRequestRow[] {
+  if (rows.some((r) => r.user_id === row.user_id)) return rows;
   const next = [...rows, row];
   next.sort((a, b) => a.requested_at.localeCompare(b.requested_at));
   return next;
