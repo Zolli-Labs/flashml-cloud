@@ -1585,45 +1585,30 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        owned = dbmod.list_job_ids_for_owner(db, user_id)
+        # One query for both halves of visibility — owned, and reachable
+        # through a shared pool — carrying the pool_id and submitter the
+        # console renders. This replaced two queries whose ids were unioned
+        # in Python; the union is now in the SQL, and it no longer discards
+        # the columns that came back with it.
+        scopes = dbmod.list_job_scopes_for_viewer(db, user_id)
         # A federated parent id names no coordinator job, so it can never
         # match anything in the coordinator's list; dropping it here is what
         # lets a user whose only jobs are federated skip the round trip
         # entirely instead of fetching a list to throw all of it away.
-        owned = {j for j in owned if not fedavgmod.is_federated_job_id(j)}
-        # The third source: jobs the caller can see through pool membership
-        # but does not own outright. Same federated-id drop as `owned`, same
-        # reason — a pool-scoped federated parent id is still not anything
-        # the coordinator's list can match.
-        pool_ids = {
-            j for j in dbmod.list_pool_job_ids_for_member(db, user_id)
-            if not fedavgmod.is_federated_job_id(j)
-        }
-        # A plain set union, not two separate membership checks against the
-        # coordinator's list: a viewer who is also the owner has their job
-        # id in both `owned` and `pool_ids`, and this is what collapses that
-        # back to exactly one entry rather than two.
-        seen = owned | pool_ids
+        seen = {j for j in scopes if not fedavgmod.is_federated_job_id(j)}
+
         # A federated run is one coordinator job per round, so it is not in
         # the coordinator's list at all and has to be added from this table.
-        # Empty for every user who has never submitted one, which is what
-        # keeps this list byte-identical to before for them.
-        #
-        # `list_federated_jobs_for_viewer`, not `..._for_owner`: a pool
-        # member must be able to *discover* a teammate's federated run here,
-        # not merely open it once they already have its id.
-        # `fetch_job_for_viewer` already admits that direct-by-id read; this
-        # is the other half — without it the run would never surface in the
-        # list at all for anyone but its owner. One flat `WHERE owner_id = %s
-        # OR EXISTS(...)` select, so — unlike the coordinator-sourced half
-        # above — no separate dedup is needed here: a job id appears in this
-        # table once, and this query returns each matching row once.
+        # `list_federated_jobs_for_viewer` applies the same owner-or-member
+        # predicate as `scopes`, so every id it returns is already a key
+        # there — the `.get` default is belt-and-braces, not a real branch.
         federated = [
             {
                 "job_id": row["id"],
                 "name": row.get("name"),
                 "state": row.get("status"),
                 "mode": "federated",
+                **scopes.get(row["id"], {"pool_id": None, "submitted_by": None}),
             }
             for row in dbmod.list_federated_jobs_for_viewer(db, user_id)
         ]
@@ -1641,11 +1626,14 @@ def create_cloud_app(
         if not isinstance(jobs, list):
             return _passthrough(r)
         # The coordinator has no notion of accounts and returns every job
-        # unscoped behind the operator token; this table (owned or reachable
+        # unscoped behind the operator token; `scopes` (owned or reachable
         # through a shared pool) is the only place that filter can be
-        # applied.
+        # applied — and now also the only place the workspace label comes
+        # from, since the coordinator has never heard of pools.
         return [
-            j for j in jobs if isinstance(j, dict) and j.get("job_id") in seen
+            {**j, **scopes[j["job_id"]]}
+            for j in jobs
+            if isinstance(j, dict) and j.get("job_id") in seen
         ] + federated
 
     @app.get("/v1alpha1/jobs/{job_id}", tags=["browser"])
@@ -1688,9 +1676,30 @@ def create_cloud_app(
                 "finished_at": (
                     str(row["finished_at"]) if row.get("finished_at") else None
                 ),
+                "pool_id": (
+                    None if row.get("pool_id") is None else str(row["pool_id"])
+                ),
+                "submitted_by": dbmod.display_name_for(db, row["owner_id"]),
             }
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}")
-        return _passthrough(r)
+        # Merge the workspace label in rather than passing the coordinator's
+        # body straight through: the detail page renders its own breadcrumb
+        # and may have been deep-linked, so it cannot rely on having loaded
+        # the list. `row` is already in hand from the visibility check above,
+        # so this costs one profile lookup and no extra job query.
+        if r.status_code >= 300:
+            return _passthrough(r)
+        try:
+            job = r.json()
+        except ValueError:
+            return _passthrough(r)
+        if not isinstance(job, dict):
+            return _passthrough(r)
+        job["pool_id"] = (
+            None if row.get("pool_id") is None else str(row["pool_id"])
+        )
+        job["submitted_by"] = dbmod.display_name_for(db, row["owner_id"])
+        return job
 
     @app.get("/v1alpha1/jobs/{job_id}/rounds", tags=["browser"])
     async def get_job_rounds(

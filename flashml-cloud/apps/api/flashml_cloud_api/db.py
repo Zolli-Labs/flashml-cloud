@@ -1266,6 +1266,60 @@ def list_pool_job_ids_for_member(
         return [row["id"] for row in cur.fetchall()]
 
 
+def list_job_scopes_for_viewer(
+    db: psycopg.Connection, user_id: str
+) -> dict[str, dict[str, Any]]:
+    """Every job id ``user_id`` can see — owned outright, or reachable
+    through a shared pool — mapped to the two fields the console scopes and
+    labels on: which pool the job belongs to, and who submitted it.
+
+    Replaces the ``list_job_ids_for_owner`` + ``list_pool_job_ids_for_member``
+    pair at ``list_jobs_route``. Those ran the owner half and the pool half
+    as two queries and unioned the ids in Python, throwing away the
+    ``pool_id`` that came back with them. This is the same union expressed
+    once in SQL, and it keeps that column — so the route gets a scoping
+    filter and a display mapping out of strictly less work than before.
+
+    ``pool_id`` is None for every pre-pools job. Those rows are reachable by
+    their owner alone: a null pool can never match the ``pool_members`` half
+    of the check, exactly as ``fetch_job_for_viewer`` documents for itself.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select j.id, j.pool_id, pr.display_name as submitted_by
+              from public.jobs j
+              left join public.profiles pr on pr.id = j.owner_id
+             where j.owner_id = %s
+                or exists (
+                     select 1 from public.pool_members pm
+                      where pm.pool_id = j.pool_id and pm.user_id = %s
+                   )
+            """,
+            (user_id, user_id),
+        )
+        return {
+            row["id"]: {
+                "pool_id": None if row["pool_id"] is None else str(row["pool_id"]),
+                "submitted_by": row["submitted_by"],
+            }
+            for row in cur.fetchall()
+        }
+
+
+def display_name_for(db: psycopg.Connection, user_id: str) -> str | None:
+    """The profile display name for ``user_id``. None when the profile row
+    does not exist yet (a brand-new sign-in that has not hit ``upsert_profile``)
+    or the name was never set — both are "no label to show", and the caller
+    renders the same fallback for each."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select display_name from public.profiles where id = %s", (user_id,)
+        )
+        row = cur.fetchone()
+        return row["display_name"] if row else None
+
+
 def list_job_contributions(
     db: psycopg.Connection, job_id: str
 ) -> list[dict[str, Any]]:
