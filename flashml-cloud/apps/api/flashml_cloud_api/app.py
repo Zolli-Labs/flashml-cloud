@@ -76,6 +76,7 @@ from flashml_cloud_api.compile import (
     compile_to_jobspec,
 )
 from flashml_cloud_api.db import Machine
+from flashml_cloud_api.emails import derive_email_facts
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import UnknownImage, resolve_image
 from flashml_cloud_api.preflight import preflight, safe_text
@@ -957,6 +958,59 @@ def create_cloud_app(
             fields[field] = value
 
         return _jsonable(dbmod.update_profile_fields(db, user_id, **fields))
+
+    # `current_user`, not `admitted_user`: this route is how an un-admitted
+    # account asks to be admitted. Gating it behind admission would make the
+    # only way in require already being in.
+    @app.post("/v1alpha1/access-request", tags=["browser"])
+    async def create_access_request(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # A POSITIVE allow-list, not a denylist of decided states: only
+        # "needs_onboarding" (never asked) and "pending" (already asked,
+        # not yet decided — resubmitting to edit the answer is allowed)
+        # may proceed. `access_state_for` is the single source of truth for
+        # this account's state, and any state this route doesn't
+        # explicitly recognise as submittable — "admitted", "declined", or
+        # one added later — must fail closed (refused) rather than open
+        # (silently allowed through), which a denylist of just
+        # ("admitted", "declined") would not guarantee.
+        #
+        # This also closes a real defect: `submit_access_request`'s
+        # bare-INSERT branch (the first time an account ever submits) has
+        # no `where status = 'pending'` guard, because there is no existing
+        # row for it to guard. An account carrying `admitted_at` with NO
+        # access_requests row — exactly what a hand-run
+        # `UPDATE public.profiles SET admitted_at = now()` produces — would
+        # otherwise sail through that bare INSERT and manufacture a fresh
+        # `pending` row for an account that is already admitted.
+        state = dbmod.access_state_for(db, user_id)
+        if state not in ("needs_onboarding", "pending"):
+            # Re-submitting after a decision would reset it to pending —
+            # silently un-deciding something an admin decided. An admitted
+            # account edits these fields through PATCH /v1alpha1/me.
+            raise HTTPException(
+                status_code=409, detail="this account's access is already decided"
+            )
+
+        payload = await _json_object(request)
+        try:
+            submission = access.parse_submission(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        # Derived, never accepted from the body: the domain is a fact about
+        # the verified signup address, not a claim the client gets to make.
+        domain, personal = derive_email_facts(dbmod.email_for_user(db, user_id))
+
+        dbmod.upsert_profile(db, user_id)  # the FK target must exist
+        dbmod.submit_access_request(
+            db, user_id, submission,
+            email_domain=domain, is_personal_email=personal,
+        )
+        return {"access": dbmod.access_state_for(db, user_id)}
 
     @app.get("/v1alpha1/machines", tags=["browser"])
     async def list_machines(
