@@ -6,6 +6,7 @@ whole point of this module and cannot be shown against a mock.
 """
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import datetime, timezone
 
@@ -53,6 +54,52 @@ def _user(db, *, email: str | None = None, admitted: bool = False) -> str:
             (user_id, datetime.now(timezone.utc) if admitted else None),
         )
     return user_id
+
+
+@contextlib.contextmanager
+def _pool_member_inserts_fail(db):
+    """Make every INSERT into ``public.pool_members`` raise, database-side.
+
+    A trigger rather than a monkeypatch: the property under test is the
+    real Postgres transaction, and a Python-level stub would fail OUTSIDE
+    it and prove nothing about what the database rolled back.
+
+    Teardown is the delicate part, because ``postgres_dsn`` is
+    SESSION-scoped — this trigger sits on a table shared with every other
+    db test in the run, and a leak would fail unrelated files with an
+    error naming nothing about this one. So it (a) runs in ``finally``,
+    ahead of any assertion in the test body that could fail, (b) returns
+    the session to a usable state first, since a DROP issued inside an
+    aborted transaction raises instead of running, and (c) VERIFIES the
+    trigger is gone rather than assuming the DROP took.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "create or replace function public._boom() returns trigger as $$ "
+            "begin raise exception 'boom'; end $$ language plpgsql"
+        )
+        cur.execute("drop trigger if exists _boom on public.pool_members")
+        cur.execute(
+            "create trigger _boom before insert on public.pool_members "
+            "for each row execute function public._boom()"
+        )
+    try:
+        yield
+    finally:
+        if db.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+            db.rollback()
+        with db.cursor() as cur:
+            cur.execute("drop trigger if exists _boom on public.pool_members")
+            cur.execute("drop function if exists public._boom()")
+            cur.execute(
+                "select 1 from pg_trigger "
+                " where tgname = '_boom' "
+                "   and tgrelid = 'public.pool_members'::regclass"
+            )
+            assert cur.fetchone() is None, (
+                "the fault-injection trigger survived teardown — every later "
+                "test in this session that joins a pool would fail with 'boom'"
+            )
 
 
 def _pool(db, owner_id: str) -> str:
@@ -123,8 +170,15 @@ def test_submit_writes_profile_columns_and_seeds_display_name(db):
             (user,),
         )
         row = cur.fetchone()
+    # Every column the insert binds, checked. The nine parameters are
+    # positional, and `role` and `team_size` are adjacent, both text, and
+    # both free-form — transposing them is the exact mistake a
+    # column-round-trip test exists to catch, so neither may go unasserted.
     assert row["first_name"] == "Ha"
+    assert row["last_name"] == "Nguyen"
     assert row["company_name"] == "VinAI"
+    assert row["role"] == "researcher"
+    assert row["team_size"] == "2_5"
     assert row["email_domain"] == "vinai.io"
     assert row["is_personal_email"] is False
     assert row["display_name"] == "Ha Nguyen"
@@ -256,6 +310,36 @@ def test_approving_twice_is_idempotent_not_an_error(db):
 
 def test_approve_is_false_for_an_account_that_never_asked(db):
     assert dbmod.approve_access_request(db, _user(db), decided_by=_user(db)) is False
+
+
+def test_approve_rolls_back_the_admission_when_the_pool_join_fails(db):
+    """The three effects are one transaction, or the approval is a lie.
+
+    Every other approve test above observes the happy path only — delete
+    `with db.transaction():` from `approve_access_request` and all of them
+    still pass, while the module docstring goes on claiming atomicity is
+    the whole point. This one breaks the THIRD effect and insists the
+    first two never happened: without the transaction the status flip and
+    `admitted_at` commit on their own, and the person is admitted into a
+    console with no pool — the exact failure the one transaction exists to
+    prevent.
+    """
+    owner = _user(db, admitted=True)
+    pool_id = _pool(db, owner)
+    user = _user(db)
+    dbmod.submit_access_request(
+        db, user, SUBMISSION, email_domain=None, is_personal_email=None
+    )
+    dbmod.record_pending_invite(db, user, pool_id=pool_id, invited_by=owner)
+
+    with _pool_member_inserts_fail(db):
+        with pytest.raises(psycopg.Error):
+            dbmod.approve_access_request(db, user, decided_by=owner)
+
+    assert dbmod.access_state_for(db, user) == "pending"
+    with db.cursor() as cur:
+        cur.execute("select admitted_at from public.profiles where id = %s", (user,))
+        assert cur.fetchone()["admitted_at"] is None
 
 
 # -- list -------------------------------------------------------------------

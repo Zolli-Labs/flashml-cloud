@@ -235,6 +235,12 @@ def record_pending_invite(
     Creates a stub request if the account has not onboarded yet, so an
     invite clicked before the form is never lost. The stub is still
     ``pending`` — banking an invite is not being admitted.
+
+    "Stub" covers a missing ``access_requests`` row only. THE CALLER MUST
+    ENSURE THE ``public.profiles`` ROW EXISTS FIRST: this table's
+    ``user_id`` is a foreign key to ``public.profiles(id)``, so calling
+    this for an account with no profile raises ``ForeignKeyViolation``
+    rather than stubbing anything. Route it after ``upsert_profile``.
     """
     with db.cursor() as cur:
         cur.execute(
