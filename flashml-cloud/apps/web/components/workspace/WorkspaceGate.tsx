@@ -36,8 +36,13 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
         <p className="text-sm text-muted-foreground">
           This workspace doesn&apos;t exist, or you&apos;re not a member.
         </p>
-        <Link href="/pools" className="text-sm text-primary hover:underline">
-          Back to workspaces
+        {/* `/workspaces`, not `/pools`. `/pools` is a RESOLVER now
+            (`WorkspaceResolver`): it drops you inside whichever workspace
+            you were last in, which for someone who just failed to load one
+            is the opposite of a way out. `/workspaces` is the page that
+            actually lets you create or join one. */}
+        <Link href="/workspaces" className="text-sm text-primary hover:underline">
+          Create or join a workspace
         </Link>
       </Shell>
     );

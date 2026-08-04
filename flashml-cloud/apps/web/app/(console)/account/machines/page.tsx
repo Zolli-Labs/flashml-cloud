@@ -52,7 +52,11 @@ export default function MachinesPage() {
           // 401 means signed out, not "you have no machines". Rendering the
           // empty state here would tell a signed-out user their fleet is
           // gone.
-          router.push("/sign-in?next=/machines");
+          //
+          // `/account/machines`, this page's own path — `/machines` is only
+          // a redirect stub now, so signing in used to bounce you through it
+          // instead of straight back to where you were.
+          router.push("/sign-in?next=/account/machines");
           return;
         }
         setError(
