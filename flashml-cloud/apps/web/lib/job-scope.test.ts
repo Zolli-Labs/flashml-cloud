@@ -60,13 +60,13 @@ describe("partitioning", () => {
 
 describe("isActiveJob", () => {
   it("is false for every terminal state", () => {
-    for (const state of (["SUCCEEDED", "FAILED", "CANCELLED"] as JobState[])) {
+    for (const state of ["SUCCEEDED", "FAILED", "CANCELLED"] satisfies JobState[]) {
       expect(isActiveJob(job({ state }))).toBe(false);
     }
   });
 
   it("is true for anything still in flight", () => {
-    for (const state of (["PENDING", "SUBMITTED", "RUNNING"] as JobState[])) {
+    for (const state of ["PENDING", "SUBMITTED", "RUNNING"] satisfies JobState[]) {
       expect(isActiveJob(job({ state }))).toBe(true);
     }
   });
