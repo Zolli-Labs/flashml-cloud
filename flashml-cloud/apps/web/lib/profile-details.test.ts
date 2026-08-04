@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Profile } from "./cloud-api";
-import { changedDetails, draftFromProfile, isDetailsEmpty } from "./profile-details";
+import {
+  TEXT_FIELD_CAPS,
+  changedDetails,
+  detailsTextError,
+  draftFromProfile,
+  isDetailsEmpty,
+  type DetailsTextField,
+} from "./profile-details";
 
 const BASE: Profile = {
   id: "u1",
@@ -115,5 +122,57 @@ describe("changedDetails", () => {
   it("allows clearing a previously-set field back to empty", () => {
     const withCompany = { ...current, company_name: "VinAI" };
     expect(changedDetails(current, withCompany)).toEqual({ company_name: "" });
+  });
+});
+
+// Mirrors `_PATCHABLE_TEXT` in `app.py` exactly, including its `>`-not-`>=`
+// comparison — the client must refuse to offer an action the server will
+// reject, never merely react to the 400 after the fact.
+describe("detailsTextError", () => {
+  const FIELDS: DetailsTextField[] = ["first_name", "last_name", "company_name"];
+
+  it("accepts an ordinary, well-within-cap value for every field", () => {
+    for (const field of FIELDS) {
+      expect(detailsTextError("Ha", field)).toBeNull();
+    }
+  });
+
+  it.each(FIELDS)("rejects %s when blank", (field) => {
+    expect(detailsTextError("", field)).toBe("Can't be blank.");
+  });
+
+  it.each(FIELDS)("rejects %s when it is whitespace only", (field) => {
+    expect(detailsTextError("   ", field)).toBe("Can't be blank.");
+  });
+
+  it.each(FIELDS)("rejects %s one character over its cap", (field) => {
+    const cap = TEXT_FIELD_CAPS[field];
+    const value = "a".repeat(cap + 1);
+    expect(detailsTextError(value, field)).toBe(
+      `${cap + 1}/${cap} characters. Too long.`
+    );
+  });
+
+  it.each(FIELDS)(
+    "accepts %s exactly at its cap — the API compares with '>', not '>='",
+    (field) => {
+      const cap = TEXT_FIELD_CAPS[field];
+      const value = "a".repeat(cap);
+      expect(detailsTextError(value, field)).toBeNull();
+    }
+  );
+
+  it("trims before measuring, so surrounding whitespace cannot itself push a value over its cap", () => {
+    const cap = TEXT_FIELD_CAPS.first_name;
+    const value = `  ${"a".repeat(cap)}  `;
+    expect(detailsTextError(value, "first_name")).toBeNull();
+  });
+
+  it("first and last name share an 80-character cap; company gets 160", () => {
+    expect(TEXT_FIELD_CAPS).toEqual({
+      first_name: 80,
+      last_name: 80,
+      company_name: 160,
+    });
   });
 });

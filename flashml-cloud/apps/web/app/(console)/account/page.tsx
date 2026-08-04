@@ -30,7 +30,9 @@ import {
 } from "@/lib/cloud-api";
 import { ROLE_OPTIONS, TEAM_SIZE_OPTIONS } from "@/lib/onboarding-options";
 import {
+  TEXT_FIELD_CAPS,
   changedDetails,
+  detailsTextError,
   draftFromProfile,
   isDetailsEmpty,
   type DetailsDraft,
@@ -121,8 +123,29 @@ export default function AccountPage() {
   const currentDetails = draftFromProfile(profile);
   const pendingDetails = changedDetails(details, currentDetails);
   const detailsDirty = Object.keys(pendingDetails).length > 0;
-  const detailsCanSave = detailsDirty && !detailsSaving;
   const detailsEmpty = isDetailsEmpty(profile);
+
+  // Validated only when a field is actually part of `pendingDetails` — i.e.
+  // only when it is about to be sent. An untouched field that has simply
+  // never been filled in (the grandfathered-tester case `detailsEmpty`
+  // describes) must never block Save on its own: it isn't in the payload,
+  // so it cannot 400. What must be blocked is CLEARING a field that WAS
+  // set, or typing past its cap — both only matter, and only trigger the
+  // API's rejection, once that field is dirty.
+  const firstNameError =
+    "first_name" in pendingDetails
+      ? detailsTextError(details.first_name, "first_name")
+      : null;
+  const lastNameError =
+    "last_name" in pendingDetails
+      ? detailsTextError(details.last_name, "last_name")
+      : null;
+  const companyNameError =
+    "company_name" in pendingDetails
+      ? detailsTextError(details.company_name, "company_name")
+      : null;
+  const detailsValid = !firstNameError && !lastNameError && !companyNameError;
+  const detailsCanSave = detailsDirty && detailsValid && !detailsSaving;
 
   function updateDetail<K extends keyof DetailsDraft>(
     key: K,
@@ -269,7 +292,16 @@ export default function AccountPage() {
               id="first-name"
               value={details.first_name}
               onChange={(e) => updateDetail("first_name", e.target.value)}
+              aria-invalid={!!firstNameError || undefined}
+              aria-describedby="first-name-help"
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60"
+            />
+            <DetailsFieldHelp
+              id="first-name-help"
+              dirty={"first_name" in pendingDetails}
+              error={firstNameError}
+              length={details.first_name.trim().length}
+              cap={TEXT_FIELD_CAPS.first_name}
             />
           </div>
           <div className="flex flex-col gap-1.5">
@@ -280,7 +312,16 @@ export default function AccountPage() {
               id="last-name"
               value={details.last_name}
               onChange={(e) => updateDetail("last_name", e.target.value)}
+              aria-invalid={!!lastNameError || undefined}
+              aria-describedby="last-name-help"
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60"
+            />
+            <DetailsFieldHelp
+              id="last-name-help"
+              dirty={"last_name" in pendingDetails}
+              error={lastNameError}
+              length={details.last_name.trim().length}
+              cap={TEXT_FIELD_CAPS.last_name}
             />
           </div>
         </div>
@@ -293,7 +334,16 @@ export default function AccountPage() {
             id="company-name"
             value={details.company_name}
             onChange={(e) => updateDetail("company_name", e.target.value)}
+            aria-invalid={!!companyNameError || undefined}
+            aria-describedby="company-name-help"
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60"
+          />
+          <DetailsFieldHelp
+            id="company-name-help"
+            dirty={"company_name" in pendingDetails}
+            error={companyNameError}
+            length={details.company_name.trim().length}
+            cap={TEXT_FIELD_CAPS.company_name}
           />
         </div>
 
@@ -515,5 +565,41 @@ function Tag({ children }: { children: React.ReactNode }) {
     <span className="rounded-sm border border-border bg-surface-elevated px-1.5 py-0.5 font-mono text-[10px]">
       {children}
     </span>
+  );
+}
+
+/** Inline validity feedback for one of "Your details"'s three text fields
+ * — same presentation as the display-name field's helper text above
+ * (`#display-name-help`), plus a destructive "Can't be blank." this page
+ * needs and that field doesn't: display name can never be dirty-and-blank
+ * (its own `canSave` silently disables on length 0), but here clearing a
+ * previously-set field is an ordinary, expected action that must be
+ * refused with a reason, not just a disabled button. Renders nothing at
+ * all when `!dirty` — an untouched field that has simply never been filled
+ * in (a grandfathered tester's default state) must not be nagged. */
+function DetailsFieldHelp({
+  id,
+  dirty,
+  error,
+  length,
+  cap,
+}: {
+  id: string;
+  dirty: boolean;
+  error: string | null;
+  length: number;
+  cap: number;
+}) {
+  if (!dirty) return null;
+  return (
+    <p id={id} className="text-xs">
+      {error ? (
+        <span className="text-destructive">{error}</span>
+      ) : (
+        <span className="text-muted-foreground">
+          {length}/{cap} characters.
+        </span>
+      )}
+    </p>
   );
 }

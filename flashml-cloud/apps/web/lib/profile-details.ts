@@ -55,7 +55,13 @@ export function isDetailsEmpty(profile: Profile | null): boolean {
 /** Only the fields that actually changed, trimmed, ready to hand to
  * `updateProfile` — never the whole draft, so an untouched field is never
  * re-sent and can never clobber a value someone else set from a different
- * tab or device in between. */
+ * tab or device in between.
+ *
+ * This deliberately reports a change to `""` when a previously-set field
+ * is cleared — that IS what changed, and it is this function's job to say
+ * so. It is `detailsTextError` below, and the page gating `detailsCanSave`
+ * on it, that must refuse to submit that particular change; diffing and
+ * validating are different jobs and stay in different functions. */
 export function changedDetails(
   draft: DetailsDraft,
   current: DetailsDraft
@@ -66,4 +72,39 @@ export function changedDetails(
     if (value !== current[key]) out[key] = value;
   }
   return out;
+}
+
+/** The three free-text fields this section edits and the length cap the
+ * API enforces on each — `_PATCHABLE_TEXT` in `app.py`, mirrored here so
+ * the client can refuse to offer an action the server will reject rather
+ * than round-tripping into a 400. `role`/`team_size` are not here on
+ * purpose: both are `<Select>`s over a fixed option list with no
+ * empty-value item, so neither can be driven blank through the UI the way
+ * a text field can. */
+export const TEXT_FIELD_CAPS = {
+  first_name: 80,
+  last_name: 80,
+  company_name: 160,
+} as const;
+
+export type DetailsTextField = keyof typeof TEXT_FIELD_CAPS;
+
+/** Validates one text field's current value against the API's own rule
+ * for it — blank (after trim) or over its cap, matching `_PATCHABLE_TEXT`'s
+ * loop in `app.py` exactly, including its `>`-not-`>=` comparison: a value
+ * exactly at the cap is valid, one character over is not. Returns `null`
+ * for a valid value, a short reason otherwise, ready to render inline next
+ * to the field (its label already names the field, so the message does
+ * not repeat it). */
+export function detailsTextError(
+  value: string,
+  field: DetailsTextField
+): string | null {
+  const trimmed = value.trim();
+  const cap = TEXT_FIELD_CAPS[field];
+  if (trimmed.length === 0) return "Can't be blank.";
+  if (trimmed.length > cap) {
+    return `${trimmed.length}/${cap} characters. Too long.`;
+  }
+  return null;
 }
