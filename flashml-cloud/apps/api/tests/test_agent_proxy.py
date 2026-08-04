@@ -40,7 +40,12 @@ from psycopg.rows import dict_row
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
-from flashml_cloud_api.app import DELEGATION_HEADER, _scrub_identity, create_cloud_app
+from flashml_cloud_api.app import (
+    DELEGATION_HEADER,
+    MAX_JSON_BODY_BYTES,
+    _scrub_identity,
+    create_cloud_app,
+)
 from flashml_cloud_api.settings import Settings
 
 RUN_MARKER = uuid.uuid4().hex[:12]
@@ -566,11 +571,16 @@ def test_heartbeat_fails_closed_when_pools_lookup_raises(
 
 def test_stamp_is_machine_scoped_not_owner_scoped(client, transport, db):
     """Two machines, one owner, one pool: only the BOUND machine's register
-    body carries the pool. This is the opt-in core — under v1 both would."""
+    AND heartbeat bodies carry the pool. This is the opt-in core — under v1
+    both machines would carry it, on both routes; the heartbeat half pins
+    that `node_heartbeat`'s lookup is machine-scoped too, not just
+    `register_node`'s — a partial swap that narrowed only one call site
+    would leave the other silently back on owner scope."""
     owner = _new_user(db)
     pool = dbmod.create_pool(db, name=f"scoped-{RUN_MARKER}", owner_id=owner)
-    m1_id, m1_tok = _enrol(db, owner, _node_id("bound"))
-    m2_id, m2_tok = _enrol(db, owner, _node_id("unbound"))
+    bound_node_id, unbound_node_id = _node_id("bound"), _node_id("unbound")
+    m1_id, m1_tok = _enrol(db, owner, bound_node_id)
+    m2_id, m2_tok = _enrol(db, owner, unbound_node_id)
     dbmod.bind_machine_pool(db, machine_id=str(m1_id), pool_id=str(pool["id"]))
     for tok, expected in ((m1_tok, [str(pool["id"])]), (m2_tok, [])):
         client.post("/v1alpha1/nodes/register",
@@ -579,6 +589,16 @@ def test_stamp_is_machine_scoped_not_owner_scoped(client, transport, db):
                     headers={"Authorization": f"Bearer {tok}"})
         body = json.loads(transport.last.read())
         assert body["capabilities"]["pools"] == expected
+
+    for node_id, tok, expected in (
+        (bound_node_id, m1_tok, [str(pool["id"])]),
+        (unbound_node_id, m2_tok, []),
+    ):
+        client.post(f"/v1alpha1/nodes/{node_id}/heartbeat",
+                    json={"schema_version": "v1alpha1", "node_id": node_id},
+                    headers={"Authorization": f"Bearer {tok}"})
+        body = json.loads(transport.last.read())
+        assert body["pools"] == expected
 
 
 def test_register_persists_the_capability_snapshot(client, transport, db):
@@ -662,6 +682,60 @@ def test_capability_persist_failure_does_not_fail_registration(
     assert r.status_code == 200
     body = json.loads(transport.last.read())
     assert body["capabilities"]["pools"] == [str(pool["id"])]
+
+
+def test_oversized_register_body_413s_before_the_capability_parse(
+    client, machine, transport, monkeypatch
+):
+    """The size gate must run BEFORE the capability `json.loads` and the
+    persist write, not merely before the coordinator is contacted: a
+    machine-token holder must not be able to force an expensive parse (or
+    a DB write) merely by padding a request that is about to be rejected
+    as too large anyway. `proxy()` still 413s it right after — this test
+    pins that the parse/persist upstream of that never runs at all."""
+    calls = []
+    monkeypatch.setattr(
+        dbmod, "set_machine_capabilities",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    padding = "x" * (MAX_JSON_BODY_BYTES + 1)
+    oversized = json.dumps({
+        "schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+        "padding": padding,
+    }).encode()
+    assert len(oversized) > MAX_JSON_BODY_BYTES, "sanity: the body must actually be oversized"
+
+    r = client.post(
+        "/v1alpha1/nodes/register",
+        content=oversized,
+        headers={"Authorization": f"Bearer {machine['token']}",
+                 "Content-Type": "application/json"},
+    )
+    assert r.status_code == 413
+    assert calls == [], "set_machine_capabilities ran for a body that was about to be rejected"
+
+
+def test_register_capability_booleans_require_true_not_merely_truthy(
+    client, transport, db
+):
+    """`is True` coercion, not Python truthiness: a JSON string `"true"` or
+    the number `1` must persist as `False` — only the JSON literal `true`
+    (which `json.loads` turns into the Python singleton `True`) counts.
+    A `bool(...)` coercion instead of `is True` would pass both of these
+    through as truthy and this test would catch it."""
+    owner = _new_user(db)
+    mid, tok = _enrol(db, owner, _node_id("caps-truthy-not-true"))
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "sandbox_capable": "true", "argv_capable": 1,
+                      "capabilities": {"cpu_cores": 4}},
+                headers={"Authorization": f"Bearer {tok}"})
+    with db.cursor() as cur:
+        cur.execute("select sandbox_capable, argv_capable, unsandboxed_argv_capable,"
+                    " module_capable from public.machines where id = %s", (mid,))
+        row = cur.fetchone()
+    assert row == {"sandbox_capable": False, "argv_capable": False,
+                   "unsandboxed_argv_capable": False, "module_capable": False}
 
 
 def test_artifact_put_forwards_raw_bytes_with_delegation(client, machine, transport):

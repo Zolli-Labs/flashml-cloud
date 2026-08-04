@@ -20,7 +20,7 @@ with; there is no narrower path today.
 None of this is instant in the sense of "the worker stops mid-task." The
 proxy re-resolves pool membership from the database and stamps it onto
 **every** `register` and `heartbeat` call a machine makes
-(`pool_ids_for_machine_owner`, read fresh on each call — see
+(`pool_ids_for_machine`, read fresh on each call — see
 `apps/api/flashml_cloud_api/app.py`'s `register_node` and `node_heartbeat`).
 So the removal reaches a worker at its **next heartbeat**, not on a fixed
 schedule and not requiring an agent restart. This is the same mechanism

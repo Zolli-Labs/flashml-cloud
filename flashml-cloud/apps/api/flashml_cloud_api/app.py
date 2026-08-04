@@ -1782,16 +1782,27 @@ def create_cloud_app(
                 # which is why this sits INSIDE the pools-lookup try rather
                 # than wrapping it.
                 try:
-                    parsed = json.loads(body) if body.strip() else {}
-                    dbmod.set_machine_capabilities(
-                        conn, machine_id=machine.id,
-                        sandbox_capable=parsed.get("sandbox_capable") is True,
-                        argv_capable=parsed.get("argv_capable") is True,
-                        unsandboxed_argv_capable=(
-                            parsed.get("unsandboxed_argv_capable") is True
-                        ),
-                        module_capable=parsed.get("module_capable") is True,
-                    )
+                    # Gated on size, not just non-empty. `proxy()` below is
+                    # the real 413 authority — it re-checks the same
+                    # constant and rejects the request — but that check
+                    # runs AFTER this block, once `body` is already fully
+                    # buffered in this process. Without this guard a
+                    # machine-token holder could force a multi-hundred-MB
+                    # `json.loads` AND a DB write on every request, merely
+                    # by padding a body that is about to be rejected as too
+                    # large anyway. `body.strip()`/`len()` are cheap
+                    # byte-level scans; `json.loads` and the write are not.
+                    if len(body) <= MAX_JSON_BODY_BYTES:
+                        parsed = json.loads(body) if body.strip() else {}
+                        dbmod.set_machine_capabilities(
+                            conn, machine_id=machine.id,
+                            sandbox_capable=parsed.get("sandbox_capable") is True,
+                            argv_capable=parsed.get("argv_capable") is True,
+                            unsandboxed_argv_capable=(
+                                parsed.get("unsandboxed_argv_capable") is True
+                            ),
+                            module_capable=parsed.get("module_capable") is True,
+                        )
                 except Exception:
                     log.warning(
                         "could not persist capability snapshot for %s", machine.id
