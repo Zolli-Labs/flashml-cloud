@@ -535,6 +535,41 @@ def test_pools_for_machines_of_owner_empty_dict_for_an_ownerless_machine_set(db)
     assert dbmod.pools_for_machines_of_owner(db, owner) == {}
 
 
+def test_pools_for_machines_of_owner_hides_a_chip_after_membership_is_revoked(db):
+    """Carried from Task 2's review: this query joined ``machine_pools`` to
+    ``pools`` without intersecting ``pool_members`` on the owner, so a
+    binding to a pool the owner had since left still rendered a chip —
+    ``pool_ids_for_machine``'s stamp already excludes exactly this case
+    (``test_stamp_requires_both_binding_and_membership`` above), and the
+    chip map must agree with the stamp rather than show a pool the machine
+    is not actually allowed to serve. The binding row itself is untouched:
+    only the chip is gated on live membership, the same as the stamp.
+    """
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    machine_id = _enrol(db, owner, _node_id("chip-revoked"))
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    assert dbmod.pools_for_machines_of_owner(db, owner)[str(machine_id)] == [
+        {"id": str(pool["id"]), "name": pool["name"]}
+    ]
+
+    with db.cursor() as cur:
+        cur.execute(
+            "delete from public.pool_members where pool_id = %s and user_id = %s",
+            (pool["id"], owner),
+        )
+
+    assert str(machine_id) not in dbmod.pools_for_machines_of_owner(db, owner)
+    # ...while the binding row itself still exists.
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.machine_pools "
+            "where machine_id = %s and pool_id = %s",
+            (machine_id, pool["id"]),
+        )
+        assert cur.fetchone()["n"] == 1
+
+
 # ---------------------------------------------------------------------------
 # fetch_outstanding_invite / revoke_pool_invites (Task 2)
 # ---------------------------------------------------------------------------

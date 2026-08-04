@@ -354,6 +354,8 @@ def fetch_machine_for_owner(
 MACHINE_PUBLIC_COLUMNS = (
     "id", "node_id", "name", "platform", "capabilities", "status",
     "token_prefix", "last_seen_at", "created_at", "revoked_at",
+    "sandbox_capable", "argv_capable", "unsandboxed_argv_capable",
+    "module_capable",
 )
 
 
@@ -993,6 +995,12 @@ def pools_for_machines_of_owner(
     (callers default to ``[]``), not present with an empty list — the join
     below produces no row at all for it, and there is no reason to manufacture
     one.
+
+    Joined through ``pool_members`` on the owner, same as
+    ``pool_ids_for_machine``'s own join: without it, a binding to a pool the
+    owner has since left would still render a chip here even though the
+    stamp that same binding feeds correctly treats it as inert. The chip
+    map and the stamp must agree on which pools a machine actually serves.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -1001,6 +1009,8 @@ def pools_for_machines_of_owner(
               from public.machines m
               join public.machine_pools mp on mp.machine_id = m.id
               join public.pools p on p.id = mp.pool_id
+              join public.pool_members pm
+                on pm.pool_id = mp.pool_id and pm.user_id = m.owner_id
              where m.owner_id = %s
             """,
             (owner_id,),

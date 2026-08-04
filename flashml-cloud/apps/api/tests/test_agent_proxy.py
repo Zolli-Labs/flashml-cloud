@@ -1045,6 +1045,124 @@ def test_approving_an_unknown_user_code_does_not_confirm_anything(client, db):
 
 
 # ---------------------------------------------------------------------------
+# 6b. device approve auto-attaches to a pool (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def _pool(db, owner_id: str, name: str = "Approve Pool") -> str:
+    return str(dbmod.create_pool(db, name=name, owner_id=owner_id)["id"])
+
+
+def _start_code(client, node_id: str) -> str:
+    started = client.post("/v1alpha1/device/code", json={"node_id": node_id})
+    assert started.status_code == 200
+    return started.json()["user_code"]
+
+
+def test_approving_with_a_valid_pool_id_binds_the_approved_machine(client, db):
+    owner = _new_user(db)
+    pool_id = _pool(db, owner)
+    user_code = _start_code(client, _node_id("approve-pool-ok"))
+
+    r = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": pool_id},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert r.status_code == 200, r.text
+    machine_id = r.json()["machine_id"]
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [pool_id]
+
+
+def test_approving_with_a_non_member_pool_id_is_404_and_leaves_the_code_redeemable(
+    client, db
+):
+    """The refusal has to happen BEFORE the device code is consumed: the
+    same user_code must still approve cleanly (without a pool) afterward,
+    proving nothing was written by the refused attempt."""
+    owner = _new_user(db)
+    other_owner = _new_user(db)
+    strangers_pool = _pool(db, other_owner)
+    user_code = _start_code(client, _node_id("approve-pool-refused"))
+
+    refused = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": strangers_pool},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert refused.status_code == 404
+    assert refused.json()["detail"] == "unknown pool"
+
+    ok = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert ok.status_code == 200, ok.text
+    machine_id = ok.json()["machine_id"]
+    # Approved with no pool: the refused attempt bound nothing.
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+def test_approving_with_an_unknown_pool_id_is_404_and_leaves_the_code_redeemable(
+    client, db
+):
+    owner = _new_user(db)
+    user_code = _start_code(client, _node_id("approve-pool-unknown"))
+
+    refused = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": str(uuid.uuid4())},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert refused.status_code == 404
+    assert refused.json()["detail"] == "unknown pool"
+
+    ok = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_approving_with_a_malformed_pool_id_is_404_and_leaves_the_code_redeemable(
+    client, db
+):
+    owner = _new_user(db)
+    user_code = _start_code(client, _node_id("approve-pool-malformed"))
+
+    refused = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": "not-a-uuid-at-all"},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert refused.status_code == 404
+    assert refused.json()["detail"] == "unknown pool"
+
+    ok = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_approving_without_a_pool_id_is_unchanged(client, db):
+    owner = _new_user(db)
+    user_code = _start_code(client, _node_id("approve-pool-absent"))
+
+    r = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert r.status_code == 200, r.text
+    machine_id = r.json()["machine_id"]
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+# ---------------------------------------------------------------------------
 # 7. the operator credential never escapes
 # ---------------------------------------------------------------------------
 
