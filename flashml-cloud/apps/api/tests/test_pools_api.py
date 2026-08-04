@@ -968,10 +968,10 @@ def test_unadmitted_account_is_blocked_from_pool_create_but_not_reads(
 
     r = client.post("/v1alpha1/pools", json={"name": "Nope"}, headers=_auth(user))
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
-    # Reads stay open: the console needs GET /me to know to show the
-    # enter-invite screen, and job listing must not itself be gated.
+    # Reads stay open: the console needs GET /me to know which screen to
+    # show, and job listing must not itself be gated.
     me = client.get("/v1alpha1/me", headers=_auth(user))
     assert me.status_code == 200
     assert me.json()["admitted"] is False
@@ -990,7 +990,7 @@ def test_unadmitted_account_is_blocked_from_job_submission(make_client, db):
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
 
 def test_unadmitted_account_is_blocked_from_job_submission_from_repo(
@@ -1005,7 +1005,7 @@ def test_unadmitted_account_is_blocked_from_job_submission_from_repo(
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
     assert client.fetch.calls == []
 
 
@@ -1019,7 +1019,7 @@ def test_unadmitted_account_is_blocked_from_device_approve(make_client, db):
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
 
 def test_admitted_account_is_not_blocked_from_pool_create(make_client, db):

@@ -90,13 +90,49 @@ def upsert_profile(
                set display_name = coalesce(excluded.display_name,
                                            public.profiles.display_name)
             returning id, display_name, github_login, is_host, is_developer,
-                      created_at
+                      created_at, first_name, last_name, company_name, role,
+                      team_size, email_domain, is_personal_email
             """,
             (user_id, display_name),
         )
         row = cur.fetchone()
         assert row is not None
         return row
+
+
+def update_profile_fields(
+    db: psycopg.Connection, user_id: str, **fields: str
+) -> dict[str, Any]:
+    """Set exactly the named columns and return the whole row.
+
+    The caller decides which fields are writable; this refuses to be a
+    generic column setter by whitelisting here as well, so a future caller
+    cannot turn it into one by accident.
+    """
+    allowed = {
+        "display_name", "first_name", "last_name", "company_name",
+        "role", "team_size",
+    }
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"not a writable profile field: {', '.join(sorted(unknown))}")
+    if not fields:
+        return upsert_profile(db, user_id)
+
+    assignments = ", ".join(f"{name} = %s" for name in fields)
+    with db.cursor() as cur:
+        upsert_profile(db, user_id)  # guarantee the row exists
+        cur.execute(
+            f"""
+            update public.profiles set {assignments}
+             where id = %s
+         returning id, display_name, github_login, is_host, is_developer,
+                   created_at, first_name, last_name, company_name, role,
+                   team_size, email_domain, is_personal_email
+            """,
+            (*fields.values(), user_id),
+        )
+        return cur.fetchone()
 
 
 # ---------------------------------------------------------------------------

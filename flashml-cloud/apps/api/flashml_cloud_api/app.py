@@ -57,6 +57,7 @@ from starlette.concurrency import run_in_threadpool
 
 from flashruntime.protocol.v1alpha1 import JobSpec, NodeHeartbeat, NodeRegistration
 
+from flashml_cloud_api import access
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
@@ -716,13 +717,15 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ) -> str:
-        """current_user plus the alpha's invite gate. Reads (jobs, machines,
-        /me) stay open to un-admitted accounts — the console needs /me to
-        know to SHOW the enter-invite screen — but everything that creates
-        state requires admission. 403, not 404: unlike a resource id, the
-        gate's existence is not a secret."""
+        """current_user plus the account-admission gate. Reads (jobs,
+        machines, /me) stay open to un-admitted accounts — the console needs
+        /me to know which screen to show instead of the product — but
+        everything that creates state requires admission. Admission is no
+        longer invite-driven: an admin grants it by deciding the account's
+        access request (see ``access_state_for`` / 0009). 403, not 404:
+        unlike a resource id, the gate's existence is not a secret."""
         if not dbmod.profile_is_admitted(db, user_id):
-            raise HTTPException(status_code=403, detail="invite required")
+            raise HTTPException(status_code=403, detail="access not yet approved")
         return user_id
 
     async def proxy(
@@ -879,17 +882,24 @@ def create_cloud_app(
     ):
         # Additive: every existing key from upsert_profile is unchanged, and
         # this is the one route an un-admitted account MUST be able to
-        # read — it is how the console learns to show the enter-invite
-        # screen instead of the product itself.
+        # read — it is how the console learns which screen to show instead
+        # of the product itself.
         profile = _jsonable(dbmod.upsert_profile(db, user_id))
         profile["admitted"] = dbmod.profile_is_admitted(db, user_id)
+        # `access` is the four-state version `admitted` cannot express:
+        # a signed-in account that has not filled the form is neither
+        # admitted nor refused.
+        profile["access"] = dbmod.access_state_for(db, user_id)
         return profile
 
-    # Display name is the ONE profile field a user owns. Email and avatar come
-    # from the identity provider and are not ours to edit; github_login is set
-    # by enrolment; is_host/is_developer are roles, not preferences. So this
-    # takes exactly one field and ignores anything else in the body rather
-    # than letting a client hand us a role.
+    #: Fields a user owns. Everything absent from this map is either the
+    #: identity provider's (email, avatar), written by enrolment
+    #: (github_login), or a role rather than a preference (is_host,
+    #: is_developer, is_admin, admitted_at). A client handing us one of
+    #: those is not rejected with an error naming it; it is never read.
+    _PATCHABLE_TEXT = {"first_name": 80, "last_name": 80, "company_name": 160}
+    _PATCHABLE_ENUM = {"role": access.ROLES, "team_size": access.TEAM_SIZES}
+
     @app.patch("/v1alpha1/me", tags=["browser"])
     async def update_me(
         request: Request,
@@ -897,13 +907,13 @@ def create_cloud_app(
         db: psycopg.Connection = Depends(db_conn),
     ):
         payload = await _json_object(request)
+        fields: dict[str, str] = {}
+
         raw = payload.get("display_name")
         if raw is not None and not isinstance(raw, str):
             raise HTTPException(
                 status_code=400, detail="display_name must be a string or null"
             )
-
-        name: str | None = None
         if isinstance(raw, str):
             name = raw.strip()
             if len(name) > 80:
@@ -918,8 +928,35 @@ def create_cloud_app(
                 raise HTTPException(
                     status_code=400, detail="display_name cannot be empty"
                 )
+            fields["display_name"] = name
 
-        return _jsonable(dbmod.upsert_profile(db, user_id, display_name=name))
+        for field, cap in _PATCHABLE_TEXT.items():
+            value = payload.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise HTTPException(status_code=400, detail=f"{field} must be a string")
+            trimmed = value.strip()
+            if not trimmed:
+                raise HTTPException(status_code=400, detail=f"{field} cannot be empty")
+            if len(trimmed) > cap:
+                raise HTTPException(
+                    status_code=400, detail=f"{field} is limited to {cap} characters"
+                )
+            fields[field] = trimmed
+
+        for field, allowed in _PATCHABLE_ENUM.items():
+            value = payload.get(field)
+            if value is None:
+                continue
+            if value not in allowed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field} must be one of: {', '.join(sorted(allowed))}",
+                )
+            fields[field] = value
+
+        return _jsonable(dbmod.update_profile_fields(db, user_id, **fields))
 
     @app.get("/v1alpha1/machines", tags=["browser"])
     async def list_machines(
