@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Plus } from "@phosphor-icons/react";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
+import { isMachineOnline } from "@/lib/machine-scope";
 import { workspacePath } from "@/lib/workspace-scope";
 
 /**
@@ -20,7 +21,9 @@ export function WorkspaceHeader() {
   const { pool, members, machines } = useWorkspace();
   if (!pool) return null;
 
-  const online = machines.filter((m) => m.status === "active").length;
+  // `isMachineOnline`: heartbeat recency, not enrolment state — see
+  // lib/machine-scope.ts. Must agree with PoolFleetTable's own dots.
+  const online = machines.filter(isMachineOnline).length;
 
   return (
     <div className="flex flex-wrap items-end justify-between gap-3">

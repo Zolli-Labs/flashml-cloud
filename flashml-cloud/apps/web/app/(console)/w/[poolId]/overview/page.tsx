@@ -6,6 +6,7 @@ import { StateBadge } from "@/components/jobs/StateBadge";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import { isActiveJob } from "@/lib/job-scope";
+import { isMachineOnline } from "@/lib/machine-scope";
 import { workspacePath } from "@/lib/workspace-scope";
 
 // The console had no home: signing in dropped you on the marketing page.
@@ -22,7 +23,9 @@ export default function WorkspaceOverviewPage() {
   if (!pool) return null;
 
   const active = jobs.filter(isActiveJob);
-  const online = machines.filter((m) => m.status === "active");
+  // `isMachineOnline`: heartbeat recency, not enrolment state — see
+  // lib/machine-scope.ts. Must agree with WorkspaceHeader's own count.
+  const online = machines.filter(isMachineOnline);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
