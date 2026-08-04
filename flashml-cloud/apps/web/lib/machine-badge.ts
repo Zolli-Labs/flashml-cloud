@@ -33,3 +33,23 @@ export function machineBadge(m: {
   if (m.unsandboxed_argv_capable) return "trusted";
   return "modules-only";
 }
+
+/** Styling for each badge, lifted out of `app/(console)/machines/page.tsx`
+ * so the pool page's "Your machines" list (Task 6) renders the identical
+ * badge instead of keeping a second copy of this map in sync by hand.
+ * Same amber the submit page's "runs unsandboxed" warning uses — trust and
+ * sandboxing get the one warning colour this design system has, not a
+ * second one invented just for this badge. The other two tiers stay
+ * neutral: "sandboxed" is the safe default and does not need to draw the
+ * eye, and "modules-only" is a lesser capability, not a risk. */
+export const MACHINE_BADGE_STYLES: Record<MachineBadge, string> = {
+  sandboxed: "border-border text-foreground",
+  trusted: "border-amber-400/30 bg-amber-400/10 text-amber-400",
+  "modules-only": "border-border text-muted-foreground",
+};
+
+export const MACHINE_BADGE_LABELS: Record<MachineBadge, string> = {
+  sandboxed: "Sandboxed",
+  trusted: "Trusted",
+  "modules-only": "Modules only",
+};

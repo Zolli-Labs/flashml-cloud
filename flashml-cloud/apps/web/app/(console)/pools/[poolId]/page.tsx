@@ -5,16 +5,42 @@ import { use, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Check, Copy, Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { relativeTime } from "@/lib/machine-status";
+import { ConnectPanel } from "@/components/pools/ConnectPanel";
+import { isOnline, relativeTime } from "@/lib/machine-status";
+import {
+  MACHINE_BADGE_LABELS,
+  MACHINE_BADGE_STYLES,
+  machineBadge,
+} from "@/lib/machine-badge";
+import { formatInviteState } from "@/lib/pool-invite-state";
 import {
   ApiError,
   NotAuthenticated,
   NotFound,
+  bindMachineToPool,
   createPoolInvite,
   getMe,
   getPool,
+  getPoolInviteState,
+  listMachines,
+  revokePoolInvites,
+  unbindMachineFromPool,
+  type Machine,
   type Pool,
+  type PoolInviteState,
   type PoolMember,
 } from "@/lib/cloud-api";
 
@@ -149,6 +175,21 @@ export default function PoolDetailPage({
         </table>
       </div>
 
+      <div className="mt-8">
+        <YourMachinesSection poolId={pool.id} poolName={pool.name} />
+      </div>
+
+      <div id="connect-panel" className="mt-8">
+        <h2 className="text-sm font-semibold">Connect a machine</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          No spare laptop? Point a Colab notebook or a rented pod at this
+          pool instead.
+        </p>
+        <div className="mt-4">
+          <ConnectPanel poolId={pool.id} />
+        </div>
+      </div>
+
       {/* Owner only — the API's own doctrine on `POST
           /pools/{id}/invites` (404, not 403, for a non-owner member). This
           client-side check is a convenience, not the boundary: a non-owner
@@ -191,30 +232,276 @@ function MemberRow({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Your machines — per-device opt-in
+// ---------------------------------------------------------------------------
+
+/** `listMachines()` is scoped to the caller by the API itself, so this is
+ * always "your machines", never every machine in the pool — the pool's
+ * fleet is what the member table's "Machines"/"Online" columns already
+ * summarise in aggregate. */
+function YourMachinesSection({
+  poolId,
+  poolName,
+}: {
+  poolId: string;
+  poolName: string;
+}) {
+  const [machines, setMachines] = useState<Machine[]>([]);
+  const [state, setState] = useState<"loading" | "ready" | "error">(
+    "loading"
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+
+  const load = useCallback(() => {
+    listMachines()
+      .then((r) => {
+        setMachines(r);
+        setState("ready");
+        setError(null);
+      })
+      .catch((err) => {
+        setError(
+          err instanceof Error ? err.message : "Couldn't load your machines."
+        );
+        setState("error");
+      });
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Optimistic, with revert on failure — the checkbox flips immediately
+  // rather than waiting a round trip, and flips back with a toast if the
+  // API refuses. Same "confirm, then reflect it in state" shape the
+  // machines page's revoke button uses, just eagerly instead of after the
+  // fact, since a toggle (unlike an irreversible revoke) is cheap to undo
+  // on screen.
+  async function toggle(machine: Machine, bound: boolean) {
+    const label = machine.name || machine.node_id;
+    setPendingIds((prev) => new Set(prev).add(machine.id));
+    setMachines((prev) =>
+      prev.map((m) =>
+        m.id !== machine.id
+          ? m
+          : {
+              ...m,
+              pools: bound
+                ? m.pools.filter((p) => p.id !== poolId)
+                : [...m.pools, { id: poolId, name: poolName }],
+            }
+      )
+    );
+    try {
+      if (bound) {
+        await unbindMachineFromPool(poolId, machine.id);
+      } else {
+        await bindMachineToPool(poolId, machine.id);
+      }
+    } catch {
+      setMachines((prev) =>
+        prev.map((m) =>
+          m.id !== machine.id
+            ? m
+            : {
+                ...m,
+                pools: bound
+                  ? [...m.pools, { id: poolId, name: poolName }]
+                  : m.pools.filter((p) => p.id !== poolId),
+              }
+        )
+      );
+      toast.error(`Couldn't ${bound ? "remove" : "add"} ${label}`, {
+        description: "This pool is unchanged. Try again.",
+      });
+    } finally {
+      setPendingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(machine.id);
+        return next;
+      });
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="text-sm font-semibold">Your machines</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Opt your own machines into this pool&apos;s work. A machine serves
+        no pool until it&apos;s ticked in here, even if you own it.
+      </p>
+
+      <div className="mt-3">
+        {state === "loading" ? (
+          <div className="space-y-px">
+            <div className="skeleton h-11" />
+            <div className="skeleton h-11" />
+          </div>
+        ) : state === "error" ? (
+          <div className="flex items-center gap-2 py-2 text-sm text-destructive">
+            <Warning className="h-4 w-4 shrink-0" weight="fill" />
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={load}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              Try again
+            </button>
+          </div>
+        ) : machines.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No machines on your account yet.{" "}
+            <a
+              href="#connect-panel"
+              className="text-primary hover:underline"
+            >
+              Connect one below.
+            </a>
+          </p>
+        ) : (
+          <div className="divide-y divide-border">
+            {machines.map((m) => (
+              <MachineToggleRow
+                key={m.id}
+                machine={m}
+                bound={m.pools.some((p) => p.id === poolId)}
+                pending={pendingIds.has(m.id)}
+                onToggle={toggle}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {machines.length > 0 && (
+        <p className="mt-2.5 text-xs text-muted-foreground">
+          Takes effect within ~30s while the agent is running.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function MachineToggleRow({
+  machine,
+  bound,
+  pending,
+  onToggle,
+}: {
+  machine: Machine;
+  bound: boolean;
+  pending: boolean;
+  onToggle: (machine: Machine, bound: boolean) => void;
+}) {
+  const badge = machineBadge(machine);
+  const online = isOnline(machine.last_seen_at);
+  const label = machine.name || machine.node_id;
+
+  return (
+    <label className="flex cursor-pointer items-center gap-3 py-2.5 text-sm">
+      <input
+        type="checkbox"
+        checked={bound}
+        disabled={pending}
+        onChange={() => onToggle(machine, bound)}
+        aria-label={`${bound ? "Remove" : "Add"} ${label} ${bound ? "from" : "to"} this pool`}
+        className="h-4 w-4 shrink-0 rounded border-border accent-primary disabled:opacity-50"
+      />
+      <span
+        className="status-dot"
+        data-state={online ? "live" : undefined}
+        style={{
+          background: online ? "var(--node-green)" : "oklch(1 0 0 / 0.25)",
+        }}
+      />
+      <span className="min-w-0 flex-1 truncate font-mono">{label}</span>
+      <Badge variant="outline" className={MACHINE_BADGE_STYLES[badge]}>
+        {MACHINE_BADGE_LABELS[badge]}
+      </Badge>
+    </label>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Invite section — owner only, a single standing capped link
+// ---------------------------------------------------------------------------
+
 function InviteSection({ poolId }: { poolId: string }) {
+  const [inviteState, setInviteState] = useState<PoolInviteState | null>(
+    null
+  );
+  const [state, setState] = useState<"loading" | "ready" | "error">(
+    "loading"
+  );
   const [link, setLink] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  async function create() {
-    setCreating(true);
+  const load = useCallback(() => {
+    getPoolInviteState(poolId)
+      .then((s) => {
+        setInviteState(s);
+        setState("ready");
+      })
+      .catch(() => {
+        setState("error");
+      });
+  }, [poolId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Regenerate covers both "there's no link yet" and "replace the current
+  // one" with the same call — revoking a pool with nothing outstanding is
+  // a no-op on the API side (`revokePoolInvites`'s own contract), so there
+  // is no separate "create" action to keep in sync with this one.
+  async function regenerate() {
+    setWorking(true);
     setError(null);
     setCopied(false);
     try {
-      const { token } = await createPoolInvite(poolId);
-      // Built here, not stored anywhere — the token exists in this
-      // component's state for exactly as long as this card is on screen,
-      // matching the API's own "shown once" contract for the raw value.
+      await revokePoolInvites(poolId);
+      const { token } = await createPoolInvite(poolId, { uses: 10 });
       setLink(`${window.location.origin}/pools/join?token=${token}`);
+      // Best effort: the new link is already in hand even if this refresh
+      // fails, so a failure here doesn't roll anything back — it just
+      // leaves the state line stale until the next load.
+      try {
+        setInviteState(await getPoolInviteState(poolId));
+      } catch {
+        // leave the previous state line in place
+      }
     } catch (err) {
       setError(
         err instanceof ApiError
           ? err.detail
-          : "Couldn't create an invite link. Try again."
+          : "Couldn't regenerate the invite link. Try again."
       );
     } finally {
-      setCreating(false);
+      setWorking(false);
+    }
+  }
+
+  async function revoke() {
+    setWorking(true);
+    try {
+      await revokePoolInvites(poolId);
+      setInviteState(null);
+      setLink(null);
+      toast.success("Invite link revoked", {
+        description: "It can no longer be used to join this pool.",
+      });
+    } catch {
+      toast.error("Couldn't revoke the invite link", {
+        description: "Try again.",
+      });
+    } finally {
+      setWorking(false);
     }
   }
 
@@ -233,13 +520,30 @@ function InviteSection({ poolId }: { poolId: string }) {
     <section className="panel p-5">
       <h2 className="text-sm font-semibold">Invite a teammate</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        Mint a one-time link. Anyone who opens it and signs in joins this
-        pool.
+        A standing link — anyone who opens it and signs in joins this pool.
+        Treat it like a password: it&apos;s good for the uses and time shown
+        below, and Regenerate invalidates whatever copy is currently out.
       </p>
 
-      {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
+      {state === "loading" ? (
+        <div className="skeleton mt-3 h-4 w-40" />
+      ) : state === "error" ? (
+        <p className="mt-3 text-xs text-destructive">
+          Couldn&apos;t load the current invite state.
+        </p>
+      ) : inviteState ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          {formatInviteState(inviteState)}
+        </p>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">
+          No active invite link.
+        </p>
+      )}
 
-      {link ? (
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+
+      {link && (
         <>
           <div className="mt-3 flex items-center gap-2">
             <Input
@@ -273,25 +577,54 @@ function InviteSection({ poolId }: { poolId: string }) {
               it to you again.
             </span>
           </p>
-          <button
-            type="button"
-            onClick={create}
-            disabled={creating}
-            className="mt-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-40"
-          >
-            {creating ? "Creating…" : "Create another link"}
-          </button>
         </>
-      ) : (
+      )}
+
+      <div className="mt-3 flex items-center gap-3">
         <button
           type="button"
-          onClick={create}
-          disabled={creating}
-          className="interactive mt-3 rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          onClick={regenerate}
+          disabled={working}
+          className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {creating ? "Creating…" : "Create invite link"}
+          {working ? "Working…" : "Regenerate"}
         </button>
-      )}
+
+        {inviteState && (
+          <AlertDialog>
+            <AlertDialogTrigger
+              render={
+                <button
+                  type="button"
+                  disabled={working}
+                  className="rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Revoke
+                </button>
+              }
+            />
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Revoke this invite link?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Anyone still holding it can no longer use it to join this
+                  pool. Members already in the pool are unaffected.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep it</AlertDialogCancel>
+                <AlertDialogAction
+                  disabled={working}
+                  onClick={revoke}
+                  className="bg-destructive/15 text-destructive hover:bg-destructive/25"
+                >
+                  {working ? "Revoking…" : "Revoke"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        )}
+      </div>
     </section>
   );
 }

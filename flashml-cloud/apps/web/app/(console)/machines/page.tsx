@@ -19,7 +19,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import { isOnline, relativeTime } from "@/lib/machine-status";
-import { machineBadge, type MachineBadge } from "@/lib/machine-badge";
+import {
+  MACHINE_BADGE_LABELS as BADGE_LABELS,
+  MACHINE_BADGE_STYLES as BADGE_STYLES,
+  machineBadge,
+} from "@/lib/machine-badge";
 import {
   NotAuthenticated,
   cloudApiBase,
@@ -27,23 +31,6 @@ import {
   revokeMachine,
   type Machine,
 } from "@/lib/cloud-api";
-
-// Same amber the submit page's "runs unsandboxed" warning uses — trust and
-// sandboxing get the one warning colour this design system has, not a
-// second one invented just for this badge. The other two tiers stay
-// neutral: "sandboxed" is the safe default and does not need to draw the
-// eye, and "modules-only" is a lesser capability, not a risk.
-const BADGE_STYLES: Record<MachineBadge, string> = {
-  sandboxed: "border-border text-foreground",
-  trusted: "border-amber-400/30 bg-amber-400/10 text-amber-400",
-  "modules-only": "border-border text-muted-foreground",
-};
-
-const BADGE_LABELS: Record<MachineBadge, string> = {
-  sandboxed: "Sandboxed",
-  trusted: "Trusted",
-  "modules-only": "Modules only",
-};
 
 const POLL_MS = 15_000;
 
