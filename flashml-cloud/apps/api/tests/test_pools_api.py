@@ -85,6 +85,17 @@ def _add_member(db, pool_id: str, user_id: str) -> None:
         )
 
 
+def _set_display_name(db, user_id: str, name: str) -> None:
+    """``_new_user`` creates a profile with no display name, and the pool
+    machines route renders one. No existing helper sets it, so set it
+    directly."""
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set display_name = %s where id = %s",
+            (name, user_id),
+        )
+
+
 def _create_pool(client, owner: str, name: str = "Ada's Team"):
     return client.post("/v1alpha1/pools", json={"name": name}, headers=_auth(owner))
 
@@ -1017,3 +1028,77 @@ def test_raw_token_appears_exactly_once_and_token_hash_never_appears(
     # that consumed it.
     total = sum(r.text.count(raw_token) for r in responses)
     assert total == 1
+
+
+# ---------------------------------------------------------------------------
+# pool machines: the workspace's fleet across all members (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_pool_machines_lists_every_members_bound_machine(make_client, db):
+    """The point of the tab: you see the workspace's compute, not just your
+    own. `list_machines_for_owner` structurally cannot answer this."""
+    owner = _new_user(db)
+    _set_display_name(db, owner, "Ada")
+    member = _new_user(db)
+    _set_display_name(db, member, "Grace")
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+    _add_member(db, pool["id"], member)
+
+    mine = _enrol(db, owner, "mine")
+    theirs = _enrol(db, member, "theirs")
+    unbound = _enrol(db, owner, "unbound")
+    dbmod.bind_machine_pool(db, machine_id=mine, pool_id=pool["id"])
+    dbmod.bind_machine_pool(db, machine_id=theirs, pool_id=pool["id"])
+
+    rows = client.get(
+        f"/v1alpha1/pools/{pool['id']}/machines", headers=_auth(owner)
+    ).json()
+
+    by_id = {r["id"]: r for r in rows}
+    assert set(by_id) == {mine, theirs}, "unbound machines must not appear"
+    assert unbound not in by_id
+    assert by_id[theirs]["owner_display_name"] == "Grace"
+    assert "token_hash" not in by_id[mine]
+
+
+def test_pool_machines_omits_a_machine_whose_owner_left(make_client, db):
+    """A binding left behind by someone who has left the pool is inert for
+    placement (`pool_ids_for_machine`'s join). This view must agree, or the
+    tab overstates the workspace's capacity."""
+    owner = _new_user(db)
+    leaver = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+    _add_member(db, pool["id"], leaver)
+
+    abandoned = _enrol(db, leaver, "abandoned")
+    dbmod.bind_machine_pool(db, machine_id=abandoned, pool_id=pool["id"])
+    with db.cursor() as cur:
+        cur.execute(
+            "delete from public.pool_members where pool_id = %s and user_id = %s",
+            (pool["id"], leaver),
+        )
+
+    rows = client.get(
+        f"/v1alpha1/pools/{pool['id']}/machines", headers=_auth(owner)
+    ).json()
+
+    assert rows == []
+
+
+def test_pool_machines_404s_for_non_member_and_for_a_malformed_id(make_client, db):
+    """404 doctrine: a stranger and a garbage id get the same answer, so the
+    route cannot be used to learn which pool ids are real."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}/machines", headers=_auth(stranger)
+    ).status_code == 404
+    assert client.get(
+        "/v1alpha1/pools/not-a-uuid/machines", headers=_auth(owner)
+    ).status_code == 404

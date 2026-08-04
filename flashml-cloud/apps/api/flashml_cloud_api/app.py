@@ -1067,6 +1067,30 @@ def create_cloud_app(
         members = dbmod.list_pool_members(db, pool_id)
         return {**_jsonable(pool), "members": [_jsonable(m) for m in members]}
 
+    @app.get("/v1alpha1/pools/{pool_id}/machines", tags=["browser"])
+    async def list_pool_machines_route(
+        pool_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Every machine this pool has, across all of its members.
+
+        Authorize BEFORE listing, exactly as ``get_pool_route`` does:
+        ``list_pool_machines`` takes no viewer param by design, so membership
+        has to be established here, first, or any pool's fleet would be
+        readable by anyone who could guess an id. 404, not 403 — see
+        ``fetch_pool_for_member``'s own docstring.
+        """
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            # A pool_id that is not even a uuid. Same answer as one that
+            # simply is not yours.
+            pool = None
+        if pool is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        return [_jsonable(m) for m in dbmod.list_pool_machines(db, pool_id)]
+
     @app.put(
         "/v1alpha1/pools/{pool_id}/machines/{machine_id}",
         status_code=204, tags=["browser"],

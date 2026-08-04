@@ -1044,6 +1044,49 @@ def pools_for_machines_of_owner(
         return chips
 
 
+def list_pool_machines(
+    db: psycopg.Connection, pool_id: str
+) -> list[dict[str, Any]]:
+    """Every machine bound to ``pool_id``, across all of its members, with
+    the owner label the console renders beside each row.
+
+    ``list_machines_for_owner`` cannot answer this and is not supposed to:
+    it is scoped to one caller by design, so it shows you your own machines
+    and none of your teammates'. This is the workspace-wide view — what
+    compute the pool actually has.
+
+    Joined against live ``pool_members``, the same guard
+    ``pool_ids_for_machine`` and ``pools_for_machines_of_owner`` both apply:
+    a binding left behind by an owner who has since left the pool is already
+    inert for placement, so listing it here would overstate the workspace's
+    capacity to every member looking at it. The three views must agree on
+    which machines a pool actually has.
+
+    Revoked machines are NOT filtered out. A revoked machine's token is dead
+    and it can never claim work, but it is still a row the workspace can see,
+    and the console renders its status — unlike the opt-in checkbox list,
+    which filters them because ticking one would be meaningless.
+    """
+    columns = ", ".join(f"m.{c}" for c in MACHINE_PUBLIC_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {columns},
+                   m.owner_id,
+                   pr.display_name as owner_display_name
+              from public.machine_pools mp
+              join public.machines m on m.id = mp.machine_id
+              join public.pool_members pm
+                on pm.pool_id = mp.pool_id and pm.user_id = m.owner_id
+              left join public.profiles pr on pr.id = m.owner_id
+             where mp.pool_id = %s
+             order by m.created_at
+            """,
+            (pool_id,),
+        )
+        return list(cur.fetchall())
+
+
 def create_pool_invite(
     db: psycopg.Connection,
     *,
