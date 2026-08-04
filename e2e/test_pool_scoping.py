@@ -217,31 +217,37 @@ def test_trusted_worker_claims_pool_argv_but_never_public_argv(coordinator):
     thread.start()
     try:
         _wait_until(lambda: _task_states(coordinator, pool_job_id) == ["COMPLETED"])
+        assert _accepted_tasks(coordinator, "trusted-a") == 1
+
+        # A public task: no pool, and the submitter did NOT waive the sandbox
+        # tier (allowFallback False) — CommandRecipe refuses allowFallback
+        # without a pool outright, so this also pins that a *legitimate*
+        # public argv job (the common case) still cannot reach this
+        # trusted-only node.
+        public_job = coordinator.post(
+            "/v1alpha1/jobs",
+            _argv_job(pool=None, allow_fallback=False, name="public-argv"),
+        )
+        public_job_id = public_job["job_id"]
+
+        # The agent thread is STILL RUNNING and polling here — stop_event is
+        # not set until this whole `try` exits, unlike a check made after
+        # the loop was already stopped, which would prove nothing. Several
+        # real poll cycles' worth of time to show it does not quietly pick
+        # this up.
+        time.sleep(0.6)
+        assert _task_states(coordinator, public_job_id) == ["PENDING"]
+        assert _accepted_tasks(coordinator, "trusted-a") == 1  # unchanged
+
+        # And the direct claim, unambiguous: nothing else is registered, this
+        # public task is the only thing left in the queue, and the node is
+        # refused it outright — independent of (and consistent with) the
+        # polling loop above, which was already proving the same thing on
+        # every cycle during the sleep.
+        lease = CoordinatorClient(coordinator.base_url).claim("trusted-a")
+        assert lease is None
     finally:
         agent.stop_event.set()
-    assert _accepted_tasks(coordinator, "trusted-a") == 1
-
-    # A public task: no pool, and the submitter did NOT waive the sandbox
-    # tier (allowFallback False) — CommandRecipe refuses allowFallback
-    # without a pool outright, so this also pins that a *legitimate* public
-    # argv job (the common case) still cannot reach this trusted-only node.
-    public_job = coordinator.post(
-        "/v1alpha1/jobs",
-        _argv_job(pool=None, allow_fallback=False, name="public-argv"),
-    )
-    public_job_id = public_job["job_id"]
-
-    # Give the still-registered node several poll cycles' worth of time to
-    # prove it does not quietly pick this up.
-    time.sleep(0.6)
-    assert _task_states(coordinator, public_job_id) == ["PENDING"]
-    assert _accepted_tasks(coordinator, "trusted-a") == 1  # unchanged
-
-    # And the direct claim, unambiguous: nothing else is registered, this
-    # public task is the only thing left in the queue, and the node is
-    # refused it outright.
-    lease = CoordinatorClient(coordinator.base_url).claim("trusted-a")
-    assert lease is None
 
 
 # ---------------------------------------------------------------------------
