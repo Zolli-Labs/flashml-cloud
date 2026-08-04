@@ -412,7 +412,7 @@ describe("cloud-api", () => {
       const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
-      fetchMock.mockResolvedValue(jsonResponse(201, { token: "fmi_secret123" }));
+      fetchMock.mockResolvedValue(jsonResponse(201, { token: "fmi_test-invite-token-000" }));
 
       const result = await createPoolInvite("pool-1");
 
@@ -420,7 +420,7 @@ describe("cloud-api", () => {
       expect(url).toBe(`${cloudApiBase()}/v1alpha1/pools/pool-1/invites`);
       expect(init.method).toBe("POST");
       expect(init.body).toBeUndefined();
-      expect(result).toEqual({ token: "fmi_secret123" });
+      expect(result).toEqual({ token: "fmi_test-invite-token-000" });
       expect(logSpy).not.toHaveBeenCalled();
       expect(errorSpy).not.toHaveBeenCalled();
 
@@ -434,12 +434,12 @@ describe("cloud-api", () => {
         jsonResponse(200, { pool_id: "pool-1", name: "Lab" })
       );
 
-      const result = await acceptInvite("fmi_secret123");
+      const result = await acceptInvite("fmi_test-invite-token-000");
 
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe(`${cloudApiBase()}/v1alpha1/invites/accept`);
       expect(init.method).toBe("POST");
-      expect(JSON.parse(init.body)).toEqual({ token: "fmi_secret123" });
+      expect(JSON.parse(init.body)).toEqual({ token: "fmi_test-invite-token-000" });
       expect(result).toEqual({ pool_id: "pool-1", name: "Lab" });
     });
 

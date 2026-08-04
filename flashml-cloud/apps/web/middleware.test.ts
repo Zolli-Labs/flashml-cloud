@@ -1,6 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
+// middleware.ts talks to Supabase only through @supabase/ssr's
+// createServerClient — mock that boundary rather than let it construct a
+// real client, the same pattern cloud-api.test.ts uses for the browser
+// client. This matters beyond test isolation: @supabase/ssr's client pulls
+// in supabase-js's realtime client, which probes for a native WebSocket at
+// CONSTRUCTION time, not at connection time. Node 22 (this machine) has a
+// global WebSocket and never notices; CI's Node 20 does not, so
+// createServerClient() throws "Node.js detected but native WebSocket not
+// found" before getUser() is ever reached — a CI-only failure. Mocking the
+// boundary means no real client, and therefore no realtime client, is ever
+// constructed.
+const getUser = vi.fn();
+vi.mock("@supabase/ssr", () => ({
+  createServerClient: () => ({
+    auth: { getUser },
+  }),
+}));
+
 import { middleware } from "./middleware";
 
 /**
@@ -75,15 +93,16 @@ describe("auth code forwarding", () => {
  * "Supabase not configured" bailout, so — unlike the `code`-forwarding
  * tests above, which return before that check runs at all — these stub
  * NEXT_PUBLIC_SUPABASE_URL/ANON_KEY. The fake project is never actually
- * reached: `getUser()` with no session cookie on the request resolves
- * `{ user: null }` from `@supabase/ssr`'s local session check alone
- * (`AuthSessionMissingError`, no `access_token` to even attempt a fetch
- * with), so this stays a fast, offline unit test.
+ * reached: `@supabase/ssr` is mocked (see the top of this file), so
+ * `createServerClient` never builds a real client and `getUser()` resolves
+ * whatever this block tells it to, offline and instantly.
  */
 describe("signed-out redirect to /sign-in", () => {
   beforeEach(() => {
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://fake-project.supabase.co");
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "fake-anon-key");
+    getUser.mockReset();
+    getUser.mockResolvedValue({ data: { user: null } });
   });
 
   afterEach(() => {

@@ -26,3 +26,8 @@
 # scrubbed from already-pushed history. It is NOT a statement that the value
 # is safe.
 b1e5df96aa7c76021fb1be5a5fe538a249bedcde:.env.dev.example:generic-api-key:32
+
+# fake invite-token literal in web tests (6bc4218) — fabricated value, never a real credential
+6bc4218192b3df87514db38fc6f7a0b9cec8320d:flashml-cloud/apps/web/lib/cloud-api.test.ts:generic-api-key:317
+6bc4218192b3df87514db38fc6f7a0b9cec8320d:flashml-cloud/apps/web/lib/cloud-api.test.ts:generic-api-key:325
+6bc4218192b3df87514db38fc6f7a0b9cec8320d:flashml-cloud/apps/web/lib/cloud-api.test.ts:generic-api-key:344
