@@ -125,6 +125,13 @@ class FederatedRun:
     Frozen and self-contained on purpose: it is handed to a background
     thread that outlives the request, so it must not hold a database
     connection, a request object, or anything else with a lifetime.
+
+    ``pool`` is ``None`` for every run outside a pool — every run before
+    pools existed, and every ordinary independent submission today. It is
+    threaded into every round this run compiles (``build_round_for``) and
+    into the ``run_fedavg`` call itself (``run_federated_job``), so a pool
+    named for round 0 travels to every later round without the caller
+    repeating itself.
     """
 
     job_id: str
@@ -132,6 +139,7 @@ class FederatedRun:
     config: FlashmlConfig
     image: CuratedImage
     code_artifact_uri: str
+    pool: str | None = None
 
 
 def build_round_for(run: FederatedRun) -> Callable[[int, str | None], RoundPlan]:
@@ -152,6 +160,7 @@ def build_round_for(run: FederatedRun) -> Callable[[int, str | None], RoundPlan]
             run.job_name,
             round_index=round_index,
             weights_uri=weights_uri,
+            pool=run.pool,
         )
         return {"body": body,
                 "task_ids": federated_task_ids(run.config.shards or 0)}
@@ -418,6 +427,16 @@ def run_federated_job(
             poll_seconds=POLL_SECONDS,
             on_round=on_round,
             build_round=build_round_for(run),
+            # Also inputs to the default round body only, and so likewise
+            # inert here — `build_round_for(run)` above is what actually
+            # stamps `placement.pool`/`isolation.allowFallback` on every
+            # round this run compiles. Threaded through anyway so this call
+            # states the same invariant `compile_federated_round` enforces
+            # (allowFallback iff pool) rather than silently relying on
+            # `run_fedavg`'s own defaults, and so a future caller reading
+            # this line does not have to already know build_round wins.
+            pool=run.pool,
+            allow_fallback=run.pool is not None,
         )
     except BaseException as exc:  # noqa: BLE001
         # BaseException, not Exception: a driver thread killed by anything

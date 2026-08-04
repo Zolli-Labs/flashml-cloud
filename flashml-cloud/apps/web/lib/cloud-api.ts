@@ -110,6 +110,13 @@ export interface Profile {
   is_host: boolean;
   is_developer: boolean;
   created_at: string;
+  /** Whether this account has redeemed an invite (or predates the gate —
+   * see the migration's grandfather clause). `GET /v1alpha1/me` stays
+   * reachable for an un-admitted account on purpose (`admitted_user`'s own
+   * docstring: "reads stay open") specifically so the console can read
+   * this flag and show the invite gate instead of a silent 403 on every
+   * other route. */
+  admitted: boolean;
 }
 
 /** A row of `public.machines`, restricted to `MACHINE_PUBLIC_COLUMNS` —
@@ -274,6 +281,67 @@ export interface JobTask {
   round?: number;
 }
 
+/** A row of `public.pools` — exactly `POOL_PUBLIC_COLUMNS` in `db.py` — as
+ * every pool route returns it: `GET /v1alpha1/pools/{id}` (flattened
+ * alongside `members`, see `getPool()`) and `POST /v1alpha1/pools` both
+ * return precisely this, no more.
+ *
+ * `GET /v1alpha1/pools` (the LIST route) returns MORE than this per pool —
+ * see `PoolSummary` below — so this base type deliberately does not carry
+ * `member_count`/`machines_online`: a route that cannot supply them no
+ * longer has to lie about it with a runtime-`undefined` field the type
+ * claims is a `number`. */
+export interface Pool {
+  id: string;
+  name: string;
+  owner_id: string;
+  created_at: string;
+}
+
+/** `GET /v1alpha1/pools`'s row shape: `Pool` plus the two aggregates
+ * `list_pools_for_user` (`db.py`) computes in the same query —
+ * `member_count`, `machines_online` — the same single-query-not-N
+ * reasoning `listJobRounds` documents elsewhere. Only this route populates
+ * them; do not reach for these two fields off a `getPool()` or
+ * `createPool()` result, which are typed as the plain `Pool` above
+ * specifically so the compiler catches that instead of a comment having
+ * to. */
+export interface PoolSummary extends Pool {
+  member_count: number;
+  machines_online: number;
+}
+
+/** A row of `public.pool_members` joined to the member's profile, as
+ * `GET /v1alpha1/pools/{id}` returns each entry of `members`. Per-MEMBER
+ * machine counts (their own enrolled machines), not the pool's aggregate —
+ * see `list_pool_members`, `db.py`. */
+export interface PoolMember {
+  user_id: string;
+  display_name: string | null;
+  joined_at: string;
+  machine_count: number;
+  machines_online: number;
+}
+
+/** `GET /v1alpha1/jobs/{id}/contributions`'s row shape — the per-machine
+ * credit view for a job: which machine did the work, whose it is, and how
+ * much. Mirrors `list_job_contributions`'s query in `db.py` exactly (join
+ * of `contributions` -> `machines` -> `profiles`), one row per machine that
+ * was credited, not per task.
+ *
+ * `machine_name` and `member_display_name` are nullable because `Machine.name`
+ * and `Profile.display_name` both are — a machine enrolled without a name,
+ * or a member who never set one, still gets a credit row, just with a null
+ * label rather than a missing one. An independent (non-pool) job has no
+ * contributions at all and this route returns `[]` for it, never an error. */
+export interface JobContribution {
+  node_id: string;
+  machine_name: string | null;
+  member_display_name: string | null;
+  tasks_credited: number;
+  total_duration_s: number;
+}
+
 // ---------------------------------------------------------------------------
 // request plumbing
 // ---------------------------------------------------------------------------
@@ -402,6 +470,67 @@ export function revokeMachine(machineId: string): Promise<RevokeMachineResult> {
   );
 }
 
+// -- pools and invites -------------------------------------------------
+
+export function listPools(): Promise<PoolSummary[]> {
+  return request<PoolSummary[]>("/v1alpha1/pools");
+}
+
+/** `POST /v1alpha1/pools` requires admission (creating a pool is state
+ * creation, the thing the alpha gate exists to block) — a 401-shaped
+ * `NotAuthenticated` never fires here for "not admitted"; that case
+ * surfaces as a plain `ApiError` with the API's own detail
+ * ("invite required"), same as any other refusal. */
+export function createPool(name: string): Promise<Pool> {
+  return request<Pool>("/v1alpha1/pools", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** `GET /v1alpha1/pools/{id}` actually returns the pool's own columns
+ * flattened alongside `members` — `{...Pool fields, members: [...]}` — NOT
+ * `{pool: {...}, members: [...]}`. */
+type PoolDetailResponse = Pool & { members: PoolMember[] };
+
+/** Reshapes that flat response into `{pool, members}` so callers get one
+ * nested shape, matching every other place this client separates "the
+ * thing" from "the list attached to it". No cast needed on the way out:
+ * `Pool` (unlike `PoolSummary`) has no fields this route fails to supply. */
+export async function getPool(
+  poolId: string
+): Promise<{ pool: Pool; members: PoolMember[] }> {
+  const { members, ...pool } = await request<PoolDetailResponse>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}`
+  );
+  return { pool, members };
+}
+
+/** Mints a one-time invite link's token. The API returns the raw token
+ * exactly once — it is hashed for storage and never kept in the clear, so
+ * this is the only place it could ever be recovered — and this function
+ * does nothing with it but hand it back: no logging, no persistence, no
+ * echoing anywhere else in this client. */
+export function createPoolInvite(poolId: string): Promise<{ token: string }> {
+  return request<{ token: string }>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/invites`,
+    { method: "POST" }
+  );
+}
+
+/** `POST /v1alpha1/invites/accept` — deliberately callable by a
+ * signed-in-but-not-yet-admitted account (the API's `accept_invite` sits on
+ * `current_user`, not `admitted_user`): this call IS the admission
+ * bootstrap, not something gated behind having already passed it. */
+export function acceptInvite(
+  token: string
+): Promise<{ pool_id: string; name: string }> {
+  return request<{ pool_id: string; name: string }>(
+    "/v1alpha1/invites/accept",
+    { method: "POST", body: JSON.stringify({ token }) }
+  );
+}
+
 export function listJobs(): Promise<JobRecord[]> {
   return request<JobRecord[]>("/v1alpha1/jobs");
 }
@@ -444,6 +573,17 @@ export function listJobEvents(jobId: string, since = 0): Promise<JobEvent[]> {
 export function listJobTasks(jobId: string): Promise<JobTask[]> {
   return request<JobTask[]>(
     `/v1alpha1/jobs/${encodeURIComponent(jobId)}/tasks`
+  );
+}
+
+/** `GET /v1alpha1/jobs/{id}/contributions` — visibility matches the
+ * sibling read routes above: the owner, or any member of the job's pool,
+ * may see who did the work; a job that exists and the caller cannot see
+ * 404s here too, same as `getJob`. An independent (non-pool) job returns
+ * `[]`, not an error — there is nobody to credit. */
+export function listJobContributions(jobId: string): Promise<JobContribution[]> {
+  return request<JobContribution[]>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/contributions`
   );
 }
 
@@ -493,13 +633,23 @@ export function submitJob(spec: unknown): Promise<JobRecord> {
 }
 
 /** `POST /v1alpha1/jobs/from-repo` — throws `PreflightRejected` (never a
- * plain `ApiError`) when the API's preflight finds a blocking error. */
+ * plain `ApiError`) when the API's preflight finds a blocking error.
+ *
+ * `pool` rides in the body only when set, exactly like `ref` already did:
+ * omitting the key (rather than sending `pool: undefined`, which
+ * `JSON.stringify` also drops, or `pool: null`, which it would not) keeps
+ * the request identical to what this client sent before pools existed for
+ * every submission that leaves the selector on "No pool — public queue". */
 export function submitFromRepo(
   repo: string,
-  ref?: string
+  ref?: string,
+  pool?: string
 ): Promise<SubmitFromRepoResult> {
+  const body: { repo: string; ref?: string; pool?: string } = { repo };
+  if (ref) body.ref = ref;
+  if (pool) body.pool = pool;
   return request<SubmitFromRepoResult>("/v1alpha1/jobs/from-repo", {
     method: "POST",
-    body: JSON.stringify(ref ? { repo, ref } : { repo }),
+    body: JSON.stringify(body),
   });
 }

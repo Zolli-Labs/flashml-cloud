@@ -16,10 +16,17 @@ import {
   NotFound,
   PreflightRejected,
   cloudApiBase,
+  acceptInvite,
   approveDeviceCode,
+  createPool,
+  createPoolInvite,
   getJob,
+  getPool,
+  listJobContributions,
   listJobRounds,
   listMachines,
+  listPools,
+  submitFromRepo,
 } from "./cloud-api";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -148,6 +155,100 @@ describe("cloud-api", () => {
     expect(err).toBeInstanceOf(NotFound);
   });
 
+  describe("submitFromRepo", () => {
+    const okResponse = { job_id: "job-1", state: "PENDING", findings: [] };
+
+    it("POSTs {repo} alone when neither ref nor pool is given", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/from-repo`);
+      expect(JSON.parse(init.body)).toEqual({ repo: "owner/repo" });
+    });
+
+    it("includes ref but omits pool when no pool is selected", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", "main");
+
+      const [, init] = fetchMock.mock.calls[0];
+      const body = JSON.parse(init.body);
+      expect(body).toEqual({ repo: "owner/repo", ref: "main" });
+      expect(body).not.toHaveProperty("pool");
+    });
+
+    it("includes pool in the body when a pool is selected", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", "main", "pool-1");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        repo: "owner/repo",
+        ref: "main",
+        pool: "pool-1",
+      });
+    });
+
+    it("includes pool even when ref is left blank", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", undefined, "pool-1");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        repo: "owner/repo",
+        pool: "pool-1",
+      });
+    });
+  });
+
+  describe("listJobContributions", () => {
+    it("attaches the bearer token and returns the per-machine credit rows", async () => {
+      const rows = [
+        {
+          node_id: "node-0",
+          machine_name: "Ada's laptop",
+          member_display_name: "Ada Lovelace",
+          tasks_credited: 3,
+          total_duration_s: 120.5,
+        },
+      ];
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, rows));
+
+      const result = await listJobContributions("job-1");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/job-1/contributions`);
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(result).toEqual(rows);
+    });
+
+    it("returns an empty list for a non-pool job rather than an error", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+      const result = await listJobContributions("job-1");
+      expect(result).toEqual([]);
+    });
+
+    it("raises NotFound for a job the caller cannot see, never a 403-style message", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "unknown job" }));
+
+      const err: unknown = await listJobContributions("not-mine").catch((e) => e);
+      expect(err).toBeInstanceOf(NotFound);
+    });
+  });
+
   it("names the URL it could not reach when fetch rejects", async () => {
     // A bare "Failed to fetch" is the same message for a wrong host, DNS,
     // CORS, mixed content and offline. The URL is the one fact that tells
@@ -230,6 +331,126 @@ describe("cloud-api", () => {
       const [url] = fetchMock.mock.calls[0];
       expect(url).not.toMatch(/^\/v1alpha1/);
       expect(url).toBe("http://localhost:8000/v1alpha1/machines");
+    });
+  });
+
+  describe("pools and invites", () => {
+    it("attaches the bearer token on listPools", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+      await listPools();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/pools`);
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+    });
+
+    it("creates a pool by POSTing the trimmed-by-the-server name and returns it", async () => {
+      // POST /v1alpha1/pools returns exactly POOL_PUBLIC_COLUMNS — no
+      // member_count/machines_online (see Pool's docstring in
+      // cloud-api.ts) — so this fixture omits them too, rather than
+      // asserting against a shape the real route never sends.
+      const pool = {
+        id: "pool-1",
+        name: "Lab",
+        owner_id: "user-1",
+        created_at: "2026-08-03T00:00:00Z",
+      };
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(201, pool));
+
+      const result = await createPool("Lab");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/pools`);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({ name: "Lab" });
+      expect(result).toEqual(pool);
+    });
+
+    it("reshapes GET /pools/{id}'s flat response into {pool, members}, not a nested pool field the API never sends", async () => {
+      const members = [
+        {
+          user_id: "user-1",
+          display_name: "Ada",
+          joined_at: "2026-08-01T00:00:00Z",
+          machine_count: 2,
+          machines_online: 1,
+        },
+      ];
+      // The API returns the pool's own columns flattened alongside
+      // `members` — see `get_pool_route`'s `{**_jsonable(pool), "members": ...}`
+      // — never `{pool: {...}, members: [...]}`.
+      const flat = {
+        id: "pool-1",
+        name: "Lab",
+        owner_id: "user-1",
+        created_at: "2026-08-03T00:00:00Z",
+        members,
+      };
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, flat));
+
+      const result = await getPool("pool-1");
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/pools/pool-1`);
+      expect(result).toEqual({
+        pool: {
+          id: "pool-1",
+          name: "Lab",
+          owner_id: "user-1",
+          created_at: "2026-08-03T00:00:00Z",
+        },
+        members,
+      });
+    });
+
+    it("POSTs to the pool's invites route with no body and returns the token verbatim, without ever logging or echoing it elsewhere", async () => {
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(201, { token: "fmi_test-invite-token-000" }));
+
+      const result = await createPoolInvite("pool-1");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/pools/pool-1/invites`);
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeUndefined();
+      expect(result).toEqual({ token: "fmi_test-invite-token-000" });
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    it("POSTs {token} to /v1alpha1/invites/accept and returns the admitted pool", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { pool_id: "pool-1", name: "Lab" })
+      );
+
+      const result = await acceptInvite("fmi_test-invite-token-000");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/invites/accept`);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({ token: "fmi_test-invite-token-000" });
+      expect(result).toEqual({ pool_id: "pool-1", name: "Lab" });
+    });
+
+    it("raises NotFound (not a 403-shaped message) for an unknown or expired invite token", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(404, { detail: "invalid or expired invite" })
+      );
+
+      const err: unknown = await acceptInvite("bad-token").catch((e) => e);
+      expect(err).toBeInstanceOf(NotFound);
     });
   });
 });

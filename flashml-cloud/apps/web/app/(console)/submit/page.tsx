@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -13,13 +13,23 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   ApiError,
   NotAuthenticated,
   PreflightRejected,
+  listPools,
   submitFromRepo,
+  type PoolSummary,
   type PreflightFinding,
   type SubmitFromRepoResult,
 } from "@/lib/cloud-api";
+import { NO_POOL, hasNoWorkersOnline, isPoolSelected } from "@/lib/pool-selection";
 
 type Status = "idle" | "submitting" | "rejected" | "submitted" | "error";
 
@@ -27,10 +37,30 @@ export default function SubmitPage() {
   const router = useRouter();
   const [repo, setRepo] = useState("");
   const [ref, setRef] = useState("");
+  const [pools, setPools] = useState<PoolSummary[]>([]);
+  const [poolId, setPoolId] = useState(NO_POOL);
   const [status, setStatus] = useState<Status>("idle");
   const [findings, setFindings] = useState<PreflightFinding[]>([]);
   const [result, setResult] = useState<SubmitFromRepoResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    listPools()
+      .then(setPools)
+      .catch((err) => {
+        if (err instanceof NotAuthenticated) {
+          router.push("/sign-in?next=/submit");
+          return;
+        }
+        // Any other failure just leaves the selector on "No pool — public
+        // queue" — submitting to the public queue never depended on the
+        // pool list loading, so there is nothing to block or retry here.
+      });
+  }, [router]);
+
+  const selectedPool = isPoolSelected(poolId)
+    ? pools.find((p) => p.id === poolId) ?? null
+    : null;
 
   const canSubmit = repo.trim().length > 0 && status !== "submitting";
 
@@ -41,7 +71,11 @@ export default function SubmitPage() {
     setErrorMessage(null);
 
     try {
-      const job = await submitFromRepo(repo.trim(), ref.trim() || undefined);
+      const job = await submitFromRepo(
+        repo.trim(),
+        ref.trim() || undefined,
+        poolId || undefined
+      );
       setResult(job);
       setFindings(job.findings ?? []);
       setStatus("submitted");
@@ -180,6 +214,46 @@ export default function SubmitPage() {
                 Defaults to <span className="font-mono">main</span> if left blank.
               </p>
             </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="pool">Pool</Label>
+              <Select
+                value={poolId}
+                onValueChange={(value) => setPoolId(value ?? NO_POOL)}
+                disabled={status === "submitting"}
+              >
+                <SelectTrigger id="pool" className="w-full">
+                  <SelectValue placeholder="No pool — public queue" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_POOL}>
+                    No pool — public queue
+                  </SelectItem>
+                  {pools.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {isPoolSelected(poolId) && (
+                <p className="text-xs text-muted-foreground">
+                  Pool jobs run without a container sandbox on your
+                  team&apos;s machines. Every member you invited can run
+                  code this job stages.
+                </p>
+              )}
+            </div>
+
+            {hasNoWorkersOnline(selectedPool) ? (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5 text-sm text-amber-400">
+                <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
+                <span>
+                  0 workers online in this pool right now — the job will
+                  queue until one connects.
+                </span>
+              </div>
+            ) : null}
 
             {status === "error" && errorMessage ? (
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">

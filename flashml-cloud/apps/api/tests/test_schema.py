@@ -24,7 +24,7 @@ ALL_SQL = "\n".join(p.read_text() for p in sorted(MIGRATIONS.glob("*.sql")))
 
 TABLES = ["profiles", "machines", "device_codes", "jobs", "contributions"]
 
-ALL_TABLES = TABLES + ["job_rounds"]
+ALL_TABLES = TABLES + ["job_rounds", "pools", "pool_members", "pool_invites"]
 
 
 def test_every_table_is_created():

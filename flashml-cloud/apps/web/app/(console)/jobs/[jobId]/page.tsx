@@ -8,6 +8,7 @@ import { StateBadge } from "@/components/jobs/StateBadge";
 import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { FleetTopology } from "@/components/jobs/FleetTopology";
 import { RoundProgress } from "@/components/jobs/RoundProgress";
+import { MemberCredits } from "@/components/jobs/MemberCredits";
 import { formatBytes } from "@/lib/utils";
 import {
   deriveAttempts,
@@ -22,9 +23,11 @@ import {
   fetchJobArtifact,
   getJob,
   jobArtifactKey,
+  listJobContributions,
   listJobEvents,
   listJobRounds,
   listJobTasks,
+  type JobContribution,
   type JobEvent,
   type JobRecord,
   type JobRound,
@@ -59,6 +62,7 @@ export default function JobDetailPage({
   const [rounds, setRounds] = useState<JobRound[]>([]);
   const [tasks, setTasks] = useState<JobTask[]>([]);
   const [events, setEvents] = useState<JobEvent[]>([]);
+  const [contributions, setContributions] = useState<JobContribution[]>([]);
   const [state, setState] = useState<LoadState>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [view, setView] = useState<View | null>(null);
@@ -99,6 +103,7 @@ export default function JobDetailPage({
     listJobRounds(jobId).then(setRounds).catch(soft);
     listJobTasks(jobId).then(setTasks).catch(soft);
     listJobEvents(jobId).then(setEvents).catch(soft);
+    listJobContributions(jobId).then(setContributions).catch(soft);
   }, [jobId, router]);
 
   useEffect(() => {
@@ -233,7 +238,7 @@ export default function JobDetailPage({
 
       <div className="mt-6">
         {activeView === "progress" && (
-          <ProgressView job={job} rounds={rounds} />
+          <ProgressView job={job} rounds={rounds} contributions={contributions} />
         )}
         {activeView === "placement" && (
           <PlacementView job={job} tasks={tasks} attempts={attempts} now={now} />
@@ -314,7 +319,15 @@ function ProgressBar({
   );
 }
 
-function ProgressView({ job, rounds }: { job: JobRecord; rounds: JobRound[] }) {
+function ProgressView({
+  job,
+  rounds,
+  contributions,
+}: {
+  job: JobRecord;
+  rounds: JobRound[];
+  contributions: JobContribution[];
+}) {
   return (
     <div className="space-y-6">
       {job.error && (
@@ -331,6 +344,10 @@ function ProgressView({ job, rounds }: { job: JobRecord; rounds: JobRound[] }) {
       ) : (
         <NoMetrics />
       )}
+
+      {/* Renders nothing for a job with no recorded contributions — most
+          jobs, since this data only exists for a pool job. */}
+      <MemberCredits contributions={contributions} />
 
       <ArtifactsCard job={job} />
       {job.spec && <SpecCard job={job} />}

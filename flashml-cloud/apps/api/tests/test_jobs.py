@@ -176,10 +176,18 @@ def db(postgres_dsn):
 
 
 def _new_user(db) -> str:
+    """A real ``auth.users`` + ``public.profiles`` pair, admitted at
+    creation — every test in this file submits jobs through the
+    invite-gated ``POST /v1alpha1/jobs`` route (Task 10), and this fixture
+    is meant to model an ordinary, already-onboarded account, not the
+    admission gate itself."""
     user_id = str(uuid.uuid4())
     with db.cursor() as cur:
         cur.execute("insert into auth.users (id) values (%s)", (user_id,))
-        cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
+        cur.execute(
+            "insert into public.profiles (id, admitted_at) values (%s, now())",
+            (user_id,),
+        )
     return user_id
 
 

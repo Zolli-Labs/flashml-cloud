@@ -34,7 +34,14 @@ dependencies = [
     # `extra="ignore"` — evidence collected on the host and discarded on
     # arrival, with nothing to say so. It also carries the fedavg influence
     # cap and node exclusion, the sixth placement gate.
-    "flashruntime==0.4.2",
+    #
+    # 0.4.3 opens `PlacementSpec.pool` from a closed Literal to a plain
+    # `str`, which is the seventh placement gate: on 0.4.2 a pool id other
+    # than the built-in literals fails validation before it ever reaches the
+    # coordinator, so team pools cannot resolve at all. `CommandRecipe.expand`
+    # also gains the `allowFallback`-iff-`pool` rule this API's compile layer
+    # depends on.
+    "flashruntime==0.4.3",
     "fastapi>=0.111",
     "uvicorn>=0.30",
     "httpx>=0.27",

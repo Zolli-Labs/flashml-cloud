@@ -16,6 +16,33 @@ entry contradicts an earlier one, say so explicitly and link it.
 
 ---
 
+## 2026-08-03 — The tester release is team pools, not the volunteer network
+
+**Changed:** the first thing real outsiders touch. The foundation design
+chose the open volunteer network; the colab-pooling note (2026-08-02)
+recorded the "team's own fleet" model as an adjacent market and explicitly
+did not reopen the choice. The owner has now reopened it deliberately:
+the tester release ships **team pools** — a group shares all its members'
+resources (1–2 machines each, plus paid-Colab and RunPod sessions) and
+works on the group's combined fleet. The volunteer network is not
+abandoned; untagged jobs behave exactly as today.
+
+**Trigger:** the owner's release intent, 2026-08-03 — "most people now
+have 1–2 machines, multiple accounts for GPUs like Google Colab or
+RunPod; I want them to be able to make the collaboration on their own
+resources first." That is the audience both 2026-08-02 strategy notes
+said existed, now chosen on purpose rather than drifted into.
+
+**What it implies:** the pool boundary becomes the seventh placement gate
+(fail-closed, membership asserted server-side); trusted-pool isolation
+reuses `allowFallback`, coupled so unsandboxed placement can never escape
+the pool; invite-only alpha because verification still enforces nothing.
+Design: `2026-08-03-team-pools-design.md`. The desktop app stays the least
+urgent item — this audience installs with pip, exactly as the supply-side
+note predicted.
+
+---
+
 ## 2026-08-03 — Thread 4 was never designed, and what shipped is not it
 
 **Changed:** nothing in the thesis. Two claims in the written record were

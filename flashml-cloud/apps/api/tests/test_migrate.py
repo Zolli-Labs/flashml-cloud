@@ -284,7 +284,9 @@ def test_baseline_through_then_apply_runs_only_the_remainder(postgres_dsn):
         # next migration fails on a missing object, which is the *good*
         # outcome; the bad one is `--baseline` over a migration that creates
         # nothing later code references, where the gap stays invisible.
+        conn.execute("create table public.profiles (id uuid primary key)") # 0001, for 0007
         conn.execute("create table public.machines (id uuid primary key)")   # 0001, for 0004
+        conn.execute("create table public.jobs (id text primary key)")       # 0001, for 0007
         conn.execute("create table public.job_rounds (id uuid primary key)") # 0002, for 0005
 
         done = migrate.apply(conn, REAL_MIGRATIONS)

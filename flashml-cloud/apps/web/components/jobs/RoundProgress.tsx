@@ -28,7 +28,10 @@ const PAD = { top: 14, right: 12, bottom: 24, left: 46 };
 const W = 720;
 const H = 210;
 
-function fmtDuration(ms: number): string {
+/** Shared with `MemberCredits` so both durations on a job page are
+ * formatted identically — there is exactly one way this product renders a
+ * span of time, not one per component that happens to need it. */
+export function fmtDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return "—";
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;

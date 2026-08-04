@@ -40,8 +40,9 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
 import tempfile
 import uuid
@@ -64,6 +65,8 @@ from flashml_cloud_api import verify as verifymod
 from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
     AuthError,
+    hash_invite_token,
+    new_invite_token,
     verify_supabase_jwt,
 )
 from flashml_cloud_api.compile import (
@@ -116,6 +119,13 @@ MEDIA_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]{1,64}/[A-Za-z0-9!#$&^_.+-]{1,
 #: Largest JSON control-plane body the API will buffer. Claims, heartbeats
 #: and completions are a few hundred bytes; nothing legitimate is close.
 MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
+
+#: Bounds on POST /v1alpha1/pools/{id}/invites' expires_hours. A week by
+#: default — long enough to actually reach a teammate, short enough that a
+#: forgotten link does not stay live indefinitely; the cap keeps a caller
+#: from minting a de-facto permanent credential by mistake.
+DEFAULT_INVITE_EXPIRES_HOURS = 24 * 7
+MAX_INVITE_EXPIRES_HOURS = 24 * 90
 
 #: Largest artifact body the API will buffer, overridable per deployment.
 #: Every proxied upload is read fully into memory before it is forwarded, so
@@ -369,7 +379,53 @@ def _passthrough(r: httpx.Response) -> Response:
     )
 
 
-def _scrub_identity(body: bytes, node_id: str, *, force: bool) -> tuple[bytes, str]:
+def _stamp_pools(
+    parsed: dict[str, Any],
+    pools: list[str],
+    where: Literal["capabilities", "top"],
+) -> None:
+    """OVERWRITE — never merge — whatever the agent claimed about its own
+    pool membership. ``where`` picks the shape: register nests it under
+    ``capabilities.pools`` (matching ``NodeRegistration.capabilities``);
+    heartbeat carries it top-level (matching ``NodeHeartbeat.pools``).
+
+    Always assigns, including ``[]`` — the caller (route handlers) resolves
+    "no pools" and "lookup failed" to the same empty list on purpose, and
+    this function has no way to tell them apart nor any reason to.
+    """
+    if where == "top":
+        parsed["pools"] = list(pools)
+        # NodeHeartbeat has no `capabilities.pools` field today, but an
+        # agent that rides a `capabilities` object along on a heartbeat body
+        # anyway must not get to smuggle a forged nested copy through
+        # unscrubbed — same overwrite rule as the top-level field, so a
+        # future NodeHeartbeat.capabilities field cannot silently revive
+        # this hole.
+        caps = parsed.get("capabilities")
+        if isinstance(caps, dict):
+            caps["pools"] = list(pools)
+        elif caps is not None:
+            parsed["capabilities"] = {}
+        return
+    caps = parsed.get("capabilities")
+    if not isinstance(caps, dict):
+        # A forged/malformed `capabilities` (not a dict at all) is replaced
+        # outright rather than merged into — there is nothing sane to merge
+        # with, and leaving it in place would ship it to the coordinator
+        # unexamined.
+        caps = {}
+    caps["pools"] = list(pools)
+    parsed["capabilities"] = caps
+
+
+def _scrub_identity(
+    body: bytes,
+    node_id: str,
+    *,
+    force: bool,
+    pools: list[str] | None = None,
+    pools_where: Literal["capabilities", "top"] = "capabilities",
+) -> tuple[bytes, str]:
     """Replace any ``node_id`` the agent put in its own body with the one
     its token resolves to. Returns ``(body, media_type)``.
 
@@ -383,11 +439,19 @@ def _scrub_identity(body: bytes, node_id: str, *, force: bool) -> tuple[bytes, s
     ``force`` inserts the field on the identity-bearing calls (register /
     heartbeat / claim) even when the agent omitted it, so the coordinator
     never has to fall back to a default.
+
+    ``pools``, when not ``None``, is stamped onto the body the same way:
+    OVERWRITTEN, never merged with whatever the agent sent, and stamped even
+    onto an otherwise-empty body (the ``force`` branch) — a node that skips
+    the field must not thereby dodge the stamp.
     """
     if not body.strip():
         if not force:
             return body, "application/json"
-        return json.dumps({"node_id": node_id}).encode(), "application/json"
+        parsed: dict[str, Any] = {"node_id": node_id}
+        if pools is not None:
+            _stamp_pools(parsed, pools, pools_where)
+        return json.dumps(parsed).encode(), "application/json"
     try:
         parsed = json.loads(body)
     except (ValueError, UnicodeDecodeError):
@@ -396,6 +460,8 @@ def _scrub_identity(body: bytes, node_id: str, *, force: bool) -> tuple[bytes, s
         return body, "application/json"
     if force or "node_id" in parsed:
         parsed["node_id"] = node_id
+    if pools is not None:
+        _stamp_pools(parsed, pools, pools_where)
     return json.dumps(parsed).encode(), "application/json"
 
 
@@ -619,12 +685,27 @@ def create_cloud_app(
             # oracle, and the caller can do nothing different either way.
             raise HTTPException(status_code=401, detail="sign-in required") from None
 
+    def admitted_user(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ) -> str:
+        """current_user plus the alpha's invite gate. Reads (jobs, machines,
+        /me) stay open to un-admitted accounts — the console needs /me to
+        know to SHOW the enter-invite screen — but everything that creates
+        state requires admission. 403, not 404: unlike a resource id, the
+        gate's existence is not a secret."""
+        if not dbmod.profile_is_admitted(db, user_id):
+            raise HTTPException(status_code=403, detail="invite required")
+        return user_id
+
     async def proxy(
         request: Request,
         machine: Machine,
         path: str,
         *,
         force_node_id: bool = False,
+        pools: list[str] | None = None,
+        pools_where: Literal["capabilities", "top"] = "capabilities",
     ) -> Response:
         is_artifact = path.startswith("/v1alpha1/artifacts/")
         limit = max_upload_bytes if is_artifact else MAX_JSON_BODY_BYTES
@@ -649,7 +730,8 @@ def create_cloud_app(
             )
         elif request.method in ("POST", "PUT", "PATCH"):
             body, media_type = _scrub_identity(
-                body, machine.node_id, force=force_node_id
+                body, machine.node_id, force=force_node_id,
+                pools=pools, pools_where=pools_where,
             )
         else:
             media_type = None
@@ -768,7 +850,13 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        return _jsonable(dbmod.upsert_profile(db, user_id))
+        # Additive: every existing key from upsert_profile is unchanged, and
+        # this is the one route an un-admitted account MUST be able to
+        # read — it is how the console learns to show the enter-invite
+        # screen instead of the product itself.
+        profile = _jsonable(dbmod.upsert_profile(db, user_id))
+        profile["admitted"] = dbmod.profile_is_admitted(db, user_id)
+        return profile
 
     # Display name is the ONE profile field a user owns. Email and avatar come
     # from the identity provider and are not ours to edit; github_login is set
@@ -816,7 +904,7 @@ def create_cloud_app(
     @app.post("/v1alpha1/device/approve", tags=["browser"])
     async def approve(
         request: Request,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(admitted_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
         payload = await _json_object(request)
@@ -858,6 +946,143 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown machine")
         return {"machine_id": machine_id, "status": "revoked"}
 
+    # -- browser-facing: pools and invites -----------------------------------
+    #
+    # A pool is a team; membership is what every read below scopes on, never
+    # ``pools.owner_id`` alone (see ``create_pool``'s own docstring on that).
+    # Creating a pool requires admission — it is state creation, the thing
+    # the alpha gate exists to block — but reading one you already belong to
+    # does not, the same "reads stay open" rule ``admitted_user`` documents.
+
+    @app.post("/v1alpha1/pools", status_code=201, tags=["browser"])
+    async def create_pool_route(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        payload = await _json_object(request)
+        raw_name = payload.get("name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise HTTPException(status_code=400, detail="name is required")
+        name = raw_name.strip()
+        if len(name) > 200:
+            raise HTTPException(
+                status_code=400, detail="name is limited to 200 characters"
+            )
+        pool = dbmod.create_pool(db, name=name, owner_id=user_id)
+        return _jsonable(pool)
+
+    @app.get("/v1alpha1/pools", tags=["browser"])
+    async def list_pools_route(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        return [_jsonable(p) for p in dbmod.list_pools_for_user(db, user_id)]
+
+    @app.get("/v1alpha1/pools/{pool_id}", tags=["browser"])
+    async def get_pool_route(
+        pool_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # Authorize BEFORE listing: list_pool_members takes no viewer
+        # param by design, so membership has to be established here, first,
+        # or it would list any pool's roster to anyone who could guess an
+        # id. 404, not 403 — see fetch_pool_for_member's own docstring.
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None  # not even a uuid; same answer as "not found"
+        if pool is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        members = dbmod.list_pool_members(db, pool_id)
+        return {**_jsonable(pool), "members": [_jsonable(m) for m in members]}
+
+    @app.post("/v1alpha1/pools/{pool_id}/invites", status_code=201, tags=["browser"])
+    async def create_pool_invite_route(
+        pool_id: str,
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Mint a one-time invite link. Owner only — checked here, against
+        this pool's row, before anything is written. 404, not 403, whether
+        the pool does not exist, the caller is a stranger to it, or the
+        caller is a member who simply isn't its owner: a 403 for the last
+        case would confirm the pool is real to someone who isn't in it at
+        all, and the caller here has no way to tell the three apart from
+        each other regardless.
+
+        Not gated by ``admitted_user``: minting an invite already requires
+        owning a pool, and owning a pool already required admission at
+        create time. The four routes that need the gate directly are named
+        exhaustively on ``admitted_user`` itself.
+        """
+        payload = await _json_object(request)
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None or str(pool["owner_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="unknown pool")
+
+        raw_hours = payload.get("expires_hours")
+        if raw_hours is None:
+            hours = DEFAULT_INVITE_EXPIRES_HOURS
+        elif (
+            isinstance(raw_hours, (int, float))
+            and not isinstance(raw_hours, bool)
+            and 0 < raw_hours <= MAX_INVITE_EXPIRES_HOURS
+        ):
+            hours = raw_hours
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"expires_hours must be a positive number, at most "
+                       f"{MAX_INVITE_EXPIRES_HOURS}",
+            )
+
+        token = new_invite_token()
+        dbmod.create_pool_invite(
+            db,
+            pool_id=pool_id,
+            created_by=user_id,
+            token_hash=hash_invite_token(token),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=hours),
+            uses=1,
+        )
+        # The raw token appears in a response exactly this once. It is
+        # never stored (only its hash is), so this is also the only place
+        # it could ever be recovered from.
+        return {"token": token}
+
+    @app.post("/v1alpha1/invites/accept", tags=["browser"])
+    async def accept_invite(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The admission bootstrap itself — deliberately on ``current_user``,
+        not ``admitted_user``: the entire point of this route is that an
+        un-admitted, possibly brand-new account can call it.
+        """
+        payload = await _json_object(request)
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            raise HTTPException(status_code=400, detail="token required")
+        # The account may be signing in for the very first time — upsert
+        # the profile row before consuming the invite, since consume_pool_
+        # invite's membership/admission writes both carry a FK to it.
+        dbmod.upsert_profile(db, user_id)
+        result = dbmod.consume_pool_invite(
+            db, token_hash=hash_invite_token(token), user_id=user_id
+        )
+        if result is None:
+            # Unknown, expired, and exhausted all land here, indistinguishably
+            # — same fold consume_pool_invite itself documents.
+            raise HTTPException(status_code=404, detail="invalid or expired invite")
+        return {"pool_id": str(result["pool_id"]), "name": result["name"]}
+
     # -- browser-facing: job ownership --------------------------------------
     #
     # A developer submits a job with a Supabase JWT; the row this writes is
@@ -871,7 +1096,7 @@ def create_cloud_app(
     @app.post("/v1alpha1/jobs", status_code=201, tags=["browser"])
     async def submit_job(
         request: Request,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(admitted_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
         raw = await request.body()
@@ -881,6 +1106,24 @@ def create_cloud_app(
         # owner_id is never accepted from the body — whatever the caller
         # put there (if anything) is simply not forwarded or looked at.
         payload.pop("owner_id", None)
+        # A pool waiver requires `fetch_pool_for_member` to have confirmed
+        # membership first, and this route never looks the caller up in
+        # `pool_members` — only /v1alpha1/jobs/from-repo does. So a raw spec
+        # carrying either half of the pool coupling is refused outright,
+        # named at the path that CAN grant it, rather than forwarded to a
+        # coordinator that would place a stranger's arbitrary code on a
+        # volunteer machine sandboxed only because the placement gate never
+        # got the chance to confine it to a team.
+        spec_inner = payload.get("spec") if isinstance(payload.get("spec"), dict) else {}
+        isolation_raw = spec_inner.get("isolation")
+        isolation = isolation_raw if isinstance(isolation_raw, dict) else {}
+        placement_raw = spec_inner.get("placement")
+        placement = placement_raw if isinstance(placement_raw, dict) else {}
+        if isolation.get("allowFallback") or placement.get("pool", "any") != "any":
+            raise HTTPException(
+                status_code=400,
+                detail="pool jobs must be submitted via /v1alpha1/jobs/from-repo",
+            )
         r = await coordinator.forward(
             "POST",
             "/v1alpha1/jobs",
@@ -919,7 +1162,7 @@ def create_cloud_app(
     @app.post("/v1alpha1/jobs/from-repo", status_code=201, tags=["browser"])
     async def submit_job_from_repo(
         request: Request,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(admitted_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
         """Paste a GitHub repo, get a job — or get told exactly what is
@@ -937,6 +1180,28 @@ def create_cloud_app(
             raise HTTPException(status_code=413, detail="request body too large")
         payload = await _json_object(request)
         owner, name, ref = _parse_repo_ref(payload.get("repo"), payload.get("ref"))
+
+        # Optional pool scoping. Checked before a single network call: a
+        # pool id the caller does not belong to (or that does not exist —
+        # 404 in both cases, same doctrine as `fetch_pool_for_member`
+        # itself, so a guess cannot distinguish them) must not spend the
+        # cost of fetching and preflighting the repo first.
+        pool = _opt_str(payload.get("pool"))
+        if pool is not None:
+            try:
+                pool_row = dbmod.fetch_pool_for_member(db, pool, user_id)
+            except psycopg.errors.InvalidTextRepresentation:
+                pool_row = None  # not even a uuid; same answer as "not found"
+            if pool_row is None:
+                raise HTTPException(status_code=404, detail="unknown pool")
+            # Rebind to the database's canonical spelling, not the caller's.
+            # Postgres accepts uppercase/braced/hyphen-less uuids and the
+            # membership check above passes on any of them, but the
+            # scheduler's gate compares exact strings against the
+            # canonical-lowercase ids `pool_ids_for_machine_owner` returns.
+            # An un-normalized `pool` here would pass this check and then
+            # never match that gate, leaving the job PENDING forever.
+            pool = str(pool_row["id"])
 
         with tempfile.TemporaryDirectory(prefix="flashml-repo-") as tmpdir:
             dest = Path(tmpdir) / "src"
@@ -1003,10 +1268,12 @@ def create_cloud_app(
             if config.is_federated:
                 spec = compile_federated_round(
                     config, image, code_uri, config.name,
-                    round_index=0, weights_uri=None,
+                    round_index=0, weights_uri=None, pool=pool,
                 )
             else:
-                spec = compile_to_jobspec(config, image, code_uri, config.name)
+                spec = compile_to_jobspec(
+                    config, image, code_uri, config.name, pool=pool
+                )
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
 
@@ -1031,27 +1298,31 @@ def create_cloud_app(
             # request at all — the driver submits round 0 itself, so a run
             # can never end up with a round the driver does not know it owns.
             job_id = fedavgmod.new_federated_job_id()
+            federated_source: dict[str, Any] = {
+                "type": "github",
+                "owner": owner,
+                "repo": name,
+                "ref": ref,
+                "code_artifact": code_uri,
+                # Only a federated row carries these. An independent
+                # row's `source` is byte-identical to what it has always
+                # been, so nothing reading it has to learn a new shape.
+                "mode": config.mode,
+                "rounds": config.rounds,
+                "shards": config.shards,
+                "min_participants": config.min_participants,
+            }
+            if pool is not None:
+                federated_source["pool"] = pool
             dbmod.insert_job(
                 db,
                 job_id=job_id,
                 owner_id=user_id,
                 name=spec["metadata"]["name"],
-                source={
-                    "type": "github",
-                    "owner": owner,
-                    "repo": name,
-                    "ref": ref,
-                    "code_artifact": code_uri,
-                    # Only a federated row carries these. An independent
-                    # row's `source` is byte-identical to what it has always
-                    # been, so nothing reading it has to learn a new shape.
-                    "mode": config.mode,
-                    "rounds": config.rounds,
-                    "shards": config.shards,
-                    "min_participants": config.min_participants,
-                },
+                source=federated_source,
                 spec=spec,
                 status="PENDING",
+                pool_id=pool,
             )
             start_federated_job(
                 fedavgmod.FederatedRun(
@@ -1060,6 +1331,7 @@ def create_cloud_app(
                     config=config,
                     image=image,
                     code_artifact_uri=code_uri,
+                    pool=pool,
                 ),
                 settings=settings,
                 connect=request.app.state.connect,
@@ -1095,6 +1367,15 @@ def create_cloud_app(
             log.error(json.dumps({"text": "job accepted with no job_id in response"}))
             raise HTTPException(status_code=502, detail="coordinator returned no job id")
 
+        independent_source: dict[str, Any] = {
+            "type": "github",
+            "owner": owner,
+            "repo": name,
+            "ref": ref,
+            "code_artifact": code_uri,
+        }
+        if pool is not None:
+            independent_source["pool"] = pool
         dbmod.insert_job(
             db,
             job_id=job_id,
@@ -1102,15 +1383,10 @@ def create_cloud_app(
             # and there is no branch here that could give it one.
             owner_id=user_id,
             name=spec["metadata"]["name"],
-            source={
-                "type": "github",
-                "owner": owner,
-                "repo": name,
-                "ref": ref,
-                "code_artifact": code_uri,
-            },
+            source=independent_source,
             spec=spec,
             status=str(job.get("state") or "PENDING"),
+            pool_id=pool,
         )
         return Response(
             content=json.dumps({**job, "findings": rendered}),
@@ -1129,10 +1405,33 @@ def create_cloud_app(
         # lets a user whose only jobs are federated skip the round trip
         # entirely instead of fetching a list to throw all of it away.
         owned = {j for j in owned if not fedavgmod.is_federated_job_id(j)}
+        # The third source: jobs the caller can see through pool membership
+        # but does not own outright. Same federated-id drop as `owned`, same
+        # reason — a pool-scoped federated parent id is still not anything
+        # the coordinator's list can match.
+        pool_ids = {
+            j for j in dbmod.list_pool_job_ids_for_member(db, user_id)
+            if not fedavgmod.is_federated_job_id(j)
+        }
+        # A plain set union, not two separate membership checks against the
+        # coordinator's list: a viewer who is also the owner has their job
+        # id in both `owned` and `pool_ids`, and this is what collapses that
+        # back to exactly one entry rather than two.
+        seen = owned | pool_ids
         # A federated run is one coordinator job per round, so it is not in
         # the coordinator's list at all and has to be added from this table.
         # Empty for every user who has never submitted one, which is what
         # keeps this list byte-identical to before for them.
+        #
+        # `list_federated_jobs_for_viewer`, not `..._for_owner`: a pool
+        # member must be able to *discover* a teammate's federated run here,
+        # not merely open it once they already have its id.
+        # `fetch_job_for_viewer` already admits that direct-by-id read; this
+        # is the other half — without it the run would never surface in the
+        # list at all for anyone but its owner. One flat `WHERE owner_id = %s
+        # OR EXISTS(...)` select, so — unlike the coordinator-sourced half
+        # above — no separate dedup is needed here: a job id appears in this
+        # table once, and this query returns each matching row once.
         federated = [
             {
                 "job_id": row["id"],
@@ -1140,9 +1439,9 @@ def create_cloud_app(
                 "state": row.get("status"),
                 "mode": "federated",
             }
-            for row in dbmod.list_federated_jobs_for_owner(db, user_id)
+            for row in dbmod.list_federated_jobs_for_viewer(db, user_id)
         ]
-        if not owned:
+        if not seen:
             # Nothing to scope down to; skip the coordinator round trip
             # rather than fetch a list of jobs we would only throw away.
             return federated
@@ -1156,10 +1455,11 @@ def create_cloud_app(
         if not isinstance(jobs, list):
             return _passthrough(r)
         # The coordinator has no notion of accounts and returns every job
-        # unscoped behind the operator token; this table is the only place
-        # the owner filter can be applied.
+        # unscoped behind the operator token; this table (owned or reachable
+        # through a shared pool) is the only place that filter can be
+        # applied.
         return [
-            j for j in jobs if isinstance(j, dict) and j.get("job_id") in owned
+            j for j in jobs if isinstance(j, dict) and j.get("job_id") in seen
         ] + federated
 
     @app.get("/v1alpha1/jobs/{job_id}", tags=["browser"])
@@ -1168,10 +1468,12 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        row = dbmod.fetch_job_for_owner(db, job_id, user_id)
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
         if row is None:
             # Not found and not yours look identical: a 403 here would
-            # confirm to a guesser that the id exists.
+            # confirm to a guesser that the id exists. "Yours" now means
+            # "owned by you, or in a pool you belong to" — fetch_job_for_viewer
+            # is the one place that widened scope is applied.
             raise HTTPException(status_code=404, detail="unknown job")
         if fedavgmod.is_federated_job_id(job_id):
             # A federated run has no single coordinator job — it is one job
@@ -1180,7 +1482,14 @@ def create_cloud_app(
             # the user does own. The local row plus the round history IS the
             # job here. Unreachable for every non-federated id, so the
             # forwarding path below is unchanged.
-            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            #
+            # `row["owner_id"]` here, not `user_id`: list_job_rounds_for_owner
+            # is scoped to the job's actual owner, and a viewing pool member
+            # is not that owner. fetch_job_for_viewer above is the
+            # authorization check; this is a data query for a job already
+            # confirmed visible, so it must use the id that query actually
+            # requires to return anything.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])
             source = row.get("source") or {}
             return {
                 "job_id": job_id,
@@ -1203,19 +1512,26 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The federated-averaging history of a job the caller owns.
+        """The federated-averaging history of a job the caller can see.
 
-        Ownership is checked exactly as the rest of this block does it —
+        Visibility is checked exactly as the rest of this block does it —
         against the ``jobs`` table, before anything else, answering 404 (not
-        403) for a job that exists but belongs to someone else, so this
-        route cannot be used to learn which job ids are real. The listing
-        query joins on ownership a second time (``list_job_rounds_for_owner``)
-        rather than trusting this check to have happened.
+        403) for a job that exists but the caller cannot see, so this route
+        cannot be used to learn which job ids are real. The owner, or any
+        member of the job's pool, may read it; only the owner may cancel it.
+
+        The listing query itself (``list_job_rounds_for_owner``) is still
+        owner-scoped, not viewer-scoped — it has no notion of pools — so it
+        is called with the job's own ``owner_id`` from the row just fetched,
+        not with ``user_id``. A viewing pool member is not that owner, and
+        passing ``user_id`` through here would silently return an empty
+        list to every teammate instead of the job's real history.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
         return [_jsonable(r)
-                for r in dbmod.list_job_rounds_for_owner(db, job_id, user_id)]
+                for r in dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])]
 
     @app.get("/v1alpha1/jobs/{job_id}/events", tags=["browser"])
     async def get_job_events(
@@ -1224,7 +1540,7 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The coordinator's event ledger for a job the caller owns.
+        """The coordinator's event ledger for a job the caller can see.
 
         This is the read side of everything the console shows about *how* a
         job ran: which node claimed which task, which lease expired, which
@@ -1239,11 +1555,13 @@ def create_cloud_app(
         a lease and requeues the task in one pass), so a time cursor either
         replays them or drops them.
 
-        Ownership is checked against the ``jobs`` table before the
+        Visibility is checked against the ``jobs`` table before the
         coordinator is contacted, answering 404 for a job that exists and
-        is not yours, exactly as the sibling read routes do.
+        the caller cannot see, exactly as the sibling read routes do. The
+        owner, or any member of the job's pool, may read it.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
 
         if fedavgmod.is_federated_job_id(job_id):
@@ -1254,7 +1572,11 @@ def create_cloud_app(
             # Rounds without a coordinator_job_id are rounds that never
             # reached the coordinator; they contribute nothing rather than
             # an empty group.
-            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            #
+            # `row["owner_id"]`, not `user_id`: same reason as the rounds
+            # route — the listing query is owner-scoped and a viewing pool
+            # member is not that owner.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])
             pairs = [
                 (row["round"], row["coordinator_job_id"])
                 for row in rounds
@@ -1307,7 +1629,7 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """Current task state for a job the caller owns.
+        """Current task state for a job the caller can see.
 
         Deliberately *current* state only, which is what the coordinator
         exposes: task id, state, attempts used against the cap, the node
@@ -1321,15 +1643,18 @@ def create_cloud_app(
         ids repeat across rounds and merging them would silently collapse
         distinct work into one row.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
 
         if fedavgmod.is_federated_job_id(job_id):
-            rounds = dbmod.list_job_rounds_for_owner(db, job_id, user_id)
+            # `row["owner_id"]`, not `user_id` — same reason as the rounds
+            # and events routes.
+            rounds = dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])
             pairs = [
-                (row["round"], row["coordinator_job_id"])
-                for row in rounds
-                if row.get("coordinator_job_id")
+                (r["round"], r["coordinator_job_id"])
+                for r in rounds
+                if r.get("coordinator_job_id")
             ]
             if not pairs:
                 return []
@@ -1357,6 +1682,25 @@ def create_cloud_app(
 
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks")
         return _passthrough(r)
+
+    @app.get("/v1alpha1/jobs/{job_id}/contributions", tags=["browser"])
+    async def get_job_contributions(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The per-machine credit view for a job the caller can see.
+
+        Visibility is checked exactly as the sibling read routes do it — the
+        owner, or any member of the job's pool, may see who did the work —
+        answering 404 (not 403) for a job that exists and the caller cannot
+        see. ``list_job_contributions`` itself takes no viewer argument by
+        design (Task 9): it trusts its caller to have authorized first, so
+        this check must run before it, never after or not at all.
+        """
+        if dbmod.fetch_job_for_viewer(db, job_id, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return [_jsonable(r) for r in dbmod.list_job_contributions(db, job_id)]
 
     @app.post("/v1alpha1/jobs/{job_id}/cancel", tags=["browser"])
     async def cancel_job_route(
@@ -1394,11 +1738,13 @@ def create_cloud_app(
         """The one deliberate residual the Task 5 report flagged: agent
         artifact reads stay open at the coordinator (an agent legitimately
         reads inputs for the task it holds), but a *browser* must only be
-        able to read artifacts under a job it owns. Ownership is checked
+        able to read artifacts under a job it can see. Visibility is checked
         here, against this table, before the key is ever forwarded — same
-        404-not-403 rule as the rest of this block.
+        404-not-403 rule as the rest of this block. This is a read, so it
+        uses ``fetch_job_for_viewer`` like its siblings: the owner, or any
+        member of the job's pool, may fetch a job's artifacts.
         """
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        if dbmod.fetch_job_for_viewer(db, job_id, user_id) is None:
             raise HTTPException(status_code=404, detail="unknown job")
         full_key = _artifact_key(f"{_seg(job_id)}/{key}")
         coordinator_key = f"jobs/{full_key}"
@@ -1417,8 +1763,21 @@ def create_cloud_app(
     async def register_node(
         request: Request, machine: Machine = Depends(current_machine)
     ):
+        # Resolved BEFORE proxying and stamped onto the body — never trust
+        # what the agent claims about its own pool membership.
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
+        except Exception:
+            # Fail CLOSED: a node we cannot vouch for serves no pool this
+            # cycle. Never skip the stamp — skipping would forward whatever
+            # the agent claimed.
+            log.warning("could not resolve pools for machine %s", machine.id)
+            pools = []
+
         return await proxy(
-            request, machine, "/v1alpha1/nodes/register", force_node_id=True
+            request, machine, "/v1alpha1/nodes/register", force_node_id=True,
+            pools=pools, pools_where="capabilities",
         )
 
     @app.post("/v1alpha1/nodes/{node_id}/heartbeat", tags=["agent"])
@@ -1437,19 +1796,34 @@ def create_cloud_app(
         # written, so `machines.last_seen_at` stayed null and every machine
         # rendered "Offline / Last seen never" no matter how healthy it was.
         #
-        # Best-effort: a display column must never be the reason a machine's
-        # heartbeat fails and its leases start expiring.
+        # The pool membership refresh rides the same connection open, but
+        # its own try/except, separate from `touch_machine_last_seen`'s: a
+        # display-column failure is best-effort and must never fail the
+        # pools stamp CLOSED — only a genuine membership-lookup failure
+        # does that, below.
         try:
             with contextlib.closing(app.state.connect()) as conn:
-                dbmod.touch_machine_last_seen(conn, machine.id)
+                try:
+                    dbmod.touch_machine_last_seen(conn, machine.id)
+                except Exception:
+                    log.warning(
+                        "could not record last_seen_at for machine %s", machine.id
+                    )
+                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
         except Exception:
-            log.warning("could not record last_seen_at for machine %s", machine.id)
+            # Fail CLOSED: a node we cannot vouch for serves no pool this
+            # cycle. Never skip the stamp — skipping would forward whatever
+            # the agent claimed.
+            log.warning("could not resolve pools for machine %s", machine.id)
+            pools = []
 
         return await proxy(
             request,
             machine,
             f"/v1alpha1/nodes/{machine.node_id}/heartbeat",
             force_node_id=True,
+            pools=pools,
+            pools_where="top",
         )
 
     @app.post("/v1alpha1/leases/claim", tags=["agent"])

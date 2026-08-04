@@ -188,3 +188,29 @@ def hash_machine_token(token: str) -> str:
     """One-way, stable digest of a machine token for storage/comparison.
     The raw token is never stored or logged."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+#: Same discipline as ``MACHINE_TOKEN_PREFIX``: a leaked invite token is
+#: greppable in logs without revealing anything about its value.
+INVITE_TOKEN_PREFIX = "fmi_"
+
+
+def new_invite_token() -> str:
+    """Mint a new, unguessable pool-invite token. Mirrors
+    ``new_machine_token`` exactly — same entropy, same "prefix on the
+    outside, nothing recoverable from it" shape — because an invite token
+    is the same kind of bearer secret a machine token is: whoever holds the
+    raw value gets to redeem it, so it is generated, hashed, and handed back
+    exactly once the same way."""
+    return INVITE_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def hash_invite_token(token: str) -> str:
+    """One-way, stable digest of an invite token for storage/comparison.
+    The raw token is never stored or logged — only this hash ever reaches
+    ``public.pool_invites.token_hash``."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def looks_like_invite_token(token: str | None) -> bool:
+    return bool(token) and token.startswith(INVITE_TOKEN_PREFIX)

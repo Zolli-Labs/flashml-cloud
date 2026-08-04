@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   BookOpen,
   CaretDown,
@@ -14,13 +14,16 @@ import {
   Desktop,
   DeviceMobile,
   SidebarSimple,
+  UsersThree,
   UserCircle,
 } from "@phosphor-icons/react";
 import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
+import { InviteGate } from "@/components/shell/InviteGate";
 import { Shortcuts } from "@/components/shell/Shortcuts";
 import { Wordmark } from "@/components/brand/Mark";
 import { UserMenu } from "@/components/nav/UserMenu";
+import { NotAuthenticated, getMe } from "@/lib/cloud-api";
 
 // The console shell. A left rail rather than a top nav: a top bar is a
 // marketing pattern, and the rail gives the fleet state somewhere permanent
@@ -47,11 +50,19 @@ const GROUPS = [
     items: [
       { href: "/machines", label: "Machines", icon: Desktop },
       { href: "/activate", label: "Activate", icon: DeviceMobile },
+      { href: "/pools", label: "Pools", icon: UsersThree },
     ],
   },
 ] as const;
 
 const REPO = "https://github.com/Zolli-Labs/flashml";
+
+// `/pools/join` is the one console route an admitted-false account must
+// still be able to reach: it is how a signed-in-but-not-yet-admitted user
+// redeems an invite by clicking a link rather than pasting one into the
+// gate below. The API's own `accept_invite` mirrors this — it sits on
+// `current_user`, not `admitted_user`, for the identical reason.
+const INVITE_GATE_BYPASS = "/pools/join";
 
 function NavItem({
   href,
@@ -109,7 +120,54 @@ function Group({
 
 export function ConsoleShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [railOpen, setRailOpen] = useState(false);
+
+  // "admitted" is the optimistic default, not "unknown": this shell mounts
+  // once for the whole console session (Next keeps a layout instance across
+  // client navigations within it), so the alternative is a real console
+  // page flashing to a loading state on every first paint while `GET /me`
+  // is in flight — for the overwhelming majority of loads, an already
+  // -admitted returning user. Nothing this gate protects is enforced only
+  // here: every state-creating route re-checks admission server-side, so
+  // rendering optimistically for the one round trip this takes costs
+  // nothing but UI politeness.
+  const [gated, setGated] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getMe()
+      .then((me) => {
+        if (!cancelled) setGated(!me.admitted);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof NotAuthenticated) {
+          // `window.location`, not `usePathname()`: the latter never
+          // includes the query string, and `/pools/join?token=...` needs
+          // that token to survive the round trip through sign-in or the
+          // invite this is protecting is lost.
+          const next = window.location.pathname + window.location.search;
+          router.push(`/sign-in?next=${encodeURIComponent(next)}`);
+          return;
+        }
+        // A transient failure (network blip, 500) is not evidence of "not
+        // admitted" — fail open rather than lock an admitted user out of
+        // their own console over one bad request. Every page under here
+        // already handles its own load failures.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately mount-only. `router` is stable across renders and
+    // `window.location` is read fresh inside the callback above when it's
+    // actually needed, so neither belongs in this list — the alternative,
+    // depending on something that changes with navigation, would mean one
+    // `GET /me` per page visited instead of one per console session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const showGate = gated && pathname !== INVITE_GATE_BYPASS;
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
@@ -233,7 +291,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main id="content" className="min-w-0 flex-1">
-          {children}
+          {showGate ? <InviteGate /> : children}
         </main>
       </div>
     </div>

@@ -393,7 +393,10 @@ def _seed_job(db, owner_id: str) -> str:
     return job_id
 
 
-def _run(job_id: str, settings, postgres_dsn, coordinator, rounds: int = 2):
+def _run(
+    job_id: str, settings, postgres_dsn, coordinator, rounds: int = 2,
+    pool: str | None = None,
+):
     config = _config(FEDERATED_YAML.replace("rounds: 3", f"rounds: {rounds}"))
     run = fedavgmod.FederatedRun(
         job_id=job_id,
@@ -401,6 +404,7 @@ def _run(job_id: str, settings, postgres_dsn, coordinator, rounds: int = 2):
         config=config,
         image=resolve_image("python-slim"),
         code_artifact_uri="artifact://uploads/deadbeef/code.tar.gz",
+        pool=pool,
     )
     fedavgmod.run_federated_job(
         run,
@@ -483,6 +487,98 @@ def test_re_running_a_finished_job_is_idempotent(db, settings, postgres_dsn):
     _run(job_id, settings, postgres_dsn, coordinator, rounds=1)
     assert len(coordinator.submitted) == 1
     assert len(dbmod.list_job_rounds_for_owner(db, job_id, owner)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 4b. pool threading — FederatedRun.pool must reach the run_fedavg call
+# ---------------------------------------------------------------------------
+
+
+def _capture_run_fedavg(monkeypatch) -> dict:
+    """Replace ``fedavgmod.run_fedavg`` and return the dict its kwargs land
+    in. Same boundary ``_run_reporting`` patches below, for the same reason:
+    what is under test is the *call*, not the averaging arithmetic."""
+    captured: dict = {}
+
+    def fake_run_fedavg(coord, **kwargs):
+        captured.update(kwargs)
+        return {"weights": {}, "history": [], "job_ids": []}
+
+    monkeypatch.setattr(fedavgmod, "run_fedavg", fake_run_fedavg)
+    return captured
+
+
+def test_a_pool_scoped_run_threads_pool_and_the_waiver_into_run_fedavg(
+    db, settings, postgres_dsn, monkeypatch
+):
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    captured = _capture_run_fedavg(monkeypatch)
+
+    _run(job_id, settings, postgres_dsn, StubCoordinator(), rounds=1, pool="p-1")
+
+    assert captured["pool"] == "p-1"
+    assert captured["allow_fallback"] is True
+
+
+def test_a_run_with_no_pool_passes_none_and_no_waiver(
+    db, settings, postgres_dsn, monkeypatch
+):
+    """The regression guard: an independent (non-pool) run's call into
+    ``run_fedavg`` is exactly what it was before this parameter existed —
+    ``pool=None``, ``allow_fallback=False``."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    captured = _capture_run_fedavg(monkeypatch)
+
+    _run(job_id, settings, postgres_dsn, StubCoordinator(), rounds=1)
+
+    assert captured["pool"] is None
+    assert captured["allow_fallback"] is False
+
+
+def test_a_pool_scoped_run_stamps_every_submitted_round_body(
+    db, settings, postgres_dsn
+):
+    """The functional half of pool confinement, exercised end to end with
+    the REAL ``run_fedavg`` (no monkeypatch): ``run_fedavg``'s own
+    ``pool``/``allow_fallback`` kwargs are inert once ``build_round`` is
+    supplied (``fedavg.py`` always supplies one) — what actually stamps
+    ``placement.pool``/``isolation.allowFallback`` onto a round is
+    ``build_round_for`` threading ``run.pool`` into
+    ``compile_federated_round``. The two tests above patch ``run_fedavg``
+    away and would stay green even if that thread were deleted; this one
+    would not, because it asserts on the bodies the stub coordinator
+    actually received across every round of a multi-round run."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    coordinator = StubCoordinator()
+
+    _run(job_id, settings, postgres_dsn, coordinator, rounds=2, pool="p-1")
+
+    assert len(coordinator.submitted) == 2
+    for body in coordinator.submitted:
+        assert body["spec"]["placement"]["pool"] == "p-1"
+        assert body["spec"]["isolation"]["allowFallback"] is True
+
+
+def test_a_run_with_no_pool_stamps_any_on_every_submitted_round_body(
+    db, settings, postgres_dsn
+):
+    """The regression guard for the test above: an independent run's round
+    bodies are unchanged — ``placement.pool: "any"``,
+    ``isolation.allowFallback: false`` — on every round, not just the
+    first."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    coordinator = StubCoordinator()
+
+    _run(job_id, settings, postgres_dsn, coordinator, rounds=2)
+
+    assert len(coordinator.submitted) == 2
+    for body in coordinator.submitted:
+        assert body["spec"]["placement"]["pool"] == "any"
+        assert body["spec"]["isolation"]["allowFallback"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +678,24 @@ def test_an_independent_repo_still_submits_one_job_and_starts_no_driver(
     assert len(transport.job_submissions) == 1
     assert client.starter.runs == []
     assert r.json()["job_id"].startswith("job-")
+
+
+def test_a_pool_scoped_federated_submission_threads_pool_into_the_run(
+    federated_client, db, transport
+):
+    """The from-repo route's ``pool`` body field has to reach the
+    ``FederatedRun`` handed to the driver — the other half of the trip
+    ``test_a_pool_scoped_run_threads_pool_and_the_waiver_into_run_fedavg``
+    pins from ``FederatedRun`` onward."""
+    client = federated_client()
+    owner = _new_user(db)
+    pool_id = str(dbmod.create_pool(db, name="Ada's Team", owner_id=owner)["id"])
+
+    r = _post(client, _jwt(owner), pool=pool_id)
+    assert r.status_code == 201, r.text
+
+    assert len(client.starter.runs) == 1
+    assert client.starter.runs[0].pool == pool_id
 
 
 # ---------------------------------------------------------------------------

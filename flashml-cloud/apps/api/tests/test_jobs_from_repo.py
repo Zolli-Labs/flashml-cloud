@@ -211,11 +211,29 @@ def make_client(settings, postgres_dsn, transport):
         client.__exit__(None, None, None)
 
 
-def _new_user(db) -> str:
+def _new_user(db, *, admitted: bool = True) -> str:
+    """A real ``auth.users`` + ``public.profiles`` pair.
+
+    Admitted by default: this file (and everything that imports this
+    helper — ``test_profile.py``, ``test_contributions.py``,
+    ``test_federated.py``, ``test_verification.py``, ``test_db_pools.py``)
+    submits jobs and otherwise exercises routes gated by the invite-only
+    admission dependency (Task 10), and pre-alpha-gate accounts are exactly
+    what most fixtures here are meant to model. ``admitted=False`` is the
+    one deliberate exception, for the handful of tests whose point IS the
+    gate (see ``test_pools_api.py`` and
+    ``test_db_pools.test_consume_pool_invite_admits_the_profile``).
+    """
     user_id = str(uuid.uuid4())
     with db.cursor() as cur:
         cur.execute("insert into auth.users (id) values (%s)", (user_id,))
-        cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
+        if admitted:
+            cur.execute(
+                "insert into public.profiles (id, admitted_at) values (%s, now())",
+                (user_id,),
+            )
+        else:
+            cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
     return user_id
 
 
@@ -618,3 +636,192 @@ def test_a_refused_submission_writes_no_jobs_row(make_client, db, transport):
     r = _post(client, _jwt(alice))
     assert r.status_code == 422
     assert _job_rows(db, alice) == []
+
+
+# ---------------------------------------------------------------------------
+# 8. pool-scoped submission — the waiver exists iff the pool does
+# ---------------------------------------------------------------------------
+
+
+def test_a_pool_member_submits_with_pool_and_the_row_carries_it(
+    make_client, db, transport
+):
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    alice = _new_user(db)
+    pool = dbmod.create_pool(db, name="Ada's Team", owner_id=alice)
+    pool_id = str(pool["id"])
+
+    r = _post(client, _jwt(alice), pool=pool_id)
+    assert r.status_code == 201, r.text
+
+    row = _job_rows(db, alice)[0]
+    assert str(row["pool_id"]) == pool_id
+    assert row["source"]["pool"] == pool_id
+
+    spec = transport.submitted[0]["spec"]
+    assert spec["isolation"] == {"tier": "sandboxed", "allowFallback": True}
+    assert spec["placement"]["pool"] == pool_id
+
+
+def test_a_pool_id_submitted_uppercase_is_normalized_to_canonical(
+    make_client, db, transport
+):
+    """Postgres accepts an uppercase uuid, so the membership check
+    (`fetch_pool_for_member`) passes it just fine — but the scheduler's gate
+    compares exact strings against the canonical-lowercase ids
+    `pool_ids_for_machine_owner` returns. Submitting the caller's spelling
+    verbatim would pass this check and then never match that gate, leaving
+    the job PENDING forever. The route must rebind `pool` to the database's
+    canonical id before it reaches compile/insert_job/source."""
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    alice = _new_user(db)
+    pool = dbmod.create_pool(db, name="Ada's Team", owner_id=alice)
+    pool_id = str(pool["id"])
+    assert pool_id == pool_id.lower(), "sanity: a fresh uuid is already lowercase"
+
+    r = _post(client, _jwt(alice), pool=pool_id.upper())
+    assert r.status_code == 201, r.text
+
+    row = _job_rows(db, alice)[0]
+    assert str(row["pool_id"]) == pool_id
+    assert row["source"]["pool"] == pool_id
+
+    spec = transport.submitted[0]["spec"]
+    assert spec["placement"]["pool"] == pool_id
+
+
+def test_a_non_member_submitting_to_a_pool_is_404(make_client, db, transport):
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    owner = _new_user(db)
+    outsider = _new_user(db)
+    pool_id = str(dbmod.create_pool(db, name="Ada's Team", owner_id=owner)["id"])
+
+    r = _post(client, _jwt(outsider), pool=pool_id)
+    assert r.status_code == 404
+    assert transport.requests == []
+    assert _job_rows(db, outsider) == []
+
+
+def test_an_unknown_pool_id_is_404(make_client, db, transport):
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice), pool=str(uuid.uuid4()))
+    assert r.status_code == 404
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
+def test_a_pool_that_is_not_even_a_uuid_is_404_not_500(make_client, db, transport):
+    """Same answer as 'not found' — three sibling routes already guard this
+    exact case (revoke, get_pool_route, create_pool_invite_route) so a
+    malformed pool id must not become a distinguishable third answer that
+    breaks the 404 doctrine every member-scoped lookup here relies on."""
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice), pool="not-a-uuid")
+    assert r.status_code == 404
+    assert transport.requests == []
+    assert _job_rows(db, alice) == []
+
+
+def test_an_unadmitted_user_submitting_with_a_pool_is_403_not_404(make_client, db):
+    """Admission is checked before the pool lookup — same ordering as every
+    other route here: an un-admitted account never learns whether the pool
+    id it guessed is even real."""
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    owner = _new_user(db)
+    pool_id = str(dbmod.create_pool(db, name="Ada's Team", owner_id=owner)["id"])
+    stranger = _new_user(db, admitted=False)
+
+    r = _post(client, _jwt(stranger), pool=pool_id)
+    assert r.status_code == 403
+
+
+def test_no_pool_field_is_unchanged(make_client, db, transport):
+    """The regression guard: a plain from-repo submission with no `pool`
+    key carries no pool_id and no placement waiver, exactly as before."""
+    client = make_client()
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+
+    row = _job_rows(db, alice)[0]
+    assert row["pool_id"] is None
+    assert "pool" not in row["source"]
+
+    spec = transport.submitted[0]["spec"]
+    assert spec["isolation"] == {"tier": "sandboxed", "allowFallback": False}
+
+
+def test_raw_job_submission_refuses_an_allow_fallback_spec(make_client, db, transport):
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={"spec": {"isolation": {"allowFallback": True}}},
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 400
+    assert "from-repo" in r.json()["detail"]
+    assert transport.requests == []
+
+
+def test_raw_job_submission_with_a_non_dict_isolation_or_placement_does_not_500(
+    make_client, db, transport
+):
+    """A malformed (non-dict) `isolation`/`placement` value must not crash
+    the refusal guard with an AttributeError from `.get` on a string — it is
+    treated as absent, the same `isinstance(..., dict) else {}` guard the
+    line above already applies to `spec` itself. Neither condition can then
+    be true, so the request is not refused; the point of this test is the
+    absence of a 500, not any particular status code."""
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={
+            "metadata": {"name": "demo", "labels": {}},
+            "spec": {"isolation": "x", "placement": "y"},
+        },
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_raw_job_submission_refuses_a_pool_placement(make_client, db, transport):
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={"spec": {"placement": {"pool": "some-pool"}}},
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 400
+    assert "from-repo" in r.json()["detail"]
+    assert transport.requests == []
+
+
+def test_raw_job_submission_with_placement_pool_any_is_still_allowed(
+    make_client, db, transport
+):
+    """`placement.pool: "any"` is the same as omitting it — the explicit
+    default, not a waiver request — so the raw route must not refuse it."""
+    client = make_client()
+    alice = _new_user(db)
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={
+            "metadata": {"name": "demo", "labels": {}},
+            "spec": {"placement": {"pool": "any"}},
+        },
+        headers={"Authorization": f"Bearer {_jwt(alice)}"},
+    )
+    assert r.status_code == 201, r.text

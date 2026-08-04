@@ -25,6 +25,7 @@ reads as green in CI and is worse than no test at all.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -39,7 +40,7 @@ from psycopg.rows import dict_row
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
-from flashml_cloud_api.app import DELEGATION_HEADER, create_cloud_app
+from flashml_cloud_api.app import DELEGATION_HEADER, _scrub_identity, create_cloud_app
 from flashml_cloud_api.settings import Settings
 
 RUN_MARKER = uuid.uuid4().hex[:12]
@@ -137,11 +138,19 @@ def client(settings, postgres_dsn, transport):
 def _new_user(db) -> str:
     """A real ``auth.users`` + ``public.profiles`` pair. profiles.id is an
     FK to auth.users, and machines.owner_id an FK to profiles, so a machine
-    cannot exist without both."""
+    cannot exist without both.
+
+    Admitted at creation: this file's device-approve tests go through the
+    invite-gated ``POST /v1alpha1/device/approve`` route (Task 10), and this
+    fixture models an ordinary, already-onboarded account rather than the
+    admission gate itself."""
     user_id = str(uuid.uuid4())
     with db.cursor() as cur:
         cur.execute("insert into auth.users (id) values (%s)", (user_id,))
-        cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
+        cur.execute(
+            "insert into public.profiles (id, admitted_at) values (%s, now())",
+            (user_id,),
+        )
     return user_id
 
 
@@ -398,6 +407,152 @@ def test_heartbeat_path_node_id_is_taken_from_the_token_not_the_url(
     assert r.status_code == 200
     assert transport.last.url.path == f"/v1alpha1/nodes/{machine['node_id']}/heartbeat"
     assert "fn-victim" not in transport.last.read().decode()
+
+
+# ---------------------------------------------------------------------------
+# 2b. pool membership is stamped onto register/heartbeat — never trusted
+# from the agent's own body (Task 11)
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_identity_stamps_pools_on_the_empty_body_force_branch():
+    """``force=True`` on an empty body already synthesizes ``{"node_id":
+    ...}`` out of nothing; the pools stamp must land in that same
+    synthesized body rather than only firing when the agent sent *some*
+    body. Both placements exercised — the heartbeat (top-level) and
+    register (nested under ``capabilities``) shapes respectively — and the
+    empty-membership case must still emit ``[]``, not omit the key."""
+    top, media_type = _scrub_identity(
+        b"", "node-x", force=True, pools=["p1", "p2"], pools_where="top"
+    )
+    assert media_type == "application/json"
+    assert json.loads(top) == {"node_id": "node-x", "pools": ["p1", "p2"]}
+
+    nested, _ = _scrub_identity(
+        b"", "node-x", force=True, pools=[], pools_where="capabilities"
+    )
+    assert json.loads(nested) == {"node_id": "node-x", "capabilities": {"pools": []}}
+
+
+def test_register_body_pools_is_stamped_from_membership(client, db, transport):
+    """A forged ``capabilities.pools`` in the register body must be
+    overwritten with the caller's real membership, never merged with it."""
+    owner = _new_user(db)
+    node_id = _node_id("pool-register")
+    _, token = _enrol(db, owner, node_id)
+    pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+
+    client.post(
+        "/v1alpha1/nodes/register",
+        json={"schema_version": "v1alpha1", "node_id": node_id,
+              "hostname": "h",
+              "capabilities": {"cpu_cores": 4, "pools": ["forged-pool"]}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["capabilities"]["pools"] == [str(pool["id"])]
+    assert "forged-pool" not in json.dumps(body)
+
+
+def test_register_with_no_membership_stamps_empty(client, db, transport):
+    """``[]`` not absent: an agent-supplied value must be OVERWRITTEN even
+    when the truthful answer is 'no pools'. A fresh owner/machine, not the
+    module's shared ``machine`` fixture — relying on "no other test ever
+    gives the shared fixture a pool" is a latent order dependency, not a
+    guarantee."""
+    owner = _new_user(db)
+    node_id = _node_id("pool-register-empty")
+    _, token = _enrol(db, owner, node_id)
+
+    client.post(
+        "/v1alpha1/nodes/register",
+        json={"schema_version": "v1alpha1", "node_id": node_id,
+              "hostname": "h", "capabilities": {"pools": ["forged-pool"]}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["capabilities"]["pools"] == []
+
+
+def test_heartbeat_carries_the_membership_refresh(client, db, transport):
+    owner = _new_user(db)
+    node_id = _node_id("pool-heartbeat")
+    _, token = _enrol(db, owner, node_id)
+    pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+
+    client.post(
+        f"/v1alpha1/nodes/{node_id}/heartbeat",
+        json={"schema_version": "v1alpha1", "node_id": node_id},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["pools"] == [str(pool["id"])]
+
+
+def test_heartbeat_scrubs_a_forged_nested_capabilities_pools_too(client, db, transport):
+    """``NodeHeartbeat`` has no ``capabilities.pools`` field today, but an
+    agent that includes one anyway must not get it forwarded unscrubbed —
+    today's schema is the only thing standing between that and a real
+    forgery landing wherever the coordinator adds the field next."""
+    owner = _new_user(db)
+    node_id = _node_id("pool-heartbeat-nested")
+    _, token = _enrol(db, owner, node_id)
+    pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+
+    client.post(
+        f"/v1alpha1/nodes/{node_id}/heartbeat",
+        json={"schema_version": "v1alpha1", "node_id": node_id,
+              "capabilities": {"pools": ["forged-pool"]}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["pools"] == [str(pool["id"])]
+    assert body["capabilities"]["pools"] == [str(pool["id"])]
+    assert "forged-pool" not in json.dumps(body)
+
+
+def test_register_fails_closed_when_pools_lookup_raises(
+    client, machine, transport, monkeypatch
+):
+    """Pins the except branch as a STAMP, not a skip. `dbmod` is imported by
+    name in `app.py` and the attribute is resolved at call time, so
+    monkeypatching it here reaches the same lookup the route calls —
+    without this, a refactor that turned `except: pools = []` into
+    `except: pass` would forward the agent's forged pools untouched and
+    every other test in this file would stay green."""
+    def raiser(*_a, **_kw):
+        raise RuntimeError("simulated pool lookup failure")
+
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+
+    client.post(
+        "/v1alpha1/nodes/register",
+        json={"schema_version": "v1alpha1", "node_id": machine["node_id"],
+              "hostname": "h", "capabilities": {"pools": ["forged-pool"]}},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["capabilities"]["pools"] == []
+    assert "forged-pool" not in json.dumps(body)
+
+
+def test_heartbeat_fails_closed_when_pools_lookup_raises(
+    client, machine, transport, monkeypatch
+):
+    def raiser(*_a, **_kw):
+        raise RuntimeError("simulated pool lookup failure")
+
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+
+    client.post(
+        f"/v1alpha1/nodes/{machine['node_id']}/heartbeat",
+        json={"schema_version": "v1alpha1", "node_id": machine["node_id"],
+              "pools": ["forged-pool"]},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    body = json.loads(transport.last.read())
+    assert body["pools"] == []
+    assert "forged-pool" not in json.dumps(body)
 
 
 def test_artifact_put_forwards_raw_bytes_with_delegation(client, machine, transport):
