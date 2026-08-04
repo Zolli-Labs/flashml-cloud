@@ -19,6 +19,7 @@ import {
 import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { Shortcuts } from "@/components/shell/Shortcuts";
+import { WorkspaceHintProvider } from "@/components/shell/WorkspaceHint";
 import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { Wordmark } from "@/components/brand/Mark";
 import { UserMenu } from "@/components/nav/UserMenu";
@@ -160,7 +161,14 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
 
-  const currentWorkspace = workspaceIdFromPath(pathname);
+  // A workspace-scoped URL is the authority. `/jobs/[jobId]` is not one —
+  // it is the normal destination from the Jobs tab and from Overview, and
+  // its path carries no pool id, so the rail used to empty out the moment
+  // you opened a job. The page itself knows (`job.pool_id`) and reports it
+  // through `WorkspaceHintProvider` below; the URL still wins wherever it
+  // says anything at all. See components/shell/WorkspaceHint.tsx.
+  const [workspaceHint, setWorkspaceHint] = useState<string | null>(null);
+  const currentWorkspace = workspaceIdFromPath(pathname) ?? workspaceHint;
 
   const rail = (
     <>
@@ -335,7 +343,9 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           ) : screen === "declined" ? (
             <DeclinedScreen />
           ) : (
-            children
+            <WorkspaceHintProvider onHint={setWorkspaceHint}>
+              {children}
+            </WorkspaceHintProvider>
           )}
         </main>
       </div>

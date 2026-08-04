@@ -9,6 +9,7 @@ import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { FleetTopology } from "@/components/jobs/FleetTopology";
 import { RoundProgress } from "@/components/jobs/RoundProgress";
 import { MemberCredits } from "@/components/jobs/MemberCredits";
+import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
 import { formatBytes } from "@/lib/utils";
 import {
   deriveAttempts,
@@ -129,6 +130,15 @@ export default function JobDetailPage({
     () => (job ? deriveStallReason(job.state, tasks, events, now) : null),
     [job, tasks, events, now]
   );
+
+  // This route's path carries no pool id, so the rail would otherwise show
+  // no workspace tabs and "Choose a workspace" — one click out of a
+  // workspace losing all of its navigation. The job says which workspace it
+  // belongs to; the same `pool_id` the back link below uses. Above the early
+  // returns because it is a hook: while `job` is still null this passes
+  // `undefined`, which leaves the rail exactly as the URL alone would have
+  // it.
+  useWorkspaceHint(job?.pool_id);
 
   // Default the view by state: a failed job opens on the ledger, because
   // "why" is the only question you have. Opening it on a truncated metric
