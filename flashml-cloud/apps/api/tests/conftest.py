@@ -116,10 +116,16 @@ def postgres_dsn(tmp_path_factory):
         dsn = f"postgresql://postgres@127.0.0.1:{port}/postgres"
 
         # Supabase provides the `auth` schema; locally we stand in for it
-        # with only the one column the migration's FK actually needs.
+        # with only the columns migrations actually need.
+        #
+        # `email` mirrors real Supabase `auth.users`. Without it, every
+        # email-derivation test would pass against a schema that is not
+        # the deployed one. No migration touches auth.users — that
+        # schema is Supabase's, and this stub exists to imitate it.
         stub = _run([
             "psql", dsn, "-v", "ON_ERROR_STOP=1", "-c",
-            "create schema auth; create table auth.users (id uuid primary key);",
+            "create schema auth; "
+            "create table auth.users (id uuid primary key, email text);",
         ])
         if stub.returncode != 0:
             raise RuntimeError(f"auth schema stub failed:\n{stub.stdout}\n{stub.stderr}")
