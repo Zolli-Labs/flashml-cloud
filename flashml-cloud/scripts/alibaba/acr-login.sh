@@ -6,7 +6,7 @@ set -euo pipefail
 ENV_FILE="$(dirname "$0")/../../../.env.alibaba"
 [ -f "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
 
-: "${ACR_REGISTRY:?set ACR_REGISTRY (see .env.alibaba.example)}"
+: "${ACR_REGISTRY:?set ACR_REGISTRY (see: git show 244277b:.env.alibaba.example)}"
 : "${ACR_USERNAME:?set ACR_USERNAME (RAM user with ACR push permission)}"
 : "${ACR_PASSWORD:?set ACR_PASSWORD (not stored, not printed)}"
 

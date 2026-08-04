@@ -151,9 +151,15 @@ poc-reset:
 	kubectl -n $(POC_NS) rollout restart ds/flashnode
 
 # ---------------------------------------------------------------------------
-# FlashML POC — Alibaba ACK profile. Requires .env.alibaba (see
-# .env.alibaba.example) and an ACK kubeconfig context. Nothing here creates
-# billable resources without an explicit confirmation.
+# FlashML POC — Alibaba ACK profile. Requires .env.alibaba and an ACK
+# kubeconfig context. Nothing here creates billable resources without an
+# explicit confirmation.
+#
+# `.env.alibaba.example` was removed on 2026-08-04: Alibaba is deferred (the
+# deployed POC runs on Supabase + Render), and per M1_DECISIONS.md no Alibaba
+# credential has ever existed in this workspace, so the template documented a
+# path nobody had taken. Recover it with
+# `git show 244277b:.env.alibaba.example` if this profile is picked back up.
 # ---------------------------------------------------------------------------
 
 poc-ack-bootstrap:
