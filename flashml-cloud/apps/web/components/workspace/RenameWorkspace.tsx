@@ -17,9 +17,18 @@ export function RenameWorkspace({
   const [name, setName] = useState(currentName);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The last name this component itself successfully saved. `currentName`
+  // (the prop) only catches up once the parent's `reload()` round-trips and
+  // re-renders with a fresh `pool.name` — comparing against it directly left
+  // a window, between `renamePool` resolving and that reload landing, where
+  // `name` already held the new value but `currentName` didn't, so
+  // `unchanged` read false and Save re-enabled for an already-saved name.
+  // Comparing against this instead is settled the instant the save itself
+  // succeeds, with no round trip to wait on.
+  const [savedName, setSavedName] = useState(currentName);
 
   const trimmed = name.trim();
-  const unchanged = trimmed === currentName;
+  const unchanged = trimmed === savedName;
 
   async function save() {
     if (!trimmed || unchanged) return;
@@ -30,6 +39,7 @@ export function RenameWorkspace({
       // string we sent — is what the name actually became.
       const updated = await renamePool(poolId, trimmed);
       setName(updated.name);
+      setSavedName(updated.name);
       onRenamed();
       toast.success("Workspace renamed", { description: updated.name });
     } catch (err) {
