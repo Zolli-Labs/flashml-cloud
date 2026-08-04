@@ -1,4 +1,5 @@
 import { WorkspaceProvider } from "@/components/workspace/WorkspaceProvider";
+import { WorkspaceGate } from "@/components/workspace/WorkspaceGate";
 
 export default async function WorkspaceLayout({
   children,
@@ -20,7 +21,7 @@ export default async function WorkspaceLayout({
   // not decoration.
   return (
     <WorkspaceProvider key={poolId} poolId={poolId}>
-      {children}
+      <WorkspaceGate>{children}</WorkspaceGate>
     </WorkspaceProvider>
   );
 }
