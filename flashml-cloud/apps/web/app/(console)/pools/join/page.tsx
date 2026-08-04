@@ -7,11 +7,13 @@ import { NotAuthenticated, acceptInvite } from "@/lib/cloud-api";
 
 // This route is `ConsoleShell`'s one deliberate bypass of the invite gate
 // (see `INVITE_GATE_BYPASS`): a signed-in-but-not-yet-admitted account has
-// to be able to reach it, since redeeming the token here is how they join
-// the workspace. It does NOT by itself admit them — `acceptInvite`'s
-// `joined` flag is false until an admin approves the account's access
-// request; the join is banked and applied then. `useSearchParams()` needs a
-// Suspense boundary to avoid bailing the whole route out of static
+// to be able to reach it, since this is where redeeming an invite happens.
+// Joining and admission are one signal, not two: `acceptInvite`'s `joined`
+// is `true` only for an already-admitted caller, who is added to the pool
+// outright. For the account this bypass exists for, nothing joins yet —
+// the membership is banked on the account's access request and
+// materializes only once an admin approves them. `useSearchParams()` needs
+// a Suspense boundary to avoid bailing the whole route out of static
 // rendering, hence the split below rather than reading it straight in the
 // default export — same shape as `(auth)/sign-in`'s `page.tsx` +
 // `SignInCard.tsx`, folded into one file since console routes keep metadata
@@ -41,10 +43,12 @@ function JoinPoolInner() {
       .then((result) => {
         if (cancelled) return;
         // A full navigation, not `router.replace`: `ConsoleShell` reads
-        // admission once per mount, and this account just joined the pool
-        // (`result.joined` — not necessarily admitted; see the note above)
-        // — a client-side route change would land on the pool page with
-        // the shell still holding its stale gate state.
+        // admission once per mount, so a client-side route change would
+        // land here with the shell still holding its stale gate state.
+        // `result.joined` is `true` only when the caller was already
+        // admitted and is now a member of this pool; when it is `false`,
+        // nothing joined — the membership is queued behind admin approval
+        // and materializes only once someone decides this account.
         window.location.href = `/pools/${result.pool_id}`;
       })
       .catch((err) => {

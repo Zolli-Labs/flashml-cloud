@@ -675,8 +675,10 @@ describe("cloud-api", () => {
 
       await approveAccessRequest("a b/c");
 
-      expect(fetchMock.mock.calls[0][0]).toContain(encodeURIComponent("a b/c"));
-      expect(fetchMock.mock.calls[0][0]).toContain("/approve");
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toContain(encodeURIComponent("a b/c"));
+      expect(url).toContain("/approve");
+      expect(init.method).toBe("POST");
     });
 
     it("POSTs to the decline route", async () => {
@@ -685,7 +687,9 @@ describe("cloud-api", () => {
 
       await declineAccessRequest("u1");
 
-      expect(fetchMock.mock.calls[0][0]).toContain("/decline");
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toContain("/decline");
+      expect(init.method).toBe("POST");
     });
   });
 
