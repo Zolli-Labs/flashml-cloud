@@ -56,6 +56,8 @@ def _one_of(payload: dict, field: str, allowed: frozenset[str]) -> str:
 def parse_submission(payload: dict) -> OnboardingSubmission:
     """Validate the form body. Raises ``ValueError`` with a message safe to
     show a user; the route turns that into a 400."""
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
     sources = payload.get("compute_sources", [])
     if not isinstance(sources, list):
         raise ValueError("compute_sources must be a list")

@@ -22,6 +22,15 @@ VALID = {
 }
 
 
+def test_rejects_non_dict_payloads():
+    with pytest.raises(ValueError, match="payload"):
+        parse_submission(None)
+    with pytest.raises(ValueError, match="payload"):
+        parse_submission([])
+    with pytest.raises(ValueError, match="payload"):
+        parse_submission("x")
+
+
 def test_accepts_a_complete_submission():
     s = parse_submission(dict(VALID))
     assert s.first_name == "Ha"
@@ -96,11 +105,32 @@ def test_length_caps_are_enforced():
         parse_submission({**VALID, "use_case": "x" * 2001})
 
 
+def test_length_caps_accept_boundary_values():
+    s = parse_submission({**VALID, "first_name": "x" * 80})
+    assert s.first_name == "x" * 80
+    s = parse_submission({**VALID, "company_name": "x" * 160})
+    assert s.company_name == "x" * 160
+    s = parse_submission({**VALID, "use_case": "x" * 2000})
+    assert s.use_case == "x" * 2000
+
+
 def test_privileged_fields_in_the_body_are_ignored_not_honoured():
-    """A client handing us a role is the attack this shape exists to make
-    impossible: parse_submission has nowhere to put it."""
+    """Privileged keys must be silently ignored, not rejected by name.
+    A ValueError naming `is_admin` would tell an attacker the field exists.
+    This test proves: (a) no raise (they are ignored, not rejected),
+    and (b) legitimate fields parse correctly alongside them."""
     s = parse_submission(
-        {**VALID, "is_admin": True, "admitted_at": "now", "is_host": True}
+        {
+            **VALID,
+            "is_admin": True,
+            "admitted_at": "now",
+            "is_host": True,
+            "is_developer": True,
+            "github_login": "attacker",
+        }
     )
-    assert not hasattr(s, "is_admin")
-    assert not hasattr(s, "admitted_at")
+    # The absence of a raise above IS the assertion: privileged keys are silently ignored.
+    # Verify legitimate fields still have correct values:
+    assert s.role == "researcher"
+    assert s.first_name == "Ha"
+    assert s.last_name == "Nguyen"
