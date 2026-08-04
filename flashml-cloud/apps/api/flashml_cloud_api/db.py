@@ -17,13 +17,19 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from flashml_cloud_api.settings import Settings
+
+if TYPE_CHECKING:
+    # Type-only: this data layer writes what the validator already accepted
+    # and must not depend on it at runtime — the import direction stays
+    # route -> validation -> db, never db -> validation.
+    from flashml_cloud_api.access import OnboardingSubmission
 
 
 def connect(settings: Settings) -> psycopg.Connection:
@@ -91,6 +97,252 @@ def upsert_profile(
         row = cur.fetchone()
         assert row is not None
         return row
+
+
+# ---------------------------------------------------------------------------
+# access requests
+#
+# `admitted_at` on profiles remains the switch every gate reads. This table
+# is the paperwork behind it: who asked, what they said, who decided.
+# ---------------------------------------------------------------------------
+
+
+def access_state_for(db: psycopg.Connection, user_id: str) -> str:
+    """``needs_onboarding`` | ``pending`` | ``admitted`` | ``declined``.
+
+    DERIVED, never stored.
+
+    Two sources, in order. The request row wins when there is one. With no
+    row, ``admitted_at`` decides: 0009's backfill covers every account that
+    existed WHEN IT RAN, but an account admitted afterwards by any other
+    path — the owner running one UPDATE, which is exactly how `is_admin` is
+    granted — would otherwise compute as ``needs_onboarding`` and be shown
+    the onboarding form despite already being admitted. Falling back to the
+    flag every gate already reads keeps the two from disagreeing.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select status from public.access_requests where user_id = %s", (user_id,)
+        )
+        row = cur.fetchone()
+        if row:
+            return row["status"]
+        # No request on file. An account already carrying admitted_at is
+        # admitted; anything else has not asked yet.
+        cur.execute(
+            "select admitted_at from public.profiles where id = %s", (user_id,)
+        )
+        profile = cur.fetchone()
+    return "admitted" if profile and profile["admitted_at"] else "needs_onboarding"
+
+
+def email_for_user(db: psycopg.Connection, user_id: str) -> str | None:
+    """The signup address, from ``auth.users``.
+
+    Read here rather than from the JWT: the access token's ``email`` claim
+    is not guaranteed present, and this API already holds the service-role
+    key that can see the table. Never written — that schema is Supabase's.
+    """
+    with db.cursor() as cur:
+        cur.execute("select email from auth.users where id = %s", (user_id,))
+        row = cur.fetchone()
+    return row["email"] if row else None
+
+
+def profile_is_admin(db: psycopg.Connection, user_id: str) -> bool:
+    with db.cursor() as cur:
+        cur.execute("select is_admin from public.profiles where id = %s", (user_id,))
+        row = cur.fetchone()
+    return bool(row and row["is_admin"])
+
+
+def submit_access_request(
+    db: psycopg.Connection,
+    user_id: str,
+    submission: "OnboardingSubmission",
+    *,
+    email_domain: str | None,
+    is_personal_email: bool | None,
+) -> None:
+    """Write the profile facts and create (or update) the pending request.
+
+    One transaction: a profile written without its request row would leave
+    the account computing as ``needs_onboarding`` with the form already
+    filled, and it would be shown again with everything blank.
+
+    Deliberately does NOT touch ``admitted_at``. Submitting is asking.
+
+    ``display_name`` is only SEEDED — ``coalesce`` leaves a name the user
+    chose alone, so filling this form never renames somebody.
+    """
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                insert into public.profiles
+                    (id, first_name, last_name, company_name, role, team_size,
+                     email_domain, is_personal_email, display_name)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (id) do update
+                   set first_name        = excluded.first_name,
+                       last_name         = excluded.last_name,
+                       company_name      = excluded.company_name,
+                       role              = excluded.role,
+                       team_size         = excluded.team_size,
+                       email_domain      = excluded.email_domain,
+                       is_personal_email = excluded.is_personal_email,
+                       display_name      = coalesce(public.profiles.display_name,
+                                                    excluded.display_name)
+                """,
+                (
+                    user_id,
+                    submission.first_name,
+                    submission.last_name,
+                    submission.company_name,
+                    submission.role,
+                    submission.team_size,
+                    email_domain,
+                    is_personal_email,
+                    f"{submission.first_name} {submission.last_name}",
+                ),
+            )
+            cur.execute(
+                """
+                insert into public.access_requests
+                    (user_id, status, use_case, compute_sources, heard_from)
+                values (%s, 'pending', %s, %s, %s)
+                on conflict (user_id) do update
+                   set use_case        = excluded.use_case,
+                       compute_sources = excluded.compute_sources,
+                       heard_from      = excluded.heard_from,
+                       requested_at    = now()
+                 where public.access_requests.status = 'pending'
+                """,
+                (
+                    user_id,
+                    submission.use_case,
+                    submission.compute_sources,
+                    submission.heard_from,
+                ),
+            )
+
+
+def record_pending_invite(
+    db: psycopg.Connection, user_id: str, *, pool_id: str, invited_by: str
+) -> None:
+    """Bank a workspace invite redeemed before approval.
+
+    Creates a stub request if the account has not onboarded yet, so an
+    invite clicked before the form is never lost. The stub is still
+    ``pending`` — banking an invite is not being admitted.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.access_requests
+                (user_id, status, pending_pool_id, invited_by)
+            values (%s, 'pending', %s, %s)
+            on conflict (user_id) do update
+               set pending_pool_id = excluded.pending_pool_id,
+                   invited_by      = excluded.invited_by
+             where public.access_requests.status = 'pending'
+            """,
+            (user_id, pool_id, invited_by),
+        )
+
+
+def approve_access_request(
+    db: psycopg.Connection, user_id: str, *, decided_by: str
+) -> bool:
+    """Admit the account and materialise any banked workspace join.
+
+    ONE TRANSACTION, deliberately: an approval that admits but silently
+    drops the queued pool join puts the person in a console with no pool,
+    which is indistinguishable from the invite never having worked.
+
+    Returns False for an account with no pending request — already decided,
+    or never asked — so the route can 404 rather than report a success that
+    changed nothing.
+    """
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                update public.access_requests
+                   set status = 'admitted', decided_at = now(), decided_by = %s
+                 where user_id = %s and status = 'pending'
+             returning pending_pool_id
+                """,
+                (decided_by, user_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return False
+
+            cur.execute(
+                "update public.profiles set admitted_at = coalesce(admitted_at, now()) "
+                " where id = %s",
+                (user_id,),
+            )
+
+            if row["pending_pool_id"] is not None:
+                cur.execute(
+                    """
+                    insert into public.pool_members (pool_id, user_id)
+                    values (%s, %s)
+                    on conflict (pool_id, user_id) do nothing
+                    """,
+                    (row["pending_pool_id"], user_id),
+                )
+    return True
+
+
+def decline_access_request(
+    db: psycopg.Connection, user_id: str, *, decided_by: str
+) -> bool:
+    """Refuse the request. ``admitted_at`` is left alone rather than
+    cleared: this route decides a pending request, and using it to revoke
+    an already-admitted account would be a different, unaudited action."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.access_requests
+               set status = 'declined', decided_at = now(), decided_by = %s
+             where user_id = %s and status = 'pending'
+            """,
+            (decided_by, user_id),
+        )
+        return cur.rowcount == 1
+
+
+def list_access_requests(
+    db: psycopg.Connection, *, status: str = "pending"
+) -> list[dict[str, Any]]:
+    """The queue. Joins ``auth.users`` for the address — possible only
+    because this API holds the service-role key; a browser cannot reach
+    that table, which is the entire reason this is a server route."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select ar.user_id, ar.status, ar.use_case, ar.compute_sources,
+                   ar.heard_from, ar.requested_at, ar.pending_pool_id,
+                   ar.invited_by,
+                   u.email,
+                   p.first_name, p.last_name, p.company_name, p.role,
+                   p.team_size, p.email_domain, p.is_personal_email,
+                   po.name as pending_pool_name,
+                   inv.display_name as invited_by_name
+              from public.access_requests ar
+              join public.profiles p on p.id = ar.user_id
+              left join auth.users u on u.id = ar.user_id
+              left join public.pools po on po.id = ar.pending_pool_id
+              left join public.profiles inv on inv.id = ar.invited_by
+             where ar.status = %s
+             order by ar.requested_at
+            """,
+            (status,),
+        )
+        return list(cur.fetchall())
 
 
 # ---------------------------------------------------------------------------
