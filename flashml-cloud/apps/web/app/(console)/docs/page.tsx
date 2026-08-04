@@ -128,6 +128,52 @@ flashml/bin/flashnode login --coordinator ${base}`}
                 </span>
               </p>
             </div>
+
+            <h3 className="mt-8 text-sm font-semibold text-foreground">
+              From a notebook or a rented pod, for a team pool
+            </h3>
+            <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
+              A Colab notebook or a rented pod (RunPod and similar) can&apos;t
+              nest a Docker daemon, so the steps above don&apos;t apply and{" "}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                flashnode doctor
+              </code>{" "}
+              has nothing to check there &mdash; skip it. This path is also
+              for a{" "}
+              <Link href="/pools" className="text-primary hover:underline">
+                team pool
+              </Link>{" "}
+              you were invited to, not the open pool above: run{" "}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                login
+              </code>{" "}
+              the same way, then start work with{" "}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                --runner trusted
+              </code>{" "}
+              instead of <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">argv</code>.
+            </p>
+            <CopyBlock
+              label="on the notebook or pod"
+              code={`pip install flashnode
+flashnode login --coordinator ${base}
+flashnode work --coordinator ${base} --runner trusted`}
+            />
+            <div className="mt-3 rounded-md border border-[var(--warning)]/30 bg-[var(--warning)]/[0.06] px-3 py-2.5">
+              <p className="max-w-prose text-sm leading-relaxed">
+                <span className="font-medium">
+                  {String.fromCharCode(0x2014)} <code className="font-mono text-xs">--runner trusted</code>{" "}
+                  runs jobs unsandboxed.
+                </span>{" "}
+                <span className="text-muted-foreground">
+                  No container, no network isolation &mdash; whatever the
+                  job&apos;s command does, it does directly on this machine.
+                  Only your pool&apos;s jobs are ever placed here; the
+                  coordinator refuses everything else, fail closed. Only run
+                  this for a pool you&apos;d hand a shell account to.
+                </span>
+              </p>
+            </div>
           </section>
 
           <hr className="rule-fade mt-12 border-0" />
