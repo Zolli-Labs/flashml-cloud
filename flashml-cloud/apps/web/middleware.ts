@@ -125,6 +125,15 @@ export async function middleware(request: NextRequest) {
   // Signed in and asking for /sign-in: send them to the console home, not
   // to /machines. Landing a returning user on a single resource list was a
   // stand-in for not having an overview page; there is one now.
+  //
+  // `/overview` is not itself a page any more — it resolves to a specific
+  // workspace (`WorkspaceResolver`, reading the last-visited-workspace
+  // cookie and the caller's pool membership) or to `/workspaces` if there
+  // is none. Middleware cannot make that call itself: it runs on the edge,
+  // before any component tree exists, with no access to the pool list
+  // `resolveWorkspace` needs — so it hands off to the one fixed URL that is
+  // always safe to redirect to, and lets client-side resolution pick the
+  // actual workspace.
   if (user && pathname === "/sign-in") {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = "/overview";
