@@ -5,14 +5,13 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   BookOpen,
-  CaretDown,
+  ChartBar,
+  Gear,
   GithubLogo,
   House,
   ListChecks,
   MagnifyingGlass,
-  Plus,
   Desktop,
-  DeviceMobile,
   ShieldCheck,
   SidebarSimple,
   UsersThree,
@@ -21,6 +20,7 @@ import {
 import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { Shortcuts } from "@/components/shell/Shortcuts";
+import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { Wordmark } from "@/components/brand/Mark";
 import { UserMenu } from "@/components/nav/UserMenu";
 import { DeclinedScreen } from "@/components/onboarding/DeclinedScreen";
@@ -28,6 +28,12 @@ import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
 import { PendingScreen } from "@/components/onboarding/PendingScreen";
 import { screenFor } from "@/lib/access-screen";
 import { useSessionUser } from "@/lib/session-user";
+import {
+  WORKSPACE_TABS,
+  workspaceIdFromPath,
+  workspacePath,
+  type WorkspaceTab,
+} from "@/lib/workspace-scope";
 import {
   NotAuthenticated,
   getMe,
@@ -38,38 +44,26 @@ import {
 // The console shell. A left rail rather than a top nav: a top bar is a
 // marketing pattern, and the rail gives the fleet state somewhere permanent
 // to live.
-//
-// Routes that do not exist yet are NOT listed. "Activity" and "Reliability"
-// are specced (P3) but depend on read endpoints that are not built, and a
-// nav item that leads nowhere is worse than a missing one.
-
-const GROUPS = [
-  {
-    label: null,
-    items: [{ href: "/overview", label: "Overview", icon: House }],
-  },
-  {
-    label: "Run",
-    items: [
-      { href: "/jobs", label: "Jobs", icon: ListChecks },
-      { href: "/submit", label: "Submit", icon: Plus },
-    ],
-  },
-  {
-    label: "Fleet",
-    items: [
-      { href: "/machines", label: "Machines", icon: Desktop },
-      { href: "/activate", label: "Activate", icon: DeviceMobile },
-      { href: "/pools", label: "Pools", icon: UsersThree },
-    ],
-  },
-] as const;
 
 const REPO = "https://github.com/Zolli-Labs/flashml";
 
-// The admin queue. Not in GROUPS because it is the one item whose presence
-// depends on the signed-in account rather than on the route table, and
-// `/admin` has no page of its own — the queue is the destination.
+// One entry per `WORKSPACE_TABS` slot, keyed by tab rather than listed, so
+// that adding a tab to `WORKSPACE_TABS` (lib/workspace-scope.ts) without
+// adding it here is a compile error, not a silently missing nav item.
+const WORKSPACE_TAB_ITEMS: Record<
+  WorkspaceTab,
+  { label: string; icon: React.ElementType }
+> = {
+  overview: { label: "Overview", icon: House },
+  jobs: { label: "Jobs", icon: ListChecks },
+  machines: { label: "Machines", icon: Desktop },
+  people: { label: "People", icon: UsersThree },
+  settings: { label: "Settings", icon: Gear },
+};
+
+// The admin queue. Rendered separately from the tab list below because its
+// presence depends on the signed-in account rather than on the route table,
+// and `/admin` has no page of its own — the queue is the destination.
 const ADMIN_ITEM = {
   href: "/admin/requests",
   label: "Admin",
@@ -100,33 +94,6 @@ function NavItem({
       <Icon size={17} weight={active ? "fill" : "regular"} />
       {label}
     </Link>
-  );
-}
-
-function Group({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(true);
-  return (
-    <div className="mt-5">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground"
-      >
-        {label}
-        <CaretDown
-          size={11}
-          weight="bold"
-          className={`transition-transform duration-200 ${open ? "" : "-rotate-90"}`}
-        />
-      </button>
-      {open && <div className="mt-1 space-y-0.5">{children}</div>}
-    </div>
   );
 }
 
@@ -194,6 +161,8 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
 
+  const currentWorkspace = workspaceIdFromPath(pathname);
+
   const rail = (
     <>
       <div className="flex h-14 items-center px-4">
@@ -210,6 +179,8 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           the wordmark, account, docs and source links stay. */}
       {screen === "console" && (
         <>
+          <WorkspaceSwitcher currentId={currentWorkspace} />
+
           {/* The ⌘K affordance. It was advertised in the rail design and
               never built; a shortcut hint that does nothing is worse than
               no hint. */}
@@ -237,21 +208,48 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <nav className="flex-1 overflow-y-auto px-3 pb-4">
-            {GROUPS.map((g, i) =>
-              g.label === null ? (
-                <div key={i} className="space-y-0.5">
-                  {g.items.map((it) => (
-                    <NavItem key={it.href} {...it} active={isActive(it.href)} />
-                  ))}
-                </div>
-              ) : (
-                <Group key={g.label} label={g.label}>
-                  {g.items.map((it) => (
-                    <NavItem key={it.href} {...it} active={isActive(it.href)} />
-                  ))}
-                </Group>
-              )
+            {currentWorkspace && (
+              <div className="space-y-0.5">
+                {WORKSPACE_TABS.map((tab) => {
+                  const { label, icon } = WORKSPACE_TAB_ITEMS[tab];
+                  const href = workspacePath(currentWorkspace, tab);
+                  return (
+                    <NavItem
+                      key={tab}
+                      href={href}
+                      label={label}
+                      icon={icon}
+                      active={isActive(href)}
+                    />
+                  );
+                })}
+              </div>
             )}
+
+            {/* Personal section: always shown, independent of whether the
+                current route is workspace-scoped. `/account/machines` and
+                `/account/earlier-jobs` are built by the next two tasks in
+                this plan, immediately after this one — a deliberate,
+                time-boxed exception to "a nav item leading nowhere is worse
+                than a missing one". They are the correct destinations, and
+                wiring the rail to them now is what makes them reachable the
+                moment they land. */}
+            <div className="mt-5 space-y-0.5">
+              <p className="label-caps px-2.5 pb-1">My account</p>
+              <NavItem
+                href="/account/machines"
+                label="My machines"
+                icon={Desktop}
+                active={isActive("/account/machines")}
+              />
+              <NavItem
+                href="/account/earlier-jobs"
+                label="Earlier jobs"
+                icon={ChartBar}
+                active={isActive("/account/earlier-jobs")}
+              />
+            </div>
+
             {/* Hidden until `GET /me` says otherwise, so a non-admin never
                 sees it flash. The API enforces admin on every queue route
                 regardless — this only decides whether the door is drawn. */}
