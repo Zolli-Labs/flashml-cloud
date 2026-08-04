@@ -1102,3 +1102,83 @@ def test_pool_machines_404s_for_non_member_and_for_a_malformed_id(make_client, d
     assert client.get(
         "/v1alpha1/pools/not-a-uuid/machines", headers=_auth(owner)
     ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# rename: owner-only, 404 doctrine, shared validation with create
+# ---------------------------------------------------------------------------
+
+
+def test_owner_can_rename_their_pool(make_client, db):
+    owner = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner, name="Untitled").json()
+
+    r = client.patch(
+        f"/v1alpha1/pools/{pool['id']}",
+        json={"name": "  Vision Lab  "},
+        headers=_auth(owner),
+    )
+
+    assert r.status_code == 200
+    assert r.json()["name"] == "Vision Lab", "the name is stored trimmed"
+    # get_pool_route returns pool fields flat (see
+    # test_create_list_get_round_trip), not nested under a "pool" key.
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}", headers=_auth(owner)
+    ).json()["name"] == "Vision Lab"
+
+
+def test_a_member_who_is_not_the_owner_cannot_rename(make_client, db):
+    """404, not 403 — the same answer a stranger gets. A 403 here would
+    confirm the pool is real to someone outside it."""
+    owner = _new_user(db)
+    member = _new_user(db)
+    stranger = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner, name="Vision Lab").json()
+    _add_member(db, pool["id"], member)
+
+    for who in (member, stranger):
+        r = client.patch(
+            f"/v1alpha1/pools/{pool['id']}",
+            json={"name": "Hijacked"},
+            headers=_auth(who),
+        )
+        assert r.status_code == 404
+        assert r.json()["detail"] == "unknown pool"
+
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}", headers=_auth(owner)
+    ).json()["name"] == "Vision Lab"
+
+
+def test_rename_rejects_empty_and_overlong_names(make_client, db):
+    """Same validation as create — the two routes must agree on what a
+    legal pool name is."""
+    owner = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+
+    for bad in ("", "   ", 42, None):
+        r = client.patch(
+            f"/v1alpha1/pools/{pool['id']}", json={"name": bad},
+            headers=_auth(owner),
+        )
+        assert r.status_code == 400, f"{bad!r} should be rejected"
+
+    r = client.patch(
+        f"/v1alpha1/pools/{pool['id']}", json={"name": "x" * 201},
+        headers=_auth(owner),
+    )
+    assert r.status_code == 400
+    assert "200 characters" in r.json()["detail"]
+
+
+def test_rename_404s_on_a_malformed_pool_id(make_client, db):
+    owner = _new_user(db)
+    client = make_client()
+    r = client.patch(
+        "/v1alpha1/pools/not-a-uuid", json={"name": "x"}, headers=_auth(owner)
+    )
+    assert r.status_code == 404

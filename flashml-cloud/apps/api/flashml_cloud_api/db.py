@@ -833,6 +833,25 @@ def create_pool(
     return row
 
 
+def rename_pool(
+    db: psycopg.Connection, *, pool_id: str, name: str
+) -> dict[str, Any] | None:
+    """Set a pool's name and return the updated row.
+
+    Takes no viewer or owner argument on purpose: authorization for a write
+    this consequential belongs at the route, checked against the pool's own
+    row before anything is written, the same shape ``revoke_pool_invites``
+    uses. None here therefore means the row vanished between that check and
+    this write — not that the caller was refused.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.pools set name = %s where id = %s returning *",
+            (name, pool_id),
+        )
+        return cur.fetchone()
+
+
 def list_pools_for_user(
     db: psycopg.Connection, user_id: str
 ) -> list[dict[str, Any]]:

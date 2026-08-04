@@ -499,6 +499,25 @@ async def _json_object(request: Request) -> dict[str, Any]:
     return parsed
 
 
+def _validated_pool_name(payload: dict[str, Any]) -> str:
+    """The one definition of a legal pool name, shared by the create and
+    rename routes.
+
+    They must agree — a name create would reject is a name rename must
+    reject too — and one function is what makes that structural instead of
+    two blocks that happen to match today.
+    """
+    raw = payload.get("name")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    name = raw.strip()
+    if len(name) > 200:
+        raise HTTPException(
+            status_code=400, detail="name is limited to 200 characters"
+        )
+    return name
+
+
 def _opt_str(value: Any, limit: int = 256) -> str | None:
     if not isinstance(value, str) or not value:
         return None
@@ -1030,14 +1049,7 @@ def create_cloud_app(
         db: psycopg.Connection = Depends(db_conn),
     ):
         payload = await _json_object(request)
-        raw_name = payload.get("name")
-        if not isinstance(raw_name, str) or not raw_name.strip():
-            raise HTTPException(status_code=400, detail="name is required")
-        name = raw_name.strip()
-        if len(name) > 200:
-            raise HTTPException(
-                status_code=400, detail="name is limited to 200 characters"
-            )
+        name = _validated_pool_name(payload)
         pool = dbmod.create_pool(db, name=name, owner_id=user_id)
         return _jsonable(pool)
 
@@ -1090,6 +1102,40 @@ def create_cloud_app(
         if pool is None:
             raise HTTPException(status_code=404, detail="unknown pool")
         return [_jsonable(m) for m in dbmod.list_pool_machines(db, pool_id)]
+
+    @app.patch("/v1alpha1/pools/{pool_id}", tags=["browser"])
+    async def rename_pool_route(
+        pool_id: str,
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Rename a pool. Owner only — checked here, against this pool's
+        row, before anything is written. 404, not 403, whether the pool does
+        not exist, the caller is a stranger to it, or the caller is a member
+        who simply isn't its owner: the same doctrine, and for the same
+        reason, as the three invite routes.
+
+        Not gated by ``admitted_user``, for the reason
+        ``create_pool_invite_route`` states: renaming a pool already requires
+        owning one, and owning one already required admission at create time.
+        """
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None or str(pool["owner_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="unknown pool")
+
+        # Ownership first, validation second: a non-owner must get the same
+        # 404 for a well-formed name as for a malformed one, or the error
+        # code itself tells them the pool is real.
+        name = _validated_pool_name(await _json_object(request))
+
+        updated = dbmod.rename_pool(db, pool_id=pool_id, name=name)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        return _jsonable(updated)
 
     @app.put(
         "/v1alpha1/pools/{pool_id}/machines/{machine_id}",
