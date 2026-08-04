@@ -57,6 +57,7 @@ from starlette.concurrency import run_in_threadpool
 
 from flashruntime.protocol.v1alpha1 import JobSpec, NodeHeartbeat, NodeRegistration
 
+from flashml_cloud_api import access
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
@@ -75,6 +76,7 @@ from flashml_cloud_api.compile import (
     compile_to_jobspec,
 )
 from flashml_cloud_api.db import Machine
+from flashml_cloud_api.emails import derive_email_facts
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import UnknownImage, resolve_image
 from flashml_cloud_api.preflight import preflight, safe_text
@@ -532,6 +534,17 @@ def _seg(value: str) -> str:
     return value
 
 
+def _uuid_or_400(value: str) -> str:
+    """A path segment that reaches a WHERE clause. psycopg parameterises it
+    safely, but a malformed uuid raises a DataError that would surface as a
+    500 — a 400 is the honest answer."""
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="invalid user id") from None
+    return value
+
+
 def _artifact_key(key: str) -> str:
     """A multi-segment artifact key, validated before it is interpolated
     into the forwarded URL.
@@ -716,13 +729,35 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ) -> str:
-        """current_user plus the alpha's invite gate. Reads (jobs, machines,
-        /me) stay open to un-admitted accounts — the console needs /me to
-        know to SHOW the enter-invite screen — but everything that creates
-        state requires admission. 403, not 404: unlike a resource id, the
-        gate's existence is not a secret."""
+        """current_user plus the account-admission gate. Reads (jobs,
+        machines, /me) stay open to un-admitted accounts — the console needs
+        /me to know which screen to show instead of the product — but
+        everything that creates state requires admission. Admission is no
+        longer invite-driven: an admin grants it by deciding the account's
+        access request (see ``access_state_for`` / 0009). 403, not 404:
+        unlike a resource id, the gate's existence is not a secret."""
         if not dbmod.profile_is_admitted(db, user_id):
-            raise HTTPException(status_code=403, detail="invite required")
+            raise HTTPException(status_code=403, detail="access not yet approved")
+        return user_id
+
+    def admin_user(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ) -> str:
+        """current_user plus the admin flag. 403, not 404, for the same
+        reason `admitted_user` gives: unlike a resource id, the gate's
+        existence is not a secret.
+
+        `is_admin` has no granting route anywhere in this API, deliberately.
+        It is set with one UPDATE against the owner's own row.
+
+        Admission is NOT admin: an ordinary account that is fully through
+        the gate still fails here, which is the whole point — the queue is
+        the only surface that grants product access, so anything less than
+        this would let any signed-in account admit itself.
+        """
+        if not dbmod.profile_is_admin(db, user_id):
+            raise HTTPException(status_code=403, detail="admin required")
         return user_id
 
     async def proxy(
@@ -879,17 +914,30 @@ def create_cloud_app(
     ):
         # Additive: every existing key from upsert_profile is unchanged, and
         # this is the one route an un-admitted account MUST be able to
-        # read — it is how the console learns to show the enter-invite
-        # screen instead of the product itself.
+        # read — it is how the console learns which screen to show instead
+        # of the product itself.
         profile = _jsonable(dbmod.upsert_profile(db, user_id))
         profile["admitted"] = dbmod.profile_is_admitted(db, user_id)
+        # `access` is the four-state version `admitted` cannot express:
+        # a signed-in account that has not filled the form is neither
+        # admitted nor refused.
+        profile["access"] = dbmod.access_state_for(db, user_id)
+        # Read-only, and the console's only source for whether to draw the
+        # admin queue's entry in its rail. Still granted by one manual SQL
+        # UPDATE and by nothing else: `PATCH /me` never writes it, and
+        # the `admin_user` dependency re-checks it on every queue route, so
+        # exposing it here changes what is *drawn*, never what is allowed.
+        profile["is_admin"] = dbmod.profile_is_admin(db, user_id)
         return profile
 
-    # Display name is the ONE profile field a user owns. Email and avatar come
-    # from the identity provider and are not ours to edit; github_login is set
-    # by enrolment; is_host/is_developer are roles, not preferences. So this
-    # takes exactly one field and ignores anything else in the body rather
-    # than letting a client hand us a role.
+    #: Fields a user owns. Everything absent from this map is either the
+    #: identity provider's (email, avatar), written by enrolment
+    #: (github_login), or a role rather than a preference (is_host,
+    #: is_developer, is_admin, admitted_at). A client handing us one of
+    #: those is not rejected with an error naming it; it is never read.
+    _PATCHABLE_TEXT = {"first_name": 80, "last_name": 80, "company_name": 160}
+    _PATCHABLE_ENUM = {"role": access.ROLES, "team_size": access.TEAM_SIZES}
+
     @app.patch("/v1alpha1/me", tags=["browser"])
     async def update_me(
         request: Request,
@@ -897,13 +945,13 @@ def create_cloud_app(
         db: psycopg.Connection = Depends(db_conn),
     ):
         payload = await _json_object(request)
+        fields: dict[str, str] = {}
+
         raw = payload.get("display_name")
         if raw is not None and not isinstance(raw, str):
             raise HTTPException(
                 status_code=400, detail="display_name must be a string or null"
             )
-
-        name: str | None = None
         if isinstance(raw, str):
             name = raw.strip()
             if len(name) > 80:
@@ -918,8 +966,133 @@ def create_cloud_app(
                 raise HTTPException(
                     status_code=400, detail="display_name cannot be empty"
                 )
+            fields["display_name"] = name
 
-        return _jsonable(dbmod.upsert_profile(db, user_id, display_name=name))
+        for field, cap in _PATCHABLE_TEXT.items():
+            value = payload.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise HTTPException(status_code=400, detail=f"{field} must be a string")
+            trimmed = value.strip()
+            if not trimmed:
+                raise HTTPException(status_code=400, detail=f"{field} cannot be empty")
+            if len(trimmed) > cap:
+                raise HTTPException(
+                    status_code=400, detail=f"{field} is limited to {cap} characters"
+                )
+            fields[field] = trimmed
+
+        for field, allowed in _PATCHABLE_ENUM.items():
+            value = payload.get(field)
+            if value is None:
+                continue
+            if value not in allowed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field} must be one of: {', '.join(sorted(allowed))}",
+                )
+            fields[field] = value
+
+        return _jsonable(dbmod.update_profile_fields(db, user_id, **fields))
+
+    # `current_user`, not `admitted_user`: this route is how an un-admitted
+    # account asks to be admitted. Gating it behind admission would make the
+    # only way in require already being in.
+    @app.post("/v1alpha1/access-request", tags=["browser"])
+    async def create_access_request(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # A POSITIVE allow-list, not a denylist of decided states: only
+        # "needs_onboarding" (never asked) and "pending" (already asked,
+        # not yet decided — resubmitting to edit the answer is allowed)
+        # may proceed. `access_state_for` is the single source of truth for
+        # this account's state, and any state this route doesn't
+        # explicitly recognise as submittable — "admitted", "declined", or
+        # one added later — must fail closed (refused) rather than open
+        # (silently allowed through), which a denylist of just
+        # ("admitted", "declined") would not guarantee.
+        #
+        # This also closes a real defect: `submit_access_request`'s
+        # bare-INSERT branch (the first time an account ever submits) has
+        # no `where status = 'pending'` guard, because there is no existing
+        # row for it to guard. An account carrying `admitted_at` with NO
+        # access_requests row — exactly what a hand-run
+        # `UPDATE public.profiles SET admitted_at = now()` produces — would
+        # otherwise sail through that bare INSERT and manufacture a fresh
+        # `pending` row for an account that is already admitted.
+        state = dbmod.access_state_for(db, user_id)
+        if state not in ("needs_onboarding", "pending"):
+            # Re-submitting after a decision would reset it to pending —
+            # silently un-deciding something an admin decided. An admitted
+            # account edits these fields through PATCH /v1alpha1/me.
+            raise HTTPException(
+                status_code=409, detail="this account's access is already decided"
+            )
+
+        payload = await _json_object(request)
+        try:
+            submission = access.parse_submission(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        # Derived, never accepted from the body: the domain is a fact about
+        # the verified signup address, not a claim the client gets to make.
+        domain, personal = derive_email_facts(dbmod.email_for_user(db, user_id))
+
+        dbmod.upsert_profile(db, user_id)  # the FK target must exist
+        dbmod.submit_access_request(
+            db, user_id, submission,
+            email_domain=domain, is_personal_email=personal,
+        )
+        return {"access": dbmod.access_state_for(db, user_id)}
+
+    # -- the admin queue ----------------------------------------------------
+    #
+    # EVERY route below sits on ``admin_user``. One of them left on
+    # ``current_user`` would not be a smaller bug than three: this is the
+    # only surface in the system that grants product access, so a single
+    # ungated write is a privilege escalation for every signed-in account.
+
+    @app.get("/v1alpha1/admin/access-requests", tags=["admin"])
+    async def list_requests(
+        status: str = "pending",
+        _admin: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # Validated HERE, because `list_access_requests` does not check its
+        # argument against the CHECK constraint — an unknown status matches
+        # no row and returns [], which renders as "nobody is waiting". A
+        # typo must not look like an empty queue.
+        if status not in ("pending", "admitted", "declined"):
+            raise HTTPException(status_code=400, detail="unknown status")
+        return [_jsonable(r) for r in dbmod.list_access_requests(db, status=status)]
+
+    @app.post("/v1alpha1/admin/access-requests/{user_id}/approve", tags=["admin"])
+    async def approve_request(
+        user_id: str,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        _uuid_or_400(user_id)
+        # 404, not 200, when nothing was pending: reporting success for a
+        # call that changed nothing is how a queue silently stops working.
+        if not dbmod.approve_access_request(db, user_id, decided_by=admin_id):
+            raise HTTPException(status_code=404, detail="no pending request")
+        return {"user_id": user_id, "status": "admitted"}
+
+    @app.post("/v1alpha1/admin/access-requests/{user_id}/decline", tags=["admin"])
+    async def decline_request(
+        user_id: str,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        _uuid_or_400(user_id)
+        if not dbmod.decline_access_request(db, user_id, decided_by=admin_id):
+            raise HTTPException(status_code=404, detail="no pending request")
+        return {"user_id": user_id, "status": "declined"}
 
     @app.get("/v1alpha1/machines", tags=["browser"])
     async def list_machines(
@@ -1318,17 +1491,25 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The admission bootstrap itself — deliberately on ``current_user``,
-        not ``admitted_user``: the entire point of this route is that an
-        un-admitted, possibly brand-new account can call it.
+        """Redeem a workspace invite — deliberately on ``current_user``, not
+        ``admitted_user``: a not-yet-admitted account is exactly who calls
+        this, and gating it behind admission would make the only path in
+        require already being in.
+
+        Accepting no longer admits (0009). An admitted caller joins the
+        pool outright; anybody else has the join banked on their access
+        request and lands in the pool when an admin approves them. That is
+        what ``joined`` reports, so the console can tell "you are in the
+        workspace" from "you will be, once you are approved".
         """
         payload = await _json_object(request)
         token = payload.get("token")
         if not isinstance(token, str) or not token:
             raise HTTPException(status_code=400, detail="token required")
         # The account may be signing in for the very first time — upsert
-        # the profile row before consuming the invite, since consume_pool_
-        # invite's membership/admission writes both carry a FK to it.
+        # the profile row before consuming the invite. Both of consume_pool_
+        # invite's outcomes carry a FK to it: pool_members.user_id when the
+        # join lands, access_requests.user_id when it is only banked.
         dbmod.upsert_profile(db, user_id)
         result = dbmod.consume_pool_invite(
             db, token_hash=hash_invite_token(token), user_id=user_id
@@ -1337,7 +1518,11 @@ def create_cloud_app(
             # Unknown, expired, and exhausted all land here, indistinguishably
             # — same fold consume_pool_invite itself documents.
             raise HTTPException(status_code=404, detail="invalid or expired invite")
-        return {"pool_id": str(result["pool_id"]), "name": result["name"]}
+        return {
+            "pool_id": str(result["pool_id"]),
+            "name": result["name"],
+            "joined": result["admitted"],
+        }
 
     # -- browser-facing: job ownership --------------------------------------
     #

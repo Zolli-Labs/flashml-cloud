@@ -85,3 +85,15 @@ select p.id, 'admitted', p.admitted_at
   from public.profiles p
  where p.admitted_at is not null
 on conflict (user_id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- 0007's comment on pool_invites is now wrong, and a wrong comment on a
+-- security-relevant table is worse than none: it told the next reader that
+-- redeeming an invite ADMITS. It no longer does. Corrected here rather than
+-- by editing 0007, which has been applied and is checksummed.
+-- ---------------------------------------------------------------------------
+comment on table public.pool_invites is
+    'One invite link: sha256 of the raw token (raw returned exactly once, '
+    'like machine tokens). Consuming an invite joins the pool, or banks the '
+    'join on public.access_requests when the account is not yet admitted. '
+    'It no longer admits — that is an admin decision (0009).';

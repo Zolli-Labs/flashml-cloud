@@ -222,7 +222,8 @@ def _new_user(db, *, admitted: bool = True) -> str:
     what most fixtures here are meant to model. ``admitted=False`` is the
     one deliberate exception, for the handful of tests whose point IS the
     gate (see ``test_pools_api.py`` and
-    ``test_db_pools.test_consume_pool_invite_admits_the_profile``).
+    ``test_db_pools.test_consume_pool_invite_no_longer_admits_the_profile``
+    — renamed and inverted when 0009 took admission away from invites).
     """
     user_id = str(uuid.uuid4())
     with db.cursor() as cur:

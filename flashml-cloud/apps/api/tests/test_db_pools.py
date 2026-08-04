@@ -328,9 +328,19 @@ def test_consume_pool_invite_unknown_token_is_none(db):
     ) is None
 
 
-def test_consume_pool_invite_admits_the_profile(db):
-    """Consuming an invite is the alpha gate's *only* other door besides
-    being grandfathered at migration time — see 0007's header."""
+def test_consume_pool_invite_no_longer_admits_the_profile(db):
+    """INVERTED BY 0009, deliberately. This test used to be
+    ``test_consume_pool_invite_admits_the_profile`` and asserted that
+    consuming an invite is the alpha gate's *only* other door besides being
+    grandfathered at migration time — 0007's header said exactly that.
+
+    Access is now an account property an admin decides
+    (``approve_access_request``) and pool membership is a workspace
+    property its owner decides, so a redemption by an un-admitted account
+    leaves ``admitted_at`` alone and BANKS the join instead of making it.
+    See docs/superpowers/specs/
+    2026-08-04-signup-profile-and-access-requests-design.md.
+    """
     owner = _new_user(db)
     # Unadmitted on purpose: `_new_user` marks its profile admitted by
     # default now (Task 10 — most fixtures across the suite need that), so
@@ -345,7 +355,17 @@ def test_consume_pool_invite_admits_the_profile(db):
     result = dbmod.consume_pool_invite(db, token_hash=token_hash, user_id=joiner)
 
     assert result is not None
-    assert dbmod.profile_is_admitted(db, joiner) is True
+    assert result["admitted"] is False
+    assert dbmod.profile_is_admitted(db, joiner) is False
+    # Banked, not lost: no membership yet, but the pool is on the request
+    # for `approve_access_request` to materialise.
+    assert dbmod.is_pool_member(db, pool_id, joiner) is False
+    with db.cursor() as cur:
+        cur.execute(
+            "select pending_pool_id from public.access_requests where user_id = %s",
+            (joiner,),
+        )
+        assert str(cur.fetchone()["pending_pool_id"]) == str(pool_id)
 
 
 def test_consume_pool_invite_multi_use_is_exhausted_after_its_count(db):

@@ -45,7 +45,7 @@
 | `apps/web/components/shell/InviteGate.tsx` | **Delete.** |
 | `apps/web/app/(console)/admin/requests/page.tsx` | **Create.** The queue. |
 | `apps/web/app/(console)/account/page.tsx` | **Modify.** New editable fields. |
-| `apps/web/app/(console)/pools/page.tsx` | **Modify.** "Join with a code". |
+| `apps/web/app/(console)/pools/join/page.tsx` | **Modify.** "Join with a code" lives HERE, not `/pools` — see Task 13 Step 2's 2026-08-04 amendment. `/pools` is unreachable for un-admitted accounts. |
 | `apps/web/app/(console)/pools/join/page.tsx` | **Modify.** Pending-account copy. |
 
 ---
@@ -3122,12 +3122,30 @@ they are deliberately never prompted — so the empty state must invite rather
 than nag. When every field is null, show the help line
 `You signed up before we asked for this. Filling it in helps us build the right thing.`
 
-- [ ] **Step 2: Add "Join with a code" to the pools page**
+- [ ] **Step 2: Add "Join with a code" to the INVITE LANDING PAGE, not `/pools`**
 
-In `apps/web/app/(console)/pools/page.tsx`, add an input + button that calls
-`acceptInvite(tokenFromInput(value))` using the existing
-`@/lib/invite-token` helper — this is the affordance `InviteGate` used to
-own, and `tokenFromInput` already accepts either a full link or a bare code.
+**AMENDED 2026-08-04 after Task 11's review — the original instruction was
+wrong and would have shipped a dead end.** It said to put this box on
+`/pools`. But `screenFor("pending", "/pools")` returns `"pending"`, so the
+shell replaces that page with `PendingScreen` for every un-admitted account
+— which is precisely the population that needs to paste a code. Under the
+old code those accounts got `InviteGate`'s working paste box; sending them
+to `/pools` gives them a waiting screen instead, and there is then NO path
+by which a pending account can redeem a code it typed rather than clicked.
+
+Put it on **`app/(console)/pools/join/page.tsx`** instead. That route is
+`INVITE_ROUTE`, and `screenFor` returns `"console"` for it in every access
+state — it is the one page guaranteed reachable by the people who need it.
+Render the paste box as the no-token fallback, replacing the `LinkProblem`
+card Task 11 added as a compile fix, and keep it available on the
+invalid/expired-token path too.
+
+Add an input + button that calls `acceptInvite(tokenFromInput(value))` using
+the existing `@/lib/invite-token` helper — this is the affordance
+`InviteGate` used to own, and `tokenFromInput` already accepts either a full
+link or a bare code.
+
+Do NOT add it to `/pools` as well. One affordance, on the reachable route.
 
 On success: `toast.success` naming the pool, then reload the list. On
 `NotFound`: `That invite link isn't valid, or it's already been used.` —

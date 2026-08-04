@@ -17,13 +17,19 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from flashml_cloud_api.settings import Settings
+
+if TYPE_CHECKING:
+    # Type-only: this data layer writes what the validator already accepted
+    # and must not depend on it at runtime — the import direction stays
+    # route -> validation -> db, never db -> validation.
+    from flashml_cloud_api.access import OnboardingSubmission
 
 
 def connect(settings: Settings) -> psycopg.Connection:
@@ -84,13 +90,328 @@ def upsert_profile(
                set display_name = coalesce(excluded.display_name,
                                            public.profiles.display_name)
             returning id, display_name, github_login, is_host, is_developer,
-                      created_at
+                      created_at, first_name, last_name, company_name, role,
+                      team_size, email_domain, is_personal_email
             """,
             (user_id, display_name),
         )
         row = cur.fetchone()
         assert row is not None
         return row
+
+
+def update_profile_fields(
+    db: psycopg.Connection, user_id: str, **fields: str
+) -> dict[str, Any]:
+    """Set exactly the named columns and return the whole row.
+
+    The caller decides which fields are writable; this refuses to be a
+    generic column setter by whitelisting here as well, so a future caller
+    cannot turn it into one by accident.
+    """
+    allowed = {
+        "display_name", "first_name", "last_name", "company_name",
+        "role", "team_size",
+    }
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"not a writable profile field: {', '.join(sorted(unknown))}")
+    if not fields:
+        return upsert_profile(db, user_id)
+
+    assignments = ", ".join(f"{name} = %s" for name in fields)
+    with db.cursor() as cur:
+        upsert_profile(db, user_id)  # guarantee the row exists
+        cur.execute(
+            f"""
+            update public.profiles set {assignments}
+             where id = %s
+         returning id, display_name, github_login, is_host, is_developer,
+                   created_at, first_name, last_name, company_name, role,
+                   team_size, email_domain, is_personal_email
+            """,
+            (*fields.values(), user_id),
+        )
+        return cur.fetchone()
+
+
+# ---------------------------------------------------------------------------
+# access requests
+#
+# `admitted_at` on profiles remains the switch every gate reads. This table
+# is the paperwork behind it: who asked, what they said, who decided.
+# ---------------------------------------------------------------------------
+
+
+def access_state_for(db: psycopg.Connection, user_id: str) -> str:
+    """``needs_onboarding`` | ``pending`` | ``admitted`` | ``declined``.
+
+    DERIVED, never stored.
+
+    Two sources, in order. The request row wins when there is one. With no
+    row, ``admitted_at`` decides: 0009's backfill covers every account that
+    existed WHEN IT RAN, but an account admitted afterwards by any other
+    path — the owner running one UPDATE, which is exactly how `is_admin` is
+    granted — would otherwise compute as ``needs_onboarding`` and be shown
+    the onboarding form despite already being admitted. Falling back to the
+    flag every gate already reads keeps the two from disagreeing.
+
+    ONE ROW IS NOT A REQUEST. ``record_pending_invite`` stubs a ``pending``
+    row for an account that redeemed a workspace invite before it ever saw
+    the form — the primary invited-teammate path. Reporting that stub as
+    ``pending`` would park a brand-new account on "we'll get back to you"
+    forever: it is never offered the form, and its admin-queue row renders
+    with a NULL name, company, role, and use case. A NULL ``use_case`` is
+    the reliable marker of a stub, because a submitted row cannot have one
+    — ``parse_submission`` rejects an empty ``use_case`` before
+    ``submit_access_request`` is ever reached. Only ``pending`` is treated
+    this way: a decided row says what an admin decided, and 0009's backfill
+    writes ``admitted`` rows with no ``use_case`` on purpose.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select status, use_case from public.access_requests where user_id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            if row["status"] == "pending" and row["use_case"] is None:
+                return "needs_onboarding"
+            return row["status"]
+        # No request on file. An account already carrying admitted_at is
+        # admitted; anything else has not asked yet.
+        cur.execute(
+            "select admitted_at from public.profiles where id = %s", (user_id,)
+        )
+        profile = cur.fetchone()
+    return "admitted" if profile and profile["admitted_at"] else "needs_onboarding"
+
+
+def email_for_user(db: psycopg.Connection, user_id: str) -> str | None:
+    """The signup address, from ``auth.users``.
+
+    Read here rather than from the JWT: the access token's ``email`` claim
+    is not guaranteed present, and this API already holds the service-role
+    key that can see the table. Never written — that schema is Supabase's.
+    """
+    with db.cursor() as cur:
+        cur.execute("select email from auth.users where id = %s", (user_id,))
+        row = cur.fetchone()
+    return row["email"] if row else None
+
+
+def profile_is_admin(db: psycopg.Connection, user_id: str) -> bool:
+    with db.cursor() as cur:
+        cur.execute("select is_admin from public.profiles where id = %s", (user_id,))
+        row = cur.fetchone()
+    return bool(row and row["is_admin"])
+
+
+def submit_access_request(
+    db: psycopg.Connection,
+    user_id: str,
+    submission: "OnboardingSubmission",
+    *,
+    email_domain: str | None,
+    is_personal_email: bool | None,
+) -> None:
+    """Write the profile facts and create (or update) the pending request.
+
+    One transaction: a profile written without its request row would leave
+    the account computing as ``needs_onboarding`` with the form already
+    filled, and it would be shown again with everything blank.
+
+    Deliberately does NOT touch ``admitted_at``. Submitting is asking.
+
+    ``display_name`` is only SEEDED — ``coalesce`` leaves a name the user
+    chose alone, so filling this form never renames somebody.
+    """
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                insert into public.profiles
+                    (id, first_name, last_name, company_name, role, team_size,
+                     email_domain, is_personal_email, display_name)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (id) do update
+                   set first_name        = excluded.first_name,
+                       last_name         = excluded.last_name,
+                       company_name      = excluded.company_name,
+                       role              = excluded.role,
+                       team_size         = excluded.team_size,
+                       email_domain      = excluded.email_domain,
+                       is_personal_email = excluded.is_personal_email,
+                       display_name      = coalesce(public.profiles.display_name,
+                                                    excluded.display_name)
+                """,
+                (
+                    user_id,
+                    submission.first_name,
+                    submission.last_name,
+                    submission.company_name,
+                    submission.role,
+                    submission.team_size,
+                    email_domain,
+                    is_personal_email,
+                    f"{submission.first_name} {submission.last_name}",
+                ),
+            )
+            cur.execute(
+                """
+                insert into public.access_requests
+                    (user_id, status, use_case, compute_sources, heard_from)
+                values (%s, 'pending', %s, %s, %s)
+                on conflict (user_id) do update
+                   set use_case        = excluded.use_case,
+                       compute_sources = excluded.compute_sources,
+                       heard_from      = excluded.heard_from,
+                       requested_at    = now()
+                 where public.access_requests.status = 'pending'
+                """,
+                (
+                    user_id,
+                    submission.use_case,
+                    submission.compute_sources,
+                    submission.heard_from,
+                ),
+            )
+
+
+def record_pending_invite(
+    db: psycopg.Connection, user_id: str, *, pool_id: str, invited_by: str
+) -> bool:
+    """Bank a workspace invite redeemed before approval.
+
+    Creates a stub request if the account has not onboarded yet, so an
+    invite clicked before the form is never lost. The stub is still
+    ``pending`` — banking an invite is not being admitted.
+
+    "Stub" covers a missing ``access_requests`` row only. THE CALLER MUST
+    ENSURE THE ``public.profiles`` ROW EXISTS FIRST: this table's
+    ``user_id`` is a foreign key to ``public.profiles(id)``, so calling
+    this for an account with no profile raises ``ForeignKeyViolation``
+    rather than stubbing anything. Route it after ``upsert_profile``.
+
+    Returns whether a row was actually banked. The upsert's
+    ``where status = 'pending'`` refuses to touch a DECIDED request, which
+    is right — a declined account must not re-queue itself by clicking a
+    link — but it refuses SILENTLY, and the caller has already spent one
+    use of somebody else's invite by the time it gets here. So the outcome
+    is reported rather than swallowed: ``consume_pool_invite`` turns False
+    into a refusal that rolls the decrement back.
+
+    Performs NO authorization on ``pool_id`` or ``invited_by``, deliberately
+    — the invite TOKEN is the authorization, and the caller verifies it.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.access_requests
+                (user_id, status, pending_pool_id, invited_by)
+            values (%s, 'pending', %s, %s)
+            on conflict (user_id) do update
+               set pending_pool_id = excluded.pending_pool_id,
+                   invited_by      = excluded.invited_by
+             where public.access_requests.status = 'pending'
+            """,
+            (user_id, pool_id, invited_by),
+        )
+        return cur.rowcount == 1
+
+
+def approve_access_request(
+    db: psycopg.Connection, user_id: str, *, decided_by: str
+) -> bool:
+    """Admit the account and materialise any banked workspace join.
+
+    ONE TRANSACTION, deliberately: an approval that admits but silently
+    drops the queued pool join puts the person in a console with no pool,
+    which is indistinguishable from the invite never having worked.
+
+    Returns False for an account with no pending request — already decided,
+    or never asked — so the route can 404 rather than report a success that
+    changed nothing.
+    """
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                update public.access_requests
+                   set status = 'admitted', decided_at = now(), decided_by = %s
+                 where user_id = %s and status = 'pending'
+             returning pending_pool_id
+                """,
+                (decided_by, user_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return False
+
+            cur.execute(
+                "update public.profiles set admitted_at = coalesce(admitted_at, now()) "
+                " where id = %s",
+                (user_id,),
+            )
+
+            if row["pending_pool_id"] is not None:
+                cur.execute(
+                    """
+                    insert into public.pool_members (pool_id, user_id)
+                    values (%s, %s)
+                    on conflict (pool_id, user_id) do nothing
+                    """,
+                    (row["pending_pool_id"], user_id),
+                )
+    return True
+
+
+def decline_access_request(
+    db: psycopg.Connection, user_id: str, *, decided_by: str
+) -> bool:
+    """Refuse the request. ``admitted_at`` is left alone rather than
+    cleared: this route decides a pending request, and using it to revoke
+    an already-admitted account would be a different, unaudited action."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.access_requests
+               set status = 'declined', decided_at = now(), decided_by = %s
+             where user_id = %s and status = 'pending'
+            """,
+            (decided_by, user_id),
+        )
+        return cur.rowcount == 1
+
+
+def list_access_requests(
+    db: psycopg.Connection, *, status: str = "pending"
+) -> list[dict[str, Any]]:
+    """The queue. Joins ``auth.users`` for the address — possible only
+    because this API holds the service-role key; a browser cannot reach
+    that table, which is the entire reason this is a server route."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select ar.user_id, ar.status, ar.use_case, ar.compute_sources,
+                   ar.heard_from, ar.requested_at, ar.pending_pool_id,
+                   ar.invited_by,
+                   u.email,
+                   p.first_name, p.last_name, p.company_name, p.role,
+                   p.team_size, p.email_domain, p.is_personal_email,
+                   po.name as pending_pool_name,
+                   inv.display_name as invited_by_name
+              from public.access_requests ar
+              join public.profiles p on p.id = ar.user_id
+              left join auth.users u on u.id = ar.user_id
+              left join public.pools po on po.id = ar.pending_pool_id
+              left join public.profiles inv on inv.id = ar.invited_by
+             where ar.status = %s
+             order by ar.requested_at
+            """,
+            (status,),
+        )
+        return list(cur.fetchall())
 
 
 # ---------------------------------------------------------------------------
@@ -1136,15 +1457,31 @@ def create_pool_invite(
 def consume_pool_invite(
     db: psycopg.Connection, *, token_hash: str, user_id: str
 ) -> dict[str, Any] | None:
-    """Redeem an invite: decrement its use, join the pool, admit the
-    profile — or refuse all three at once.
+    """Redeem an invite: decrement its use, then either join the pool or
+    bank the join for later — or refuse both at once.
 
-    Returns ``{"pool_id", "name"}`` on success, or ``None`` for every
-    do-not-admit case together (unknown token, expired, already exhausted)
-    without distinguishing which — the same reason
-    ``claim_attempt_credit`` and ``claim_device_code_for_redemption`` fold
-    their refusal cases into one ``None``: telling a guesser *which* reason
-    an invite failed for is a small oracle for free.
+    ADMISSION IS NO LONGER THIS FUNCTION'S BUSINESS (0009). It used to
+    write ``admitted_at`` as well, which made a workspace invite the
+    product's only front door and left an uninvited signup with nothing to
+    ask for. Access is now an account property an admin decides, in
+    ``approve_access_request``; pool membership stays a workspace property
+    its owner decides. So:
+
+    * an already-admitted caller joins ``pool_members`` immediately,
+      exactly as before;
+    * anyone else has the join BANKED on their access request by
+      ``record_pending_invite``, and ``approve_access_request``
+      materialises it the moment somebody approves them.
+
+    Returns ``{"pool_id", "name", "created_by", "admitted"}`` on success —
+    ``admitted`` is what the caller ALREADY WAS, and therefore says which
+    of the two happened — or ``None`` for every refusal case together
+    (unknown token, expired, already exhausted, and an account whose
+    request is already decided) without distinguishing which — the same
+    reason ``claim_attempt_credit`` and ``claim_device_code_for_redemption``
+    fold their refusal cases into one ``None``: telling a guesser *which*
+    reason an invite failed for is a small oracle for free. Adding the
+    last case opens nothing: a caller already knows their own access state.
 
     The decrement is one ``UPDATE ... WHERE ... RETURNING`` — the
     ``claim_attempt_credit`` idiom — so that two redemptions of the same
@@ -1152,13 +1489,20 @@ def consume_pool_invite(
     ``UPDATE`` can match ``uses_remaining > 0`` before the other sees the
     decremented value.
 
-    Decrement, membership, and admission are one transaction
-    (``db.transaction()``, explicit despite this connection being
-    autocommit — psycopg supports that). A membership joined without the
-    matching admission would leave a still-gated account sitting inside a
-    team it cannot otherwise reach; a decrement that "succeeded" without
-    either would burn a one-use invite for nothing. All three commit
-    together or none do.
+    A use is spent when the join is banked, and DECLINING THAT PERSON
+    AFTERWARDS does not hand it back. That specific cost is deliberate:
+    holding the use until approval would let a single link be claimed by an
+    unlimited number of pending accounts. It does NOT extend to a request
+    that was ALREADY decided before the click — there the refusal exists
+    up front, the join could never be materialised
+    (``approve_access_request`` requires ``status = 'pending'``), and the
+    cost would fall on an uninvolved pool owner. So when there is nothing
+    to bank on, this refuses and rolls the decrement back.
+
+    Decrement and join-or-bank are one transaction (``db.transaction()``,
+    explicit despite this connection being autocommit — psycopg supports
+    that). A decrement that "succeeded" while neither the membership nor
+    the banked row landed would burn a one-use invite for nothing.
     """
     with db.transaction():
         with db.cursor() as cur:
@@ -1169,7 +1513,7 @@ def consume_pool_invite(
                  where token_hash = %s
                    and expires_at > now()
                    and uses_remaining > 0
-                returning pool_id
+                returning pool_id, created_by
                 """,
                 (token_hash,),
             )
@@ -1177,30 +1521,57 @@ def consume_pool_invite(
             if row is None:
                 return None
             pool_id = row["pool_id"]
+            created_by = row["created_by"]
 
             cur.execute(
-                """
-                insert into public.pool_members (pool_id, user_id)
-                values (%s, %s)
-                on conflict do nothing
-                """,
-                (pool_id, user_id),
-            )
-            cur.execute(
-                """
-                update public.profiles
-                   set admitted_at = coalesce(admitted_at, now())
-                 where id = %s
-                """,
+                "select admitted_at from public.profiles where id = %s",
                 (user_id,),
             )
+            profile = cur.fetchone()
+            admitted = bool(profile and profile["admitted_at"])
+
+            if admitted:
+                cur.execute(
+                    """
+                    insert into public.pool_members (pool_id, user_id)
+                    values (%s, %s)
+                    on conflict do nothing
+                    """,
+                    (pool_id, user_id),
+                )
+            else:
+                # The invite TOKEN is the authorization for this pool_id;
+                # it was verified by the UPDATE above, which is why
+                # record_pending_invite deliberately checks nothing itself.
+                if not record_pending_invite(
+                    db, user_id, pool_id=pool_id, invited_by=created_by
+                ):
+                    # Nothing to bank the join on — the account's request is
+                    # already decided, which in practice means DECLINED (an
+                    # admitted one took the branch above). Undo everything,
+                    # decrement included, so a terminal account cannot spend
+                    # a use of somebody else's link on a join that can never
+                    # be materialised, and cannot be told "you'll join as
+                    # soon as you're approved" when no approval can come.
+                    # psycopg.Rollback unwinds the block and is swallowed by
+                    # it; execution resumes after the `with`.
+                    raise psycopg.Rollback
+
             cur.execute(
                 "select name from public.pools where id = %s",
                 (pool_id,),
             )
             pool_row = cur.fetchone()
             assert pool_row is not None
-            return {"pool_id": pool_id, "name": pool_row["name"]}
+            return {
+                "pool_id": pool_id,
+                "name": pool_row["name"],
+                "created_by": created_by,
+                "admitted": admitted,
+            }
+    # Reached only via the psycopg.Rollback above: the use was refunded, and
+    # the caller gets the same opaque refusal an invalid token would give.
+    return None
 
 
 def fetch_outstanding_invite(db: psycopg.Connection, pool_id: str) -> dict[str, Any] | None:

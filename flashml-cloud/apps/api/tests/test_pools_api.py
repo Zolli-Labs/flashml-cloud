@@ -6,9 +6,10 @@ routes built on top of Task 9's db layer.
 (404, never 403, for a pool that exists but is not yours — same doctrine as
 every other resource in this API); ``POST /v1alpha1/pools/{id}/invites``
 mints a one-time link only the pool's OWNER may create; ``POST
-/v1alpha1/invites/accept`` is the admission bootstrap itself, so it runs on
-``current_user`` rather than ``admitted_user`` — the whole point is that an
-un-admitted account can use it.
+/v1alpha1/invites/accept`` redeems one, and runs on ``current_user`` rather
+than ``admitted_user`` — a not-yet-admitted account is exactly who calls it.
+Since 0009 it joins a WORKSPACE and nothing more: an un-admitted caller's
+join is banked on their access request until an admin approves them.
 
 Runs against the same migrated Postgres as the rest of the suite, reusing
 ``test_jobs_from_repo``'s fixtures exactly as ``test_profile.py`` does.
@@ -799,13 +800,23 @@ def test_regenerate_after_revoke_mints_a_working_link(make_client, db):
 
 
 # ---------------------------------------------------------------------------
-# accept: the admission bootstrap
+# accept: joining a workspace (which is no longer being admitted)
 # ---------------------------------------------------------------------------
 
 
-def test_accepting_a_valid_invite_admits_and_joins_and_me_reflects_it(
+def test_accepting_a_valid_invite_banks_the_join_and_does_not_admit(
     make_client, db
 ):
+    """INVERTED BY 0009, deliberately. This was
+    ``test_accepting_a_valid_invite_admits_and_joins_and_me_reflects_it``
+    and asserted that accepting flipped ``/me``'s ``admitted`` to True and
+    seated the caller in the pool immediately. Accepting an invite is now
+    joining a WORKSPACE, not being let into the product: an un-admitted
+    caller's join is banked on their access request and materialises when
+    an admin approves them, so ``joined`` comes back False and ``/me``
+    still says not admitted. See docs/superpowers/specs/
+    2026-08-04-signup-profile-and-access-requests-design.md.
+    """
     client = make_client()
     owner = _new_user(db)
     pool = _create_pool(client, owner).json()
@@ -824,9 +835,41 @@ def test_accepting_a_valid_invite_admits_and_joins_and_me_reflects_it(
     body = accepted.json()
     assert body["pool_id"] == pool["id"]
     assert body["name"] == pool["name"]
+    assert body["joined"] is False
 
     after = client.get("/v1alpha1/me", headers=_auth(joiner))
-    assert after.json()["admitted"] is True
+    assert after.json()["admitted"] is False
+
+    # Not a member yet — and the pool read is member-scoped, so it 404s the
+    # same as any pool that is not yours.
+    got = client.get(f"/v1alpha1/pools/{pool['id']}", headers=_auth(joiner))
+    assert got.status_code == 404
+
+    # The join is banked, waiting on an approval.
+    with db.cursor() as cur:
+        cur.execute(
+            "select pending_pool_id from public.access_requests where user_id = %s",
+            (joiner,),
+        )
+        assert str(cur.fetchone()["pending_pool_id"]) == pool["id"]
+
+
+def test_accepting_a_valid_invite_seats_an_already_admitted_account(
+    make_client, db
+):
+    """The other half of the split: admission is not this route's business,
+    but an account that already has it joins outright, exactly as before."""
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    token = _invite(client, owner, pool["id"]).json()["token"]
+
+    joiner = _new_user(db)  # admitted by default
+    accepted = client.post(
+        "/v1alpha1/invites/accept", json={"token": token}, headers=_auth(joiner)
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["joined"] is True
 
     got = client.get(f"/v1alpha1/pools/{pool['id']}", headers=_auth(joiner))
     assert got.status_code == 200
@@ -925,10 +968,10 @@ def test_unadmitted_account_is_blocked_from_pool_create_but_not_reads(
 
     r = client.post("/v1alpha1/pools", json={"name": "Nope"}, headers=_auth(user))
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
-    # Reads stay open: the console needs GET /me to know to show the
-    # enter-invite screen, and job listing must not itself be gated.
+    # Reads stay open: the console needs GET /me to know which screen to
+    # show, and job listing must not itself be gated.
     me = client.get("/v1alpha1/me", headers=_auth(user))
     assert me.status_code == 200
     assert me.json()["admitted"] is False
@@ -947,7 +990,7 @@ def test_unadmitted_account_is_blocked_from_job_submission(make_client, db):
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
 
 def test_unadmitted_account_is_blocked_from_job_submission_from_repo(
@@ -962,7 +1005,7 @@ def test_unadmitted_account_is_blocked_from_job_submission_from_repo(
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
     assert client.fetch.calls == []
 
 
@@ -976,7 +1019,7 @@ def test_unadmitted_account_is_blocked_from_device_approve(make_client, db):
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
 
 def test_admitted_account_is_not_blocked_from_pool_create(make_client, db):

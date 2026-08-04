@@ -13,17 +13,27 @@ import {
   Plus,
   Desktop,
   DeviceMobile,
+  ShieldCheck,
   SidebarSimple,
   UsersThree,
   UserCircle,
 } from "@phosphor-icons/react";
 import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
-import { InviteGate } from "@/components/shell/InviteGate";
 import { Shortcuts } from "@/components/shell/Shortcuts";
 import { Wordmark } from "@/components/brand/Mark";
 import { UserMenu } from "@/components/nav/UserMenu";
-import { NotAuthenticated, getMe } from "@/lib/cloud-api";
+import { DeclinedScreen } from "@/components/onboarding/DeclinedScreen";
+import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
+import { PendingScreen } from "@/components/onboarding/PendingScreen";
+import { screenFor } from "@/lib/access-screen";
+import { useSessionUser } from "@/lib/session-user";
+import {
+  NotAuthenticated,
+  getMe,
+  type AccessState,
+  type Profile,
+} from "@/lib/cloud-api";
 
 // The console shell. A left rail rather than a top nav: a top bar is a
 // marketing pattern, and the rail gives the fleet state somewhere permanent
@@ -57,12 +67,14 @@ const GROUPS = [
 
 const REPO = "https://github.com/Zolli-Labs/flashml";
 
-// `/pools/join` is the one console route an admitted-false account must
-// still be able to reach: it is how a signed-in-but-not-yet-admitted user
-// redeems an invite by clicking a link rather than pasting one into the
-// gate below. The API's own `accept_invite` mirrors this — it sits on
-// `current_user`, not `admitted_user`, for the identical reason.
-const INVITE_GATE_BYPASS = "/pools/join";
+// The admin queue. Not in GROUPS because it is the one item whose presence
+// depends on the signed-in account rather than on the route table, and
+// `/admin` has no page of its own — the queue is the destination.
+const ADMIN_ITEM = {
+  href: "/admin/requests",
+  label: "Admin",
+  icon: ShieldCheck,
+} as const;
 
 function NavItem({
   href,
@@ -121,9 +133,11 @@ function Group({
 export function ConsoleShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const session = useSessionUser();
   const [railOpen, setRailOpen] = useState(false);
 
-  // "admitted" is the optimistic default, not "unknown": this shell mounts
+  // `undefined` is "not answered yet", and `screenFor` maps it to the
+  // console — an optimistic default, not a loading state. This shell mounts
   // once for the whole console session (Next keeps a layout instance across
   // client navigations within it), so the alternative is a real console
   // page flashing to a loading state on every first paint while `GET /me`
@@ -132,13 +146,19 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   // here: every state-creating route re-checks admission server-side, so
   // rendering optimistically for the one round trip this takes costs
   // nothing but UI politeness.
-  const [gated, setGated] = useState(false);
+  const [access, setAccess] = useState<AccessState | undefined>(undefined);
+  // The same `GET /me` answer, kept whole so the rail can read `is_admin`
+  // off it. A second request for one boolean would be one more round trip
+  // on every console session for a flag we already have.
+  const [profile, setProfile] = useState<Profile | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     getMe()
       .then((me) => {
-        if (!cancelled) setGated(!me.admitted);
+        if (cancelled) return;
+        setProfile(me);
+        setAccess(me.access);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -153,8 +173,10 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
         }
         // A transient failure (network blip, 500) is not evidence of "not
         // admitted" — fail open rather than lock an admitted user out of
-        // their own console over one bad request. Every page under here
-        // already handles its own load failures.
+        // their own console over one bad request. Leaving `access`
+        // `undefined` is exactly that: `screenFor` keeps showing the
+        // console. Every page under here already handles its own load
+        // failures.
       });
     return () => {
       cancelled = true;
@@ -167,7 +189,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const showGate = gated && pathname !== INVITE_GATE_BYPASS;
+  const screen = screenFor(access, pathname);
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
@@ -180,47 +202,69 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
         </Link>
       </div>
 
-      {/* The ⌘K affordance. It was advertised in the rail design and never
-          built; a shortcut hint that does nothing is worse than no hint. */}
-      <div className="px-3 pb-2">
-        <button
-          type="button"
-          onClick={() => {
-            // Same path the global listener takes, so there is one way in.
-            window.dispatchEvent(
-              new KeyboardEvent("keydown", { key: "k", metaKey: true })
-            );
-          }}
-          className="flex w-full items-center gap-2 rounded-md border border-border bg-background/60 px-2.5 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
-        >
-          <MagnifyingGlass size={14} />
-          <span className="flex-1">Search</span>
-          <kbd className="meta rounded border border-border px-1 py-px">⌘K</kbd>
-        </button>
-        <p className="meta mt-1.5 px-2.5">
-          Press <span className="text-foreground">?</span> for shortcuts
-        </p>
-      </div>
+      {/* Everything between the wordmark and the footer is navigation to
+          pages a non-console screen cannot use: an account waiting on
+          approval is shown the same waiting screen whichever of them it
+          lands on. A nav — or a search box over the same routes — that
+          leads nowhere useful is worse than none, so both are hidden and
+          the wordmark, account, docs and source links stay. */}
+      {screen === "console" && (
+        <>
+          {/* The ⌘K affordance. It was advertised in the rail design and
+              never built; a shortcut hint that does nothing is worse than
+              no hint. */}
+          <div className="px-3 pb-2">
+            <button
+              type="button"
+              onClick={() => {
+                // Same path the global listener takes, so there is one way
+                // in.
+                window.dispatchEvent(
+                  new KeyboardEvent("keydown", { key: "k", metaKey: true })
+                );
+              }}
+              className="flex w-full items-center gap-2 rounded-md border border-border bg-background/60 px-2.5 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
+            >
+              <MagnifyingGlass size={14} />
+              <span className="flex-1">Search</span>
+              <kbd className="meta rounded border border-border px-1 py-px">
+                ⌘K
+              </kbd>
+            </button>
+            <p className="meta mt-1.5 px-2.5">
+              Press <span className="text-foreground">?</span> for shortcuts
+            </p>
+          </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 pb-4">
-        {GROUPS.map((g, i) =>
-          g.label === null ? (
-            <div key={i} className="space-y-0.5">
-              {g.items.map((it) => (
-                <NavItem key={it.href} {...it} active={isActive(it.href)} />
-              ))}
-            </div>
-          ) : (
-            <Group key={g.label} label={g.label}>
-              {g.items.map((it) => (
-                <NavItem key={it.href} {...it} active={isActive(it.href)} />
-              ))}
-            </Group>
-          )
-        )}
-      </nav>
+          <nav className="flex-1 overflow-y-auto px-3 pb-4">
+            {GROUPS.map((g, i) =>
+              g.label === null ? (
+                <div key={i} className="space-y-0.5">
+                  {g.items.map((it) => (
+                    <NavItem key={it.href} {...it} active={isActive(it.href)} />
+                  ))}
+                </div>
+              ) : (
+                <Group key={g.label} label={g.label}>
+                  {g.items.map((it) => (
+                    <NavItem key={it.href} {...it} active={isActive(it.href)} />
+                  ))}
+                </Group>
+              )
+            )}
+            {/* Hidden until `GET /me` says otherwise, so a non-admin never
+                sees it flash. The API enforces admin on every queue route
+                regardless — this only decides whether the door is drawn. */}
+            {profile?.is_admin && (
+              <div className="mt-5 space-y-0.5">
+                <NavItem {...ADMIN_ITEM} active={isActive(ADMIN_ITEM.href)} />
+              </div>
+            )}
+          </nav>
+        </>
+      )}
 
-      <div className="space-y-0.5 border-t border-border px-3 py-3">
+      <div className="mt-auto space-y-0.5 border-t border-border px-3 py-3">
         <NavItem
           href="/docs"
           label="Docs"
@@ -291,7 +335,20 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main id="content" className="min-w-0 flex-1">
-          {showGate ? <InviteGate /> : children}
+          {screen === "onboarding" ? (
+            // Not a route of its own: the form has to stand in for whatever
+            // page the user asked for, or a bookmarked `/jobs` would render
+            // the product to an account that has not asked for it yet.
+            // `setAccess` rather than a reload — the API has already told us
+            // the new state in its response.
+            <OnboardingForm onSubmitted={() => setAccess("pending")} />
+          ) : screen === "pending" ? (
+            <PendingScreen email={session?.email ?? null} />
+          ) : screen === "declined" ? (
+            <DeclinedScreen />
+          ) : (
+            children
+          )}
         </main>
       </div>
     </div>
