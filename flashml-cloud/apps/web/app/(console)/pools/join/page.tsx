@@ -7,12 +7,15 @@ import { NotAuthenticated, acceptInvite } from "@/lib/cloud-api";
 
 // This route is `ConsoleShell`'s one deliberate bypass of the invite gate
 // (see `INVITE_GATE_BYPASS`): a signed-in-but-not-yet-admitted account has
-// to be able to reach it, since redeeming the token here IS how they become
-// admitted. `useSearchParams()` needs a Suspense boundary to avoid bailing
-// the whole route out of static rendering, hence the split below rather
-// than reading it straight in the default export — same shape as
-// `(auth)/sign-in`'s `page.tsx` + `SignInCard.tsx`, folded into one file
-// since console routes keep metadata in a sibling `layout.tsx` already.
+// to be able to reach it, since redeeming the token here is how they join
+// the workspace. It does NOT by itself admit them — `acceptInvite`'s
+// `joined` flag is false until an admin approves the account's access
+// request; the join is banked and applied then. `useSearchParams()` needs a
+// Suspense boundary to avoid bailing the whole route out of static
+// rendering, hence the split below rather than reading it straight in the
+// default export — same shape as `(auth)/sign-in`'s `page.tsx` +
+// `SignInCard.tsx`, folded into one file since console routes keep metadata
+// in a sibling `layout.tsx` already.
 
 function Loading() {
   return (
@@ -38,10 +41,10 @@ function JoinPoolInner() {
       .then((result) => {
         if (cancelled) return;
         // A full navigation, not `router.replace`: `ConsoleShell` reads
-        // admission once per mount, and this account just became admitted
+        // admission once per mount, and this account just joined the pool
+        // (`result.joined` — not necessarily admitted; see the note above)
         // — a client-side route change would land on the pool page with
-        // the shell still holding its stale "gated" state and showing the
-        // invite gate again instead of the pool it was just added to.
+        // the shell still holding its stale gate state.
         window.location.href = `/pools/${result.pool_id}`;
       })
       .catch((err) => {

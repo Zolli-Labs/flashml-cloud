@@ -17,11 +17,14 @@ import { tokenFromInput } from "@/lib/invite-token";
  * (see `ConsoleShell`). A signed-in account with no invite gets exactly
  * one thing to do here: redeem one.
  *
- * On success this reloads the page rather than flipping local state — the
- * admission decision is made server-side, by `POST /v1alpha1/invites/accept`,
- * and a full reload is the one way to make the console re-derive its own
- * state (nav, this gate, every page under it) from what the API now says,
- * instead of this component guessing at what changed. */
+ * Redeeming a token joins a workspace; it does not by itself admit the
+ * account (`acceptInvite`'s `joined` flag is false until an admin approves
+ * the account's access request — the join is banked and applied then).
+ * This still reloads the page rather than flipping local state on success:
+ * the admission decision is made server-side, and a full reload is the one
+ * way to make the console re-derive its own state (nav, this gate, every
+ * page under it) from what the API now says, instead of this component
+ * guessing at what changed. */
 export function InviteGate() {
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);

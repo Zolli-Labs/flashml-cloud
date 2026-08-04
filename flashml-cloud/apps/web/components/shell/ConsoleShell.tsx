@@ -60,8 +60,10 @@ const REPO = "https://github.com/Zolli-Labs/flashml";
 // `/pools/join` is the one console route an admitted-false account must
 // still be able to reach: it is how a signed-in-but-not-yet-admitted user
 // redeems an invite by clicking a link rather than pasting one into the
-// gate below. The API's own `accept_invite` mirrors this — it sits on
-// `current_user`, not `admitted_user`, for the identical reason.
+// gate below. Redeeming joins the workspace but does not by itself admit
+// the account — see `acceptInvite`'s `joined` flag in `lib/cloud-api.ts`.
+// The API's own `accept_invite` mirrors the reachability requirement — it
+// sits on `current_user`, not `admitted_user`, for the identical reason.
 const INVITE_GATE_BYPASS = "/pools/join";
 
 function NavItem({
