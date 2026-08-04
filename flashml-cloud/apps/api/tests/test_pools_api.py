@@ -1104,6 +1104,23 @@ def test_pool_machines_lists_every_members_bound_machine(make_client, db):
     assert unbound not in by_id
     assert by_id[theirs]["owner_display_name"] == "Grace"
     assert "token_hash" not in by_id[mine]
+    # This route crosses an account boundary — `theirs` belongs to Grace and
+    # is being read by Ada. `MACHINE_PUBLIC_COLUMNS` means "everything bar
+    # the hash, to the machine's OWNER"; the columns below are owner-only
+    # detail and must not ride along here (`_POOL_MACHINE_COLUMNS`, db.py).
+    for owner_only in (
+        "token_prefix", "capabilities", "platform", "created_at", "revoked_at"
+    ):
+        assert owner_only not in by_id[theirs], (
+            f"{owner_only!r} leaked a teammate's machine detail across "
+            "accounts"
+        )
+    # And the fleet view still carries everything the console renders.
+    assert set(by_id[theirs]) == {
+        "id", "node_id", "name", "owner_id", "owner_display_name", "status",
+        "last_seen_at", "sandbox_capable", "argv_capable",
+        "unsandboxed_argv_capable", "module_capable",
+    }
 
 
 def test_pool_machines_omits_a_machine_whose_owner_left(make_client, db):
@@ -1194,6 +1211,37 @@ def test_a_member_who_is_not_the_owner_cannot_rename(make_client, db):
     assert client.get(
         f"/v1alpha1/pools/{pool['id']}", headers=_auth(owner)
     ).json()["name"] == "Vision Lab"
+
+
+def test_rename_checks_ownership_before_it_validates_the_name(make_client, db):
+    """A non-owner gets 404 for an INVALID name too, not 400.
+
+    The invariant is the ordering inside `rename_pool_route`: ownership is
+    established before `_validated_pool_name` ever runs. Swap those two and
+    the route still 404s every non-owner who sends a legal name — every
+    other test here does — while quietly answering 400 for an illegal one.
+    That split is an existence oracle: a stranger who sends `{"name": ""}`
+    to a hundred guessed uuids learns which ones are real pools purely from
+    the status code, without a single 200.
+    """
+    owner = _new_user(db)
+    member = _new_user(db)
+    stranger = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner, name="Vision Lab").json()
+    _add_member(db, pool["id"], member)
+
+    for who in (member, stranger):
+        r = client.patch(
+            f"/v1alpha1/pools/{pool['id']}",
+            json={"name": ""},  # 400 for the owner (see the test below)
+            headers=_auth(who),
+        )
+        assert r.status_code == 404, (
+            "a malformed name must not turn a non-owner's 404 into a 400 — "
+            "that difference tells them the pool exists"
+        )
+        assert r.json()["detail"] == "unknown pool"
 
 
 def test_rename_rejects_empty_and_overlong_names(make_client, db):

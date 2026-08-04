@@ -1384,6 +1384,28 @@ def pools_for_machines_of_owner(
         return chips
 
 
+#: The columns ``list_pool_machines`` may return, and NOT
+#: ``MACHINE_PUBLIC_COLUMNS``.
+#:
+#: The two constants answer different questions. ``MACHINE_PUBLIC_COLUMNS``
+#: means "everything about this machine except the token hash, shown to the
+#: machine's own OWNER" — that is why it can carry ``token_prefix``,
+#: ``capabilities``, ``platform``, ``created_at`` and ``revoked_at``.
+#: This route serves every MEMBER of a pool, so reusing that list would ship
+#: a teammate's live token prefix and enrolment detail across an account
+#: boundary — the first place in the API where one user's machine rows are
+#: rendered to another user at all.
+#:
+#: What a member legitimately needs is the fleet view the console draws:
+#: which machine, whose, what it can run, and whether it is alive. Anything
+#: past that belongs on the owner's own "My machines" page.
+_POOL_MACHINE_COLUMNS = (
+    "id", "node_id", "name", "owner_id", "status", "last_seen_at",
+    "sandbox_capable", "argv_capable", "unsandboxed_argv_capable",
+    "module_capable",
+)
+
+
 def list_pool_machines(
     db: psycopg.Connection, pool_id: str
 ) -> list[dict[str, Any]]:
@@ -1404,15 +1426,18 @@ def list_pool_machines(
 
     Revoked machines are NOT filtered out. A revoked machine's token is dead
     and it can never claim work, but it is still a row the workspace can see,
-    and the console renders its status — unlike the opt-in checkbox list,
-    which filters them because ticking one would be meaningless.
+    and the console marks it as such — ``PoolFleetTable`` renders a "Revoked"
+    badge off ``status``, which is why ``status`` is in the column list below
+    and why this sentence is true rather than aspirational. (Without it a
+    revoked machine is indistinguishable from a sleeping one: both are
+    "offline".) Unlike the opt-in checkbox list, which filters them because
+    ticking one would be meaningless.
     """
-    columns = ", ".join(f"m.{c}" for c in MACHINE_PUBLIC_COLUMNS)
+    columns = ", ".join(f"m.{c}" for c in _POOL_MACHINE_COLUMNS)
     with db.cursor() as cur:
         cur.execute(
             f"""
             select {columns},
-                   m.owner_id,
                    pr.display_name as owner_display_name
               from public.machine_pools mp
               join public.machines m on m.id = mp.machine_id

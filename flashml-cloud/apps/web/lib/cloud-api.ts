@@ -185,14 +185,31 @@ export interface Machine {
  * pool, across all its members, which `listMachines()` cannot return
  * because it is scoped to the caller by design.
  *
- * No `pools` field: this response is already answering "which pool", so a
- * per-machine chip list would be a longer way of saying the id in the URL.
- * That absence is why this extends `Omit<Machine, "pools">` rather than
- * `Machine` — the compiler should reject reading `.pools` off one of these,
- * not let it be silently undefined. */
-export interface PoolMachine extends Omit<Machine, "pools"> {
+ * Deliberately NOT derived from `Machine`. This route is read by every
+ * MEMBER of a pool, so it returns strictly less than the owner's own view:
+ * no `token_prefix`, `capabilities`, `platform`, `created_at` or
+ * `revoked_at` — see `_POOL_MACHINE_COLUMNS` in `apps/api/.../db.py` for
+ * why. Spelling the fields out here rather than `Omit`-ing them off
+ * `Machine` keeps the two shapes independent: adding a column to the
+ * owner's view must not silently widen this one, and reading a field the
+ * API no longer sends should be a compile error.
+ *
+ * No `pools` field either: this response already answers "which pool", so a
+ * per-machine chip list would be a longer way of saying the id in the URL. */
+export interface PoolMachine {
+  id: string;
+  node_id: string;
+  name: string | null;
   owner_id: string;
   owner_display_name: string | null;
+  status: "pending" | "active" | "revoked" | string;
+  last_seen_at: string | null;
+  /** Same three flags `machineBadge` reads, and `module_capable` alongside
+   * them — see `Machine` above for what each means. */
+  sandbox_capable: boolean;
+  argv_capable: boolean;
+  unsandboxed_argv_capable: boolean;
+  module_capable: boolean;
 }
 
 export interface ApproveDeviceCodeResult {
