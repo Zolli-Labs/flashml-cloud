@@ -48,6 +48,11 @@ approved it prints `Approved. This machine is enrolled` and exits on its
 own. (`flashnode login` requires `--coordinator`; there's no default it
 falls back to.)
 
+It also prints `Start contributing with:  flashnode work --runner docker` —
+ignore that. It's a fixed suggestion the CLI always shows, written for a
+Docker host; Colab isn't one, so use the trusted command in the next cell
+instead.
+
 ```python
 !flashnode work --coordinator https://flashml-api.onrender.com --runner trusted
 ```

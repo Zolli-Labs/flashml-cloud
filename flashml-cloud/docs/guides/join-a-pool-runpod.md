@@ -40,6 +40,10 @@ the code, and the terminal prints `Approved. This machine is enrolled` on
 its own. (`--coordinator` is required; there's no default it falls back
 to.)
 
+It also prints `Start contributing with:  flashnode work --runner docker` —
+ignore that. It's a fixed suggestion the CLI always shows, written for a
+Docker host; a pod isn't one, so use the trusted command below instead.
+
 ```bash
 flashnode work --coordinator https://flashml-api.onrender.com --runner trusted
 ```
