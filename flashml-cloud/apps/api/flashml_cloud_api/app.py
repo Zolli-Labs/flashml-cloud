@@ -1318,17 +1318,25 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The admission bootstrap itself — deliberately on ``current_user``,
-        not ``admitted_user``: the entire point of this route is that an
-        un-admitted, possibly brand-new account can call it.
+        """Redeem a workspace invite — deliberately on ``current_user``, not
+        ``admitted_user``: a not-yet-admitted account is exactly who calls
+        this, and gating it behind admission would make the only path in
+        require already being in.
+
+        Accepting no longer admits (0009). An admitted caller joins the
+        pool outright; anybody else has the join banked on their access
+        request and lands in the pool when an admin approves them. That is
+        what ``joined`` reports, so the console can tell "you are in the
+        workspace" from "you will be, once you are approved".
         """
         payload = await _json_object(request)
         token = payload.get("token")
         if not isinstance(token, str) or not token:
             raise HTTPException(status_code=400, detail="token required")
         # The account may be signing in for the very first time — upsert
-        # the profile row before consuming the invite, since consume_pool_
-        # invite's membership/admission writes both carry a FK to it.
+        # the profile row before consuming the invite. Both of consume_pool_
+        # invite's outcomes carry a FK to it: pool_members.user_id when the
+        # join lands, access_requests.user_id when it is only banked.
         dbmod.upsert_profile(db, user_id)
         result = dbmod.consume_pool_invite(
             db, token_hash=hash_invite_token(token), user_id=user_id
@@ -1337,7 +1345,11 @@ def create_cloud_app(
             # Unknown, expired, and exhausted all land here, indistinguishably
             # — same fold consume_pool_invite itself documents.
             raise HTTPException(status_code=404, detail="invalid or expired invite")
-        return {"pool_id": str(result["pool_id"]), "name": result["name"]}
+        return {
+            "pool_id": str(result["pool_id"]),
+            "name": result["name"],
+            "joined": result["admitted"],
+        }
 
     # -- browser-facing: job ownership --------------------------------------
     #

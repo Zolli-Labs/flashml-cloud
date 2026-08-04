@@ -1394,15 +1394,30 @@ def create_pool_invite(
 def consume_pool_invite(
     db: psycopg.Connection, *, token_hash: str, user_id: str
 ) -> dict[str, Any] | None:
-    """Redeem an invite: decrement its use, join the pool, admit the
-    profile — or refuse all three at once.
+    """Redeem an invite: decrement its use, then either join the pool or
+    bank the join for later — or refuse both at once.
 
-    Returns ``{"pool_id", "name"}`` on success, or ``None`` for every
-    do-not-admit case together (unknown token, expired, already exhausted)
-    without distinguishing which — the same reason
-    ``claim_attempt_credit`` and ``claim_device_code_for_redemption`` fold
-    their refusal cases into one ``None``: telling a guesser *which* reason
-    an invite failed for is a small oracle for free.
+    ADMISSION IS NO LONGER THIS FUNCTION'S BUSINESS (0009). It used to
+    write ``admitted_at`` as well, which made a workspace invite the
+    product's only front door and left an uninvited signup with nothing to
+    ask for. Access is now an account property an admin decides, in
+    ``approve_access_request``; pool membership stays a workspace property
+    its owner decides. So:
+
+    * an already-admitted caller joins ``pool_members`` immediately,
+      exactly as before;
+    * anyone else has the join BANKED on their access request by
+      ``record_pending_invite``, and ``approve_access_request``
+      materialises it the moment somebody approves them.
+
+    Returns ``{"pool_id", "name", "created_by", "admitted"}`` on success —
+    ``admitted`` is what the caller ALREADY WAS, and therefore says which
+    of the two happened — or ``None`` for every refusal case together
+    (unknown token, expired, already exhausted) without distinguishing
+    which — the same reason ``claim_attempt_credit`` and
+    ``claim_device_code_for_redemption`` fold their refusal cases into one
+    ``None``: telling a guesser *which* reason an invite failed for is a
+    small oracle for free.
 
     The decrement is one ``UPDATE ... WHERE ... RETURNING`` — the
     ``claim_attempt_credit`` idiom — so that two redemptions of the same
@@ -1410,13 +1425,15 @@ def consume_pool_invite(
     ``UPDATE`` can match ``uses_remaining > 0`` before the other sees the
     decremented value.
 
-    Decrement, membership, and admission are one transaction
-    (``db.transaction()``, explicit despite this connection being
-    autocommit — psycopg supports that). A membership joined without the
-    matching admission would leave a still-gated account sitting inside a
-    team it cannot otherwise reach; a decrement that "succeeded" without
-    either would burn a one-use invite for nothing. All three commit
-    together or none do.
+    A use is spent even when the join is only banked, and declining that
+    person later does not hand it back. That cost is deliberate: holding
+    the use until approval would let a single link be claimed by an
+    unlimited number of pending accounts.
+
+    Decrement and join-or-bank are one transaction (``db.transaction()``,
+    explicit despite this connection being autocommit — psycopg supports
+    that). A decrement that "succeeded" while neither the membership nor
+    the banked row landed would burn a one-use invite for nothing.
     """
     with db.transaction():
         with db.cursor() as cur:
@@ -1427,7 +1444,7 @@ def consume_pool_invite(
                  where token_hash = %s
                    and expires_at > now()
                    and uses_remaining > 0
-                returning pool_id
+                returning pool_id, created_by
                 """,
                 (token_hash,),
             )
@@ -1435,30 +1452,44 @@ def consume_pool_invite(
             if row is None:
                 return None
             pool_id = row["pool_id"]
+            created_by = row["created_by"]
 
             cur.execute(
-                """
-                insert into public.pool_members (pool_id, user_id)
-                values (%s, %s)
-                on conflict do nothing
-                """,
-                (pool_id, user_id),
-            )
-            cur.execute(
-                """
-                update public.profiles
-                   set admitted_at = coalesce(admitted_at, now())
-                 where id = %s
-                """,
+                "select admitted_at from public.profiles where id = %s",
                 (user_id,),
             )
+            profile = cur.fetchone()
+            admitted = bool(profile and profile["admitted_at"])
+
+            if admitted:
+                cur.execute(
+                    """
+                    insert into public.pool_members (pool_id, user_id)
+                    values (%s, %s)
+                    on conflict do nothing
+                    """,
+                    (pool_id, user_id),
+                )
+            else:
+                # The invite TOKEN is the authorization for this pool_id;
+                # it was verified by the UPDATE above, which is why
+                # record_pending_invite deliberately checks nothing itself.
+                record_pending_invite(
+                    db, user_id, pool_id=pool_id, invited_by=created_by
+                )
+
             cur.execute(
                 "select name from public.pools where id = %s",
                 (pool_id,),
             )
             pool_row = cur.fetchone()
             assert pool_row is not None
-            return {"pool_id": pool_id, "name": pool_row["name"]}
+            return {
+                "pool_id": pool_id,
+                "name": pool_row["name"],
+                "created_by": created_by,
+                "admitted": admitted,
+            }
 
 
 def fetch_outstanding_invite(db: psycopg.Connection, pool_id: str) -> dict[str, Any] | None:
