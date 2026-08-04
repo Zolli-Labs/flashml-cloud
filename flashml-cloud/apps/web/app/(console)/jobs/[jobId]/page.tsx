@@ -15,6 +15,7 @@ import {
   deriveProgress,
   deriveStallReason,
 } from "@/lib/job-activity";
+import { workspacePath } from "@/lib/workspace-scope";
 import {
   ApiError,
   NotAuthenticated,
@@ -173,21 +174,29 @@ export default function JobDetailPage({
   }
 
   const name = job.spec?.metadata?.name ?? job.name ?? job.job_id;
+  const backHref =
+    job.pool_id != null ? workspacePath(job.pool_id, "jobs") : "/account/earlier-jobs";
+  const backLabel = job.pool_id != null ? "Jobs" : "Earlier jobs";
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <Link
-        href="/jobs"
+        href={backHref}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
       >
-        <ArrowLeft className="h-3.5 w-3.5" /> Jobs
+        <ArrowLeft className="h-3.5 w-3.5" /> {backLabel}
       </Link>
 
       <div className="mt-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="truncate font-mono text-2xl font-semibold">{name}</h1>
           <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
-            {[job.job_id, job.backend, job.deployment_profile]
+            {[
+              job.job_id,
+              job.backend,
+              job.deployment_profile,
+              job.submitted_by ? `by ${job.submitted_by}` : null,
+            ]
               .filter(Boolean)
               .join(" · ")}
           </p>
