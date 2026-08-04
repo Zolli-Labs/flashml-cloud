@@ -89,9 +89,10 @@ export default function MachinesPage() {
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="title">Machines</h1>
+          <h1 className="title">My machines</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            Enrolled to your account and taking work.
+            Machines you own. Tick one into a workspace to let that team
+            place jobs on it.
           </p>
         </div>
         <div className="flex items-center gap-2">
