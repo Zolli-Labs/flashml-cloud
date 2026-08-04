@@ -172,6 +172,39 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — Team pools: the tester release, built end to end (all repos)
+
+What/why: the approved 2026-08-03 spec (invite-only alpha; a group shares all
+members' workers; pool jobs run only on the pool, unsandboxed where a worker
+has no Docker). Runtime half released: flashruntime 0.4.3 (pools wire fields,
+seventh fail-closed placement gate, trusted-argv three-leg alternative,
+allowFallback⇔pool recipe coupling, fedavg rounds carry pool) and flashnode
+0.3.4 (`--runner trusted`, TrustedArgvRunner). Cloud half on `develop`:
+migration 0007, invites + admission gate, server-side membership stamping
+(overwritten, never merged; fail-closed to []), pool-scoped submission,
+member visibility + credit view, /pools console + InviteGate, paid-Colab-only
+guides, pool-ops runbook.
+
+How verified: api 588 passed; web 102 passed + build; e2e 70 passed incl. 3
+pool-scoping tests against the RELEASED pins (boundary, trusted worker,
+heartbeat revocation). 18 SDD tasks each task-reviewed; final whole-branch
+review (verdict: merge with fixes) closed with a 7-item fix wave, re-review
+clean — incl. a tab/newline open-redirect bypass in the invite landing path
+and pool-id canonicalization across the compile seam.
+
+Gotchas: coordinators pin via Blueprint buildCommand — SYNC BEFORE deploy-prod
+or they reinstall 0.4.2 and 422 every pool spec (API would be on 0.4.3 —
+exactly the 2026-08-02 drift shape). Migration 0007 is NOT fail-soft: watch
+migrate-dev finish after pushing develop before using the dev console. 0007
+grandfathers every existing profile — check prod's profiles table is the
+intended alpha cohort before deploying. A trusted worker is still eligible
+for public MODULE tasks (burns attempts; fix = flashnode 0.3.5
+`module_capable=(runner not in ("argv","trusted"))`).
+
+Next: blueprint sync → deploy-prod → the §10-style acceptance loop with a
+real second account. Parking lot: member-removal routes (SQL runbook only);
+flashnode 0.3.5; login CLI's host-aware runner hint.
+
 ### 2026-08-03 — Both coordinators on 0.4.2; prod API still 0.4.1, so the cap is NOT live
 
 What/why: the state after the pin move, recorded precisely because "we
