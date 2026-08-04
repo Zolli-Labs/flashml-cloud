@@ -665,6 +665,35 @@ def test_a_pool_member_submits_with_pool_and_the_row_carries_it(
     assert spec["placement"]["pool"] == pool_id
 
 
+def test_a_pool_id_submitted_uppercase_is_normalized_to_canonical(
+    make_client, db, transport
+):
+    """Postgres accepts an uppercase uuid, so the membership check
+    (`fetch_pool_for_member`) passes it just fine — but the scheduler's gate
+    compares exact strings against the canonical-lowercase ids
+    `pool_ids_for_machine_owner` returns. Submitting the caller's spelling
+    verbatim would pass this check and then never match that gate, leaving
+    the job PENDING forever. The route must rebind `pool` to the database's
+    canonical id before it reaches compile/insert_job/source."""
+    from flashml_cloud_api import db as dbmod
+
+    client = make_client()
+    alice = _new_user(db)
+    pool = dbmod.create_pool(db, name="Ada's Team", owner_id=alice)
+    pool_id = str(pool["id"])
+    assert pool_id == pool_id.lower(), "sanity: a fresh uuid is already lowercase"
+
+    r = _post(client, _jwt(alice), pool=pool_id.upper())
+    assert r.status_code == 201, r.text
+
+    row = _job_rows(db, alice)[0]
+    assert str(row["pool_id"]) == pool_id
+    assert row["source"]["pool"] == pool_id
+
+    spec = transport.submitted[0]["spec"]
+    assert spec["placement"]["pool"] == pool_id
+
+
 def test_a_non_member_submitting_to_a_pool_is_404(make_client, db, transport):
     from flashml_cloud_api import db as dbmod
 

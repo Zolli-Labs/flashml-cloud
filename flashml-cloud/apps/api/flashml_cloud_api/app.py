@@ -1194,6 +1194,14 @@ def create_cloud_app(
                 pool_row = None  # not even a uuid; same answer as "not found"
             if pool_row is None:
                 raise HTTPException(status_code=404, detail="unknown pool")
+            # Rebind to the database's canonical spelling, not the caller's.
+            # Postgres accepts uppercase/braced/hyphen-less uuids and the
+            # membership check above passes on any of them, but the
+            # scheduler's gate compares exact strings against the
+            # canonical-lowercase ids `pool_ids_for_machine_owner` returns.
+            # An un-normalized `pool` here would pass this check and then
+            # never match that gate, leaving the job PENDING forever.
+            pool = str(pool_row["id"])
 
         with tempfile.TemporaryDirectory(prefix="flashml-repo-") as tmpdir:
             dest = Path(tmpdir) / "src"
