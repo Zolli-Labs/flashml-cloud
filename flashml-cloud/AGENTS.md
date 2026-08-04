@@ -30,6 +30,16 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
    credits, or metrics are involved. Idempotent commits; no double counting.
 5. Recovery actions are typed, deterministic, logged. No LLM-driven recovery.
 
+## Vocabulary
+
+The console UI says **workspace**; the API, the database and the TypeScript
+types say **pool**. They are the same thing. The rename was deliberate and
+UI-only — see
+`docs/superpowers/specs/2026-08-03-workspace-console-design.md` §1.5. Do not
+"fix" one side to match the other: renaming through the API would be a
+breaking change to a shipped release plus a table migration, for a naming
+win.
+
 ## Current state (July 2026)
 
 - `apps/api/` — FastAPI control plane (:8000): node registry + heartbeats

@@ -172,6 +172,34 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-04 — Workspace console: /w/[poolId] tabs over one WorkspaceProvider, plus dead-code sweep (flashml-cloud)
+
+What/why: 18-task plan lands the console as workspace-scoped: `/w/[poolId]/`
+(Overview, Jobs, Machines, People, Settings, submit) over one
+`WorkspaceProvider`, fetched once and keyed on `poolId` so switching
+remounts. API grew `pool_id`+submitter on job rows (collapsing two scoping
+queries into one), `GET /pools/{id}/machines`, `PATCH /pools/{id}` rename.
+Machines stay personal; jobs always belong to a workspace, so submit's "no
+pool — public queue" option is gone — its `lib/pool-selection.ts` support is
+now dead, deleted with its test (grep confirmed hits only in those two
+files). Legacy `/overview|/jobs|/pools|/submit` are resolvers;
+`/pools/[poolId]` redirects into `/w/[poolId]`. Spec:
+`flashml-cloud/docs/superpowers/specs/2026-08-03-workspace-console-design.md`.
+
+How verified: web tsc clean; `npm test` 16 files/178 passed (was 17/185
+before deleting `pool-selection.test.ts` — expected drop, not a regression);
+`npm run build` lists `/pools/join`, `/workspaces`, all 7 `/w/[poolId]/*`
+routes. api `pytest -q`: 766 passed/1 skipped/1 deselected/1 xfailed.
+
+Gotchas: a `next.config.ts` redirect for `/pools/:poolId` would swallow
+`/pools/join` (config redirects match before routing) — the redirect lives
+in the page instead. UI says "workspace", code says "pool", deliberately;
+noted in `flashml-cloud/AGENTS.md`. Two "onboarding" features nearly shipped
+and are distinct: account-admission shell state (separate workstream) vs.
+no-workspace-yet route, which is `/workspaces`.
+
+Next: none — 18/18 tasks done; future changes start from the design doc.
+
 ### 2026-08-03 — Pools v1.1: device opt-in, trust badges, group link, connect panel (flashml-cloud)
 
 What/why: dogfooding v1 team pools surfaced four rough edges in the first
