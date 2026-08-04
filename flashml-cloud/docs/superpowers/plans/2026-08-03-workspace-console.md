@@ -602,7 +602,44 @@ def rename_pool(
         return cur.fetchone()
 ```
 
-- [ ] **Step 4: Add the route**
+- [ ] **Step 4: Extract the shared name validation**
+
+Create and rename must agree on what a legal pool name is. Make that
+structural rather than a convention someone has to remember: add this
+module-level helper in `flashml_cloud_api/app.py`, beside `_json_object`.
+
+```python
+def _validated_pool_name(payload: dict[str, Any]) -> str:
+    """The one definition of a legal pool name, shared by the create and
+    rename routes.
+
+    They must agree — a name create would reject is a name rename must
+    reject too — and one function is what makes that structural instead of
+    two blocks that happen to match today.
+    """
+    raw = payload.get("name")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    name = raw.strip()
+    if len(name) > 200:
+        raise HTTPException(
+            status_code=400, detail="name is limited to 200 characters"
+        )
+    return name
+```
+
+Then replace the six validation lines in `create_pool_route` (`app.py:1033-1041`,
+from `raw_name = payload.get("name")` through the `len(name) > 200` raise)
+with:
+
+```python
+        name = _validated_pool_name(payload)
+```
+
+`create_pool_route`'s existing tests are the regression guard for this
+extraction — they must still pass unchanged in Step 6.
+
+- [ ] **Step 5: Add the route**
 
 In `flashml_cloud_api/app.py`, after `list_pool_machines_route`:
 
@@ -631,20 +668,10 @@ In `flashml_cloud_api/app.py`, after `list_pool_machines_route`:
         if pool is None or str(pool["owner_id"]) != user_id:
             raise HTTPException(status_code=404, detail="unknown pool")
 
-        payload = await _json_object(request)
-        raw_name = payload.get("name")
-        # Validated identically to create_pool_route, and deliberately
-        # duplicated rather than extracted: the two routes must agree on what
-        # a legal pool name is, and eight lines that read the same are easier
-        # to keep honest than a shared helper that can drift out from under
-        # one of them.
-        if not isinstance(raw_name, str) or not raw_name.strip():
-            raise HTTPException(status_code=400, detail="name is required")
-        name = raw_name.strip()
-        if len(name) > 200:
-            raise HTTPException(
-                status_code=400, detail="name is limited to 200 characters"
-            )
+        # Ownership first, validation second: a non-owner must get the same
+        # 404 for a well-formed name as for a malformed one, or the error
+        # code itself tells them the pool is real.
+        name = _validated_pool_name(await _json_object(request))
 
         updated = dbmod.rename_pool(db, pool_id=pool_id, name=name)
         if updated is None:
@@ -652,17 +679,17 @@ In `flashml_cloud_api/app.py`, after `list_pool_machines_route`:
         return _jsonable(updated)
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_pools_api.py -q -k rename`
 Expected: PASS.
 
-- [ ] **Step 6: Run the full API suite**
+- [ ] **Step 7: Run the full API suite**
 
 Run: `.venv/bin/pytest -q`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add flashml_cloud_api/db.py flashml_cloud_api/app.py tests/test_pools_api.py
