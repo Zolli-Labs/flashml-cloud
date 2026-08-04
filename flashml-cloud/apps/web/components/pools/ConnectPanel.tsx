@@ -167,7 +167,7 @@ export function ConnectPanel({ poolId }: { poolId: string }) {
           <CellLabel>Cell 3 — contribute</CellLabel>
           <div className="mt-1">
             <CopyBlock
-              cmd={`!flashnode work --runner trusted --coordinator ${base}`}
+              cmd={`!flashnode work --coordinator ${base} --runner trusted`}
             />
           </div>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
@@ -207,7 +207,7 @@ export function ConnectPanel({ poolId }: { poolId: string }) {
           <CellLabel>Contribute</CellLabel>
           <div className="mt-1">
             <CopyBlock
-              cmd={`flashnode work --runner trusted --coordinator ${base}`}
+              cmd={`flashnode work --coordinator ${base} --runner trusted`}
             />
           </div>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">

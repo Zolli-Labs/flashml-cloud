@@ -257,7 +257,13 @@ function YourMachinesSection({
   const load = useCallback(() => {
     listMachines()
       .then((r) => {
-        setMachines(r);
+        // A revoked machine's token is dead — it can never claim work, so
+        // "opt it into this pool" is meaningless. Filtered here, not just
+        // styled differently, because the API still accepts a bind for one
+        // (204: bindMachineToPool only checks ownership, not status), and a
+        // checkable row would silently misrepresent this pool's real
+        // capacity to every member who can see it.
+        setMachines(r.filter((m) => m.status !== "revoked"));
         setState("ready");
         setError(null);
       })
@@ -397,7 +403,12 @@ function MachineToggleRow({
   onToggle: (machine: Machine, bound: boolean) => void;
 }) {
   const badge = machineBadge(machine);
-  const online = isOnline(machine.last_seen_at);
+  // `YourMachinesSection` already filters revoked machines out before this
+  // ever renders, but the `!revoked &&` guard stays anyway — defense in
+  // depth against a future caller of this row that doesn't, same
+  // derivation `machines/page.tsx`'s `MachineRow` uses for its own dot.
+  const revoked = machine.status === "revoked";
+  const online = !revoked && isOnline(machine.last_seen_at);
   const label = machine.name || machine.node_id;
 
   return (
