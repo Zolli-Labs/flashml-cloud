@@ -141,6 +141,11 @@ def test_approval_after_banking_lands_the_join(db):
         db, newcomer, SUBMISSION, email_domain=None, is_personal_email=None
     )
     dbmod.consume_pool_invite(db, token_hash=_digest("fmi_e2e"), user_id=newcomer)
+    # Load-bearing: without this the test passes against the OLD coupled
+    # implementation too, since a direct join and a bank-then-materialise
+    # are indistinguishable if membership is only checked at the end.
+    assert dbmod.is_pool_member(db, pool_id, newcomer) is False
+
     dbmod.approve_access_request(db, newcomer, decided_by=owner)
 
     with db.cursor() as cur:
@@ -166,3 +171,106 @@ def test_a_use_is_consumed_even_when_the_join_is_only_banked(db):
     assert dbmod.consume_pool_invite(
         db, token_hash=_digest("fmi_use"), user_id=_user(db)
     ) is None
+
+
+def test_an_invited_newcomer_is_still_offered_the_onboarding_form(db):
+    """THE invited-teammate path, end to end.
+
+    Redeeming stubs a ``pending`` access-request row. Reporting that stub
+    as ``pending`` would show a brand-new account the "request received,
+    we'll get back to you" screen forever — it would never be offered the
+    form, and its admin-queue row would be all NULLs. The stub must read as
+    ``needs_onboarding`` until the form is actually submitted.
+    """
+    owner = _user(db, admitted=True)
+    pool_id = _pool_with_invite(db, owner, token="fmi_form")
+    newcomer = _user(db)
+
+    dbmod.consume_pool_invite(db, token_hash=_digest("fmi_form"), user_id=newcomer)
+    assert dbmod.access_state_for(db, newcomer) == "needs_onboarding"
+
+    dbmod.submit_access_request(
+        db, newcomer, SUBMISSION, email_domain=None, is_personal_email=None
+    )
+    assert dbmod.access_state_for(db, newcomer) == "pending"
+
+    # And the banked join survived the submission — losing it here would be
+    # a silent regression: the person is admitted into a pool-less console.
+    with db.cursor() as cur:
+        cur.execute(
+            "select pending_pool_id from public.access_requests where user_id = %s",
+            (newcomer,),
+        )
+        assert str(cur.fetchone()["pending_pool_id"]) == pool_id
+
+
+def test_a_declined_account_is_refused_and_the_use_is_refunded(db):
+    """The accepted cost above covers declining someone AFTER they banked.
+    It does not cover this: the refusal already exists, the join could never
+    be materialised (``approve_access_request`` needs ``pending``), and the
+    burnt use would be stolen from an uninvolved pool owner.
+    """
+    owner = _user(db, admitted=True)
+    _pool_with_invite(db, owner, token="fmi_declined", uses=3)
+    outcast = _user(db)
+    dbmod.submit_access_request(
+        db, outcast, SUBMISSION, email_domain=None, is_personal_email=None
+    )
+    dbmod.decline_access_request(db, outcast, decided_by=owner)
+
+    # Refused, and indistinguishably from an invalid token.
+    assert dbmod.consume_pool_invite(
+        db, token_hash=_digest("fmi_declined"), user_id=outcast
+    ) is None
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select uses_remaining from public.pool_invites where token_hash = %s",
+            (_digest("fmi_declined"),),
+        )
+        assert cur.fetchone()["uses_remaining"] == 3
+
+    # The refund is real, not just a rolled-back read: the link still works
+    # for somebody who can actually use it.
+    assert dbmod.consume_pool_invite(
+        db, token_hash=_digest("fmi_declined"), user_id=_user(db)
+    ) is not None
+
+
+def test_invited_by_is_whoever_minted_the_link_not_the_pool_owner(db):
+    """``invited_by`` is what the widened RETURNING exists to obtain, and
+    Task 8's admin queue renders it as ``invited_by_name``. Every other
+    fixture here makes the owner and the invite's creator the same account,
+    so passing ``pool.owner_id`` — or the joiner's own id — would go
+    unnoticed. This pool's link is minted by a NON-OWNER member.
+    """
+    owner = _user(db, admitted=True)
+    pool_id = _pool_with_invite(db, owner, token="fmi_owners_link")
+    inviter = _user(db, admitted=True)
+    assert inviter != owner
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.pool_members (pool_id, user_id) values (%s, %s)",
+            (pool_id, inviter),
+        )
+    dbmod.create_pool_invite(
+        db,
+        pool_id=pool_id,
+        created_by=inviter,
+        token_hash=_digest("fmi_members_link"),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        uses=1,
+    )
+    newcomer = _user(db)
+
+    result = dbmod.consume_pool_invite(
+        db, token_hash=_digest("fmi_members_link"), user_id=newcomer
+    )
+    assert str(result["created_by"]) == inviter
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select invited_by from public.access_requests where user_id = %s",
+            (newcomer,),
+        )
+        assert str(cur.fetchone()["invited_by"]) == inviter

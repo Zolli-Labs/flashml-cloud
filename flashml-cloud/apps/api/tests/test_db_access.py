@@ -146,6 +146,48 @@ def test_state_follows_the_row_status(db):
     assert dbmod.access_state_for(db, user) == "admitted"
 
 
+def test_a_stub_from_a_banked_invite_reads_as_needs_onboarding(db):
+    """A row is not a request. ``record_pending_invite`` stubs a ``pending``
+    row for an account that redeemed a workspace invite before it ever saw
+    the form; reporting that as ``pending`` parks a brand-new account on the
+    "we'll get back to you" screen forever and never offers it the form.
+    NULL ``use_case`` is the marker — Task 3's validation refuses an empty
+    one, so a submitted row always has it.
+    """
+    owner = _user(db, admitted=True)
+    pool_id = _pool(db, owner)
+    user = _user(db)
+    dbmod.record_pending_invite(db, user, pool_id=pool_id, invited_by=owner)
+
+    assert dbmod.access_state_for(db, user) == "needs_onboarding"
+
+    dbmod.submit_access_request(
+        db, user, SUBMISSION, email_domain=None, is_personal_email=None
+    )
+    assert dbmod.access_state_for(db, user) == "pending"
+
+    # Submitting must not drop the banked pool, or approval joins nothing.
+    with db.cursor() as cur:
+        cur.execute(
+            "select pending_pool_id from public.access_requests where user_id = %s",
+            (user,),
+        )
+        assert str(cur.fetchone()["pending_pool_id"]) == pool_id
+
+
+def test_a_backfilled_admitted_row_is_not_mistaken_for_a_stub(db):
+    """0009's backfill writes ``admitted`` rows with no ``use_case`` on
+    purpose. The stub rule is scoped to ``pending`` so it cannot drag a
+    grandfathered tester back to the onboarding form."""
+    user = _user(db, admitted=True)
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.access_requests (user_id, status) values (%s, %s)",
+            (user, "admitted"),
+        )
+    assert dbmod.access_state_for(db, user) == "admitted"
+
+
 def test_declined_is_its_own_state(db):
     user = _user(db)
     dbmod.submit_access_request(
@@ -239,6 +281,45 @@ def test_resubmitting_while_pending_updates_in_place(db):
         row = cur.fetchone()
     assert row["use_case"] == "Changed my mind."
     assert row["compute_sources"] == ["runpod"]
+
+
+# -- record_pending_invite --------------------------------------------------
+
+def test_banking_reports_whether_it_actually_banked(db):
+    """The upsert's ``where status = 'pending'`` refuses to touch a DECIDED
+    request — correct, a declined account must not re-queue itself by
+    clicking a link — but it refuses silently. The outcome is returned so
+    ``consume_pool_invite`` can refund the invite use it already spent
+    instead of burning a pool owner's link on a join nobody can ever
+    materialise.
+    """
+    owner = _user(db, admitted=True)
+    pool_id = _pool(db, owner)
+
+    fresh = _user(db)
+    assert dbmod.record_pending_invite(
+        db, fresh, pool_id=pool_id, invited_by=owner
+    ) is True
+
+    outcast = _user(db)
+    dbmod.submit_access_request(
+        db, outcast, SUBMISSION, email_domain=None, is_personal_email=None
+    )
+    dbmod.decline_access_request(db, outcast, decided_by=owner)
+    assert dbmod.record_pending_invite(
+        db, outcast, pool_id=pool_id, invited_by=owner
+    ) is False
+
+    # And the decided row is untouched — no pool smuggled onto it.
+    with db.cursor() as cur:
+        cur.execute(
+            "select status, pending_pool_id from public.access_requests "
+            " where user_id = %s",
+            (outcast,),
+        )
+        row = cur.fetchone()
+    assert row["status"] == "declined"
+    assert row["pending_pool_id"] is None
 
 
 # -- approve ----------------------------------------------------------------

@@ -119,13 +119,28 @@ def access_state_for(db: psycopg.Connection, user_id: str) -> str:
     granted — would otherwise compute as ``needs_onboarding`` and be shown
     the onboarding form despite already being admitted. Falling back to the
     flag every gate already reads keeps the two from disagreeing.
+
+    ONE ROW IS NOT A REQUEST. ``record_pending_invite`` stubs a ``pending``
+    row for an account that redeemed a workspace invite before it ever saw
+    the form — the primary invited-teammate path. Reporting that stub as
+    ``pending`` would park a brand-new account on "we'll get back to you"
+    forever: it is never offered the form, and its admin-queue row renders
+    with a NULL name, company, role, and use case. A NULL ``use_case`` is
+    the reliable marker of a stub, because a submitted row cannot have one
+    — ``parse_submission`` rejects an empty ``use_case`` before
+    ``submit_access_request`` is ever reached. Only ``pending`` is treated
+    this way: a decided row says what an admin decided, and 0009's backfill
+    writes ``admitted`` rows with no ``use_case`` on purpose.
     """
     with db.cursor() as cur:
         cur.execute(
-            "select status from public.access_requests where user_id = %s", (user_id,)
+            "select status, use_case from public.access_requests where user_id = %s",
+            (user_id,),
         )
         row = cur.fetchone()
         if row:
+            if row["status"] == "pending" and row["use_case"] is None:
+                return "needs_onboarding"
             return row["status"]
         # No request on file. An account already carrying admitted_at is
         # admitted; anything else has not asked yet.
@@ -229,7 +244,7 @@ def submit_access_request(
 
 def record_pending_invite(
     db: psycopg.Connection, user_id: str, *, pool_id: str, invited_by: str
-) -> None:
+) -> bool:
     """Bank a workspace invite redeemed before approval.
 
     Creates a stub request if the account has not onboarded yet, so an
@@ -241,6 +256,17 @@ def record_pending_invite(
     ``user_id`` is a foreign key to ``public.profiles(id)``, so calling
     this for an account with no profile raises ``ForeignKeyViolation``
     rather than stubbing anything. Route it after ``upsert_profile``.
+
+    Returns whether a row was actually banked. The upsert's
+    ``where status = 'pending'`` refuses to touch a DECIDED request, which
+    is right — a declined account must not re-queue itself by clicking a
+    link — but it refuses SILENTLY, and the caller has already spent one
+    use of somebody else's invite by the time it gets here. So the outcome
+    is reported rather than swallowed: ``consume_pool_invite`` turns False
+    into a refusal that rolls the decrement back.
+
+    Performs NO authorization on ``pool_id`` or ``invited_by``, deliberately
+    — the invite TOKEN is the authorization, and the caller verifies it.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -255,6 +281,7 @@ def record_pending_invite(
             """,
             (user_id, pool_id, invited_by),
         )
+        return cur.rowcount == 1
 
 
 def approve_access_request(
@@ -1413,11 +1440,12 @@ def consume_pool_invite(
     Returns ``{"pool_id", "name", "created_by", "admitted"}`` on success —
     ``admitted`` is what the caller ALREADY WAS, and therefore says which
     of the two happened — or ``None`` for every refusal case together
-    (unknown token, expired, already exhausted) without distinguishing
-    which — the same reason ``claim_attempt_credit`` and
-    ``claim_device_code_for_redemption`` fold their refusal cases into one
-    ``None``: telling a guesser *which* reason an invite failed for is a
-    small oracle for free.
+    (unknown token, expired, already exhausted, and an account whose
+    request is already decided) without distinguishing which — the same
+    reason ``claim_attempt_credit`` and ``claim_device_code_for_redemption``
+    fold their refusal cases into one ``None``: telling a guesser *which*
+    reason an invite failed for is a small oracle for free. Adding the
+    last case opens nothing: a caller already knows their own access state.
 
     The decrement is one ``UPDATE ... WHERE ... RETURNING`` — the
     ``claim_attempt_credit`` idiom — so that two redemptions of the same
@@ -1425,10 +1453,15 @@ def consume_pool_invite(
     ``UPDATE`` can match ``uses_remaining > 0`` before the other sees the
     decremented value.
 
-    A use is spent even when the join is only banked, and declining that
-    person later does not hand it back. That cost is deliberate: holding
-    the use until approval would let a single link be claimed by an
-    unlimited number of pending accounts.
+    A use is spent when the join is banked, and DECLINING THAT PERSON
+    AFTERWARDS does not hand it back. That specific cost is deliberate:
+    holding the use until approval would let a single link be claimed by an
+    unlimited number of pending accounts. It does NOT extend to a request
+    that was ALREADY decided before the click — there the refusal exists
+    up front, the join could never be materialised
+    (``approve_access_request`` requires ``status = 'pending'``), and the
+    cost would fall on an uninvolved pool owner. So when there is nothing
+    to bank on, this refuses and rolls the decrement back.
 
     Decrement and join-or-bank are one transaction (``db.transaction()``,
     explicit despite this connection being autocommit — psycopg supports
@@ -1474,9 +1507,19 @@ def consume_pool_invite(
                 # The invite TOKEN is the authorization for this pool_id;
                 # it was verified by the UPDATE above, which is why
                 # record_pending_invite deliberately checks nothing itself.
-                record_pending_invite(
+                if not record_pending_invite(
                     db, user_id, pool_id=pool_id, invited_by=created_by
-                )
+                ):
+                    # Nothing to bank the join on — the account's request is
+                    # already decided, which in practice means DECLINED (an
+                    # admitted one took the branch above). Undo everything,
+                    # decrement included, so a terminal account cannot spend
+                    # a use of somebody else's link on a join that can never
+                    # be materialised, and cannot be told "you'll join as
+                    # soon as you're approved" when no approval can come.
+                    # psycopg.Rollback unwinds the block and is swallowed by
+                    # it; execution resumes after the `with`.
+                    raise psycopg.Rollback
 
             cur.execute(
                 "select name from public.pools where id = %s",
@@ -1490,6 +1533,9 @@ def consume_pool_invite(
                 "created_by": created_by,
                 "admitted": admitted,
             }
+    # Reached only via the psycopg.Rollback above: the use was refunded, and
+    # the caller gets the same opaque refusal an invalid token would give.
+    return None
 
 
 def fetch_outstanding_invite(db: psycopg.Connection, pool_id: str) -> dict[str, Any] | None:
