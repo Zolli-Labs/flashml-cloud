@@ -801,6 +801,24 @@ def test_no_row_is_needs_onboarding(db):
     assert dbmod.access_state_for(db, _user(db)) == "needs_onboarding"
 
 
+def test_an_account_admitted_by_any_other_path_reads_as_admitted(db):
+    """0009's backfill covers accounts that existed when it ran. An account
+    admitted afterwards — the owner running one UPDATE — has no request row,
+    and must not be shown the onboarding form."""
+    assert dbmod.access_state_for(db, _user(db, admitted=True)) == "admitted"
+
+
+def test_a_request_row_wins_over_the_flag(db):
+    """A declined account that somehow carries admitted_at reports what the
+    admin decided, not what the column says."""
+    user = _user(db, admitted=True)
+    dbmod.submit_access_request(
+        db, user, SUBMISSION, email_domain=None, is_personal_email=None
+    )
+    dbmod.decline_access_request(db, user, decided_by=user)
+    assert dbmod.access_state_for(db, user) == "declined"
+
+
 def test_state_follows_the_row_status(db):
     user = _user(db)
     dbmod.submit_access_request(
@@ -1053,17 +1071,30 @@ Append to `apps/api/flashml_cloud_api/db.py`, after the profiles section:
 def access_state_for(db: psycopg.Connection, user_id: str) -> str:
     """``needs_onboarding`` | ``pending`` | ``admitted`` | ``declined``.
 
-    DERIVED, never stored. No row means the form has not been submitted,
-    which is why 0009's backfill is load-bearing: without it every
-    grandfathered account would compute as ``needs_onboarding`` and be
-    shown the form despite already being admitted.
+    DERIVED, never stored.
+
+    Two sources, in order. The request row wins when there is one. With no
+    row, ``admitted_at`` decides: 0009's backfill covers every account that
+    existed WHEN IT RAN, but an account admitted afterwards by any other
+    path — the owner running one UPDATE, which is exactly how `is_admin` is
+    granted — would otherwise compute as ``needs_onboarding`` and be shown
+    the onboarding form despite already being admitted. Falling back to the
+    flag every gate already reads keeps the two from disagreeing.
     """
     with db.cursor() as cur:
         cur.execute(
             "select status from public.access_requests where user_id = %s", (user_id,)
         )
         row = cur.fetchone()
-    return row["status"] if row else "needs_onboarding"
+        if row:
+            return row["status"]
+        # No request on file. An account already carrying admitted_at is
+        # admitted; anything else has not asked yet.
+        cur.execute(
+            "select admitted_at from public.profiles where id = %s", (user_id,)
+        )
+        profile = cur.fetchone()
+    return "admitted" if profile and profile["admitted_at"] else "needs_onboarding"
 
 
 def email_for_user(db: psycopg.Connection, user_id: str) -> str | None:
@@ -1556,8 +1587,13 @@ comment on table public.pool_invites is
     'It no longer admits — that is an admin decision (0009).';
 ```
 
-Add that statement to the end of `0009_access_requests.sql` **only if 0009
-has not yet been applied anywhere**. If it has, add it in a new `0010`.
+Add that statement to the end of `0009_access_requests.sql`. This is safe
+and is the controller's ruling, not a judgement call for you: 0009 is
+created by this same branch and has not been applied to dev or production
+(dev auto-migrates on merge to `develop`, production is a gated manual
+workflow, and neither has happened). The ephemeral test database is rebuilt
+from scratch every run and records nothing that outlives the session, so
+there is no checksum anywhere to drift against. Do NOT create an 0010.
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
