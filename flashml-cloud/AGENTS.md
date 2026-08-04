@@ -118,8 +118,15 @@ What lands here next:
 ## Dev workflow
 
 ```bash
-cd apps/web && npm install && npm run dev
+make setup                 # once: api venv + web deps
+./scripts/dev.sh --all     # coordinator :8100 + API :8000 + console :3000
 ```
+
+Both from the **repo root**. `cd apps/web && npm run dev` no longer works on
+its own: `apps/web/.env.local` was removed on 2026-08-04 (it duplicated the
+`NEXT_PUBLIC_*` trio already in `.env.dev`), and `dev.sh` is what exports
+those into the environment Next.js reads. Run it bare and the console builds
+with no Supabase project, no key and no API base.
 
 Stack: Next.js + TypeScript + Tailwind (web); FastAPI + Postgres + Redis
 (services, planned); Supabase/Clerk for auth (planned).
