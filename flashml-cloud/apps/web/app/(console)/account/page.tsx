@@ -11,6 +11,13 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Avatar } from "@/components/shell/Avatar";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
 import { initialsFor, useSessionUser } from "@/lib/session-user";
 import {
@@ -18,8 +25,16 @@ import {
   NotAuthenticated,
   getMe,
   updateMe,
+  updateProfile,
   type Profile,
 } from "@/lib/cloud-api";
+import { ROLE_OPTIONS, TEAM_SIZE_OPTIONS } from "@/lib/onboarding-options";
+import {
+  changedDetails,
+  draftFromProfile,
+  isDetailsEmpty,
+  type DetailsDraft,
+} from "@/lib/profile-details";
 
 // Account page. Two sources, kept visibly separate because the user can
 // change one and not the other:
@@ -42,11 +57,17 @@ export default function AccountPage() {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  const [details, setDetails] = useState<DetailsDraft>(() => draftFromProfile(null));
+  const [detailsSaving, setDetailsSaving] = useState(false);
+  const [detailsSaved, setDetailsSaved] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+
   const load = useCallback(() => {
     getMe()
       .then((p) => {
         setProfile(p);
         setName(p.display_name ?? "");
+        setDetails(draftFromProfile(p));
         setLoadError(null);
       })
       .catch((err) => {
@@ -94,6 +115,46 @@ export default function AccountPage() {
       toast.error("Couldn't save your name", { description: detail });
     } finally {
       setSaving(false);
+    }
+  }
+
+  const currentDetails = draftFromProfile(profile);
+  const pendingDetails = changedDetails(details, currentDetails);
+  const detailsDirty = Object.keys(pendingDetails).length > 0;
+  const detailsCanSave = detailsDirty && !detailsSaving;
+  const detailsEmpty = isDetailsEmpty(profile);
+
+  function updateDetail<K extends keyof DetailsDraft>(
+    key: K,
+    value: DetailsDraft[K]
+  ) {
+    setDetails((d) => ({ ...d, [key]: value }));
+    setDetailsSaved(false);
+    setDetailsError(null);
+  }
+
+  async function saveDetails() {
+    if (!detailsCanSave) return;
+    setDetailsSaving(true);
+    setDetailsError(null);
+    setDetailsSaved(false);
+    try {
+      const updated = await updateProfile(pendingDetails);
+      setProfile(updated);
+      setDetails(draftFromProfile(updated));
+      setDetailsSaved(true);
+      toast.success("Details saved");
+    } catch (err) {
+      if (err instanceof NotAuthenticated) {
+        router.push("/sign-in?next=/account");
+        return;
+      }
+      const detail =
+        err instanceof ApiError ? err.detail : "Couldn't save your details.";
+      setDetailsError(detail);
+      toast.error("Couldn't save your details", { description: detail });
+    } finally {
+      setDetailsSaving(false);
     }
   }
 
@@ -188,6 +249,125 @@ export default function AccountPage() {
           >
             {saving ? "Saving…" : "Save"}
           </button>
+        </div>
+      </section>
+
+      <section className="panel mt-4 p-5">
+        <h2 className="text-sm font-semibold">Your details</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {detailsEmpty
+            ? "You signed up before we asked for this. Filling it in helps us build the right thing."
+            : "Used to understand who's on FlashML. Only you and the FlashML team see this."}
+        </p>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="first-name" className="text-xs font-medium">
+              First name
+            </label>
+            <input
+              id="first-name"
+              value={details.first_name}
+              onChange={(e) => updateDetail("first_name", e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="last-name" className="text-xs font-medium">
+              Last name
+            </label>
+            <input
+              id="last-name"
+              value={details.last_name}
+              onChange={(e) => updateDetail("last_name", e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-col gap-1.5">
+          <label htmlFor="company-name" className="text-xs font-medium">
+            Company, lab, or university
+          </label>
+          <input
+            id="company-name"
+            value={details.company_name}
+            onChange={(e) => updateDetail("company_name", e.target.value)}
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60"
+          />
+        </div>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="role" className="text-xs font-medium">
+              Role
+            </label>
+            {/* `details.role`, never `details.role || undefined`: Base UI's
+                `useControlled` decides controlled-vs-uncontrolled ONCE, on
+                first render, by checking `value !== undefined` — and never
+                re-checks it. This page prefills from an existing profile
+                (a non-empty value can land on first render), so passing
+                `undefined` here would risk locking the Select uncontrolled
+                for its whole lifetime and silently ignoring that prefill.
+                Same pattern as `OnboardingForm.tsx`. */}
+            <Select
+              value={details.role}
+              onValueChange={(value) => updateDetail("role", value ?? "")}
+              disabled={detailsSaving}
+            >
+              <SelectTrigger id="role" className="w-full">
+                <SelectValue placeholder="Choose one" />
+              </SelectTrigger>
+              <SelectContent>
+                {ROLE_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="team-size" className="text-xs font-medium">
+              Team size
+            </label>
+            {/* Same reasoning as the role Select above. */}
+            <Select
+              value={details.team_size}
+              onValueChange={(value) => updateDetail("team_size", value ?? "")}
+              disabled={detailsSaving}
+            >
+              <SelectTrigger id="team-size" className="w-full">
+                <SelectValue placeholder="Choose one" />
+              </SelectTrigger>
+              <SelectContent>
+                {TEAM_SIZE_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={saveDetails}
+            disabled={!detailsCanSave}
+            className="interactive rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {detailsSaving ? "Saving…" : "Save"}
+          </button>
+          {detailsError ? (
+            <span className="text-xs text-destructive">{detailsError}</span>
+          ) : detailsSaved ? (
+            <span className="inline-flex items-center gap-1 text-xs text-[var(--node-green)]">
+              <Check size={12} weight="bold" /> Saved
+            </span>
+          ) : null}
         </div>
       </section>
 
