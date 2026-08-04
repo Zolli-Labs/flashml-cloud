@@ -18,15 +18,19 @@ import {
   cloudApiBase,
   acceptInvite,
   approveDeviceCode,
+  bindMachineToPool,
   createPool,
   createPoolInvite,
   getJob,
   getPool,
+  getPoolInviteState,
   listJobContributions,
   listJobRounds,
   listMachines,
   listPools,
+  revokePoolInvites,
   submitFromRepo,
+  unbindMachineFromPool,
 } from "./cloud-api";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -451,6 +455,162 @@ describe("cloud-api", () => {
 
       const err: unknown = await acceptInvite("bad-token").catch((e) => e);
       expect(err).toBeInstanceOf(NotFound);
+    });
+  });
+
+  describe("machine ↔ pool bindings (v1.1)", () => {
+    it("PUTs to the pool's machine route with the bearer token and resolves to nothing on 204", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+
+      const result = await bindMachineToPool("pool-1", "machine-1");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `${cloudApiBase()}/v1alpha1/pools/pool-1/machines/machine-1`
+      );
+      expect(init.method).toBe("PUT");
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(result).toBeUndefined();
+    });
+
+    it("DELETEs the same route to unbind, with the bearer token", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+
+      const result = await unbindMachineFromPool("pool-1", "machine-1");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `${cloudApiBase()}/v1alpha1/pools/pool-1/machines/machine-1`
+      );
+      expect(init.method).toBe("DELETE");
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(result).toBeUndefined();
+    });
+
+    it("raises NotFound when binding a pool or machine that is not the caller's own", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "unknown pool" }));
+
+      const err: unknown = await bindMachineToPool("not-mine", "machine-1").catch(
+        (e) => e
+      );
+      expect(err).toBeInstanceOf(NotFound);
+    });
+  });
+
+  describe("createPoolInvite opts (v1.1)", () => {
+    const minted = { token: "fmi_test-invite-token-000" };
+
+    it("includes uses in the body only when set", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(201, minted));
+
+      await createPoolInvite("pool-1", { uses: 3 });
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({ uses: 3 });
+    });
+
+    it("includes expires_hours in the body only when set", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(201, minted));
+
+      await createPoolInvite("pool-1", { expires_hours: 48 });
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({ expires_hours: 48 });
+    });
+
+    it("includes both together when both are set", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(201, minted));
+
+      await createPoolInvite("pool-1", { uses: 3, expires_hours: 48 });
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({ uses: 3, expires_hours: 48 });
+    });
+
+    it("sends no body when opts is an empty object, same as omitting it entirely", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(201, minted));
+
+      await createPoolInvite("pool-1", {});
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.body).toBeUndefined();
+    });
+  });
+
+  describe("approveDeviceCode pool auto-attach (v1.1)", () => {
+    const approved = { machine_id: "m-1", status: "approved" };
+
+    it("POSTs {user_code} alone when no pool is given, unchanged from before pools existed", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, approved));
+
+      await approveDeviceCode("ABCD1234");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({ user_code: "ABCD1234" });
+    });
+
+    it("includes pool_id in the body only when a pool is given", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, approved));
+
+      await approveDeviceCode("ABCD1234", "pool-1");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        user_code: "ABCD1234",
+        pool_id: "pool-1",
+      });
+    });
+  });
+
+  describe("getPoolInviteState (v1.1)", () => {
+    it("maps the API's empty object to null when nothing is outstanding", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, {}));
+
+      const result = await getPoolInviteState("pool-1");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/pools/pool-1/invites`);
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(result).toBeNull();
+    });
+
+    it("returns the outstanding invite's state verbatim when one exists", async () => {
+      const state = {
+        uses_remaining: 5,
+        expires_at: "2026-09-01T00:00:00Z",
+        created_at: "2026-08-01T00:00:00Z",
+      };
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, state));
+
+      const result = await getPoolInviteState("pool-1");
+      expect(result).toEqual(state);
+    });
+  });
+
+  describe("revokePoolInvites (v1.1)", () => {
+    it("DELETEs the invites route and returns the revoked count", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, { revoked: 3 }));
+
+      const result = await revokePoolInvites("pool-1");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/pools/pool-1/invites`);
+      expect(init.method).toBe("DELETE");
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(result).toEqual({ revoked: 3 });
     });
   });
 });

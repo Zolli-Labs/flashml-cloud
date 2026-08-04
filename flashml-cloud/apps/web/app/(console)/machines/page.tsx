@@ -16,8 +16,10 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import { isOnline, relativeTime } from "@/lib/machine-status";
+import { machineBadge, type MachineBadge } from "@/lib/machine-badge";
 import {
   NotAuthenticated,
   cloudApiBase,
@@ -25,6 +27,23 @@ import {
   revokeMachine,
   type Machine,
 } from "@/lib/cloud-api";
+
+// Same amber the submit page's "runs unsandboxed" warning uses — trust and
+// sandboxing get the one warning colour this design system has, not a
+// second one invented just for this badge. The other two tiers stay
+// neutral: "sandboxed" is the safe default and does not need to draw the
+// eye, and "modules-only" is a lesser capability, not a risk.
+const BADGE_STYLES: Record<MachineBadge, string> = {
+  sandboxed: "border-border text-foreground",
+  trusted: "border-amber-400/30 bg-amber-400/10 text-amber-400",
+  "modules-only": "border-border text-muted-foreground",
+};
+
+const BADGE_LABELS: Record<MachineBadge, string> = {
+  sandboxed: "Sandboxed",
+  trusted: "Trusted",
+  "modules-only": "Modules only",
+};
 
 const POLL_MS = 15_000;
 
@@ -205,6 +224,8 @@ function MachineRow({
     }
   }
 
+  const badge = machineBadge(machine);
+
   return (
     <tr className={revoked ? "opacity-45" : undefined}>
       <td className="px-3 py-3">
@@ -225,10 +246,28 @@ function MachineRow({
               {machine.name || machine.node_id}
             </span>
             <span className="meta block truncate">{machine.node_id}</span>
+            <Badge
+              variant="outline"
+              className={`mt-1 ${BADGE_STYLES[badge]}`}
+            >
+              {BADGE_LABELS[badge]}
+            </Badge>
           </span>
         </div>
       </td>
-      <td className="meta px-3 py-3">{machine.platform ?? "—"}</td>
+      <td className="px-3 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="meta">{machine.platform ?? "—"}</span>
+          {machine.pools.map((pool) => (
+            <span
+              key={pool.id}
+              className="rounded-full border border-border/60 bg-white/[0.04] px-2 py-0.5 text-[10px] text-muted-foreground"
+            >
+              {pool.name}
+            </span>
+          ))}
+        </div>
+      </td>
       <td className="meta px-3 py-3 whitespace-nowrap">
         {revoked
           ? `revoked ${relativeTime(machine.revoked_at)}`

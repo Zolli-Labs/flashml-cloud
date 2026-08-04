@@ -119,6 +119,13 @@ export interface Profile {
   admitted: boolean;
 }
 
+/** One of `GET /v1alpha1/machines`' `pools` chips — the pools a machine is
+ * opted into serving, not the pools its owner merely belongs to. */
+export interface PoolChip {
+  id: string;
+  name: string;
+}
+
 /** A row of `public.machines`, restricted to `MACHINE_PUBLIC_COLUMNS` —
  * never includes `token_hash`. */
 export interface Machine {
@@ -132,6 +139,21 @@ export interface Machine {
   last_seen_at: string | null;
   created_at: string;
   revoked_at: string | null;
+  /** The display-only capability snapshot the API persists at register
+   * time. Drives the trust badge — see `lib/machine-badge.ts` for what
+   * each of the three flags means and the deliberate precedence when more
+   * than one is true. `module_capable` has no badge of its own; it only
+   * distinguishes "can run built-in modules" from "can run nothing" within
+   * the modules-only tier. */
+  sandbox_capable: boolean;
+  argv_capable: boolean;
+  unsandboxed_argv_capable: boolean;
+  module_capable: boolean;
+  /** The pools this machine is bound to, as one aggregate query per caller
+   * rather than one per machine (`pools_for_machines_of_owner`, `db.py`) —
+   * same reasoning `listJobRounds` documents elsewhere for a single-query
+   * join over an N+1 loop. Empty, never absent, for an unbound machine. */
+  pools: PoolChip[];
 }
 
 export interface ApproveDeviceCodeResult {
@@ -454,12 +476,23 @@ export function listMachines(): Promise<Machine[]> {
   return request<Machine[]>("/v1alpha1/machines");
 }
 
+/** `POST /v1alpha1/device/approve`. `poolId`, when given, rides in the
+ * body as `pool_id` and asks the API to approve-and-bind in one atomic
+ * step — the route's own docstring: binding after the one-shot device
+ * code is already consumed would strand the volunteer's agent on a bind
+ * failure it cannot retry. Omitted from the body entirely (not sent as
+ * `pool_id: undefined`, which `JSON.stringify` would also drop, but left
+ * out of the object built here) when no pool is chosen, so the request is
+ * byte-identical to what this client sent before pools existed. */
 export function approveDeviceCode(
-  userCode: string
+  userCode: string,
+  poolId?: string
 ): Promise<ApproveDeviceCodeResult> {
+  const body: { user_code: string; pool_id?: string } = { user_code: userCode };
+  if (poolId) body.pool_id = poolId;
   return request<ApproveDeviceCodeResult>("/v1alpha1/device/approve", {
     method: "POST",
-    body: JSON.stringify({ user_code: userCode }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -506,15 +539,93 @@ export async function getPool(
   return { pool, members };
 }
 
+/** Opts one of the caller's own machines into serving one of the caller's
+ * own pools — `PUT /v1alpha1/pools/{poolId}/machines/{machineId}`, 204, no
+ * body. Both halves are scoped to the caller exactly as the route's own
+ * docstring describes (pool via membership, machine via ownership), so an
+ * id that is not the caller's own 404s here as `NotFound`, same as
+ * everywhere else in this client — never a distinguishing 403. */
+export function bindMachineToPool(
+  poolId: string,
+  machineId: string
+): Promise<void> {
+  return request<void>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/machines/${encodeURIComponent(machineId)}`,
+    { method: "PUT" }
+  );
+}
+
+/** The inverse of `bindMachineToPool` — `DELETE` on the same route.
+ * Unbinding a pair that was never bound is a no-op on the API side, not an
+ * error, as long as both ids are the caller's own. */
+export function unbindMachineFromPool(
+  poolId: string,
+  machineId: string
+): Promise<void> {
+  return request<void>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/machines/${encodeURIComponent(machineId)}`,
+    { method: "DELETE" }
+  );
+}
+
 /** Mints a one-time invite link's token. The API returns the raw token
  * exactly once — it is hashed for storage and never kept in the clear, so
  * this is the only place it could ever be recovered — and this function
  * does nothing with it but hand it back: no logging, no persistence, no
- * echoing anywhere else in this client. */
-export function createPoolInvite(poolId: string): Promise<{ token: string }> {
+ * echoing anywhere else in this client.
+ *
+ * `opts.uses` and `opts.expires_hours` each ride in the body only when
+ * explicitly set, exactly like `submitFromRepo`'s `ref`/`pool` already do
+ * — an omitted or empty `opts` sends no body at all, byte-identical to
+ * this call before either knob existed, so the API's own defaults (10
+ * uses / 720 hours) apply. */
+export function createPoolInvite(
+  poolId: string,
+  opts?: { uses?: number; expires_hours?: number }
+): Promise<{ token: string }> {
+  const body: { uses?: number; expires_hours?: number } = {};
+  if (opts?.uses !== undefined) body.uses = opts.uses;
+  if (opts?.expires_hours !== undefined) body.expires_hours = opts.expires_hours;
   return request<{ token: string }>(
     `/v1alpha1/pools/${encodeURIComponent(poolId)}/invites`,
-    { method: "POST" }
+    {
+      method: "POST",
+      ...(Object.keys(body).length > 0 ? { body: JSON.stringify(body) } : {}),
+    }
+  );
+}
+
+/** `GET /v1alpha1/pools/{id}/invites`'s non-empty shape — the pool's
+ * current standing invite, owner only. Never a token or its hash (see
+ * `fetch_outstanding_invite`'s own docstring): this is a state summary for
+ * the console to render, not a way to recover a link already handed out. */
+export interface PoolInviteState {
+  uses_remaining: number;
+  expires_at: string;
+  created_at: string;
+}
+
+/** Fetches the pool's outstanding invite, if any. The API answers `{}`
+ * (never a 404) when nothing is currently redeemable — this maps that
+ * empty object to `null` so the console can branch on "generate a link"
+ * vs. "here's the current one" without every caller re-deriving "empty
+ * object means nothing outstanding" for itself. */
+export async function getPoolInviteState(
+  poolId: string
+): Promise<PoolInviteState | null> {
+  const state = await request<PoolInviteState | Record<string, never>>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/invites`
+  );
+  return Object.keys(state).length === 0 ? null : (state as PoolInviteState);
+}
+
+/** `DELETE /v1alpha1/pools/{id}/invites` — kills every invite ever issued
+ * for this pool, owner only, same 404 doctrine as the other invite
+ * routes. Returns how many rows were revoked. */
+export function revokePoolInvites(poolId: string): Promise<{ revoked: number }> {
+  return request<{ revoked: number }>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/invites`,
+    { method: "DELETE" }
   );
 }
 
