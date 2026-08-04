@@ -32,14 +32,36 @@ collaboration product. This design makes the pool the organising unit.
    v1.1 already shipped. Jobs have no personal mode at all: **the "No pool —
    public queue" option is removed.** To run anything you create or join a
    workspace first.
-3. **Pre-pools jobs stay visible, read-only.** Every job submitted before
+3. **Pre-pools jobs stay visible, read-only.** ~~Every job submitted before
    2026-08-03 has `pool_id = null` and cannot be retrofitted into a
    workspace without writing to live production rows on a shipped tester
    release. They surface under `My account → Earlier jobs`, readable, never
    extended. The section empties itself over time and can then be deleted.
    Rejected: a migration into auto-created workspaces (prod writes for a
    naming win) and dropping them from the UI (a tester's history vanishes
-   with no explanation).
+   with no explanation).~~
+
+   **REVERSED 2026-08-04, by the owner, before `Earlier jobs` was built.**
+   The decision above rested on an assumption I never checked and the owner
+   did: that the pre-pools rows were real tester history worth preserving.
+   They are not — they are the owner's own account's test rows, with no real
+   runs behind them. So the rejected third option ("drop them from the UI")
+   is now the chosen one, and its stated cost — "a tester's history vanishes
+   with no explanation" — does not apply, because there is no history and no
+   other tester.
+
+   **As built:** pre-workspace jobs appear in no list anywhere in the
+   console. They remain in the database and remain reachable by direct URL
+   at `/jobs/<id>` for their owner. There is no `Earlier jobs` page and no
+   `/account/earlier-jobs` route. `lib/job-scope.ts`'s `earlierJobs` and
+   `isEarlierJob` were removed with it; `isInWorkspace` stays, and its test
+   that an absent `pool_id` is never "in this workspace" matters MORE under
+   this decision, not less — it is the only thing stopping an orphan row
+   rendering into a workspace it does not belong to.
+
+   The general lesson, worth more than the decision: the design weighed
+   three options against a guess about production data. One look at the
+   data collapsed the choice. Check the rows before designing around them.
 4. **Five tabs; Submit is a button, not a tab.** Overview · Jobs · Machines
    · People · Settings, with a persistent "New job" button in the workspace
    header. Submitting is an action, not a place — and it is the one nav item
