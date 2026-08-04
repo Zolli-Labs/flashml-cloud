@@ -172,6 +172,55 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-04 — Signup profile + access requests: an invite joins a workspace, an admin grants access (flashml-cloud)
+
+What/why: two problems, one flow. Nothing was known about anyone — an
+account was an email and maybe a display name — and uninvited signup was a
+dead end: you landed in the console, were told to paste a code you did not
+have, and nothing queued or notified. `admitted_at` meant two things at
+once (allowed into FlashML, member of a pool), so redeeming a pool invite
+was the only door. Those are now separate. Access is an account property an
+admin decides through `public.access_requests`; pool membership stays a
+workspace property its owner decides. An onboarding form doubles as the
+access request, and an admin queue approves or declines it.
+
+How verified: api 766 passed / 1 skipped (pre-existing `test_compile`
+gpuPerTask) / 1 deselected (network-marked) / 1 xfailed; web 214 passed
+across 18 files; `tsc --noEmit`, `npm run lint`, `npm run build` all clean.
+26 commits on `access-requests`, every task individually reviewed plus a
+final whole-branch review. Three properties were mutation-tested rather
+than read: removing `with db.transaction():` from `approve_access_request`
+fails exactly the new rollback test; downgrading the admin gate to
+`current_user` fails two authorization tests; changing `INVITE_ROUTE` fails
+only its pinned-value assertion. Migrations 0001–0008 untouched (no
+checksum drift); 0009 is additive and its backfill is idempotent.
+
+Gotchas: (1) `access` is DERIVED, never stored — the request row wins,
+falling back to `profiles.admitted_at` when there is no row, with a
+`pending` row carrying a NULL `use_case` (an invite-banked stub) reading as
+`needs_onboarding`. 0009's backfill is load-bearing: without it every
+grandfathered tester would be shown a signup form. (2) Approval is SILENT.
+There is no email provider anywhere in this repo and Supabase's built-in
+SMTP is ~2/hour project-wide — the same constraint that removed magic
+links. You approve with a click; you tell the person by hand. No copy
+anywhere may imply otherwise. (3) `is_admin` is granted by ONE manual SQL
+UPDATE and has no UI, deliberately — but grant it to an account that is
+ALREADY admitted. A fresh un-onboarded admin lands on the onboarding form
+and cannot reach their own queue (fails closed, self-recoverable, still
+ten confusing minutes). (4) Revoking is NOT just clearing `admitted_at`:
+`access_state_for` reads the request row first, so a revoke that clears the
+flag but leaves the row saying `admitted` yields an account every API gate
+refuses while `/me` reports `access: "admitted"`. Both must move in one
+transaction. (5) Editing a pending request resets `requested_at`, and the
+queue is ordered by it — a tester who fixes a typo moves to the back.
+
+Next: Task 14's manual walkthrough against a running stack (sign up, submit,
+approve, redeem an invite pre-approval, confirm the pool join materialises).
+Parking lot: revocation (needs its own route, audit trail, and a decision
+about pool memberships and running jobs); a real email provider, which
+would also give this deployment password reset; queue pagination.
+
+
 ### 2026-08-03 — Pools v1.1: device opt-in, trust badges, group link, connect panel (flashml-cloud)
 
 What/why: dogfooding v1 team pools surfaced four rough edges in the first

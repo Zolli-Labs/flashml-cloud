@@ -30,6 +30,41 @@ Sibling repos (cloned side-by-side under `~/Work/Zolli-Labs/`):
    credits, or metrics are involved. Idempotent commits; no double counting.
 5. Recovery actions are typed, deterministic, logged. No LLM-driven recovery.
 
+## Granting access and admin (2026-08-04)
+
+Admission and workspace membership are **separate**. An invite joins a pool;
+only an admin grants access to the product. `admitted_at` is written in
+exactly one place — `approve_access_request`, behind `admin_user`.
+
+**Granting yourself admin.** There is no UI for `is_admin`, deliberately:
+
+```sql
+UPDATE public.profiles SET is_admin = true WHERE id = '<your-user-id>';
+```
+
+Run it against an account that is **already admitted**. The console replaces
+the page for any non-console access state, so a fresh un-onboarded admin
+lands on the onboarding form and cannot reach their own queue. It fails
+closed and the same SQL digs you out, but it looks like a broken deploy.
+
+**Admitting by hand.** `access_state_for` falls back to `admitted_at` only
+when there is **no** `access_requests` row. If a row already exists, it wins:
+setting `admitted_at` by SQL on someone with a pending request leaves the
+console showing them the waiting screen forever while the API considers them
+admitted. Once a request row exists, admit through the queue, never by SQL.
+
+**Revoking is not the inverse.** Clearing `admitted_at` while the request row
+still says `admitted` produces an account every API gate refuses while
+`GET /me` reports `access: "admitted"` and the console shows it the product.
+Row and flag must move together, in one transaction. There is no revoke route
+yet; it needs its own task, an audit trail, and a decision about what happens
+to the person's pool memberships and running jobs.
+
+**Approval is silent.** No email provider exists in this repo, and Supabase's
+built-in SMTP is ~2 messages/hour project-wide — the constraint that removed
+magic links. Approving flips the flag and the account works on next load;
+telling the person is manual. No copy anywhere may imply a message was sent.
+
 ## Current state (July 2026)
 
 - `apps/api/` — FastAPI control plane (:8000): node registry + heartbeats
