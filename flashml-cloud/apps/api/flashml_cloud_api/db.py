@@ -289,6 +289,38 @@ def set_machine_token(
         )
 
 
+def set_machine_capabilities(
+    db: psycopg.Connection,
+    *,
+    machine_id: str,
+    sandbox_capable: bool,
+    argv_capable: bool,
+    unsandboxed_argv_capable: bool,
+    module_capable: bool,
+) -> None:
+    """Overwrite the display-only capability snapshot from the latest
+    registration (register proxy, best-effort — see migration 0008's
+    header). A single UPDATE, all four columns together, so a machine that
+    re-registers with a narrower capability set shows the narrower set —
+    not the union of every registration it has ever made. Never read by
+    placement or authorization; that stays server-side only, same as
+    ``machines.capabilities`` above it.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.machines
+               set sandbox_capable = %s,
+                   argv_capable = %s,
+                   unsandboxed_argv_capable = %s,
+                   module_capable = %s
+             where id = %s
+            """,
+            (sandbox_capable, argv_capable, unsandboxed_argv_capable,
+             module_capable, machine_id),
+        )
+
+
 def fetch_machine_by_token_hash(
     db: psycopg.Connection, token_hash: str
 ) -> dict[str, Any] | None:
@@ -915,6 +947,90 @@ def pool_ids_for_machine_owner(
         return sorted(str(row["pool_id"]) for row in cur.fetchall())
 
 
+def pool_ids_for_machine(db: psycopg.Connection, machine_id: str) -> list[str]:
+    """Pools this MACHINE serves: its explicit bindings, intersected with
+    its owner's live memberships.
+
+    The join through ``machines`` to ``pool_members`` is the authority
+    check: a binding to a pool the owner has left (or was removed from)
+    must be inert — otherwise removing a member would leave their machines
+    still claiming the pool's unsandboxed work through stale bindings.
+    Opt-in is the default by construction: no binding row, no pools.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select mp.pool_id
+              from public.machine_pools mp
+              join public.machines m  on m.id = mp.machine_id
+              join public.pool_members pm
+                on pm.pool_id = mp.pool_id and pm.user_id = m.owner_id
+             where mp.machine_id = %s
+            """,
+            (machine_id,),
+        )
+        return sorted(str(row["pool_id"]) for row in cur.fetchall())
+
+
+def bind_machine_pool(db: psycopg.Connection, *, machine_id: str, pool_id: str) -> None:
+    """Opt one machine into serving one pool. ``on conflict do nothing`` —
+    the same idempotent-write idiom ``consume_pool_invite`` uses for pool
+    membership — so a caller that re-sends an already-bound pair (a UI
+    double-click, a retried request) does not raise a duplicate-key error."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.machine_pools (machine_id, pool_id)
+            values (%s, %s)
+            on conflict do nothing
+            """,
+            (machine_id, pool_id),
+        )
+
+
+def unbind_machine_pool(db: psycopg.Connection, *, machine_id: str, pool_id: str) -> None:
+    """Opt one machine out of serving one pool. A no-op, not an error, when
+    the pair was never bound — the same tolerant-delete stance
+    ``revoke_machine_row`` takes: the caller's desired end state (unbound)
+    already holds."""
+    with db.cursor() as cur:
+        cur.execute(
+            "delete from public.machine_pools where machine_id = %s and pool_id = %s",
+            (machine_id, pool_id),
+        )
+
+
+def pools_for_machines_of_owner(
+    db: psycopg.Connection, owner_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Every pool binding for every machine ``owner_id`` owns, as the chip
+    map the machines page renders — one query rather than one per machine,
+    the same reasoning ``list_pools_for_user`` gives for its own aggregate.
+
+    A machine with no bindings is simply absent from the returned dict
+    (callers default to ``[]``), not present with an empty list — the join
+    below produces no row at all for it, and there is no reason to manufacture
+    one.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select m.id as machine_id, p.id as pool_id, p.name as pool_name
+              from public.machines m
+              join public.machine_pools mp on mp.machine_id = m.id
+              join public.pools p on p.id = mp.pool_id
+             where m.owner_id = %s
+            """,
+            (owner_id,),
+        )
+        chips: dict[str, list[dict[str, Any]]] = {}
+        for row in cur.fetchall():
+            chips.setdefault(str(row["machine_id"]), []).append(
+                {"id": str(row["pool_id"]), "name": row["pool_name"]}
+            )
+        return chips
+
+
 def create_pool_invite(
     db: psycopg.Connection,
     *,
@@ -1010,6 +1126,60 @@ def consume_pool_invite(
             pool_row = cur.fetchone()
             assert pool_row is not None
             return {"pool_id": pool_id, "name": pool_row["name"]}
+
+
+def fetch_outstanding_invite(db: psycopg.Connection, pool_id: str) -> dict[str, Any] | None:
+    """The newest still-redeemable invite for ``pool_id``, or None.
+
+    "Newest valid" is ``order by created_at desc limit 1`` over the same
+    validity predicate ``consume_pool_invite`` enforces at redemption time
+    (``expires_at > now() and uses_remaining > 0``) — an expired or
+    exhausted invite is not "outstanding" even though its row still exists,
+    same as a revoked machine is not "active" even though its row still
+    exists.
+
+    The returned dict is deliberately narrow: ``uses_remaining``,
+    ``expires_at``, ``created_at`` only — never ``token_hash``. This is the
+    one place ``POOL_PUBLIC_COLUMNS`` warns about in its own docstring: an
+    "outstanding invite" surface that leaked the hash would hand a caller
+    the one thing ``create_pool_invite`` exists to keep off this table's
+    read path.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select uses_remaining, expires_at, created_at
+              from public.pool_invites
+             where pool_id = %s
+               and expires_at > now()
+               and uses_remaining > 0
+             order by created_at desc
+             limit 1
+            """,
+            (pool_id,),
+        )
+        return cur.fetchone()
+
+
+def revoke_pool_invites(db: psycopg.Connection, *, pool_id: str) -> int:
+    """Delete every invite ever issued for ``pool_id`` — valid and already-
+    spent alike — and return how many rows that was.
+
+    All of them, not just the outstanding one: a spent invite's row is
+    otherwise inert, but leaving it behind is not what "revoke" means to a
+    caller who just asked this pool's invite links to stop existing.
+    ``returning token_hash`` + ``len(fetchall())`` mirrors
+    ``claim_attempt_credit``'s discipline of returning only what a caller
+    needs — a count, here, with the hashes read off the wire and discarded
+    rather than the digests of soon-to-be-dead credentials leaving this
+    function at all.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "delete from public.pool_invites where pool_id = %s returning token_hash",
+            (pool_id,),
+        )
+        return len(cur.fetchall())
 
 
 def profile_is_admitted(db: psycopg.Connection, user_id: str) -> bool:
