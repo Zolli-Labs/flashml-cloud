@@ -844,6 +844,15 @@ def list_pools_for_user(
     same reasoning ``record_contributions`` gives for its single resolve
     query: per-pool round trips become O(pool count) load exactly when a
     user belongs to enough pools for that to matter.
+
+    ``machines_online`` counts bound, online machines only: the
+    ``machine_pools`` join narrows the owner-inherited candidate set from
+    ``machines`` down to machines actually opted into *this* pool, the same
+    intersection ``pool_ids_for_machine`` applies for the single-machine
+    case. A member's machine that is merely owned, not bound, must not
+    inflate the pool's online count — it serves nothing for this pool.
+    ``member_count`` is untouched by this: pool membership is independent
+    of any machine binding.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -851,12 +860,15 @@ def list_pools_for_user(
             select p.id, p.name, p.owner_id,
                    count(distinct pm.user_id) as member_count,
                    count(distinct m.id) filter (
-                       where {MACHINE_ONLINE_PREDICATE}
+                       where mp.pool_id is not null
+                         and {MACHINE_ONLINE_PREDICATE}
                    ) as machines_online,
                    p.created_at
               from public.pools p
               join public.pool_members pm on pm.pool_id = p.id
               left join public.machines m on m.owner_id = pm.user_id
+              left join public.machine_pools mp
+                on mp.machine_id = m.id and mp.pool_id = p.id
              where p.id in (
                  select pool_id from public.pool_members where user_id = %s
              )
@@ -896,23 +908,32 @@ def list_pool_members(
 ) -> list[dict[str, Any]]:
     """Every member of ``pool_id``, with their own machine counts.
 
-    ``machine_count``/``machines_online`` are per-member, not per-pool: a
-    member's machines are resolved the same way ``pool_members`` documents
-    machine-pool membership works everywhere else in this schema —
-    ``machines.owner_id -> pool_members.user_id`` — because a machine is
-    never a member in its own right.
+    ``machine_count``/``machines_online`` are per-member *and* per-pool: a
+    member's candidate machines are resolved via
+    ``machines.owner_id -> pool_members.user_id`` (a machine is never a
+    member in its own right), but that ownership join alone is only the
+    candidate set. Counting lands on a machine only once it is also bound
+    to *this* pool via ``machine_pools`` — the same intersection
+    ``pool_ids_for_machine`` applies for the single-machine case — so a
+    member's machine that is merely owned, not opted in, contributes 0 to
+    both counts.
     """
     with db.cursor() as cur:
         cur.execute(
             f"""
             select pm.user_id, pr.display_name, pm.joined_at,
-                   count(distinct m.id) as machine_count,
                    count(distinct m.id) filter (
-                       where {MACHINE_ONLINE_PREDICATE}
+                       where mp.pool_id is not null
+                   ) as machine_count,
+                   count(distinct m.id) filter (
+                       where mp.pool_id is not null
+                         and {MACHINE_ONLINE_PREDICATE}
                    ) as machines_online
               from public.pool_members pm
               join public.profiles pr on pr.id = pm.user_id
               left join public.machines m on m.owner_id = pm.user_id
+              left join public.machine_pools mp
+                on mp.machine_id = m.id and mp.pool_id = pm.pool_id
              where pm.pool_id = %s
              group by pm.user_id, pr.display_name, pm.joined_at
              order by pm.joined_at

@@ -1162,6 +1162,51 @@ def test_approving_without_a_pool_id_is_unchanged(client, db):
     assert dbmod.pool_ids_for_machine(db, machine_id) == []
 
 
+def test_reapproving_someone_elses_already_approved_code_with_a_pool_id_is_404(
+    client, db
+):
+    """``approve_device_code`` short-circuits on an already-approved code
+    and returns the existing machine_id with no ownership/expiry check, by
+    design — re-approving your OWN code must stay a no-op. But that
+    short-circuit means the returned machine_id is not guaranteed to belong
+    to the caller. Without an ownership check before the bind, any admitted
+    user who ever saw this user_code (already redeemed by someone else)
+    could ride that short-circuit to bind a stranger's machine into their
+    own pool — inert, but unauthorized, and it would show up later as a
+    pre-ticked checkbox on a pool the machine's real owner never opted
+    into."""
+    owner_a = _new_user(db)
+    user_b = _new_user(db)
+    pool_b = _pool(db, user_b)
+    user_code = _start_code(client, _node_id("approve-reapprove-pool"))
+
+    first = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner_a)}"},
+    )
+    assert first.status_code == 200, first.text
+    machine_id = first.json()["machine_id"]
+
+    second = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": pool_b},
+        headers={"Authorization": f"Bearer {_browser_jwt(user_b)}"},
+    )
+    assert second.status_code == 404
+    assert second.json()["detail"] == "unknown code"
+
+    # No binding was written — A's machine does not serve B's pool.
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.machine_pools "
+            "where machine_id = %s and pool_id = %s",
+            (machine_id, pool_b),
+        )
+        assert cur.fetchone()["n"] == 0
+
+
 # ---------------------------------------------------------------------------
 # 7. the operator credential never escapes
 # ---------------------------------------------------------------------------

@@ -229,6 +229,25 @@ def test_a_member_binds_their_own_machine_to_their_own_pool(make_client, db):
     assert dbmod.pool_ids_for_machine(db, machine_id) == [pool["id"]]
 
 
+def test_a_non_owner_member_binds_their_own_machine_to_the_pool(make_client, db):
+    """The feature's primary multi-user path: binding is scoped to pool
+    MEMBERSHIP (``fetch_pool_for_member``), not pool ownership — any member
+    may opt their own machine in, not just the pool's creator. Previously
+    pinned only by inspection; this is that test."""
+    client = make_client()
+    owner = _new_user(db)
+    member = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    _add_member(db, pool["id"], member)
+    machine_id = _enrol(db, member, "member-bind")
+
+    r = client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(member)
+    )
+    assert r.status_code == 204
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [pool["id"]]
+
+
 def test_binding_requires_authentication(make_client, db):
     client = make_client()
     owner = _new_user(db)
