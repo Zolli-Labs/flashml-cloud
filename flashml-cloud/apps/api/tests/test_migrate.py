@@ -25,8 +25,13 @@ from flashml_cloud_api import migrate
 REAL_MIGRATIONS = migrate.MIGRATIONS_DIR
 
 #: The auth schema Supabase provides and a bare local server does not.
-#: `0001_initial.sql` has a foreign key into it. Same stub conftest uses.
-AUTH_STUB = "create schema auth; create table auth.users (id uuid primary key);"
+#: `0001_initial.sql` has a foreign key into it. Same stub conftest uses —
+#: must stay byte-identical to the one in conftest.py, or this file's own
+#: drift-detection tests fail in a way that looks unrelated to the change.
+AUTH_STUB = (
+    "create schema auth; "
+    "create table auth.users (id uuid primary key, email text);"
+)
 
 
 @contextlib.contextmanager
