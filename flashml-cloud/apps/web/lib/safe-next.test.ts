@@ -85,4 +85,27 @@ describe("safeNext", () => {
       "/pools/join?token=fmi_abc"
     );
   });
+
+  // The tab/newline bypass: the WHATWG URL parser a browser uses to resolve
+  // a navigation strips ASCII tab/LF/CR before parsing, so "/\t/evil.com"
+  // passes a naive /^\/[^/\\]/ check (the second character is "\t", neither
+  // "/" nor "\") but the browser deletes the tab first and resolves the
+  // protocol-relative "//evil.com" — leaving the site exactly as surely as
+  // the backslash bypass above. The guard must check the stripped string.
+  it("falls back to /machines for the tab bypass /\\t/evil.com", () => {
+    expect(safeNext("/\t/evil.com")).toBe("/machines");
+  });
+
+  it("falls back to /machines for the newline bypass /\\n/evil.com", () => {
+    expect(safeNext("/\n/evil.com")).toBe("/machines");
+  });
+
+  it("falls back to /machines for the carriage-return bypass /\\r/evil.com", () => {
+    expect(safeNext("/\r/evil.com")).toBe("/machines");
+  });
+
+  it("returns a legitimate path byte-identical when it has no tab/newline/CR", () => {
+    const legit = "/pools/join?token=fmi_abc";
+    expect(safeNext(legit)).toBe(legit);
+  });
 });

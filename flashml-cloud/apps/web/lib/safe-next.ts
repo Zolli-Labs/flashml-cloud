@@ -35,15 +35,29 @@
  * bare `"/"` (no second character to satisfy it at all) and a value with no
  * leading `/` at all (fails the same regex from the front).
  *
- * Returns `value` unchanged when it passes that check, and `fallback`
+ * One more normalization has to happen *before* that check: the WHATWG URL
+ * parser a browser uses to resolve a navigation strips ASCII tab (`\t`),
+ * LF (`\n`), and CR (`\r`) wherever they appear, before doing anything else
+ * with the value. `"/\t/evil.com"` passes the leading-slash check above
+ * as-is — the second character is `\t`, neither `/` nor `\` — but the
+ * browser deletes that tab first and then resolves `"//evil.com"`, which is
+ * the protocol-relative bypass this guard exists to stop. So the check must
+ * run against the *stripped* string — what the browser will actually
+ * parse — not the raw input.
+ *
+ * Returns the stripped value when it passes that check, and `fallback`
  * (`"/machines"` by default — the fallback every current caller wants) for
- * anything else, including empty, null, or undefined.
+ * anything else, including empty, null, or undefined. Returning the
+ * stripped value (not the original `value`) matters: it is what was
+ * actually validated, and it is also exactly what the browser will resolve,
+ * so caller and validator never disagree about what string is "safe".
  */
 export function safeNext(
   value: string | null | undefined,
   fallback: string = "/machines"
 ): string {
   if (!value) return fallback;
-  if (!/^\/[^/\\]/.test(value)) return fallback;
-  return value;
+  const stripped = value.replace(/[\t\n\r]/g, ""); // what the browser will parse
+  if (!/^\/[^/\\]/.test(stripped)) return fallback;
+  return stripped; // return exactly what was validated
 }
