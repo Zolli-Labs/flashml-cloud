@@ -71,6 +71,12 @@ export default function PoolsPage() {
           <p className="mt-1.5 text-sm text-muted-foreground">
             Share machines and jobs with people you invite.
           </p>
+          <Link
+            href="/pools/join"
+            className="mt-1 inline-block text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
+            Have an invite code?
+          </Link>
         </div>
         <button
           type="button"

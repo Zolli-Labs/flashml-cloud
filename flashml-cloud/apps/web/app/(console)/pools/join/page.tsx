@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
@@ -41,7 +42,17 @@ function Loading() {
 /** Rendered once `acceptInvite` has succeeded but `joined` came back
  * `false` — the join is banked, not applied. Shared by both ways to land
  * here: a clicked link (the auto-redeem effect below) and a pasted code
- * (`JoinByCode`), so the confirmation reads identically either way. */
+ * (`JoinByCode`), so the confirmation reads identically either way.
+ *
+ * For a brand-new invited user this is not the end of the road: they have
+ * banked a pool join but have not yet asked for access, and their row in
+ * the admin queue is an all-NULL stub until they do. The "Finish your
+ * request" link sends them to `/overview`, which is correct for either
+ * state they can be in — `needs_onboarding` renders the form there,
+ * `pending` renders the waiting screen. It cannot go directly to the form
+ * itself: `screenFor` short-circuits `INVITE_ROUTE` to `"console"` so this
+ * page stays reachable in every access state, which means the shell will
+ * never render onboarding here. */
 function InviteSaved({ name }: { name: string }) {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
@@ -50,6 +61,14 @@ function InviteSaved({ name }: { name: string }) {
           <CardTitle>Invite saved</CardTitle>
           <CardDescription>{bankedJoinTail(name)}</CardDescription>
         </CardHeader>
+        <CardContent>
+          <Link
+            href="/overview"
+            className="text-sm text-primary hover:underline"
+          >
+            Finish your request
+          </Link>
+        </CardContent>
       </Card>
     </div>
   );

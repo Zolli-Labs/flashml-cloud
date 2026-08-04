@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -17,7 +18,13 @@ import {
  * magic links from sign-in (`app/(auth)/sign-in/SignInCard.tsx` documents
  * it at length — "This flow sends no email at all"). Approval is silent and
  * the owner tells people by hand, so the only honest instruction we can
- * give someone waiting is to reload. */
+ * give someone waiting is to reload.
+ *
+ * The "Have an invite code?" link is the one other thing a pending account
+ * can still do: `/pools` renders this screen instead of the paste-a-code
+ * box for them, so without a link here a bare invite code (not a link) has
+ * no path in at all. Points at `/pools/join`, the one route `screenFor`
+ * (`lib/access-screen.ts`) keeps reachable in every access state. */
 export function PendingScreen({ email }: { email: string | null }) {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
@@ -47,6 +54,12 @@ export function PendingScreen({ email }: { email: string | null }) {
           >
             Reload
           </Button>
+          <Link
+            href="/pools/join"
+            className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
+            Have an invite code?
+          </Link>
         </CardContent>
       </Card>
     </div>

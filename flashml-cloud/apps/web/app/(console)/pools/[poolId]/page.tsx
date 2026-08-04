@@ -548,9 +548,12 @@ function InviteSection({ poolId }: { poolId: string }) {
     <section className="panel p-5">
       <h2 className="text-sm font-semibold">Invite a teammate</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        A standing link — anyone who opens it and signs in joins this pool.
-        Treat it like a password: it&apos;s good for the uses and time shown
-        below, and Regenerate invalidates whatever copy is currently out.
+        A standing link — anyone who opens it and signs in joins this pool if
+        they&apos;re already admitted to FlashML; otherwise the join is saved
+        and applied once an admin approves them. Either way it spends one
+        use. Treat it like a password: it&apos;s good for the uses and time
+        shown below, and Regenerate invalidates whatever copy is currently
+        out.
       </p>
 
       {state === "loading" ? (
