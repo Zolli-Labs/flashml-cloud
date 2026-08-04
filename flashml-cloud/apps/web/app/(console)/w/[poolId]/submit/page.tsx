@@ -210,8 +210,8 @@ export default function SubmitPage() {
             </div>
 
             <p className="text-xs text-muted-foreground">
-              Pool jobs run without a container sandbox on your
-              team&apos;s machines. Every member you invited can run
+              Jobs in this workspace run without a container sandbox on
+              your team&apos;s machines. Every member you invited can run
               code this job stages.
             </p>
 
