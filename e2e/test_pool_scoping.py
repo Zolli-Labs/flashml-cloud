@@ -41,7 +41,6 @@ import pytest
 from conftest import make_dataset_csv
 
 from flashnode.executor import CoordinatorClient, ExecutorLoop
-from flashnode.executor.trusted_runner import TrustedArgvRunner
 
 
 def _require_pool_support() -> None:
@@ -197,6 +196,11 @@ def test_trusted_worker_claims_pool_argv_but_never_public_argv(coordinator):
     the point is that IT never does, not that the queue drains some other
     way."""
     _require_pool_support()
+    # Imported here, not at module level: against pre-0.3.4 pins this module
+    # does not exist at all, and a top-level import would error at
+    # collection — before `_require_pool_support`'s skip ever runs — which
+    # contradicts this file's skip-honesty docstring.
+    from flashnode.executor.trusted_runner import TrustedArgvRunner
 
     _register(
         coordinator, "trusted-a", pools=["pool-a"],
