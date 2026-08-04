@@ -40,8 +40,18 @@ def _admin(db) -> str:
     return user
 
 
-def _pending(client, db) -> str:
+def _pending(client, db, *, email: str | None = None) -> str:
     user = _new_user(db, admitted=False)
+    if email is not None:
+        # Seeded HERE rather than in `_new_user`: that helper is shared by
+        # this file, test_profile, test_contributions, test_federated,
+        # test_verification and test_db_pools, and giving every fixture
+        # account an address could perturb suites this task never looks at
+        # — `derive_email_facts` runs off exactly this column.
+        with db.cursor() as cur:
+            cur.execute(
+                "update auth.users set email = %s where id = %s", (email, user)
+            )
     client.post("/v1alpha1/access-request", json=VALID, headers=_auth(user))
     return user
 
@@ -64,13 +74,35 @@ def _admitted_at(db, user_id: str):
 # -- authorization ----------------------------------------------------------
 
 def test_a_plain_user_cannot_list_the_queue(make_client, db):
-    """403, and no queue data in the body: a refusal that still returned the
-    rows would leak every applicant's email and company."""
+    """403, and no queue data in the body.
+
+    The asset that must not leak from this route is the EMAIL ADDRESS.
+    `list_access_requests` left-joins `auth.users` for `u.email` and returns
+    it in every row, and holding the service-role key that can read that
+    table is the entire reason this is a server route rather than a browser
+    query. So the waiting account is seeded with a canary address and BOTH
+    halves are asserted: absent from the refusal, and present in the admin's
+    listing. Without the second half this would be asserting the absence of
+    something that was never there — `_new_user` inserts `auth.users` rows
+    with only an id, so `u.email` is NULL for every unseeded fixture and the
+    negative assertion would pass against a route that leaked everything.
+    """
     client = make_client()
-    waiting = _pending(client, db)
-    r = client.get("/v1alpha1/admin/access-requests", headers=_auth(_new_user(db)))
-    assert r.status_code == 403
-    assert waiting not in r.text
+    canary = "leaked-canary@example.com"
+    waiting = _pending(client, db, email=canary)
+
+    refused = client.get(
+        "/v1alpha1/admin/access-requests", headers=_auth(_new_user(db))
+    )
+    assert refused.status_code == 403
+    assert canary not in refused.text
+    assert waiting not in refused.text
+
+    # The canary is real: an admin does see it, so its absence above is the
+    # gate working and not an empty column.
+    allowed = client.get("/v1alpha1/admin/access-requests", headers=_auth(_admin(db)))
+    assert allowed.status_code == 200
+    assert canary in allowed.text
 
 
 def test_a_plain_user_cannot_approve(make_client, db):
@@ -121,7 +153,18 @@ def test_a_plain_user_cannot_decline(make_client, db):
 
 
 def test_the_queue_requires_a_session(make_client, db):
-    assert make_client().get("/v1alpha1/admin/access-requests").status_code == 401
+    """401, and nothing serialised into the body on the way out. An
+    implementation that built the queue and then raised would pass a
+    status-only assertion, so the same canary the sibling above uses is
+    checked here too."""
+    client = make_client()
+    canary = "anonymous-canary@example.com"
+    waiting = _pending(client, db, email=canary)
+
+    r = client.get("/v1alpha1/admin/access-requests")
+    assert r.status_code == 401
+    assert canary not in r.text
+    assert waiting not in r.text
 
 
 def test_deciding_requires_a_session(make_client, db):
@@ -139,22 +182,50 @@ def test_deciding_requires_a_session(make_client, db):
     assert _admitted_at(db, user) is None
 
 
-def test_a_machine_token_cannot_reach_the_queue(make_client, db):
-    """An enrolled host agent is a credential, not an admin. It must not
-    even reach the JWT decoder, let alone the queue."""
+def _machine_token(db) -> str:
+    """A real, enrolled host-agent credential."""
     from flashml_cloud_api import enrolment
     import uuid as _uuid
 
-    client = make_client()
     owner = _new_user(db)
     started = enrolment.start_device_code(db, f"n-{_uuid.uuid4().hex[:8]}", "h", "linux")
     enrolment.approve_device_code(db, started["user_code"], owner)
-    token = enrolment.redeem_device_code(db, started["device_code"])
-    r = client.get(
-        "/v1alpha1/admin/access-requests",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert r.status_code == 401
+    return enrolment.redeem_device_code(db, started["device_code"])
+
+
+def test_a_machine_token_cannot_reach_the_queue(make_client, db):
+    """An enrolled host agent is a credential, not an admin. It must not
+    even reach the JWT decoder, let alone the queue — and that has to hold
+    on the two routes that WRITE, not only on the read.
+
+    Not a live bug today: `current_user` rejects anything shaped like a
+    machine token before the JWT decoder runs, so the two credential kinds
+    are disjoint. This is the regression guard for the day somebody adds an
+    `or current_machine(request)` fallback, a shared "any valid credential"
+    resolver, or an `admin_machine` for an ops script — at which point the
+    second credential kind would reach the only two routes that grant
+    product access.
+    """
+    client = make_client()
+    token = _machine_token(db)
+    headers = {"Authorization": f"Bearer {token}"}
+    victim = _pending(client, db)
+
+    assert client.get(
+        "/v1alpha1/admin/access-requests", headers=headers
+    ).status_code == 401
+    assert client.post(
+        f"/v1alpha1/admin/access-requests/{victim}/approve", headers=headers
+    ).status_code == 401
+    assert client.post(
+        f"/v1alpha1/admin/access-requests/{victim}/decline", headers=headers
+    ).status_code == 401
+
+    # The effect, not only the status. A route that wrote and then refused
+    # would satisfy all three assertions above — the mutation-7 shape.
+    assert _request_row(db, victim)["status"] == "pending"
+    assert _admitted_at(db, victim) is None
+    assert client.get("/v1alpha1/me", headers=_auth(victim)).json()["admitted"] is False
 
 
 def test_no_route_grants_admin(make_client, db):
