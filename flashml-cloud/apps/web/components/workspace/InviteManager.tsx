@@ -106,7 +106,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
       setInviteState(null);
       setLink(null);
       toast.success("Invite link revoked", {
-        description: "It can no longer be used to join this pool.",
+        description: "It can no longer be used to join this workspace.",
       });
     } catch {
       toast.error("Couldn't revoke the invite link", {
@@ -131,10 +131,19 @@ export function InviteManager({ poolId }: { poolId: string }) {
   return (
     <section className="panel p-5">
       <h2 className="text-sm font-semibold">Invite a teammate</h2>
+      {/* Joining and admission are two separate things (see
+          `pools/join/page.tsx`): `acceptInvite` only adds a member outright
+          when the caller is ALREADY admitted to FlashML. For anyone else the
+          join is banked on their access request and materializes when an
+          admin approves them — so this must not promise immediate
+          membership. */}
       <p className="mt-1 text-xs text-muted-foreground">
-        A standing link — anyone who opens it and signs in joins this pool.
-        Treat it like a password: it&apos;s good for the uses and time shown
-        below, and Regenerate invalidates whatever copy is currently out.
+        A standing link — anyone who opens it and signs in joins this
+        workspace if they&apos;re already admitted to FlashML; otherwise the
+        join is saved and applied once an admin approves them. Either way it
+        spends one use. Treat it like a password: it&apos;s good for the uses
+        and time shown below, and Regenerate invalidates whatever copy is
+        currently out.
       </p>
 
       {state === "loading" ? (
@@ -220,7 +229,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
                 <AlertDialogTitle>Revoke this invite link?</AlertDialogTitle>
                 <AlertDialogDescription>
                   Anyone still holding it can no longer use it to join this
-                  pool. Members already in the pool are unaffected.
+                  workspace. Members already in the workspace are unaffected.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
