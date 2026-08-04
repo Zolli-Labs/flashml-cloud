@@ -3,8 +3,9 @@
 // link with tracking params tacked on, a bare `token=...` fragment copied
 // from the middle of one, or the raw `fmi_...` token itself. No DOM/window
 // access here — this has to stay a plain function so it can be unit tested
-// in the vitest "node" environment and reused from both InviteGate and the
-// `/pools/join` page.
+// in the vitest "node" environment and reused from every surface that takes
+// a pasted invite. `InviteGate` was the first of those and is gone with the
+// invite gate; the `/pools` paste-a-code affordance replaces it.
 
 /** Extracts an invite token out of arbitrary pasted input, or returns
  * `null` when there is nothing to extract.

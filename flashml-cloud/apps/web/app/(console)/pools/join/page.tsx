@@ -1,12 +1,18 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { InviteGate } from "@/components/shell/InviteGate";
+import {
+  Card,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { NotAuthenticated, acceptInvite } from "@/lib/cloud-api";
 
-// This route is `ConsoleShell`'s one deliberate bypass of the invite gate
-// (see `INVITE_GATE_BYPASS`): a signed-in-but-not-yet-admitted account has
+// This route is the one path every access state can reach (`INVITE_ROUTE`
+// in `lib/access-screen.ts`): a signed-in-but-not-yet-admitted account has
 // to be able to reach it, since this is where redeeming an invite happens.
 // Joining and admission are one signal, not two: `acceptInvite`'s `joined`
 // is `true` only for an already-admitted caller, who is added to the pool
@@ -23,6 +29,27 @@ function Loading() {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
       <div className="skeleton h-40 w-full max-w-sm rounded-lg" />
+    </div>
+  );
+}
+
+function LinkProblem() {
+  return (
+    <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>That invite link didn&apos;t work</CardTitle>
+          <CardDescription>
+            It may be mistyped, expired, or already used — the API folds all
+            three into one answer, so we cannot say which. Ask whoever invited
+            you for a fresh link, or find the workspace under{" "}
+            <Link href="/pools" className="text-foreground underline">
+              Pools
+            </Link>
+            .
+          </CardDescription>
+        </CardHeader>
+      </Card>
     </div>
   );
 }
@@ -68,11 +95,12 @@ function JoinPoolInner() {
     };
   }, [token, router]);
 
-  // Fall back to the same paste-a-token card the console shows an
-  // un-admitted account, so a missing, stale, mistyped, or already-used
-  // link still leaves the visitor somewhere they can act instead of a dead
-  // end.
-  if (!token || failed) return <InviteGate />;
+  // A missing, stale, mistyped, or already-used link must still leave the
+  // visitor somewhere they can act instead of a dead end. This used to fall
+  // back to `InviteGate`'s paste-a-token card, which is gone with the gate
+  // (Task 11); Task 13 moves that affordance onto the pools page, which is
+  // where this points in the meantime.
+  if (!token || failed) return <LinkProblem />;
 
   return <Loading />;
 }

@@ -24,6 +24,7 @@ import {
   createPoolInvite,
   declineAccessRequest,
   getJob,
+  getMe,
   getPool,
   getPoolInviteState,
   listAccessRequests,
@@ -704,6 +705,28 @@ describe("cloud-api", () => {
 
       expect(result.joined).toBe(false);
       expect(result.name).toBe("Lab");
+    });
+  });
+
+  describe("getMe", () => {
+    it("surfaces access and is_admin, the two fields the shell switches on", async () => {
+      // The rail draws the Admin entry from this one response — adding a
+      // second request for `is_admin` would cost a round trip per console
+      // session for a boolean already on the wire.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          id: "u1",
+          admitted: false,
+          access: "pending",
+          is_admin: true,
+        })
+      );
+
+      const me = await getMe();
+
+      expect(me.access).toBe("pending");
+      expect(me.is_admin).toBe(true);
     });
   });
 

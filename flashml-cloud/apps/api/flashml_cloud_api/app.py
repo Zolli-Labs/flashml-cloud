@@ -922,6 +922,12 @@ def create_cloud_app(
         # a signed-in account that has not filled the form is neither
         # admitted nor refused.
         profile["access"] = dbmod.access_state_for(db, user_id)
+        # Read-only, and the console's only source for whether to draw the
+        # admin queue's entry in its rail. Still granted by one manual SQL
+        # UPDATE and by nothing else: `PATCH /me` never writes it, and
+        # `require_admin` re-checks it on every queue route, so exposing it
+        # here changes what is *drawn*, never what is allowed.
+        profile["is_admin"] = dbmod.profile_is_admin(db, user_id)
         return profile
 
     #: Fields a user owns. Everything absent from this map is either the

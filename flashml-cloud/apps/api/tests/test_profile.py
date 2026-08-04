@@ -162,6 +162,26 @@ def test_me_is_readable_in_every_access_state(make_client, db):
     ).status_code == 200
 
 
+def test_me_reports_is_admin_false_for_an_ordinary_account(make_client, db):
+    """The console's rail reads this to decide whether to draw the admin
+    queue's entry. Without it on the wire the entry could never appear."""
+    client = make_client()
+    body = client.get("/v1alpha1/me", headers=_auth(_new_user(db))).json()
+    assert body["is_admin"] is False
+
+
+def test_me_reports_is_admin_true_after_the_manual_grant(make_client, db):
+    """`is_admin` is still granted by one direct UPDATE and by nothing
+    else — this route only reports it."""
+    client = make_client()
+    user = _new_user(db)
+    client.get("/v1alpha1/me", headers=_auth(user))  # ensure the row exists
+    with db.cursor() as cur:
+        cur.execute("update public.profiles set is_admin = true where id = %s", (user,))
+    body = client.get("/v1alpha1/me", headers=_auth(user)).json()
+    assert body["is_admin"] is True
+
+
 # -- widened PATCH ----------------------------------------------------------
 
 def test_patch_writes_the_profile_fields(make_client, db):

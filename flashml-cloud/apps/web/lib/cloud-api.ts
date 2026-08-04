@@ -130,6 +130,13 @@ export interface Profile {
    * other readers rely on it. */
   admitted: boolean;
   access: AccessState;
+  /** Whether this account can open the access-request queue. Read-only
+   * everywhere — granted by one manual SQL UPDATE and by nothing else, and
+   * `PATCH /v1alpha1/me` refuses it. The console reads it for one purpose:
+   * whether to draw the Admin entry in the rail. Every admin route
+   * re-checks it server-side, so a client that lies to itself here gains
+   * nothing but a link to a 403. */
+  is_admin: boolean;
   first_name: string | null;
   last_name: string | null;
   company_name: string | null;
