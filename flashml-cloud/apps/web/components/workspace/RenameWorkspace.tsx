@@ -4,6 +4,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { ApiError, NotFound, renamePool } from "@/lib/cloud-api";
+import { notifyWorkspacesChanged } from "@/lib/workspace-events";
 
 export function RenameWorkspace({
   poolId,
@@ -41,6 +42,13 @@ export function RenameWorkspace({
       setName(updated.name);
       setSavedName(updated.name);
       onRenamed();
+      // `onRenamed` reloads the WorkspaceProvider this form sits under, and
+      // that is all it can reach. The rail's `WorkspaceSwitcher` fetches its
+      // own `listPools()` from `ConsoleShell` — a layout Next keeps mounted
+      // across client navigations — so without this it would keep showing
+      // the old name until a full page reload. Fired after the API has
+      // confirmed the new name, never before.
+      notifyWorkspacesChanged();
       toast.success("Workspace renamed", { description: updated.name });
     } catch (err) {
       if (err instanceof NotFound) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -16,6 +17,7 @@ import {
   NotAuthenticated,
   createPool,
 } from "@/lib/cloud-api";
+import { notifyWorkspacesChanged } from "@/lib/workspace-events";
 import { workspacePath } from "@/lib/workspace-scope";
 
 /** Where an admitted user with no workspace lands — via `WorkspaceResolver`
@@ -40,6 +42,11 @@ export default function WorkspacesPage() {
     setError(null);
     try {
       const pool = await createPool(trimmed);
+      // Same reason `RenameWorkspace` does it: `WorkspaceSwitcher` lives in
+      // `ConsoleShell`, which survives the client navigation below, so
+      // without this the rail would not list the workspace you just created
+      // and just navigated into.
+      notifyWorkspacesChanged();
       toast.success("Workspace created", { description: pool.name });
       router.push(workspacePath(pool.id, "overview"));
     } catch (err) {
@@ -108,10 +115,21 @@ export default function WorkspacesPage() {
         </CardContent>
       </Card>
 
+      {/* Carried over from the old `/pools` list page, which this replaced.
+          `/pools/join` is safe to link to bare: it reads `?token=` when
+          there is one and otherwise renders `JoinByCode`, which redeems a
+          pasted link or code via `tokenFromInput` — so arriving with no
+          token is a working screen, not an error. */}
       <p className="mt-4 text-sm text-muted-foreground">
         Been sent an invite link? Open it and you&apos;ll join that
         workspace.
       </p>
+      <Link
+        href="/pools/join"
+        className="mt-1 inline-block text-xs text-muted-foreground hover:text-foreground hover:underline"
+      >
+        Have an invite code?
+      </Link>
     </div>
   );
 }

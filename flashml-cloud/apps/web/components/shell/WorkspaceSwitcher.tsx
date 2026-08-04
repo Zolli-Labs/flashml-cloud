@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CaretUpDown, Check, Plus } from "@phosphor-icons/react";
 import { listPools, type PoolSummary } from "@/lib/cloud-api";
+import { onWorkspacesChanged } from "@/lib/workspace-events";
 import { workspacePath } from "@/lib/workspace-scope";
 
 /** The rail's workspace picker. Fetches its OWN pool list rather than reading
@@ -19,21 +20,36 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
+    // One `cancelled` flag for every fetch this effect ever starts — the
+    // initial one and each later refresh — so unmounting stops all of them
+    // rather than only the first.
     let cancelled = false;
-    listPools()
-      .then((p) => {
-        if (!cancelled) setPools(p);
-      })
-      .catch(() => {
-        // A failed fetch is not an empty list. Leaving `pools` at its
-        // initial `[]` renders the same "Choose a workspace" affordance a
-        // brand-new member would see, which would be a lie to someone who
-        // actually belongs to several — so on failure this renders nothing
-        // beyond the button itself and says nothing further. Every page
-        // below the rail already reports its own load failures.
-      });
+    const load = () => {
+      listPools()
+        .then((p) => {
+          if (!cancelled) setPools(p);
+        })
+        .catch(() => {
+          // A failed fetch is not an empty list. Leaving `pools` at its
+          // initial `[]` renders the same "Choose a workspace" affordance a
+          // brand-new member would see, which would be a lie to someone who
+          // actually belongs to several — so on failure this renders nothing
+          // beyond the button itself and says nothing further. Every page
+          // below the rail already reports its own load failures.
+        });
+    };
+
+    load();
+    // Mounting is not the only time this list can change. `ConsoleShell` is
+    // a layout Next keeps mounted across client navigations, so this
+    // component does NOT remount on the way back from Settings — a rename
+    // left the rail showing the old name until a full page reload. See
+    // `lib/workspace-events.ts` for why the signal is a window event rather
+    // than context or a store.
+    const unsubscribe = onWorkspacesChanged(load);
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, []);
 
