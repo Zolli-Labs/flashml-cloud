@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { Plus } from "@phosphor-icons/react";
+import { ArrowClockwise, Plus } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import { isActiveJob } from "@/lib/job-scope";
@@ -27,7 +27,7 @@ function started(job: JobRecord): string {
 }
 
 export default function WorkspaceJobsPage() {
-  const { pool, jobs } = useWorkspace();
+  const { pool, jobs, reload } = useWorkspace();
   const [filter, setFilter] = useState<Filter>("all");
 
   // Hooks stay above the `pool` guard below: it never actually fires at
@@ -63,13 +63,29 @@ export default function WorkspaceJobsPage() {
             Everything submitted in this workspace.
           </p>
         </div>
-        <Link
-          href={workspacePath(pool.id, "submit")}
-          className="interactive inline-flex items-center gap-2 rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
-        >
-          <Plus size={15} weight="bold" />
-          New job
-        </Link>
+        <div className="flex items-center gap-2">
+          {/* No spin-while-loading here, unlike the source page: this tab
+              only ever mounts while `useWorkspace().state === "ready"` —
+              WorkspaceGate swaps in a skeleton for every other state — so
+              `state === "loading"` inside this component is always false.
+              Wiring the spin to it would be a condition that can never
+              fire, which reads as intentional and is not. */}
+          <button
+            type="button"
+            onClick={reload}
+            aria-label="Refresh"
+            className="rounded-md p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+          >
+            <ArrowClockwise size={15} />
+          </button>
+          <Link
+            href={workspacePath(pool.id, "submit")}
+            className="interactive inline-flex items-center gap-2 rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
+          >
+            <Plus size={15} weight="bold" />
+            New job
+          </Link>
+        </div>
       </div>
 
       {jobs.length > 0 && (
