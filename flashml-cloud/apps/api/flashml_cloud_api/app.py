@@ -925,8 +925,8 @@ def create_cloud_app(
         # Read-only, and the console's only source for whether to draw the
         # admin queue's entry in its rail. Still granted by one manual SQL
         # UPDATE and by nothing else: `PATCH /me` never writes it, and
-        # `require_admin` re-checks it on every queue route, so exposing it
-        # here changes what is *drawn*, never what is allowed.
+        # the `admin_user` dependency re-checks it on every queue route, so
+        # exposing it here changes what is *drawn*, never what is allowed.
         profile["is_admin"] = dbmod.profile_is_admin(db, user_id)
         return profile
 

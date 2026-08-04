@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { INVITE_ROUTE, screenFor } from "./access-screen";
 
 describe("screenFor", () => {
+  it("pins the invite route's value", () => {
+    // The value is a contract twice over: with the route directory on disk
+    // (`app/(console)/pools/join/`) and with a second team building against
+    // it. Every other test here uses the imported constant, so without this
+    // line the value could drift to anything and stay green while the one
+    // route that must survive every access state stopped being reachable.
+    expect(INVITE_ROUTE).toBe("/pools/join");
+  });
+
   it("renders the console while the state is still unknown", () => {
     // The shell mounts once per console session. Showing a loading state on
     // every first paint would punish the overwhelming majority — already
