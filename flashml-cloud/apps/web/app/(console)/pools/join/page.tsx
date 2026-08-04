@@ -82,7 +82,6 @@ function InviteSaved({ name }: { name: string }) {
  * typed rather than clicked — including a `"pending"` account, for whom
  * `/pools` itself renders the waiting screen instead. */
 function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
-  const router = useRouter();
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,7 +105,18 @@ function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
         return;
       }
       toast.success(`Joined ${result.name}`);
-      router.push("/pools");
+      // The workspace just joined, by id — NOT `/pools`. That route is a
+      // resolver, and `resolveWorkspace` prefers the last-workspace cookie,
+      // so someone who already belongs to another workspace would be told
+      // "Joined Alpha" and then dropped into Zebra.
+      //
+      // `window.location.href`, not `router.push`: a full navigation
+      // remounts `ConsoleShell`, so `WorkspaceSwitcher` re-fetches and the
+      // workspace they just joined actually appears in the rail. A client
+      // navigation leaves the switcher's mount-only list stale, with no
+      // in-app way back to the new workspace. Same line, same reasons, as
+      // the clicked-link path below.
+      window.location.href = `/pools/${result.pool_id}`;
     } catch (err) {
       // NotAuthenticated is not handled specially here: reaching this page
       // already required a session, so a 401 mid-submit means the session

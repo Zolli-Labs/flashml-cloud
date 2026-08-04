@@ -1,6 +1,13 @@
 /** A one-way notification that the signed-in user's workspace LIST has
- * changed — renamed, created, joined, left — for components that fetch it
- * themselves and have no React path back to whoever changed it.
+ * changed — renamed or created — for components that fetch it themselves
+ * and have no React path back to whoever changed it.
+ *
+ * Those two are the only dispatchers. Joining does not use this: both join
+ * paths in `pools/join` do a full `window.location` navigation, which
+ * remounts the switcher and re-fetches anyway. Leaving does not exist —
+ * there is no leave route in `cloud-api.ts` yet. Add to this list only when
+ * something actually dispatches; a docstring ahead of its code is the
+ * defect this project has already had to fix once.
  *
  * There is exactly one such component today: `WorkspaceSwitcher`. It lives
  * in `ConsoleShell`, which Next keeps mounted across client navigations, and
