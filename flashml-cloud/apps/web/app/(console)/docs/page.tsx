@@ -168,9 +168,9 @@ flashnode work --coordinator ${base} --runner trusted`}
                 <span className="text-muted-foreground">
                   No container, no network isolation &mdash; whatever the
                   job&apos;s command does, it does directly on this machine.
-                  Only your pool&apos;s jobs are ever placed here; the
-                  coordinator refuses everything else, fail closed. Only run
-                  this for a pool you&apos;d hand a shell account to.
+                  No job from outside your pool ever runs here &mdash; argv
+                  work is confined to your pool by three fail-closed checks.
+                  Only run this for a pool you&apos;d hand a shell account to.
                 </span>
               </p>
             </div>

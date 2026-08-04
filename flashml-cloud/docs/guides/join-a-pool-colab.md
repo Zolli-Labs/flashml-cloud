@@ -22,7 +22,10 @@ caveat instead.
   [`/pools`](/pools) and sends you a link shaped like
   `/pools/join?token=...`. Open that link, sign in, and you're a member —
   this notebook is what turns your Colab session into one of the pool's
-  machines, not what joins the pool itself.
+  machines, not what joins the pool itself. Treat that link like a
+  password: anyone holding it can join your pool, and it can end up in
+  browser history — send it over a private channel, and prefer minting a
+  short-lived invite over a long-lived one.
 - The cloud API URL your team is using. The examples below use
   `https://flashml-api.onrender.com`, the hosted default — if your team
   self-hosts, use the URL from your own console's
@@ -75,12 +78,14 @@ does, it does directly inside this Colab runtime. That command prints its
 own warning to the same effect every time it starts, so you'll see it again
 in the cell's output.
 
-The coordinator is what keeps this bounded, not the sandbox: it refuses
-every task that isn't scoped to your pool to a `--runner trusted` worker —
-fail closed, so this machine can only ever be handed your own team's jobs,
-never a stranger's. That's the whole trust model here: you're trusting your
-pool's members the way you'd trust anyone with a shell account, and the
-coordinator enforces that nothing outside the pool ever reaches you.
+The coordinator is what keeps this bounded, not the sandbox: no job from
+outside your pool ever **runs** here — argv work is confined to your pool by
+three fail-closed checks. (A trusted worker can still be offered a public,
+non-argv task; it cannot execute one, so that costs it a wasted attempt, not
+a stranger's code running on your machine — closing that gap fully is
+upstream flashnode work, tracked separately.) That's the whole trust model
+here: you're trusting your pool's members the way you'd trust anyone with a
+shell account.
 
 ## Verify it worked
 

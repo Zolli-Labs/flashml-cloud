@@ -17,7 +17,10 @@ it.
   [`/pools`](/pools) and sends you a link shaped like
   `/pools/join?token=...`. Open that link in a browser, sign in, and you're
   a member — the commands below are what turns this pod into one of the
-  pool's machines, not what joins the pool itself.
+  pool's machines, not what joins the pool itself. Treat that link like a
+  password: anyone holding it can join your pool, and it can end up in
+  browser history — send it over a private channel, and prefer minting a
+  short-lived invite over a long-lived one.
 - The cloud API URL your team is using. The examples below use
   `https://flashml-api.onrender.com`, the hosted default — if your team
   self-hosts, use the URL from your own console's
@@ -65,12 +68,15 @@ not a shortcut around anything.
 container, no network isolation, no filesystem confinement beyond what the
 pod itself already provides. The command prints its own warning to that
 effect every time it starts. The coordinator is what bounds this, not the
-sandbox: it refuses every task outside your pool to a `--runner trusted`
-worker — fail closed — so this pod only ever runs your own team's jobs,
-never a stranger's. Because you're already paying for and controlling this
-pod outright, the practical risk is close to what you already accept by
-renting it; the pool boundary just means it also only ever runs code from
-people your pool operator invited.
+sandbox: no job from outside your pool ever **runs** on this pod — argv work
+is confined to your pool by three fail-closed checks. (A trusted worker can
+still be offered a public, non-argv task; it cannot execute one, so that
+costs it a wasted attempt, not a stranger's code actually running here —
+closing that gap fully is upstream flashnode work, tracked separately.)
+Because you're already paying for and controlling this pod outright, the
+practical risk is close to what you already accept by renting it; the pool
+boundary just means argv work here also only ever comes from people your
+pool operator invited.
 
 ## Verify it worked
 
