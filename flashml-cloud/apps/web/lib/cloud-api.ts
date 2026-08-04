@@ -156,6 +156,20 @@ export interface Machine {
   pools: PoolChip[];
 }
 
+/** A row of `GET /v1alpha1/pools/{id}/machines` — every machine bound to a
+ * pool, across all its members, which `listMachines()` cannot return
+ * because it is scoped to the caller by design.
+ *
+ * No `pools` field: this response is already answering "which pool", so a
+ * per-machine chip list would be a longer way of saying the id in the URL.
+ * That absence is why this extends `Omit<Machine, "pools">` rather than
+ * `Machine` — the compiler should reject reading `.pools` off one of these,
+ * not let it be silently undefined. */
+export interface PoolMachine extends Omit<Machine, "pools"> {
+  owner_id: string;
+  owner_display_name: string | null;
+}
+
 export interface ApproveDeviceCodeResult {
   machine_id: string;
   status: string;
@@ -220,6 +234,15 @@ export interface JobRecord {
   name?: string;
   /** "federated" for a federated run; absent otherwise. */
   mode?: string;
+  /** The pool this job belongs to, or null for every job submitted before
+   * pools shipped. OPTIONAL, not merely nullable: the web and API deploy
+   * separately, so a browser running this code will briefly talk to an API
+   * that has never heard of the field. `lib/job-scope.ts` treats absent and
+   * null identically for exactly that reason. */
+  pool_id?: string | null;
+  /** Display name of whoever submitted this, for the attribution that makes
+   * a shared workspace read as shared. Null when they never set one. */
+  submitted_by?: string | null;
   backend?: string;
   deployment_profile?: string;
   runtime_execution_id?: string | null;
@@ -517,6 +540,36 @@ export function listPools(): Promise<PoolSummary[]> {
 export function createPool(name: string): Promise<Pool> {
   return request<Pool>("/v1alpha1/pools", {
     method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** `GET /v1alpha1/pools/{id}/machines` — the workspace's whole fleet, one
+ * row per bound machine across every member.
+ *
+ * Member-scoped server-side: a non-member gets 404, indistinguishable from
+ * a pool that does not exist, so `NotFound` from here must never be
+ * reworded into an access-denied message.
+ *
+ * Machines whose owner has left the pool are already excluded by the query
+ * (`list_pool_machines`), matching what placement actually sees — so the
+ * count rendered from this list is the workspace's real capacity, not an
+ * optimistic one. */
+export function listPoolMachines(poolId: string): Promise<PoolMachine[]> {
+  return request<PoolMachine[]>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/machines`
+  );
+}
+
+/** `PATCH /v1alpha1/pools/{id}` — rename, owner only.
+ *
+ * A member who is not the owner gets 404, the same as a stranger: the
+ * caller cannot distinguish the two and must not try to. The API trims and
+ * caps at 200 characters, so the returned `Pool` is the authority on what
+ * the name actually became — render that, not the string you sent. */
+export function renamePool(poolId: string, name: string): Promise<Pool> {
+  return request<Pool>(`/v1alpha1/pools/${encodeURIComponent(poolId)}`, {
+    method: "PATCH",
     body: JSON.stringify({ name }),
   });
 }

@@ -27,7 +27,9 @@ import {
   listJobContributions,
   listJobRounds,
   listMachines,
+  listPoolMachines,
   listPools,
+  renamePool,
   revokePoolInvites,
   submitFromRepo,
   unbindMachineFromPool,
@@ -612,5 +614,45 @@ describe("cloud-api", () => {
       expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
       expect(result).toEqual({ revoked: 3 });
     });
+  });
+
+  it("lists a pool's machines from the pool-scoped route", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, [{ id: "m1", owner_display_name: "Grace" }])
+    );
+
+    const rows = await listPoolMachines("vision");
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/v1alpha1\/pools\/vision\/machines$/);
+    expect(rows[0].owner_display_name).toBe("Grace");
+  });
+
+  it("renames a pool with a PATCH carrying a JSON name body", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { id: "vision", name: "Vision Lab" })
+    );
+
+    const pool = await renamePool("vision", "Vision Lab");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/v1alpha1\/pools\/vision$/);
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body)).toEqual({ name: "Vision Lab" });
+    expect(pool.name).toBe("Vision Lab");
+  });
+
+  it("escapes a pool id that would otherwise break the path", async () => {
+    // Guards the encodeURIComponent in both new calls: an unescaped id
+    // containing a slash would silently address a different route.
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+    await listPoolMachines("a/b");
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/v1alpha1\/pools\/a%2Fb\/machines$/);
   });
 });
