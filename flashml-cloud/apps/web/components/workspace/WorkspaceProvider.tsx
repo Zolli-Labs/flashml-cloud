@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   NotAuthenticated,
@@ -63,9 +63,23 @@ export function WorkspaceProvider({
   const [state, setState] = useState<WorkspaceLoadState>("loading");
   const [error, setError] = useState<string | null>(null);
 
+  // Bumped by every `load()` call and compared when that call's response
+  // settles. Next.js does not remount this provider on a `/w/A/...` ->
+  // `/w/B/...` navigation — same layout position, only `poolId` changes —
+  // so A's in-flight request is still out there when B's starts. A's
+  // response resolving after B's is ordinary network variance, not an edge
+  // case, and applying it would silently overwrite B's correct state with
+  // A's. Comparing this token when a response settles is what discards it
+  // instead: a call that is no longer the latest one this component made
+  // (superseded by a newer `load`, a workspace switch, or an unmount)
+  // never reaches `setState`.
+  const requestIdRef = useRef(0);
+
   const load = useCallback(() => {
+    const requestId = ++requestIdRef.current;
     Promise.all([getPool(poolId), getMe(), listJobs(), listPoolMachines(poolId)])
       .then(([detail, me, allJobs, fleet]) => {
+        if (requestIdRef.current !== requestId) return; // stale: superseded or unmounted
         setPool(detail.pool);
         setMembers(detail.members);
         setViewerId(me.id);
@@ -78,6 +92,7 @@ export function WorkspaceProvider({
         setError(null);
       })
       .catch((err) => {
+        if (requestIdRef.current !== requestId) return; // stale: superseded or unmounted
         if (err instanceof NotAuthenticated) {
           const next = window.location.pathname + window.location.search;
           router.push(`/sign-in?next=${encodeURIComponent(next)}`);
@@ -98,9 +113,38 @@ export function WorkspaceProvider({
       });
   }, [poolId, router]);
 
+  // Reset synchronously whenever the workspace identity changes, so workspace
+  // A's pool/members/jobs/machines can never render under workspace B's URL
+  // labelled "ready" for the duration of B's fetch — the state fields go back
+  // to their initial values in the same commit that notices `poolId` moved,
+  // before B's data arrives. Bumping the token here (not only inside `load`)
+  // means this reset is itself what invalidates A's in-flight response, and
+  // does not rely on the mount effect below still being the thing that fires
+  // `load` next.
+  useEffect(() => {
+    requestIdRef.current++;
+    setPool(null);
+    setMembers([]);
+    setMachines([]);
+    setJobs([]);
+    setViewerId(null);
+    setState("loading");
+    setError(null);
+  }, [poolId]);
+
   useEffect(() => {
     load();
   }, [load]);
+
+  // Invalidate whatever is still in flight when the provider itself goes
+  // away, so a response that settles after unmount finds a token mismatch in
+  // `load` above and returns before calling `setState` on an unmounted
+  // component.
+  useEffect(() => {
+    return () => {
+      requestIdRef.current++;
+    };
+  }, []);
 
   // Remember where we were, so `/overview` and the post-sign-in redirect can
   // resolve to somewhere real. Written only once the fetch SUCCEEDS: caching
