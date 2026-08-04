@@ -106,7 +106,7 @@ export function YourMachines({
         )
       );
       toast.error(`Couldn't ${bound ? "remove" : "add"} ${label}`, {
-        description: "This pool is unchanged. Try again.",
+        description: "This workspace is unchanged. Try again.",
       });
     } finally {
       setPendingIds((prev) => {
@@ -121,8 +121,9 @@ export function YourMachines({
     <section>
       <h2 className="text-sm font-semibold">Your machines</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        Opt your own machines into this pool&apos;s work. A machine serves
-        no pool until it&apos;s ticked in here, even if you own it.
+        Opt your own machines into this workspace&apos;s work. A machine
+        serves no workspace until it&apos;s ticked in here, even if you own
+        it.
       </p>
 
       <div className="mt-3">
@@ -207,7 +208,9 @@ function MachineToggleRow({
         checked={bound}
         disabled={pending}
         onChange={() => onToggle(machine, bound)}
-        aria-label={`${bound ? "Remove" : "Add"} ${label} ${bound ? "from" : "to"} this pool`}
+        // User-visible too, just only to screen readers — same "workspace"
+        // vocabulary as every other string on this page.
+        aria-label={`${bound ? "Remove" : "Add"} ${label} ${bound ? "from" : "to"} this workspace`}
         className="h-4 w-4 shrink-0 rounded border-border accent-primary disabled:opacity-50"
       />
       <span
