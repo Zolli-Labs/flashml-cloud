@@ -198,11 +198,17 @@ jobs:
   # `autoDeploy: true` in render.yaml, so Render redeploys them on this same
   # push without needing RENDER_API_KEY. The two are therefore concurrent
   # rather than ordered: a deploy can briefly come up against a database that
-  # is one migration behind. That is tolerable in dev precisely because the
-  # code paths that touch new tables fail soft (the attempt ledger logs a
-  # warning and credits nobody rather than erroring), and the next request
-  # after the migration lands works. Do NOT carry this looseness into prod,
-  # where deploy-prod.yml migrates first and deploys only afterwards.
+  # is one migration behind.
+  #
+  # That used to be tolerable across the board because the code paths that
+  # touch new tables failed soft. It is NOT tolerable for migration 0007
+  # (pools): `profile_is_admitted` gates /me plus four other routes, and
+  # `list_pool_job_ids_for_member` backs /jobs, and neither has a
+  # try/except — a deploy that lands before 0007 finishes applying will
+  # 500 on those routes instead of degrading. After pushing to develop,
+  # watch `migrate-dev` through to completion before touching the dev
+  # console. Do NOT carry this looseness into prod, where deploy-prod.yml
+  # migrates first and deploys only afterwards.
   # ---------------------------------------------------------------------------
   migrate-dev:
     needs: [api]
