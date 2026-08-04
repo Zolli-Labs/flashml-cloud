@@ -671,7 +671,7 @@ def test_a_pool_id_submitted_uppercase_is_normalized_to_canonical(
     """Postgres accepts an uppercase uuid, so the membership check
     (`fetch_pool_for_member`) passes it just fine — but the scheduler's gate
     compares exact strings against the canonical-lowercase ids
-    `pool_ids_for_machine_owner` returns. Submitting the caller's spelling
+    `pool_ids_for_machine` returns. Submitting the caller's spelling
     verbatim would pass this check and then never match that gate, leaving
     the job PENDING forever. The route must rebind `pool` to the database's
     canonical id before it reaches compile/insert_job/source."""

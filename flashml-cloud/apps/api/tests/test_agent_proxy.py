@@ -40,7 +40,12 @@ from psycopg.rows import dict_row
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
-from flashml_cloud_api.app import DELEGATION_HEADER, _scrub_identity, create_cloud_app
+from flashml_cloud_api.app import (
+    DELEGATION_HEADER,
+    MAX_JSON_BODY_BYTES,
+    _scrub_identity,
+    create_cloud_app,
+)
 from flashml_cloud_api.settings import Settings
 
 RUN_MARKER = uuid.uuid4().hex[:12]
@@ -436,11 +441,12 @@ def test_scrub_identity_stamps_pools_on_the_empty_body_force_branch():
 
 def test_register_body_pools_is_stamped_from_membership(client, db, transport):
     """A forged ``capabilities.pools`` in the register body must be
-    overwritten with the caller's real membership, never merged with it."""
+    overwritten with the caller's real binding, never merged with it."""
     owner = _new_user(db)
     node_id = _node_id("pool-register")
-    _, token = _enrol(db, owner, node_id)
+    machine_id, token = _enrol(db, owner, node_id)
     pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=str(machine_id), pool_id=str(pool["id"]))
 
     client.post(
         "/v1alpha1/nodes/register",
@@ -477,8 +483,9 @@ def test_register_with_no_membership_stamps_empty(client, db, transport):
 def test_heartbeat_carries_the_membership_refresh(client, db, transport):
     owner = _new_user(db)
     node_id = _node_id("pool-heartbeat")
-    _, token = _enrol(db, owner, node_id)
+    machine_id, token = _enrol(db, owner, node_id)
     pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=str(machine_id), pool_id=str(pool["id"]))
 
     client.post(
         f"/v1alpha1/nodes/{node_id}/heartbeat",
@@ -496,8 +503,9 @@ def test_heartbeat_scrubs_a_forged_nested_capabilities_pools_too(client, db, tra
     forgery landing wherever the coordinator adds the field next."""
     owner = _new_user(db)
     node_id = _node_id("pool-heartbeat-nested")
-    _, token = _enrol(db, owner, node_id)
+    machine_id, token = _enrol(db, owner, node_id)
     pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=str(machine_id), pool_id=str(pool["id"]))
 
     client.post(
         f"/v1alpha1/nodes/{node_id}/heartbeat",
@@ -523,7 +531,7 @@ def test_register_fails_closed_when_pools_lookup_raises(
     def raiser(*_a, **_kw):
         raise RuntimeError("simulated pool lookup failure")
 
-    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine", raiser)
 
     client.post(
         "/v1alpha1/nodes/register",
@@ -542,7 +550,7 @@ def test_heartbeat_fails_closed_when_pools_lookup_raises(
     def raiser(*_a, **_kw):
         raise RuntimeError("simulated pool lookup failure")
 
-    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine", raiser)
 
     client.post(
         f"/v1alpha1/nodes/{machine['node_id']}/heartbeat",
@@ -553,6 +561,181 @@ def test_heartbeat_fails_closed_when_pools_lookup_raises(
     body = json.loads(transport.last.read())
     assert body["pools"] == []
     assert "forged-pool" not in json.dumps(body)
+
+
+# ---------------------------------------------------------------------------
+# 2c. the stamp narrows to MACHINE scope (Task 3); register persists the
+# display-only capability snapshot from the agent's own self-description
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_is_machine_scoped_not_owner_scoped(client, transport, db):
+    """Two machines, one owner, one pool: only the BOUND machine's register
+    AND heartbeat bodies carry the pool. This is the opt-in core — under v1
+    both machines would carry it, on both routes; the heartbeat half pins
+    that `node_heartbeat`'s lookup is machine-scoped too, not just
+    `register_node`'s — a partial swap that narrowed only one call site
+    would leave the other silently back on owner scope."""
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"scoped-{RUN_MARKER}", owner_id=owner)
+    bound_node_id, unbound_node_id = _node_id("bound"), _node_id("unbound")
+    m1_id, m1_tok = _enrol(db, owner, bound_node_id)
+    m2_id, m2_tok = _enrol(db, owner, unbound_node_id)
+    dbmod.bind_machine_pool(db, machine_id=str(m1_id), pool_id=str(pool["id"]))
+    for tok, expected in ((m1_tok, [str(pool["id"])]), (m2_tok, [])):
+        client.post("/v1alpha1/nodes/register",
+                    json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                          "capabilities": {"cpu_cores": 4}},
+                    headers={"Authorization": f"Bearer {tok}"})
+        body = json.loads(transport.last.read())
+        assert body["capabilities"]["pools"] == expected
+
+    for node_id, tok, expected in (
+        (bound_node_id, m1_tok, [str(pool["id"])]),
+        (unbound_node_id, m2_tok, []),
+    ):
+        client.post(f"/v1alpha1/nodes/{node_id}/heartbeat",
+                    json={"schema_version": "v1alpha1", "node_id": node_id},
+                    headers={"Authorization": f"Bearer {tok}"})
+        body = json.loads(transport.last.read())
+        assert body["pools"] == expected
+
+
+def test_register_persists_the_capability_snapshot(client, transport, db):
+    owner = _new_user(db)
+    _mid, tok = _enrol(db, owner, _node_id("caps"))
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "unsandboxed_argv_capable": True, "module_capable": True,
+                      "capabilities": {"cpu_cores": 4}},
+                headers={"Authorization": f"Bearer {tok}"})
+    with db.cursor() as cur:
+        cur.execute("select sandbox_capable, argv_capable, unsandboxed_argv_capable,"
+                    " module_capable from public.machines where id = %s", (_mid,))
+        row = cur.fetchone()
+    assert row == {"sandbox_capable": False, "argv_capable": False,
+                   "unsandboxed_argv_capable": True, "module_capable": True}
+
+
+def test_register_capability_snapshot_is_overwritten_not_accumulated(
+    client, transport, db
+):
+    """A snapshot of the LATEST registration, not the union of every
+    registration this machine has ever made: a re-register with a
+    narrower capability set must show the narrower set. Asserted after
+    BOTH calls — the first pins that the write actually happens (a no-op
+    persist would leave every column at its `false` default and pass this
+    test's second half for free), the second pins overwrite-not-merge."""
+    owner = _new_user(db)
+    mid, tok = _enrol(db, owner, _node_id("caps-overwrite"))
+    headers = {"Authorization": f"Bearer {tok}"}
+
+    def _row():
+        with db.cursor() as cur:
+            cur.execute(
+                "select sandbox_capable, argv_capable, unsandboxed_argv_capable,"
+                " module_capable from public.machines where id = %s", (mid,),
+            )
+            return cur.fetchone()
+
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "sandbox_capable": True, "argv_capable": True,
+                      "unsandboxed_argv_capable": True, "module_capable": True,
+                      "capabilities": {"cpu_cores": 4}},
+                headers=headers)
+    assert _row() == {"sandbox_capable": True, "argv_capable": True,
+                      "unsandboxed_argv_capable": True, "module_capable": True}
+
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "capabilities": {"cpu_cores": 4}},
+                headers=headers)
+    assert _row() == {"sandbox_capable": False, "argv_capable": False,
+                      "unsandboxed_argv_capable": False, "module_capable": False}
+
+
+def test_capability_persist_failure_does_not_fail_registration(
+    client, transport, db, monkeypatch
+):
+    """Best-effort, exactly like `touch_machine_last_seen`: a display-column
+    write failing must never fail the registration itself, and — since it
+    sits in its own try, nested inside the pools-lookup try — must never
+    zero the (unrelated) pools stamp either."""
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"persist-fail-{RUN_MARKER}", owner_id=owner)
+    mid, tok = _enrol(db, owner, _node_id("caps-persist-fail"))
+    dbmod.bind_machine_pool(db, machine_id=str(mid), pool_id=str(pool["id"]))
+
+    def raiser(*_a, **_kw):
+        raise RuntimeError("simulated capability persist failure")
+
+    monkeypatch.setattr(dbmod, "set_machine_capabilities", raiser)
+
+    r = client.post(
+        "/v1alpha1/nodes/register",
+        json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+              "unsandboxed_argv_capable": True,
+              "capabilities": {"cpu_cores": 4}},
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 200
+    body = json.loads(transport.last.read())
+    assert body["capabilities"]["pools"] == [str(pool["id"])]
+
+
+def test_oversized_register_body_413s_before_the_capability_parse(
+    client, machine, transport, monkeypatch
+):
+    """The size gate must run BEFORE the capability `json.loads` and the
+    persist write, not merely before the coordinator is contacted: a
+    machine-token holder must not be able to force an expensive parse (or
+    a DB write) merely by padding a request that is about to be rejected
+    as too large anyway. `proxy()` still 413s it right after — this test
+    pins that the parse/persist upstream of that never runs at all."""
+    calls = []
+    monkeypatch.setattr(
+        dbmod, "set_machine_capabilities",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    padding = "x" * (MAX_JSON_BODY_BYTES + 1)
+    oversized = json.dumps({
+        "schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+        "padding": padding,
+    }).encode()
+    assert len(oversized) > MAX_JSON_BODY_BYTES, "sanity: the body must actually be oversized"
+
+    r = client.post(
+        "/v1alpha1/nodes/register",
+        content=oversized,
+        headers={"Authorization": f"Bearer {machine['token']}",
+                 "Content-Type": "application/json"},
+    )
+    assert r.status_code == 413
+    assert calls == [], "set_machine_capabilities ran for a body that was about to be rejected"
+
+
+def test_register_capability_booleans_require_true_not_merely_truthy(
+    client, transport, db
+):
+    """`is True` coercion, not Python truthiness: a JSON string `"true"` or
+    the number `1` must persist as `False` — only the JSON literal `true`
+    (which `json.loads` turns into the Python singleton `True`) counts.
+    A `bool(...)` coercion instead of `is True` would pass both of these
+    through as truthy and this test would catch it."""
+    owner = _new_user(db)
+    mid, tok = _enrol(db, owner, _node_id("caps-truthy-not-true"))
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "sandbox_capable": "true", "argv_capable": 1,
+                      "capabilities": {"cpu_cores": 4}},
+                headers={"Authorization": f"Bearer {tok}"})
+    with db.cursor() as cur:
+        cur.execute("select sandbox_capable, argv_capable, unsandboxed_argv_capable,"
+                    " module_capable from public.machines where id = %s", (mid,))
+        row = cur.fetchone()
+    assert row == {"sandbox_capable": False, "argv_capable": False,
+                   "unsandboxed_argv_capable": False, "module_capable": False}
 
 
 def test_artifact_put_forwards_raw_bytes_with_delegation(client, machine, transport):
@@ -859,6 +1042,124 @@ def test_approving_an_unknown_user_code_does_not_confirm_anything(client, db):
     r = client.post("/v1alpha1/device/approve", json={"user_code": "ZZZZZZZZ"},
                     headers={"Authorization": f"Bearer {_browser_jwt(owner)}"})
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 6b. device approve auto-attaches to a pool (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def _pool(db, owner_id: str, name: str = "Approve Pool") -> str:
+    return str(dbmod.create_pool(db, name=name, owner_id=owner_id)["id"])
+
+
+def _start_code(client, node_id: str) -> str:
+    started = client.post("/v1alpha1/device/code", json={"node_id": node_id})
+    assert started.status_code == 200
+    return started.json()["user_code"]
+
+
+def test_approving_with_a_valid_pool_id_binds_the_approved_machine(client, db):
+    owner = _new_user(db)
+    pool_id = _pool(db, owner)
+    user_code = _start_code(client, _node_id("approve-pool-ok"))
+
+    r = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": pool_id},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert r.status_code == 200, r.text
+    machine_id = r.json()["machine_id"]
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [pool_id]
+
+
+def test_approving_with_a_non_member_pool_id_is_404_and_leaves_the_code_redeemable(
+    client, db
+):
+    """The refusal has to happen BEFORE the device code is consumed: the
+    same user_code must still approve cleanly (without a pool) afterward,
+    proving nothing was written by the refused attempt."""
+    owner = _new_user(db)
+    other_owner = _new_user(db)
+    strangers_pool = _pool(db, other_owner)
+    user_code = _start_code(client, _node_id("approve-pool-refused"))
+
+    refused = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": strangers_pool},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert refused.status_code == 404
+    assert refused.json()["detail"] == "unknown pool"
+
+    ok = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert ok.status_code == 200, ok.text
+    machine_id = ok.json()["machine_id"]
+    # Approved with no pool: the refused attempt bound nothing.
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+def test_approving_with_an_unknown_pool_id_is_404_and_leaves_the_code_redeemable(
+    client, db
+):
+    owner = _new_user(db)
+    user_code = _start_code(client, _node_id("approve-pool-unknown"))
+
+    refused = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": str(uuid.uuid4())},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert refused.status_code == 404
+    assert refused.json()["detail"] == "unknown pool"
+
+    ok = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_approving_with_a_malformed_pool_id_is_404_and_leaves_the_code_redeemable(
+    client, db
+):
+    owner = _new_user(db)
+    user_code = _start_code(client, _node_id("approve-pool-malformed"))
+
+    refused = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code, "pool_id": "not-a-uuid-at-all"},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert refused.status_code == 404
+    assert refused.json()["detail"] == "unknown pool"
+
+    ok = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_approving_without_a_pool_id_is_unchanged(client, db):
+    owner = _new_user(db)
+    user_code = _start_code(client, _node_id("approve-pool-absent"))
+
+    r = client.post(
+        "/v1alpha1/device/approve",
+        json={"user_code": user_code},
+        headers={"Authorization": f"Bearer {_browser_jwt(owner)}"},
+    )
+    assert r.status_code == 200, r.text
+    machine_id = r.json()["machine_id"]
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
 
 
 # ---------------------------------------------------------------------------

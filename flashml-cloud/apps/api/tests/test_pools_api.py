@@ -18,6 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from flashml_cloud_api import db as dbmod
 from flashml_cloud_api.auth import (
     hash_invite_token,
     looks_like_invite_token,
@@ -33,9 +34,28 @@ from test_jobs_from_repo import (  # noqa: F401 - fixtures
     transport,
 )
 
+RUN_MARKER = uuid.uuid4().hex[:8]
+
 
 def _auth(user_id: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {_jwt(user_id)}"}
+
+
+def _node_id(tag: str) -> str:
+    """A node id no other test can collide with on ``machines.node_id``."""
+    return f"pools-api-{RUN_MARKER}-{tag}-{uuid.uuid4().hex[:6]}"
+
+
+def _enrol(db, owner_id: str, tag: str) -> str:
+    """A machine belonging to ``owner_id``, for the binding routes — the
+    same ``insert_machine`` helper ``test_db_pools.py``'s own ``_enrol``
+    uses, since these tests need a real machine row and not the enrolment
+    token dance."""
+    node_id = _node_id(tag)
+    return str(dbmod.insert_machine(
+        db, owner_id=owner_id, node_id=node_id, name=f"machine-{node_id}",
+        platform="linux",
+    ))
 
 
 def _new_unadmitted_user(db) -> str:
@@ -192,6 +212,177 @@ def test_unknown_pool_id_and_a_malformed_one_are_both_404(make_client, db):
 
 
 # ---------------------------------------------------------------------------
+# machine <-> pool bindings (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_member_binds_their_own_machine_to_their_own_pool(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, owner, "bind")
+
+    r = client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(owner)
+    )
+    assert r.status_code == 204
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [pool["id"]]
+
+
+def test_binding_requires_authentication(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, owner, "bind-auth")
+
+    r = client.put(f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}")
+    assert r.status_code == 401
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+def test_binding_to_a_pool_the_caller_is_not_a_member_of_is_404(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, stranger, "bind-nonmember")
+
+    r = client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(stranger)
+    )
+    assert r.status_code == 404
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+def test_binding_someone_elses_machine_is_404(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    strangers_machine = _enrol(db, stranger, "bind-not-yours")
+
+    r = client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{strangers_machine}",
+        headers=_auth(owner),
+    )
+    assert r.status_code == 404
+    assert dbmod.pool_ids_for_machine(db, strangers_machine) == []
+
+
+def test_binding_a_malformed_pool_or_machine_id_is_404(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, owner, "bind-malformed")
+
+    assert client.put(
+        f"/v1alpha1/pools/not-a-uuid/machines/{machine_id}", headers=_auth(owner)
+    ).status_code == 404
+    assert client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/not-a-uuid", headers=_auth(owner)
+    ).status_code == 404
+    # Neither malformed half wrote a binding.
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+def test_binding_an_unknown_pool_or_machine_id_is_404(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, owner, "bind-unknown")
+
+    assert client.put(
+        f"/v1alpha1/pools/{uuid.uuid4()}/machines/{machine_id}", headers=_auth(owner)
+    ).status_code == 404
+    assert client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{uuid.uuid4()}", headers=_auth(owner)
+    ).status_code == 404
+
+
+def test_unbinding_returns_204_and_the_stamp_empties(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, owner, "unbind")
+    assert client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(owner)
+    ).status_code == 204
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [pool["id"]]
+
+    r = client.delete(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(owner)
+    )
+    assert r.status_code == 204
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+def test_unbinding_a_non_member_pool_or_someone_elses_machine_is_404_and_has_no_effect(
+    make_client, db
+):
+    client = make_client()
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, owner, "unbind-guard")
+    assert client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(owner)
+    ).status_code == 204
+
+    assert client.delete(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(stranger)
+    ).status_code == 404
+    # A stranger's refused unbind must not have touched the binding.
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [pool["id"]]
+
+
+# ---------------------------------------------------------------------------
+# machines listing: pool chips and capability booleans (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_machines_listing_carries_the_pool_chip_and_capability_booleans(
+    make_client, db
+):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    machine_id = _enrol(db, owner, "chip")
+    dbmod.set_machine_capabilities(
+        db, machine_id=machine_id, sandbox_capable=True, argv_capable=True,
+        unsandboxed_argv_capable=False, module_capable=True,
+    )
+    assert client.put(
+        f"/v1alpha1/pools/{pool['id']}/machines/{machine_id}", headers=_auth(owner)
+    ).status_code == 204
+
+    r = client.get("/v1alpha1/machines", headers=_auth(owner))
+    assert r.status_code == 200
+    item = next(m for m in r.json() if m["id"] == machine_id)
+    assert item["pools"] == [{"id": pool["id"], "name": pool["name"]}]
+    assert item["sandbox_capable"] is True
+    assert item["argv_capable"] is True
+    assert item["unsandboxed_argv_capable"] is False
+    assert item["module_capable"] is True
+
+
+def test_machines_listing_defaults_pools_to_an_empty_list_when_unbound(
+    make_client, db
+):
+    client = make_client()
+    owner = _new_user(db)
+    machine_id = _enrol(db, owner, "unbound-chip")
+
+    r = client.get("/v1alpha1/machines", headers=_auth(owner))
+    assert r.status_code == 200
+    item = next(m for m in r.json() if m["id"] == machine_id)
+    assert item["pools"] == []
+    assert item["sandbox_capable"] is False
+    assert item["argv_capable"] is False
+    assert item["unsandboxed_argv_capable"] is False
+    assert item["module_capable"] is False
+
+
+# ---------------------------------------------------------------------------
 # invite creation: owner only, 404 doctrine
 # ---------------------------------------------------------------------------
 
@@ -244,10 +435,25 @@ def test_a_custom_expires_hours_is_honored_in_the_stored_row(make_client, db):
     expires_at = _invite_expires_at(db, token)
     assert expires_at is not None
     now = datetime.now(timezone.utc)
-    # Close to now + 1h — and, just as importantly, nowhere near the 168h
-    # (7 day) default, which is what would come back if expires_hours were
+    # Close to now + 1h — and, just as importantly, nowhere near the 720h
+    # (30 day) default, which is what would come back if expires_hours were
     # silently ignored.
     assert now + timedelta(minutes=50) < expires_at < now + timedelta(minutes=70)
+
+
+def test_expires_hours_default_is_720_hours_30_days(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    r = _invite(client, owner, pool["id"])
+    assert r.status_code == 201, r.text
+    token = r.json()["token"]
+
+    expires_at = _invite_expires_at(db, token)
+    assert expires_at is not None
+    now = datetime.now(timezone.utc)
+    assert now + timedelta(hours=719) < expires_at < now + timedelta(hours=721)
 
 
 def test_expires_hours_zero_is_rejected_and_creates_no_row(make_client, db):
@@ -317,6 +523,252 @@ def test_expires_hours_exactly_at_the_cap_is_accepted(make_client, db):
 
 
 # ---------------------------------------------------------------------------
+# invite creation: uses boundaries (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def _invite_uses_remaining(db, pool_id: str) -> int:
+    with db.cursor() as cur:
+        cur.execute(
+            "select uses_remaining from public.pool_invites where pool_id = %s",
+            (pool_id,),
+        )
+        return cur.fetchone()["uses_remaining"]
+
+
+def test_a_custom_uses_is_honored_in_the_stored_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    r = _invite(client, owner, pool["id"], uses=3)
+    assert r.status_code == 201, r.text
+    assert _invite_uses_remaining(db, pool["id"]) == 3
+
+
+def test_uses_defaults_to_ten(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    r = _invite(client, owner, pool["id"])
+    assert r.status_code == 201, r.text
+    assert _invite_uses_remaining(db, pool["id"]) == 10
+
+
+def test_uses_zero_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], uses=0)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_uses_negative_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], uses=-3)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_uses_non_numeric_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], uses="lots")
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_uses_float_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], uses=3.5)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_uses_boolean_is_rejected_and_creates_no_row(make_client, db):
+    """``bool`` is an ``int`` subclass in Python — ``True`` must not sneak
+    past the numeric check and silently become a valid ``uses=1``."""
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], uses=True)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_uses_over_the_cap_is_rejected_and_creates_no_row(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    before = _invite_count(db, pool["id"])
+
+    r = _invite(client, owner, pool["id"], uses=101)
+    assert r.status_code == 400
+    assert _invite_count(db, pool["id"]) == before
+
+
+def test_uses_exactly_at_the_cap_is_accepted(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    r = _invite(client, owner, pool["id"], uses=100)
+    assert r.status_code == 201, r.text
+    assert _invite_uses_remaining(db, pool["id"]) == 100
+
+
+# ---------------------------------------------------------------------------
+# invite state / revoke (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_get_invite_state_is_empty_when_none_outstanding(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    r = client.get(f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(owner))
+    assert r.status_code == 200
+    assert r.json() == {}
+
+
+def test_get_invite_state_reflects_the_outstanding_invite_with_no_token_material(
+    make_client, db
+):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    invite = _invite(client, owner, pool["id"], uses=5)
+    token = invite.json()["token"]
+    token_hash = hash_invite_token(token)
+
+    r = client.get(f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(owner))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["uses_remaining"] == 5
+    assert "expires_at" in body
+    assert "token_hash" not in body
+    assert "token" not in body
+    assert token not in r.text
+    assert token_hash not in r.text
+
+
+def test_get_invite_state_is_owner_only_404_doctrine(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    member = _new_user(db)
+    stranger = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    _add_member(db, pool["id"], member)
+    _invite(client, owner, pool["id"])
+
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(member)
+    ).status_code == 404
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(stranger)
+    ).status_code == 404
+    assert client.get(
+        f"/v1alpha1/pools/{uuid.uuid4()}/invites", headers=_auth(owner)
+    ).status_code == 404
+
+
+def test_invite_state_and_revoke_require_authentication(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+
+    assert client.get(f"/v1alpha1/pools/{pool['id']}/invites").status_code == 401
+    assert client.delete(f"/v1alpha1/pools/{pool['id']}/invites").status_code == 401
+
+
+def test_delete_invites_revokes_and_returns_the_count(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    spent = _invite(client, owner, pool["id"], uses=1).json()["token"]
+    valid = _invite(client, owner, pool["id"], uses=3).json()["token"]
+
+    joiner = _new_unadmitted_user(db)
+    consumed = client.post(
+        "/v1alpha1/invites/accept", json={"token": spent}, headers=_auth(joiner)
+    )
+    assert consumed.status_code == 200
+
+    r = client.delete(f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(owner))
+    assert r.status_code == 200
+    assert r.json() == {"revoked": 2}
+
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(owner)
+    ).json() == {}
+
+    # The still-valid invite is gone too — revoke deletes everything, spent
+    # or not — so consuming it now falls into the same ``None`` fold as an
+    # unknown token.
+    second_joiner = _new_unadmitted_user(db)
+    again = client.post(
+        "/v1alpha1/invites/accept", json={"token": valid}, headers=_auth(second_joiner)
+    )
+    assert again.status_code == 404
+
+
+def test_delete_invites_is_owner_only(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    member = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    _add_member(db, pool["id"], member)
+    _invite(client, owner, pool["id"])
+
+    r = client.delete(f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(member))
+    assert r.status_code == 404
+    # Unaffected: the owner's invite is still outstanding.
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(owner)
+    ).json() != {}
+
+
+def test_regenerate_after_revoke_mints_a_working_link(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    _invite(client, owner, pool["id"])
+
+    revoke = client.delete(f"/v1alpha1/pools/{pool['id']}/invites", headers=_auth(owner))
+    assert revoke.status_code == 200
+    assert revoke.json()["revoked"] == 1
+
+    regenerated = _invite(client, owner, pool["id"])
+    assert regenerated.status_code == 201
+    token = regenerated.json()["token"]
+
+    joiner = _new_unadmitted_user(db)
+    accept = client.post(
+        "/v1alpha1/invites/accept", json={"token": token}, headers=_auth(joiner)
+    )
+    assert accept.status_code == 200
+    assert accept.json()["pool_id"] == pool["id"]
+
+
+# ---------------------------------------------------------------------------
 # accept: the admission bootstrap
 # ---------------------------------------------------------------------------
 
@@ -355,7 +807,9 @@ def test_accepting_an_already_consumed_token_is_404(make_client, db):
     client = make_client()
     owner = _new_user(db)
     pool = _create_pool(client, owner).json()
-    token = _invite(client, owner, pool["id"]).json()["token"]
+    # Explicit uses=1: the default is now 10 (Task 4), and this test's whole
+    # point is a single-use invite's second redemption being refused.
+    token = _invite(client, owner, pool["id"], uses=1).json()["token"]
 
     first_joiner = _new_unadmitted_user(db)
     ok = client.post(

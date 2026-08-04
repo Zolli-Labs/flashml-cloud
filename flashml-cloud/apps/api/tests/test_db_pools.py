@@ -224,26 +224,6 @@ def test_is_pool_member(db):
 
 
 # ---------------------------------------------------------------------------
-# pool_ids_for_machine_owner
-# ---------------------------------------------------------------------------
-
-
-def test_pool_ids_for_machine_owner_is_sorted(db):
-    owner = _new_user(db)
-    created = [str(_pool(db, owner, name=f"pool-{i}")) for i in range(3)]
-
-    got = dbmod.pool_ids_for_machine_owner(db, owner)
-
-    assert got == sorted(created)
-    assert got == sorted(got)
-
-
-def test_pool_ids_for_machine_owner_empty_for_a_lone_user(db):
-    owner = _new_user(db)
-    assert dbmod.pool_ids_for_machine_owner(db, owner) == []
-
-
-# ---------------------------------------------------------------------------
 # create_pool_invite / consume_pool_invite
 # ---------------------------------------------------------------------------
 
@@ -412,3 +392,242 @@ def test_list_job_contributions_joins_machine_and_member_names(db):
 
 def test_list_job_contributions_empty_for_an_uncredited_job(db):
     assert dbmod.list_job_contributions(db, _job_id()) == []
+
+
+# ---------------------------------------------------------------------------
+# pool_ids_for_machine / bind_machine_pool / unbind_machine_pool (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_requires_both_binding_and_membership(db):
+    """Opt-in: member+unbound stamps nothing; bound+member stamps; and a
+    binding to a pool the owner is no longer a member of is inert."""
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    machine_id = _enrol(db, owner, _node_id("stamp"))
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []          # member, unbound
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [str(pool["id"])]
+    with db.cursor() as cur:                                          # membership revoked, binding remains
+        cur.execute("delete from public.pool_members where pool_id = %s and user_id = %s",
+                    (pool["id"], owner))
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []           # binding alone grants nothing
+
+
+def test_pool_ids_for_machine_is_sorted_across_multiple_bindings(db):
+    owner = _new_user(db)
+    machine_id = _enrol(db, owner, _node_id("multi"))
+    pools = [dbmod.create_pool(db, name=f"p-{i}", owner_id=owner) for i in range(3)]
+    for pool in pools:
+        dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+
+    got = dbmod.pool_ids_for_machine(db, machine_id)
+    assert got == sorted(str(p["id"]) for p in pools)
+
+
+def test_bind_machine_pool_is_idempotent(db):
+    """Double-binding the same machine to the same pool writes one row —
+    ``on conflict do nothing``, the same idiom ``consume_pool_invite`` uses
+    for pool membership."""
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    machine_id = _enrol(db, owner, _node_id("idempotent"))
+
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.machine_pools "
+            "where machine_id = %s and pool_id = %s",
+            (machine_id, pool["id"]),
+        )
+        assert cur.fetchone()["n"] == 1
+
+
+def test_unbind_machine_pool_removes_the_binding(db):
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    machine_id = _enrol(db, owner, _node_id("unbind"))
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    assert dbmod.pool_ids_for_machine(db, machine_id) == [str(pool["id"])]
+
+    dbmod.unbind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+def test_unbind_machine_pool_is_a_noop_when_not_bound(db):
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    machine_id = _enrol(db, owner, _node_id("unbind-noop"))
+
+    dbmod.unbind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+
+    assert dbmod.pool_ids_for_machine(db, machine_id) == []
+
+
+# ---------------------------------------------------------------------------
+# set_machine_capabilities (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_set_machine_capabilities_writes_all_four_and_a_recall_overwrites(db):
+    owner = _new_user(db)
+    machine_id = _enrol(db, owner, _node_id("caps"))
+
+    dbmod.set_machine_capabilities(
+        db, machine_id=machine_id, sandbox_capable=True, argv_capable=True,
+        unsandboxed_argv_capable=False, module_capable=True,
+    )
+    with db.cursor() as cur:
+        cur.execute(
+            "select sandbox_capable, argv_capable, unsandboxed_argv_capable, "
+            "module_capable from public.machines where id = %s",
+            (machine_id,),
+        )
+        row = cur.fetchone()
+    assert row["sandbox_capable"] is True
+    assert row["argv_capable"] is True
+    assert row["unsandboxed_argv_capable"] is False
+    assert row["module_capable"] is True
+
+    # A re-call overwrites, not merges — a machine re-registering with a
+    # narrower set of capabilities must show the narrower set, not the union.
+    dbmod.set_machine_capabilities(
+        db, machine_id=machine_id, sandbox_capable=False, argv_capable=False,
+        unsandboxed_argv_capable=False, module_capable=False,
+    )
+    with db.cursor() as cur:
+        cur.execute(
+            "select sandbox_capable, argv_capable, unsandboxed_argv_capable, "
+            "module_capable from public.machines where id = %s",
+            (machine_id,),
+        )
+        row = cur.fetchone()
+    assert row["sandbox_capable"] is False
+    assert row["argv_capable"] is False
+    assert row["unsandboxed_argv_capable"] is False
+    assert row["module_capable"] is False
+
+
+# ---------------------------------------------------------------------------
+# pools_for_machines_of_owner (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_pools_for_machines_of_owner_returns_the_chip_map(db):
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    bound = _enrol(db, owner, _node_id("chip-bound"))
+    unbound = _enrol(db, owner, _node_id("chip-unbound"))
+    dbmod.bind_machine_pool(db, machine_id=bound, pool_id=str(pool["id"]))
+
+    chips = dbmod.pools_for_machines_of_owner(db, owner)
+
+    assert chips[str(bound)] == [{"id": str(pool["id"]), "name": pool["name"]}]
+    # A machine with no bindings is simply absent — callers default to [].
+    assert str(unbound) not in chips
+
+
+def test_pools_for_machines_of_owner_empty_dict_for_an_ownerless_machine_set(db):
+    owner = _new_user(db)
+    assert dbmod.pools_for_machines_of_owner(db, owner) == {}
+
+
+def test_pools_for_machines_of_owner_hides_a_chip_after_membership_is_revoked(db):
+    """Carried from Task 2's review: this query joined ``machine_pools`` to
+    ``pools`` without intersecting ``pool_members`` on the owner, so a
+    binding to a pool the owner had since left still rendered a chip —
+    ``pool_ids_for_machine``'s stamp already excludes exactly this case
+    (``test_stamp_requires_both_binding_and_membership`` above), and the
+    chip map must agree with the stamp rather than show a pool the machine
+    is not actually allowed to serve. The binding row itself is untouched:
+    only the chip is gated on live membership, the same as the stamp.
+    """
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    machine_id = _enrol(db, owner, _node_id("chip-revoked"))
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    assert dbmod.pools_for_machines_of_owner(db, owner)[str(machine_id)] == [
+        {"id": str(pool["id"]), "name": pool["name"]}
+    ]
+
+    with db.cursor() as cur:
+        cur.execute(
+            "delete from public.pool_members where pool_id = %s and user_id = %s",
+            (pool["id"], owner),
+        )
+
+    assert str(machine_id) not in dbmod.pools_for_machines_of_owner(db, owner)
+    # ...while the binding row itself still exists.
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.machine_pools "
+            "where machine_id = %s and pool_id = %s",
+            (machine_id, pool["id"]),
+        )
+        assert cur.fetchone()["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# fetch_outstanding_invite / revoke_pool_invites (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_outstanding_invite_none_when_there_are_no_invites(db):
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    assert dbmod.fetch_outstanding_invite(db, str(pool["id"])) is None
+
+
+def test_fetch_outstanding_invite_none_when_expired(db):
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    _invite(
+        db, pool["id"], owner, uses=5,
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    assert dbmod.fetch_outstanding_invite(db, str(pool["id"])) is None
+
+
+def test_fetch_outstanding_invite_none_when_exhausted(db):
+    owner = _new_user(db)
+    joiner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    token_hash = _invite(db, pool["id"], owner, uses=1)
+    assert dbmod.consume_pool_invite(db, token_hash=token_hash, user_id=joiner) is not None
+
+    assert dbmod.fetch_outstanding_invite(db, str(pool["id"])) is None
+
+
+def test_fetch_outstanding_invite_returns_the_newest_valid_one(db):
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    _invite(db, pool["id"], owner, uses=3)
+    newest_hash = _invite(db, pool["id"], owner, uses=7)
+
+    invite = dbmod.fetch_outstanding_invite(db, str(pool["id"]))
+
+    assert invite is not None
+    assert invite["uses_remaining"] == 7
+    assert set(invite.keys()) == {"uses_remaining", "expires_at", "created_at"}
+    assert "token_hash" not in invite
+    assert newest_hash  # sanity: the helper did return a hash, just never exposed
+
+
+def test_revoke_pool_invites_deletes_all_valid_and_spent_and_returns_the_count(db):
+    owner = _new_user(db)
+    joiner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"t2-{RUN_MARKER}", owner_id=owner)
+    spent_hash = _invite(db, pool["id"], owner, uses=1)
+    assert dbmod.consume_pool_invite(db, token_hash=spent_hash, user_id=joiner) is not None
+    valid_hash = _invite(db, pool["id"], owner, uses=3)
+
+    count = dbmod.revoke_pool_invites(db, pool_id=str(pool["id"]))
+
+    assert count == 2
+    assert dbmod.fetch_outstanding_invite(db, str(pool["id"])) is None
+    assert dbmod.consume_pool_invite(
+        db, token_hash=valid_hash, user_id=joiner
+    ) is None

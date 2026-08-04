@@ -120,12 +120,20 @@ MEDIA_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]{1,64}/[A-Za-z0-9!#$&^_.+-]{1,
 #: and completions are a few hundred bytes; nothing legitimate is close.
 MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
 
-#: Bounds on POST /v1alpha1/pools/{id}/invites' expires_hours. A week by
-#: default — long enough to actually reach a teammate, short enough that a
-#: forgotten link does not stay live indefinitely; the cap keeps a caller
-#: from minting a de-facto permanent credential by mistake.
-DEFAULT_INVITE_EXPIRES_HOURS = 24 * 7
+#: Bounds on POST /v1alpha1/pools/{id}/invites' expires_hours. 30 days by
+#: default — long enough that a standing team invite does not quietly go
+#: stale between the rare occasions someone actually shares it, short
+#: enough that a forgotten link does not stay live indefinitely; the cap
+#: keeps a caller from minting a de-facto permanent credential by mistake.
+DEFAULT_INVITE_EXPIRES_HOURS = 24 * 30
 MAX_INVITE_EXPIRES_HOURS = 24 * 90
+
+#: Bounds on the same route's ``uses``. Ten by default — a standing invite
+#: meant to onboard a small team, not a single guest — capped well short of
+#: "effectively unlimited" for the same reason ``MAX_INVITE_EXPIRES_HOURS``
+#: exists: a typo should not mint a credential nobody meant to hand out.
+DEFAULT_POOL_INVITE_USES = 10
+MAX_POOL_INVITE_USES = 100
 
 #: Largest artifact body the API will buffer, overridable per deployment.
 #: Every proxied upload is read fully into memory before it is forwarded, so
@@ -899,7 +907,16 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        return [_jsonable(m) for m in dbmod.list_machines_for_owner(db, user_id)]
+        # One extra query for every bound machine's chips, not one per
+        # machine — same reasoning ``pools_for_machines_of_owner`` itself
+        # gives for being a single aggregate rather than N lookups.
+        chips = dbmod.pools_for_machines_of_owner(db, user_id)
+        out = []
+        for m in dbmod.list_machines_for_owner(db, user_id):
+            item = _jsonable(m)
+            item["pools"] = chips.get(item["id"], [])
+            out.append(item)
+        return out
 
     @app.post("/v1alpha1/device/approve", tags=["browser"])
     async def approve(
@@ -911,13 +928,49 @@ def create_cloud_app(
         user_code = payload.get("user_code")
         if not isinstance(user_code, str) or not user_code:
             raise HTTPException(status_code=400, detail="user_code required")
+
+        # An optional pool to auto-attach the approved machine to. Checked
+        # BEFORE the device code is ever touched: a malformed, unknown, or
+        # not-a-member pool_id must refuse the whole approval, and refusing
+        # AFTER the code was already consumed would strand the volunteer's
+        # agent — its one-shot code burned on a request the caller gets to
+        # retry, with no way back except starting device code from scratch.
+        raw_pool_id = payload.get("pool_id")
+        pool_id: str | None = None
+        if raw_pool_id is not None:
+            if not isinstance(raw_pool_id, str) or not raw_pool_id:
+                raise HTTPException(status_code=404, detail="unknown pool")
+            try:
+                pool = dbmod.fetch_pool_for_member(db, raw_pool_id, user_id)
+            except psycopg.errors.InvalidTextRepresentation:
+                pool = None
+            if pool is None:
+                # Same fold as every other pool lookup in this file: unknown,
+                # not-a-uuid, and "real pool but you're not in it" all read
+                # identically, so a guesser cannot use this to learn which
+                # pool ids are real.
+                raise HTTPException(status_code=404, detail="unknown pool")
+            pool_id = raw_pool_id
+
         # Ownership is established here and nowhere else, from the verified
         # JWT sub. It never comes from the body.
         dbmod.upsert_profile(db, user_id)
         try:
-            machine_id = enrolment.approve_device_code(
-                db, user_code.strip().upper(), user_id
-            )
+            if pool_id is not None:
+                # Approve and bind as one unit: a bind failure must roll the
+                # approval back rather than leave a machine approved but not
+                # attached to the pool the caller specifically asked for.
+                with db.transaction():
+                    machine_id = enrolment.approve_device_code(
+                        db, user_code.strip().upper(), user_id
+                    )
+                    dbmod.bind_machine_pool(
+                        db, machine_id=str(machine_id), pool_id=pool_id
+                    )
+            else:
+                machine_id = enrolment.approve_device_code(
+                    db, user_code.strip().upper(), user_id
+                )
         except enrolment.DeviceCodeNotFound:
             raise HTTPException(status_code=404, detail="unknown code") from None
         except enrolment.DeviceCodeExpired:
@@ -998,6 +1051,68 @@ def create_cloud_app(
         members = dbmod.list_pool_members(db, pool_id)
         return {**_jsonable(pool), "members": [_jsonable(m) for m in members]}
 
+    @app.put(
+        "/v1alpha1/pools/{pool_id}/machines/{machine_id}",
+        status_code=204, tags=["browser"],
+    )
+    async def bind_pool_machine_route(
+        pool_id: str,
+        machine_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Opt one of the caller's own machines into serving one of the
+        caller's own pools. Both halves are scoped to this same caller —
+        pool via membership, machine via ownership — and both read 404,
+        never 403, for the usual reason: a 403 on either would confirm to a
+        guesser that the id is real. Not gated by ``admitted_user``: as with
+        minting an invite, owning the pool or the machine already required
+        admission at create time.
+        """
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        try:
+            machine = dbmod.fetch_machine_for_owner(db, machine_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            machine = None
+        if machine is None:
+            raise HTTPException(status_code=404, detail="unknown machine")
+        dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=pool_id)
+        return Response(status_code=204)
+
+    @app.delete(
+        "/v1alpha1/pools/{pool_id}/machines/{machine_id}",
+        status_code=204, tags=["browser"],
+    )
+    async def unbind_pool_machine_route(
+        pool_id: str,
+        machine_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The inverse of ``bind_pool_machine_route`` — same scoping, same
+        404 doctrine. Unbinding a pair that was never bound is a no-op
+        (``unbind_machine_pool``'s own tolerant-delete stance), not an
+        error, as long as both the pool and the machine are the caller's."""
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        try:
+            machine = dbmod.fetch_machine_for_owner(db, machine_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            machine = None
+        if machine is None:
+            raise HTTPException(status_code=404, detail="unknown machine")
+        dbmod.unbind_machine_pool(db, machine_id=machine_id, pool_id=pool_id)
+        return Response(status_code=204)
+
     @app.post("/v1alpha1/pools/{pool_id}/invites", status_code=201, tags=["browser"])
     async def create_pool_invite_route(
         pool_id: str,
@@ -1042,6 +1157,22 @@ def create_cloud_app(
                        f"{MAX_INVITE_EXPIRES_HOURS}",
             )
 
+        raw_uses = payload.get("uses")
+        if raw_uses is None:
+            uses = DEFAULT_POOL_INVITE_USES
+        elif (
+            isinstance(raw_uses, int)
+            and not isinstance(raw_uses, bool)
+            and 0 < raw_uses <= MAX_POOL_INVITE_USES
+        ):
+            uses = raw_uses
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"uses must be a positive integer, at most "
+                       f"{MAX_POOL_INVITE_USES}",
+            )
+
         token = new_invite_token()
         dbmod.create_pool_invite(
             db,
@@ -1049,12 +1180,51 @@ def create_cloud_app(
             created_by=user_id,
             token_hash=hash_invite_token(token),
             expires_at=datetime.now(timezone.utc) + timedelta(hours=hours),
-            uses=1,
+            uses=uses,
         )
         # The raw token appears in a response exactly this once. It is
         # never stored (only its hash is), so this is also the only place
         # it could ever be recovered from.
         return {"token": token}
+
+    @app.get("/v1alpha1/pools/{pool_id}/invites", tags=["browser"])
+    async def get_pool_invite_route(
+        pool_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The pool's current standing invite, owner only — same 404
+        doctrine and ownership check as minting one. Returns
+        ``fetch_outstanding_invite``'s narrow dict (``uses_remaining``,
+        ``expires_at``, ``created_at`` — never a token or its hash) or
+        ``{}`` when nothing is currently redeemable, so the console can
+        show "generate a link" instead of a dead one.
+        """
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None or str(pool["owner_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        invite = dbmod.fetch_outstanding_invite(db, pool_id)
+        return _jsonable(invite) if invite is not None else {}
+
+    @app.delete("/v1alpha1/pools/{pool_id}/invites", tags=["browser"])
+    async def revoke_pool_invites_route(
+        pool_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Kill every invite ever issued for this pool, owner only — same
+        404 doctrine and ownership check as the other two invite routes."""
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None or str(pool["owner_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        revoked = dbmod.revoke_pool_invites(db, pool_id=pool_id)
+        return {"revoked": revoked}
 
     @app.post("/v1alpha1/invites/accept", tags=["browser"])
     async def accept_invite(
@@ -1198,7 +1368,7 @@ def create_cloud_app(
             # Postgres accepts uppercase/braced/hyphen-less uuids and the
             # membership check above passes on any of them, but the
             # scheduler's gate compares exact strings against the
-            # canonical-lowercase ids `pool_ids_for_machine_owner` returns.
+            # canonical-lowercase ids `pool_ids_for_machine` returns.
             # An un-normalized `pool` here would pass this check and then
             # never match that gate, leaving the job PENDING forever.
             pool = str(pool_row["id"])
@@ -1764,10 +1934,49 @@ def create_cloud_app(
         request: Request, machine: Machine = Depends(current_machine)
     ):
         # Resolved BEFORE proxying and stamped onto the body — never trust
-        # what the agent claims about its own pool membership.
+        # what the agent claims about its own pool membership. Machine-
+        # scoped, not owner-scoped: this machine's own bindings (narrowed by
+        # its owner's live memberships), not everything its owner belongs to
+        # — see `pool_ids_for_machine`'s docstring for why a stale binding
+        # must be inert.
+        body = await request.body()
         try:
             with contextlib.closing(app.state.connect()) as conn:
-                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
+                pools = dbmod.pool_ids_for_machine(conn, machine.id)
+                # Display-only capability snapshot from the agent's own
+                # self-description, best-effort — its OWN try, same
+                # contract as `touch_machine_last_seen` in the heartbeat
+                # handler below: a write to a column nothing ever reads for
+                # authorization must never fail the registration itself,
+                # and must never zero the (unrelated) pools stamp above —
+                # which is why this sits INSIDE the pools-lookup try rather
+                # than wrapping it.
+                try:
+                    # Gated on size, not just non-empty. `proxy()` below is
+                    # the real 413 authority — it re-checks the same
+                    # constant and rejects the request — but that check
+                    # runs AFTER this block, once `body` is already fully
+                    # buffered in this process. Without this guard a
+                    # machine-token holder could force a multi-hundred-MB
+                    # `json.loads` AND a DB write on every request, merely
+                    # by padding a body that is about to be rejected as too
+                    # large anyway. `body.strip()`/`len()` are cheap
+                    # byte-level scans; `json.loads` and the write are not.
+                    if len(body) <= MAX_JSON_BODY_BYTES:
+                        parsed = json.loads(body) if body.strip() else {}
+                        dbmod.set_machine_capabilities(
+                            conn, machine_id=machine.id,
+                            sandbox_capable=parsed.get("sandbox_capable") is True,
+                            argv_capable=parsed.get("argv_capable") is True,
+                            unsandboxed_argv_capable=(
+                                parsed.get("unsandboxed_argv_capable") is True
+                            ),
+                            module_capable=parsed.get("module_capable") is True,
+                        )
+                except Exception:
+                    log.warning(
+                        "could not persist capability snapshot for %s", machine.id
+                    )
         except Exception:
             # Fail CLOSED: a node we cannot vouch for serves no pool this
             # cycle. Never skip the stamp — skipping would forward whatever
@@ -1809,7 +2018,7 @@ def create_cloud_app(
                     log.warning(
                         "could not record last_seen_at for machine %s", machine.id
                     )
-                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
+                pools = dbmod.pool_ids_for_machine(conn, machine.id)
         except Exception:
             # Fail CLOSED: a node we cannot vouch for serves no pool this
             # cycle. Never skip the stamp — skipping would forward whatever

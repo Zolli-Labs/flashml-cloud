@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { Suspense, useCallback, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ArrowRight, CheckCircle, Warning } from "@phosphor-icons/react";
 import {
   InputOTP,
@@ -16,6 +17,7 @@ import {
   NotAuthenticated,
   NotFound,
   approveDeviceCode,
+  getPool,
   listMachines,
   type Machine,
 } from "@/lib/cloud-api";
@@ -34,55 +36,94 @@ const CODE_LENGTH = 8;
 
 type Status = "idle" | "submitting" | "success" | "error";
 
-export default function ActivatePage() {
+// `useSearchParams()` needs a Suspense boundary or the whole route bails
+// out of static rendering — same shape `(console)/pools/join/page.tsx`
+// uses for the same reason, folded into this one file since this route
+// keeps its metadata in a sibling `layout.tsx` already.
+function Loading() {
+  return (
+    <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+      <div className="skeleton h-72 w-full max-w-sm rounded-lg" />
+    </div>
+  );
+}
+
+function ActivateInner() {
+  const searchParams = useSearchParams();
+  // `?pool=` — set when this link was reached from a pool's connect panel
+  // (`ConnectPanel`'s "Approve at .../activate?pool=<poolId>" caption).
+  // Forwarded straight through to the approve call so the same device-code
+  // flow that just enrols a machine can also, in one step, opt it into the
+  // pool that sent the volunteer here.
+  const poolId = searchParams.get("pool");
+
   const [code, setCode] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [machine, setMachine] = useState<Machine | null>(null);
   const [machineId, setMachineId] = useState<string | null>(null);
+  const [poolName, setPoolName] = useState<string | null>(null);
 
-  const submit = useCallback(async (value: string) => {
-    if (value.length !== CODE_LENGTH) return;
-    setStatus("submitting");
-    setErrorMessage(null);
-    try {
-      const result = await approveDeviceCode(value);
-      setMachineId(result.machine_id);
-      setStatus("success");
-      // The approve response carries only a machine_id, so name what was
-      // just approved rather than saying a bare "OK". Best effort: the
-      // approval already succeeded if this lookup fails.
+  const submit = useCallback(
+    async (value: string) => {
+      if (value.length !== CODE_LENGTH) return;
+      setStatus("submitting");
+      setErrorMessage(null);
       try {
-        const machines = await listMachines();
-        setMachine(machines.find((m) => m.id === result.machine_id) ?? null);
-      } catch {
-        setMachine(null);
+        const result = await approveDeviceCode(value, poolId ?? undefined);
+        setMachineId(result.machine_id);
+        setStatus("success");
+        // The approve response carries only a machine_id, so name what was
+        // just approved rather than saying a bare "OK". Best effort: the
+        // approval already succeeded if this lookup fails.
+        try {
+          const machines = await listMachines();
+          setMachine(
+            machines.find((m) => m.id === result.machine_id) ?? null
+          );
+        } catch {
+          setMachine(null);
+        }
+        // Best effort, same reasoning: the bind already happened server-side
+        // (approveDeviceCode's own atomic-approve-and-bind contract) even if
+        // naming the pool here fails, so this never turns success into an
+        // error — it only decides whether the confirmation can name the
+        // pool or has to say "approved" plainly.
+        if (poolId) {
+          try {
+            const { pool } = await getPool(poolId);
+            setPoolName(pool.name);
+          } catch {
+            setPoolName(null);
+          }
+        }
+      } catch (err) {
+        setStatus("error");
+        if (err instanceof NotAuthenticated) {
+          setErrorMessage(
+            "Your sign-in expired. Sign in again, then re-enter the code."
+          );
+        } else if (err instanceof NotFound) {
+          setErrorMessage(
+            "We couldn't find that code. Check it against the laptop's screen — codes are only valid for a few minutes."
+          );
+        } else if (err instanceof ApiError && err.status === 410) {
+          setErrorMessage(
+            "That code has expired. Run flashnode login again on the laptop for a fresh one."
+          );
+        } else if (err instanceof ApiError && err.status === 409) {
+          setErrorMessage(
+            "That machine is already enrolled under a different code. Revoke it from Machines first if this isn't expected."
+          );
+        } else if (err instanceof ApiError) {
+          setErrorMessage(err.detail);
+        } else {
+          setErrorMessage("Something went wrong. Try again.");
+        }
       }
-    } catch (err) {
-      setStatus("error");
-      if (err instanceof NotAuthenticated) {
-        setErrorMessage(
-          "Your sign-in expired. Sign in again, then re-enter the code."
-        );
-      } else if (err instanceof NotFound) {
-        setErrorMessage(
-          "We couldn't find that code. Check it against the laptop's screen — codes are only valid for a few minutes."
-        );
-      } else if (err instanceof ApiError && err.status === 410) {
-        setErrorMessage(
-          "That code has expired. Run flashnode login again on the laptop for a fresh one."
-        );
-      } else if (err instanceof ApiError && err.status === 409) {
-        setErrorMessage(
-          "That machine is already enrolled under a different code. Revoke it from Machines first if this isn't expected."
-        );
-      } else if (err instanceof ApiError) {
-        setErrorMessage(err.detail);
-      } else {
-        setErrorMessage("Something went wrong. Try again.");
-      }
-    }
-  }, []);
+    },
+    [poolId]
+  );
 
   function reset() {
     setCode("");
@@ -90,6 +131,7 @@ export default function ActivatePage() {
     setErrorMessage(null);
     setMachine(null);
     setMachineId(null);
+    setPoolName(null);
   }
 
   if (status === "success") {
@@ -114,6 +156,21 @@ export default function ActivatePage() {
               "That machine is linked to your account."
             )}
           </p>
+          {poolId && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {poolName ? (
+                <>
+                  Approved and attached to{" "}
+                  <span className="font-medium text-foreground">
+                    {poolName}
+                  </span>
+                  .
+                </>
+              ) : (
+                "Approved."
+              )}
+            </p>
+          )}
 
           <div className="panel mt-6 p-4 text-left">
             <p className="text-sm font-medium">What happens next</p>
@@ -237,5 +294,13 @@ export default function ActivatePage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function ActivatePage() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <ActivateInner />
+    </Suspense>
   );
 }

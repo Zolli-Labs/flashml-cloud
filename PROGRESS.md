@@ -172,6 +172,37 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-03 — Pools v1.1: device opt-in, trust badges, group link, connect panel (flashml-cloud)
+
+What/why: dogfooding v1 team pools surfaced four rough edges in the first
+hour of real use — no way to choose which machines serve a pool, no
+visibility into sandboxed vs trusted workers, one-time-per-person invites,
+and out-of-band Colab/RunPod onboarding. Spec:
+`flashml-cloud/docs/superpowers/specs/2026-08-03-pools-v1-1-design.md`.
+Migration 0008 adds `machine_pools` (per-machine opt-in bindings) plus four
+display-only capability columns; `pool_ids_for_machine` replaces
+`pool_ids_for_machine_owner`, narrowing the stamp to bindings intersected
+with live membership. Web: "Your machines" opt-in panel, trust badges, a
+standing per-pool group link, and a Connect panel that auto-attaches the
+enrolling machine.
+
+How verified: api 638 passed/1 skipped/1 deselected/1 xfailed; web 129
+passed + build; e2e 70 passed (unchanged, no cases added). 6 SDD tasks each
+task-reviewed; fix rounds closed clean (revoked-machine row exclusion,
+connect-panel/guide flag-order alignment).
+
+Gotchas: migration 0008 is NOT fail-soft for the machines-listing query —
+watch migrate-dev finish on `develop` before touching the dev console, same
+race as 0007. The opt-in switch is a deliberate behavior change: on deploy,
+every existing pool goes quiet until its machines are ticked back in —
+owner-approved, owner re-ticks after the prod deploy.
+
+Next: owner runs `gh workflow run deploy-prod.yml --ref main -f
+confirm=deploy` (0008 to prod, api+web deploy); verifies the machines
+listing carries `pools` + booleans and the pool page shows Your machines;
+re-ticks their machines into their pool and regenerates a standing group
+link.
+
 ### 2026-08-03 — Team pools: the tester release, built end to end (all repos)
 
 What/why: the approved 2026-08-03 spec (invite-only alpha; a group shares all

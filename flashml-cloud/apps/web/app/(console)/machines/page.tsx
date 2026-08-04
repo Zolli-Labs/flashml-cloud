@@ -16,8 +16,14 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import { isOnline, relativeTime } from "@/lib/machine-status";
+import {
+  MACHINE_BADGE_LABELS as BADGE_LABELS,
+  MACHINE_BADGE_STYLES as BADGE_STYLES,
+  machineBadge,
+} from "@/lib/machine-badge";
 import {
   NotAuthenticated,
   cloudApiBase,
@@ -205,6 +211,8 @@ function MachineRow({
     }
   }
 
+  const badge = machineBadge(machine);
+
   return (
     <tr className={revoked ? "opacity-45" : undefined}>
       <td className="px-3 py-3">
@@ -225,10 +233,28 @@ function MachineRow({
               {machine.name || machine.node_id}
             </span>
             <span className="meta block truncate">{machine.node_id}</span>
+            <Badge
+              variant="outline"
+              className={`mt-1 ${BADGE_STYLES[badge]}`}
+            >
+              {BADGE_LABELS[badge]}
+            </Badge>
           </span>
         </div>
       </td>
-      <td className="meta px-3 py-3">{machine.platform ?? "—"}</td>
+      <td className="px-3 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="meta">{machine.platform ?? "—"}</span>
+          {machine.pools.map((pool) => (
+            <span
+              key={pool.id}
+              className="rounded-full border border-border/60 bg-white/[0.04] px-2 py-0.5 text-[10px] text-muted-foreground"
+            >
+              {pool.name}
+            </span>
+          ))}
+        </div>
+      </td>
       <td className="meta px-3 py-3 whitespace-nowrap">
         {revoked
           ? `revoked ${relativeTime(machine.revoked_at)}`
