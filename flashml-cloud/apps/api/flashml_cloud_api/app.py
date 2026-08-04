@@ -534,6 +534,17 @@ def _seg(value: str) -> str:
     return value
 
 
+def _uuid_or_400(value: str) -> str:
+    """A path segment that reaches a WHERE clause. psycopg parameterises it
+    safely, but a malformed uuid raises a DataError that would surface as a
+    500 — a 400 is the honest answer."""
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="invalid user id") from None
+    return value
+
+
 def _artifact_key(key: str) -> str:
     """A multi-segment artifact key, validated before it is interpolated
     into the forwarded URL.
@@ -727,6 +738,26 @@ def create_cloud_app(
         unlike a resource id, the gate's existence is not a secret."""
         if not dbmod.profile_is_admitted(db, user_id):
             raise HTTPException(status_code=403, detail="access not yet approved")
+        return user_id
+
+    def admin_user(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ) -> str:
+        """current_user plus the admin flag. 403, not 404, for the same
+        reason `admitted_user` gives: unlike a resource id, the gate's
+        existence is not a secret.
+
+        `is_admin` has no granting route anywhere in this API, deliberately.
+        It is set with one UPDATE against the owner's own row.
+
+        Admission is NOT admin: an ordinary account that is fully through
+        the gate still fails here, which is the whole point — the queue is
+        the only surface that grants product access, so anything less than
+        this would let any signed-in account admit itself.
+        """
+        if not dbmod.profile_is_admin(db, user_id):
+            raise HTTPException(status_code=403, detail="admin required")
         return user_id
 
     async def proxy(
@@ -1011,6 +1042,51 @@ def create_cloud_app(
             email_domain=domain, is_personal_email=personal,
         )
         return {"access": dbmod.access_state_for(db, user_id)}
+
+    # -- the admin queue ----------------------------------------------------
+    #
+    # EVERY route below sits on ``admin_user``. One of them left on
+    # ``current_user`` would not be a smaller bug than three: this is the
+    # only surface in the system that grants product access, so a single
+    # ungated write is a privilege escalation for every signed-in account.
+
+    @app.get("/v1alpha1/admin/access-requests", tags=["admin"])
+    async def list_requests(
+        status: str = "pending",
+        _admin: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # Validated HERE, because `list_access_requests` does not check its
+        # argument against the CHECK constraint — an unknown status matches
+        # no row and returns [], which renders as "nobody is waiting". A
+        # typo must not look like an empty queue.
+        if status not in ("pending", "admitted", "declined"):
+            raise HTTPException(status_code=400, detail="unknown status")
+        return [_jsonable(r) for r in dbmod.list_access_requests(db, status=status)]
+
+    @app.post("/v1alpha1/admin/access-requests/{user_id}/approve", tags=["admin"])
+    async def approve_request(
+        user_id: str,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        _uuid_or_400(user_id)
+        # 404, not 200, when nothing was pending: reporting success for a
+        # call that changed nothing is how a queue silently stops working.
+        if not dbmod.approve_access_request(db, user_id, decided_by=admin_id):
+            raise HTTPException(status_code=404, detail="no pending request")
+        return {"user_id": user_id, "status": "admitted"}
+
+    @app.post("/v1alpha1/admin/access-requests/{user_id}/decline", tags=["admin"])
+    async def decline_request(
+        user_id: str,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        _uuid_or_400(user_id)
+        if not dbmod.decline_access_request(db, user_id, decided_by=admin_id):
+            raise HTTPException(status_code=404, detail="no pending request")
+        return {"user_id": user_id, "status": "declined"}
 
     @app.get("/v1alpha1/machines", tags=["browser"])
     async def list_machines(
