@@ -245,7 +245,10 @@ function MachineRow({
       <td className="px-3 py-3">
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="meta">{machine.platform ?? "—"}</span>
-          {machine.pools.map((pool) => (
+          {/* `?? []`: an API ahead of a not-yet-deployed web build (or vice
+              versa) could omit `pools` from the response entirely — this
+              must degrade to "no chips shown", never throw. */}
+          {(machine.pools ?? []).map((pool) => (
             <span
               key={pool.id}
               className="rounded-full border border-border/60 bg-white/[0.04] px-2 py-0.5 text-[10px] text-muted-foreground"
