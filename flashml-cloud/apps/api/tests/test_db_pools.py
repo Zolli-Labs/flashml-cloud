@@ -224,26 +224,6 @@ def test_is_pool_member(db):
 
 
 # ---------------------------------------------------------------------------
-# pool_ids_for_machine_owner
-# ---------------------------------------------------------------------------
-
-
-def test_pool_ids_for_machine_owner_is_sorted(db):
-    owner = _new_user(db)
-    created = [str(_pool(db, owner, name=f"pool-{i}")) for i in range(3)]
-
-    got = dbmod.pool_ids_for_machine_owner(db, owner)
-
-    assert got == sorted(created)
-    assert got == sorted(got)
-
-
-def test_pool_ids_for_machine_owner_empty_for_a_lone_user(db):
-    owner = _new_user(db)
-    assert dbmod.pool_ids_for_machine_owner(db, owner) == []
-
-
-# ---------------------------------------------------------------------------
 # create_pool_invite / consume_pool_invite
 # ---------------------------------------------------------------------------
 

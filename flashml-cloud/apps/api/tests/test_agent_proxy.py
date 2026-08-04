@@ -436,11 +436,12 @@ def test_scrub_identity_stamps_pools_on_the_empty_body_force_branch():
 
 def test_register_body_pools_is_stamped_from_membership(client, db, transport):
     """A forged ``capabilities.pools`` in the register body must be
-    overwritten with the caller's real membership, never merged with it."""
+    overwritten with the caller's real binding, never merged with it."""
     owner = _new_user(db)
     node_id = _node_id("pool-register")
-    _, token = _enrol(db, owner, node_id)
+    machine_id, token = _enrol(db, owner, node_id)
     pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=str(machine_id), pool_id=str(pool["id"]))
 
     client.post(
         "/v1alpha1/nodes/register",
@@ -477,8 +478,9 @@ def test_register_with_no_membership_stamps_empty(client, db, transport):
 def test_heartbeat_carries_the_membership_refresh(client, db, transport):
     owner = _new_user(db)
     node_id = _node_id("pool-heartbeat")
-    _, token = _enrol(db, owner, node_id)
+    machine_id, token = _enrol(db, owner, node_id)
     pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=str(machine_id), pool_id=str(pool["id"]))
 
     client.post(
         f"/v1alpha1/nodes/{node_id}/heartbeat",
@@ -496,8 +498,9 @@ def test_heartbeat_scrubs_a_forged_nested_capabilities_pools_too(client, db, tra
     forgery landing wherever the coordinator adds the field next."""
     owner = _new_user(db)
     node_id = _node_id("pool-heartbeat-nested")
-    _, token = _enrol(db, owner, node_id)
+    machine_id, token = _enrol(db, owner, node_id)
     pool = dbmod.create_pool(db, name=f"team-{RUN_MARKER}", owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=str(machine_id), pool_id=str(pool["id"]))
 
     client.post(
         f"/v1alpha1/nodes/{node_id}/heartbeat",
@@ -523,7 +526,7 @@ def test_register_fails_closed_when_pools_lookup_raises(
     def raiser(*_a, **_kw):
         raise RuntimeError("simulated pool lookup failure")
 
-    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine", raiser)
 
     client.post(
         "/v1alpha1/nodes/register",
@@ -542,7 +545,7 @@ def test_heartbeat_fails_closed_when_pools_lookup_raises(
     def raiser(*_a, **_kw):
         raise RuntimeError("simulated pool lookup failure")
 
-    monkeypatch.setattr(dbmod, "pool_ids_for_machine_owner", raiser)
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine", raiser)
 
     client.post(
         f"/v1alpha1/nodes/{machine['node_id']}/heartbeat",
@@ -553,6 +556,112 @@ def test_heartbeat_fails_closed_when_pools_lookup_raises(
     body = json.loads(transport.last.read())
     assert body["pools"] == []
     assert "forged-pool" not in json.dumps(body)
+
+
+# ---------------------------------------------------------------------------
+# 2c. the stamp narrows to MACHINE scope (Task 3); register persists the
+# display-only capability snapshot from the agent's own self-description
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_is_machine_scoped_not_owner_scoped(client, transport, db):
+    """Two machines, one owner, one pool: only the BOUND machine's register
+    body carries the pool. This is the opt-in core — under v1 both would."""
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"scoped-{RUN_MARKER}", owner_id=owner)
+    m1_id, m1_tok = _enrol(db, owner, _node_id("bound"))
+    m2_id, m2_tok = _enrol(db, owner, _node_id("unbound"))
+    dbmod.bind_machine_pool(db, machine_id=str(m1_id), pool_id=str(pool["id"]))
+    for tok, expected in ((m1_tok, [str(pool["id"])]), (m2_tok, [])):
+        client.post("/v1alpha1/nodes/register",
+                    json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                          "capabilities": {"cpu_cores": 4}},
+                    headers={"Authorization": f"Bearer {tok}"})
+        body = json.loads(transport.last.read())
+        assert body["capabilities"]["pools"] == expected
+
+
+def test_register_persists_the_capability_snapshot(client, transport, db):
+    owner = _new_user(db)
+    _mid, tok = _enrol(db, owner, _node_id("caps"))
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "unsandboxed_argv_capable": True, "module_capable": True,
+                      "capabilities": {"cpu_cores": 4}},
+                headers={"Authorization": f"Bearer {tok}"})
+    with db.cursor() as cur:
+        cur.execute("select sandbox_capable, argv_capable, unsandboxed_argv_capable,"
+                    " module_capable from public.machines where id = %s", (_mid,))
+        row = cur.fetchone()
+    assert row == {"sandbox_capable": False, "argv_capable": False,
+                   "unsandboxed_argv_capable": True, "module_capable": True}
+
+
+def test_register_capability_snapshot_is_overwritten_not_accumulated(
+    client, transport, db
+):
+    """A snapshot of the LATEST registration, not the union of every
+    registration this machine has ever made: a re-register with a
+    narrower capability set must show the narrower set. Asserted after
+    BOTH calls — the first pins that the write actually happens (a no-op
+    persist would leave every column at its `false` default and pass this
+    test's second half for free), the second pins overwrite-not-merge."""
+    owner = _new_user(db)
+    mid, tok = _enrol(db, owner, _node_id("caps-overwrite"))
+    headers = {"Authorization": f"Bearer {tok}"}
+
+    def _row():
+        with db.cursor() as cur:
+            cur.execute(
+                "select sandbox_capable, argv_capable, unsandboxed_argv_capable,"
+                " module_capable from public.machines where id = %s", (mid,),
+            )
+            return cur.fetchone()
+
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "sandbox_capable": True, "argv_capable": True,
+                      "unsandboxed_argv_capable": True, "module_capable": True,
+                      "capabilities": {"cpu_cores": 4}},
+                headers=headers)
+    assert _row() == {"sandbox_capable": True, "argv_capable": True,
+                      "unsandboxed_argv_capable": True, "module_capable": True}
+
+    client.post("/v1alpha1/nodes/register",
+                json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+                      "capabilities": {"cpu_cores": 4}},
+                headers=headers)
+    assert _row() == {"sandbox_capable": False, "argv_capable": False,
+                      "unsandboxed_argv_capable": False, "module_capable": False}
+
+
+def test_capability_persist_failure_does_not_fail_registration(
+    client, transport, db, monkeypatch
+):
+    """Best-effort, exactly like `touch_machine_last_seen`: a display-column
+    write failing must never fail the registration itself, and — since it
+    sits in its own try, nested inside the pools-lookup try — must never
+    zero the (unrelated) pools stamp either."""
+    owner = _new_user(db)
+    pool = dbmod.create_pool(db, name=f"persist-fail-{RUN_MARKER}", owner_id=owner)
+    mid, tok = _enrol(db, owner, _node_id("caps-persist-fail"))
+    dbmod.bind_machine_pool(db, machine_id=str(mid), pool_id=str(pool["id"]))
+
+    def raiser(*_a, **_kw):
+        raise RuntimeError("simulated capability persist failure")
+
+    monkeypatch.setattr(dbmod, "set_machine_capabilities", raiser)
+
+    r = client.post(
+        "/v1alpha1/nodes/register",
+        json={"schema_version": "v1alpha1", "node_id": "x", "hostname": "h",
+              "unsandboxed_argv_capable": True,
+              "capabilities": {"cpu_cores": 4}},
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 200
+    body = json.loads(transport.last.read())
+    assert body["capabilities"]["pools"] == [str(pool["id"])]
 
 
 def test_artifact_put_forwards_raw_bytes_with_delegation(client, machine, transport):

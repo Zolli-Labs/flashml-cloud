@@ -1198,7 +1198,7 @@ def create_cloud_app(
             # Postgres accepts uppercase/braced/hyphen-less uuids and the
             # membership check above passes on any of them, but the
             # scheduler's gate compares exact strings against the
-            # canonical-lowercase ids `pool_ids_for_machine_owner` returns.
+            # canonical-lowercase ids `pool_ids_for_machine` returns.
             # An un-normalized `pool` here would pass this check and then
             # never match that gate, leaving the job PENDING forever.
             pool = str(pool_row["id"])
@@ -1764,10 +1764,38 @@ def create_cloud_app(
         request: Request, machine: Machine = Depends(current_machine)
     ):
         # Resolved BEFORE proxying and stamped onto the body — never trust
-        # what the agent claims about its own pool membership.
+        # what the agent claims about its own pool membership. Machine-
+        # scoped, not owner-scoped: this machine's own bindings (narrowed by
+        # its owner's live memberships), not everything its owner belongs to
+        # — see `pool_ids_for_machine`'s docstring for why a stale binding
+        # must be inert.
+        body = await request.body()
         try:
             with contextlib.closing(app.state.connect()) as conn:
-                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
+                pools = dbmod.pool_ids_for_machine(conn, machine.id)
+                # Display-only capability snapshot from the agent's own
+                # self-description, best-effort — its OWN try, same
+                # contract as `touch_machine_last_seen` in the heartbeat
+                # handler below: a write to a column nothing ever reads for
+                # authorization must never fail the registration itself,
+                # and must never zero the (unrelated) pools stamp above —
+                # which is why this sits INSIDE the pools-lookup try rather
+                # than wrapping it.
+                try:
+                    parsed = json.loads(body) if body.strip() else {}
+                    dbmod.set_machine_capabilities(
+                        conn, machine_id=machine.id,
+                        sandbox_capable=parsed.get("sandbox_capable") is True,
+                        argv_capable=parsed.get("argv_capable") is True,
+                        unsandboxed_argv_capable=(
+                            parsed.get("unsandboxed_argv_capable") is True
+                        ),
+                        module_capable=parsed.get("module_capable") is True,
+                    )
+                except Exception:
+                    log.warning(
+                        "could not persist capability snapshot for %s", machine.id
+                    )
         except Exception:
             # Fail CLOSED: a node we cannot vouch for serves no pool this
             # cycle. Never skip the stamp — skipping would forward whatever
@@ -1809,7 +1837,7 @@ def create_cloud_app(
                     log.warning(
                         "could not record last_seen_at for machine %s", machine.id
                     )
-                pools = dbmod.pool_ids_for_machine_owner(conn, machine.owner_id)
+                pools = dbmod.pool_ids_for_machine(conn, machine.id)
         except Exception:
             # Fail CLOSED: a node we cannot vouch for serves no pool this
             # cycle. Never skip the stamp — skipping would forward whatever

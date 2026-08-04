@@ -800,7 +800,7 @@ def create_pool(
     """Create a pool and seat its owner as a member, atomically.
 
     Every reachability check below — ``fetch_pool_for_member``,
-    ``is_pool_member``, ``pool_ids_for_machine_owner``, ``list_pools_for_user``
+    ``is_pool_member``, ``pool_ids_for_machine``, ``list_pools_for_user``
     — is a join through ``pool_members``, not ``pools.owner_id``. A pool
     whose owner had no membership row would be invisible to its own creator:
     absent from their pool list, 404 on fetch, and contributing none of
@@ -927,24 +927,6 @@ def is_pool_member(db: psycopg.Connection, pool_id: str, user_id: str) -> bool:
             (pool_id, user_id),
         )
         return cur.fetchone() is not None
-
-
-def pool_ids_for_machine_owner(
-    db: psycopg.Connection, owner_id: str
-) -> list[str]:
-    """Sorted pool ids ``owner_id`` belongs to, for the agent proxy's
-    per-request pool stamp.
-
-    Sorted (not merely "in some order") because that stamp is compared
-    across requests — an unordered list would make two calls that returned
-    the identical set of pools look like a change when nothing moved.
-    """
-    with db.cursor() as cur:
-        cur.execute(
-            "select pool_id from public.pool_members where user_id = %s",
-            (owner_id,),
-        )
-        return sorted(str(row["pool_id"]) for row in cur.fetchall())
 
 
 def pool_ids_for_machine(db: psycopg.Connection, machine_id: str) -> list[str]:
