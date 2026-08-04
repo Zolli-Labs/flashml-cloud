@@ -169,8 +169,19 @@ export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
             <Label htmlFor="role" className="text-xs font-medium">
               Your role
             </Label>
+            {/* `draft.role`, never `draft.role || undefined`: Base UI's
+                `useControlled` decides controlled-vs-uncontrolled ONCE, on
+                first render, by checking `value !== undefined` — and never
+                re-checks it. Passing `undefined` on the empty initial
+                render would lock this Select into uncontrolled mode for
+                its whole lifetime, so a later external write to
+                `draft.role` (a prefill from an existing profile, a form
+                reset) would be silently ignored while the JSX still reads
+                as controlled. `""` has no matching `SelectItem` in
+                ROLE_OPTIONS, so the placeholder still renders — this stays
+                controlled without needing a sentinel item. */}
             <Select
-              value={draft.role || undefined}
+              value={draft.role}
               onValueChange={(value) => set("role", value ?? "")}
               disabled={submitting}
             >
@@ -191,8 +202,11 @@ export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
             <Label htmlFor="team-size" className="text-xs font-medium">
               Team size
             </Label>
+            {/* Same reasoning as the role Select above: `draft.team_size`
+                stays a real string, never `|| undefined`, so this stays
+                controlled from mount. */}
             <Select
-              value={draft.team_size || undefined}
+              value={draft.team_size}
               onValueChange={(value) => set("team_size", value ?? "")}
               disabled={submitting}
             >
@@ -269,8 +283,13 @@ export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
             How did you hear about FlashML?
           </Label>
           <p className="text-xs text-muted-foreground">Optional.</p>
+          {/* Same reasoning as the role Select above: `draft.heard_from`
+              stays a real string, never `|| undefined`, so this stays
+              controlled from mount — this field is optional, but "optional"
+              means the value can be absent, not that the binding should be
+              uncontrolled. */}
           <Select
-            value={draft.heard_from || undefined}
+            value={draft.heard_from}
             onValueChange={(value) => set("heard_from", value ?? "")}
             disabled={submitting}
           >
