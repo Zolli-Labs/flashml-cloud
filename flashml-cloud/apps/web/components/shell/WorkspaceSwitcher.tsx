@@ -92,6 +92,11 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
                 );
               })}
             </ul>
+            {/* `/workspaces` is built by a later task in this plan,
+                immediately after this one — the same deliberate, time-boxed
+                sequencing decision as the "My account" links in
+                ConsoleShell.tsx. Linking now is what makes it reachable the
+                moment it lands. */}
             <div className="border-t border-border py-1">
               <Link
                 href="/workspaces"
