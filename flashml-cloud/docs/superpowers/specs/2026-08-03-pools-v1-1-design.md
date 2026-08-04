@@ -120,8 +120,13 @@ downstream is untouched because placement only ever sees the stamped list.
   the APPROVER must be a member of that pool (`is_pool_member`, 404
   doctrine — approving is a browser action by the signed-in member, so the
   authority is theirs, never the machine's); the binding is written in the
-  same transaction as the approval. Invalid/absent `pool_id` approves
-  without a binding, exactly as today.
+  same transaction as the approval. An ABSENT `pool_id` approves without a
+  binding, exactly as today; a PRESENT but malformed/unknown/not-your-pool
+  `pool_id` refuses the approval with 404 ("unknown pool") rather than
+  silently approving unbound — a panel-driven flow always carries a valid
+  pool, so failing loud beats a machine that enrolls and then sits idle
+  with no visible reason. (Corrected during planning: an earlier draft said
+  invalid approves without binding; the 404 rule governs.)
 - No agent change: the machine still enrolls with the same three commands;
   attachment is decided browser-side at approval.
 
