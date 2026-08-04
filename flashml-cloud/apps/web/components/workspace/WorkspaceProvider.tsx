@@ -64,15 +64,16 @@ export function WorkspaceProvider({
   const [error, setError] = useState<string | null>(null);
 
   // Bumped by every `load()` call and compared when that call's response
-  // settles. Next.js does not remount this provider on a `/w/A/...` ->
-  // `/w/B/...` navigation — same layout position, only `poolId` changes —
-  // so A's in-flight request is still out there when B's starts. A's
-  // response resolving after B's is ordinary network variance, not an edge
-  // case, and applying it would silently overwrite B's correct state with
-  // A's. Comparing this token when a response settles is what discards it
-  // instead: a call that is no longer the latest one this component made
-  // (superseded by a newer `load`, a workspace switch, or an unmount)
-  // never reaches `setState`.
+  // settles, so a response that is no longer the latest one this instance
+  // requested never reaches `setState`. A workspace switch (A -> B) no
+  // longer needs this token to protect it — the `key={poolId}` on this
+  // component in the layout means A's instance is unmounted and B's is a
+  // fresh one with its own ref starting at 0, so A's response has nowhere
+  // of B's to land even without a token check. What this still guards,
+  // within a single workspace's lifetime: two `reload()` calls in quick
+  // succession, a poll tick landing while a manual reload is in flight, and
+  // a response settling after this instance has unmounted (see the cleanup
+  // below) — all real, none of them fixed by the key.
   const requestIdRef = useRef(0);
 
   const load = useCallback(() => {
@@ -113,24 +114,17 @@ export function WorkspaceProvider({
       });
   }, [poolId, router]);
 
-  // Reset synchronously whenever the workspace identity changes, so workspace
-  // A's pool/members/jobs/machines can never render under workspace B's URL
-  // labelled "ready" for the duration of B's fetch — the state fields go back
-  // to their initial values in the same commit that notices `poolId` moved,
-  // before B's data arrives. Bumping the token here (not only inside `load`)
-  // means this reset is itself what invalidates A's in-flight response, and
-  // does not rely on the mount effect below still being the thing that fires
-  // `load` next.
-  useEffect(() => {
-    requestIdRef.current++;
-    setPool(null);
-    setMembers([]);
-    setMachines([]);
-    setJobs([]);
-    setViewerId(null);
-    setState("loading");
-    setError(null);
-  }, [poolId]);
+  // NOTE: there is deliberately no `useEffect` here resetting state when
+  // `poolId` changes. That reset can't happen "in time" — a `useEffect` runs
+  // after React commits (and, absent a layout effect, after paint), so a
+  // workspace switch would still render one frame of the previous
+  // workspace's data under the new URL, labelled "ready", before the
+  // corrective effect fired. Instead `app/(console)/w/[poolId]/layout.tsx`
+  // keys this component on `poolId`, which makes React discard the old
+  // instance and mount a brand new one on a switch: fresh `useState` values,
+  // structurally, with no stale-data frame possible. Do not reintroduce a
+  // reset effect here to "help" — it would be redundant with the key and add
+  // back the extra mount-time render this replaced.
 
   useEffect(() => {
     load();
