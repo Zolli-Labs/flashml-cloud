@@ -1,68 +1,133 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Mark } from "@/components/brand/Mark";
-import { UserMenu } from "./UserMenu";
+import { List, X } from "@phosphor-icons/react";
+import { motion, useMotionValueEvent, useReducedMotion, useScroll } from "motion/react";
+import { Wordmark } from "@/components/brand/Mark";
+import { QUICK } from "@/lib/motion";
 
 const navLinks = [
-  { href: "/machines", label: "Machines" },
-  { href: "/jobs", label: "Jobs" },
-  { href: "/submit", label: "Submit" },
-  { href: "/activate", label: "Activate" },
+  { href: "#how-it-works", label: "How it works" },
+  { href: "#crew", label: "Meet the crew" },
 ];
 
+const RUNTIME_REPO = "https://github.com/Zolli-Labs/flashml";
+
 export function Navbar() {
-  const pathname = usePathname();
+  const [compressed, setCompressed] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const { scrollY } = useScroll();
+  const reduce = useReducedMotion();
+
+  useMotionValueEvent(scrollY, "change", (latest) => {
+    setCompressed(latest > 100);
+  });
+
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [menuOpen]);
+
+  const closeMenu = () => setMenuOpen(false);
 
   return (
-    <header className="sticky top-0 z-50 glass border-b border-border/50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between h-16">
-        {/* Logo */}
-        <Link href="/" className="flex items-center gap-2 group">
-          <Mark size={22} className="text-foreground" />
-          {/* No version chip. A "v0.1" badge next to the wordmark is a
-              stage label, not information anyone needs, and it undersells
-              the product to every first-time visitor. */}
-          <span className="font-mono font-bold tracking-tight text-foreground">
-            Flash<span className="text-brand-foreground">ML</span>
-          </span>
-        </Link>
+    <header className="pointer-events-none fixed inset-x-0 top-0 z-50 px-3 sm:px-5">
+      <motion.div
+        animate={reduce ? undefined : { y: compressed ? 8 : 0 }}
+        transition={QUICK}
+        className={`pointer-events-auto mx-auto mt-0 transition-[max-width,background-color,border-color,border-radius,box-shadow] duration-300 ${
+          compressed || menuOpen
+            ? "glass-strong max-w-5xl rounded-2xl border border-border shadow-lg"
+            : "max-w-7xl rounded-none border border-transparent bg-transparent"
+        }`}
+      >
+        <div className={`flex items-center justify-between px-4 sm:px-6 ${compressed ? "h-14" : "h-18"}`}>
+          <Link href="/" aria-label="ZolliAI home" onClick={closeMenu}>
+            <Wordmark product />
+          </Link>
 
-        {/* Nav Links — hidden below md: at phone widths there is only
-            room for the logo and account control, and this app is
-            phone-first (the /activate screen exists to be used on one). */}
-        <nav className="hidden md:flex items-center gap-1">
-          {navLinks.map((link) => {
-            const active = pathname === link.href;
-            return (
+          <nav aria-label="Primary navigation" className="hidden items-center gap-1 md:flex">
+            {navLinks.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
-                className={`
-                  px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-150
-                  ${active
-                    ? "bg-cyan/10 text-brand-foreground border border-cyan/25"
-                    : "text-muted-foreground hover:text-foreground hover:bg-surface-2"
-                  }
-                `}
+                className="rounded-full px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"
               >
                 {link.label}
               </Link>
-            );
-          })}
-        </nav>
+            ))}
+            <a
+              href={RUNTIME_REPO}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-full px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"
+            >
+              Open runtime
+            </a>
+            <Link
+              href="/workspaces"
+              className="ml-2 inline-flex rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-shadow hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2"
+            >
+              Build your crew
+            </Link>
+          </nav>
 
-        <div className="flex items-center gap-3">
-          <Link
-            href="/submit"
-            className="hidden md:inline-flex px-4 py-1.5 rounded-md bg-cyan text-foreground text-sm font-semibold hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
+          <button
+            type="button"
+            aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
+            aria-controls="mobile-navigation"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((open) => !open)}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-border bg-surface text-foreground shadow-sm md:hidden"
           >
-            Submit a job
-          </Link>
-          <UserMenu />
+            {menuOpen ? <X size={20} weight="bold" /> : <List size={20} weight="bold" />}
+          </button>
         </div>
-      </div>
+
+        {menuOpen && (
+          <nav
+            id="mobile-navigation"
+            aria-label="Mobile navigation"
+            className="border-t border-border px-4 py-4 md:hidden"
+          >
+            <div className="flex flex-col gap-1">
+              {navLinks.map((link) => (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  onClick={closeMenu}
+                  className="rounded-xl px-3 py-3 text-base font-medium text-foreground hover:bg-surface-2"
+                >
+                  {link.label}
+                </Link>
+              ))}
+              <a
+                href={RUNTIME_REPO}
+                target="_blank"
+                rel="noreferrer"
+                onClick={closeMenu}
+                className="rounded-xl px-3 py-3 text-base font-medium text-foreground hover:bg-surface-2"
+              >
+                Open runtime
+              </a>
+              <Link
+                href="/workspaces"
+                onClick={closeMenu}
+                className="mt-2 inline-flex justify-center rounded-full bg-primary px-5 py-3 text-sm font-semibold text-primary-foreground transition-shadow hover:shadow-md"
+              >
+                Build your crew
+              </Link>
+            </div>
+          </nav>
+        )}
+      </motion.div>
     </header>
   );
 }

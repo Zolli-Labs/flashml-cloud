@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { QUICK } from "@/lib/motion";
-import type { LedgerEvent, LedgerTone } from "@/lib/landing/sample-ledger";
+import type { LedgerEvent, LedgerEventType, LedgerTone } from "@/lib/landing/sample-ledger";
 
 // The ledger is the landing page's one real product visual. It is a live
 // component rendering the real `Event` shape, not a picture of a UI and not
@@ -26,17 +26,29 @@ const TONE_MARK: Record<LedgerTone, string> = {
   good: "bg-[var(--node-green)]",
 };
 
+const FRIENDLY_EVENT: Record<LedgerEventType, string> = {
+  JOB_ACCEPTED: "The Crew accepted the job.",
+  TASK_CREATED: "Captain divided the job into tasks.",
+  LEASE_CLAIMED: "A Zolli claimed a time-limited lease.",
+  LEASE_RENEWED: "The Zolli renewed its lease.",
+  LEASE_EXPIRED: "An unrenewed lease reached its deadline.",
+  TASK_REQUEUED: "Captain made the interrupted task available again.",
+  TASK_COMMIT_ACCEPTED: "The Crew accepted a validated result.",
+  NODE_HEARTBEAT_LOST: "A Zolli stopped checking in.",
+  CHECKPOINT_MANIFEST_COMMITTED: "Keeper saved a verified checkpoint manifest.",
+  FAILURE_CLASSIFIED: "The runtime classified the interruption.",
+  RECOVERY_ACTION_SELECTED: "The recovery policy selected the next action.",
+  ITERATION_COMPLETED: "The Crew completed another training round.",
+  ARTIFACT_COMMITTED: "Builder committed a completed output.",
+  JOB_SUCCEEDED: "Every task reached an accepted result.",
+};
+
 function formatOffset(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-// A grid, not a flex row with shrink-0 columns. The flex version let the
-// event-type cell set its own intrinsic width, which at 390px made the row
-// wider than the viewport and gave the whole PAGE a horizontal scrollbar:
-// the widest ledger row was setting the document width. Both text cells are
-// minmax(0, ...) so they truncate instead of pushing.
 // Justification for the entry animation: state transition. A row appearing
 // instantly reads as a re-render; sliding in from the left reads as an event
 // arriving, which is what it is.
@@ -47,19 +59,23 @@ export function LedgerRow({ event }: { event: LedgerEvent }) {
       initial={reduce ? false : { opacity: 0, x: -8 }}
       animate={{ opacity: 1, x: 0 }}
       transition={QUICK}
-      className="grid grid-cols-[0.25rem_2.25rem_minmax(0,auto)_minmax(0,1fr)] items-baseline gap-x-2.5 py-[5px] text-[11px] leading-snug"
+      className="grid grid-cols-[0.3rem_minmax(0,1fr)] gap-x-3 border-b border-border/70 py-3 last:border-b-0"
     >
       <span
         aria-hidden
-        className={`mt-[6px] h-1 w-1 self-start rounded-full ${TONE_MARK[event.tone]}`}
+        className={`mt-[0.55rem] h-1.5 w-1.5 self-start rounded-full ${TONE_MARK[event.tone]}`}
       />
-      <span className="font-mono tabular-nums text-muted-foreground">
-        {formatOffset(event.at)}
-      </span>
-      <span className={`truncate font-mono ${TONE_TEXT[event.tone]}`}>
-        {event.type}
-      </span>
-      <span className="truncate font-mono text-muted-foreground">{event.detail}</span>
+      <div className="min-w-0">
+        <p className={`text-sm font-medium leading-snug ${TONE_TEXT[event.tone]}`}>
+          {FRIENDLY_EVENT[event.type]}
+        </p>
+        <p className="mt-1 truncate font-mono text-[10px] tabular-nums text-muted-foreground">
+          {event.type} · +{formatOffset(event.at)}
+        </p>
+        <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
+          {event.source} · {event.detail}
+        </p>
+      </div>
     </motion.li>
   );
 }
@@ -103,13 +119,13 @@ export function EventLedger({
     <div className={className}>
       <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          event ledger
+          recovery ledger
         </span>
         <span className="font-mono text-[10px] text-muted-foreground">{label}</span>
       </div>
       <ul
-        aria-label="FlashML coordinator event ledger, sample data"
-        className="min-h-[276px] overflow-hidden px-4 py-3 [&>li]:min-w-0"
+        aria-label="ZolliAI Cloud recovery ledger, sample data from FlashML protocol events"
+        className="min-h-[276px] overflow-hidden px-4 py-2 [&>li]:min-w-0"
       >
         {visible.map((e, i) => (
           <LedgerRow key={`${e.type}-${e.at}-${i}`} event={e} />

@@ -44,7 +44,7 @@ export function Wordmark({
     <span className={`inline-flex items-center gap-2 ${className}`}>
       <Mark size={size} className="text-foreground" />
       <span className="font-mono text-sm font-bold tracking-tight">
-        Zolli<span className="text-primary">AI</span>{product && <span className="text-muted-foreground"> Cloud</span>}
+        Zolli<span className="text-brand-foreground">AI</span>{product && <span className="text-muted-foreground"> Cloud</span>}
       </span>
     </span>
   );
