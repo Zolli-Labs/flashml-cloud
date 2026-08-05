@@ -197,7 +197,7 @@ flashnode work --coordinator ${base} --runner trusted`}
             </p>
             <p className="mt-4 max-w-prose text-sm leading-relaxed text-muted-foreground">
               Press <Kbd>⌘</Kbd> <Kbd>K</Kbd> anywhere in the console to jump
-              to a job, a machine or a page.
+              to a job, a Zolli or a page.
             </p>
           </section>
 
@@ -213,11 +213,11 @@ flashnode work --coordinator ${base} --runner trusted`}
               {[
                 [
                   "Progress",
-                  "What the run achieved. Loss per round for federated runs, plus which machines contributed to each.",
+                  "What the run achieved. Loss per round for federated runs, plus which Zollis contributed to each.",
                 ],
                 [
                   "Placement",
-                  "Where it ran. One lane per machine, one block per attempt, so a machine that died mid-task and the machine that finished the work both appear.",
+                  "Where it ran. One lane per Zolli, one block per attempt, so a Zolli that died mid-task and the Zolli that finished the work both appear.",
                 ],
                 [
                   "Ledger",

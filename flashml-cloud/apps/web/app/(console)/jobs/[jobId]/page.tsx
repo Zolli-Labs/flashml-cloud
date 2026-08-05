@@ -382,7 +382,7 @@ function NoMetrics() {
     <section className="rounded-lg border border-border bg-surface p-6">
       <h2 className="text-sm font-semibold">No training metrics for this job</h2>
       <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-        FlashML records a mean loss per round for federated runs. Independent
+        ZolliAI records a mean loss per round for federated runs. Independent
         jobs report no model metrics today, so there is nothing to chart here
         rather than an empty axis.
       </p>
