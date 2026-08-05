@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { List, X } from "@phosphor-icons/react";
 import { motion, useMotionValueEvent, useReducedMotion, useScroll } from "motion/react";
@@ -17,6 +17,7 @@ const RUNTIME_REPO = "https://github.com/Zolli-Labs/flashml";
 export function Navbar() {
   const [compressed, setCompressed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
   const { scrollY } = useScroll();
   const reduce = useReducedMotion();
 
@@ -28,7 +29,10 @@ export function Navbar() {
     if (!menuOpen) return;
 
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        menuButtonRef.current?.focus();
+      }
     };
 
     window.addEventListener("keydown", closeOnEscape);
@@ -80,6 +84,7 @@ export function Navbar() {
           </nav>
 
           <button
+            ref={menuButtonRef}
             type="button"
             aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
             aria-controls="mobile-navigation"
