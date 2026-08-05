@@ -31,6 +31,21 @@ import {
 
 const USE_CASE_MAX = 2000;
 
+/** A labelled divider between groups of fields.
+ *
+ * The form is seven questions long and read as one undifferentiated stack,
+ * which made a short application feel like a long one. Three groups give it
+ * a shape you can see the end of. Unexported and deliberately dumb — it is
+ * layout for this one form, not a component anything else should reach for. */
+function GroupHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-3 pt-1 first:pt-0">
+      <span className="label-caps whitespace-nowrap">{children}</span>
+      <span aria-hidden className="h-px flex-1 bg-border" />
+    </div>
+  );
+}
+
 /**
  * The onboarding form: what an admin reads to decide whether to admit an
  * account. Not mounted anywhere yet — Task 11 wires this into the console
@@ -42,7 +57,16 @@ const USE_CASE_MAX = 2000;
  * never paraphrased, since it is the only thing that names the field to
  * fix.
  */
-export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
+export function OnboardingForm({
+  onSubmitted,
+  stepLabel,
+}: {
+  onSubmitted: () => void;
+  /** Shown above the heading when this is step 2 of signup, so the person
+   * can see the flow ends. Omitted on the console's resume path, where there
+   * is no step 1 behind them and "Step 2 of 2" would be a lie. */
+  stepLabel?: string;
+}) {
   const router = useRouter();
   const [draft, setDraft] = useState<OnboardingDraft>(EMPTY_DRAFT);
   const [submitting, setSubmitting] = useState(false);
@@ -105,8 +129,11 @@ export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
 
   return (
     <section className="glass w-full max-w-xl rounded-xl p-7 sm:p-8 rise">
+      {stepLabel && (
+        <p className="label-caps mb-3 text-primary">{stepLabel}</p>
+      )}
       <h1 className="text-xl font-semibold tracking-tight">
-        Tell us about you
+        {stepLabel ? "Request access" : "Tell us about you"}
       </h1>
       <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
         FlashML is a small alpha. A human reads every request — this is what
@@ -114,6 +141,7 @@ export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
       </p>
 
       <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-5">
+        <GroupHeading>You</GroupHeading>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="flex flex-col gap-2">
             <Label htmlFor="first-name" className="text-xs font-medium">
@@ -164,6 +192,7 @@ export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
           />
         </div>
 
+        <GroupHeading>Your work</GroupHeading>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="flex flex-col gap-2">
             <Label htmlFor="role" className="text-xs font-medium">
@@ -248,6 +277,7 @@ export function OnboardingForm({ onSubmitted }: { onSubmitted: () => void }) {
           </p>
         </div>
 
+        <GroupHeading>Your compute</GroupHeading>
         <div className="flex flex-col gap-2">
           <Label className="text-xs font-medium">Where&apos;s your compute?</Label>
           <p className="text-xs text-muted-foreground">

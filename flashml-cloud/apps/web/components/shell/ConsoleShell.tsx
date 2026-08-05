@@ -331,17 +331,34 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main id="content" className="min-w-0 flex-1">
-          {screen === "onboarding" ? (
-            // Not a route of its own: the form has to stand in for whatever
-            // page the user asked for, or a bookmarked `/jobs` would render
-            // the product to an account that has not asked for it yet.
-            // `setAccess` rather than a reload — the API has already told us
-            // the new state in its response.
-            <OnboardingForm onSubmitted={() => setAccess("pending")} />
-          ) : screen === "pending" ? (
-            <PendingScreen email={session?.email ?? null} />
-          ) : screen === "declined" ? (
-            <DeclinedScreen />
+          {screen !== "console" ? (
+            // Centred here, once, for all three access screens. Each of them
+            // is a self-contained card with its own `max-w-*`, and dropping
+            // one straight into this `flex-1` main left it flush against the
+            // rail — visibly off-centre, and worse the wider the window. The
+            // same treatment `app/(auth)/sign-in/page.tsx` gives its card, so
+            // signing up and being asked to wait look like one flow rather
+            // than two unrelated screens.
+            <div className="flex min-h-full items-center justify-center px-4 py-12">
+              {screen === "onboarding" ? (
+                // Not a route of its own: the form has to stand in for
+                // whatever page the user asked for, or a bookmarked `/jobs`
+                // would render the product to an account that has not asked
+                // for it yet. `setAccess` rather than a reload — the API has
+                // already told us the new state in its response.
+                //
+                // This is the RESUME path. The first-time path is step 2 of
+                // signup (`SignInCard`), which renders this same component;
+                // people reach this one by abandoning that step, by holding
+                // an account made before signup asked, or by confirming an
+                // email when "Confirm email" is on. One form, three ways in.
+                <OnboardingForm onSubmitted={() => setAccess("pending")} />
+              ) : screen === "pending" ? (
+                <PendingScreen email={session?.email ?? null} />
+              ) : (
+                <DeclinedScreen />
+              )}
+            </div>
           ) : (
             <WorkspaceHintProvider onHint={setWorkspaceHint}>
               {children}

@@ -8,10 +8,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
 import { safeNext } from "@/lib/safe-next";
+import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
 import { GoogleMark } from "./GoogleMark";
 
 type Pending = "password" | "google" | null;
 type Mode = "signin" | "signup";
+
+/** Which screen of the signup wizard is showing.
+ *
+ * `credentials` covers both signing in and creating an account — they are the
+ * same form. `details` is reachable only from a signup that returned a
+ * session, and is the access request itself. */
+type Step = "credentials" | "details";
 
 /**
  * Email and password only. This flow sends no email at all.
@@ -41,6 +49,7 @@ const MIN_PASSWORD_LENGTH = 8;
 export function SignInCard() {
   const searchParams = useSearchParams();
   const [mode, setMode] = useState<Mode>("signin");
+  const [step, setStep] = useState<Step>("credentials");
   const [pending, setPending] = useState<Pending>(null);
   const [error, setError] = useState<string | null>(searchParams.get("error"));
   const [notice, setNotice] = useState<string | null>(null);
@@ -114,8 +123,16 @@ export function SignInCard() {
       return;
     }
 
+    // Signed up AND signed in, which is what happens whenever "Confirm
+    // email" is off. Ask for the access request here, as step 2, instead of
+    // navigating into a console the account cannot use yet.
+    //
+    // The account already exists at this point and that is deliberate: the
+    // request row needs a user id to hang off, so there is no arrangement
+    // where the questions come first. What this buys is that nobody is shown
+    // the product and then told to apply for it.
     if (data.session) {
-      window.location.assign(next);
+      setStep("details");
       return;
     }
 
@@ -144,6 +161,25 @@ export function SignInCard() {
       setPending(null);
     }
     // On success the browser navigates to Google; nothing left to render.
+  }
+
+  // Step 2. The SAME component the console renders for an account that
+  // arrives here already signed up — not a copy. A second seven-field form
+  // would drift from this one, and a request that reaches an admin missing
+  // fields is worse than one that never arrives.
+  //
+  // `window.location.assign`, not a router push: the middleware reads the
+  // session server-side, and this is the first navigation the fresh session
+  // makes. A client navigation would render the next page against the
+  // request that had no session on it — the same reason the sign-in path
+  // above uses it.
+  if (step === "details") {
+    return (
+      <OnboardingForm
+        stepLabel="Step 2 of 2"
+        onSubmitted={() => window.location.assign(next)}
+      />
+    );
   }
 
   if (needsConfirmation) {
