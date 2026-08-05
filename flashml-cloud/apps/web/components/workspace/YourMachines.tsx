@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { isOnline } from "@/lib/machine-status";
 import {
   MACHINE_BADGE_LABELS,
@@ -55,7 +56,7 @@ export function YourMachines({
       })
       .catch((err) => {
         setError(
-          err instanceof Error ? err.message : "Couldn't load your machines."
+          err instanceof Error ? err.message : "Couldn't load your Zollis."
         );
         setState("error");
       });
@@ -106,7 +107,7 @@ export function YourMachines({
         )
       );
       toast.error(`Couldn't ${bound ? "remove" : "add"} ${label}`, {
-        description: "This workspace is unchanged. Try again.",
+        description: "This Crew is unchanged. Try again.",
       });
     } finally {
       setPendingIds((prev) => {
@@ -119,10 +120,10 @@ export function YourMachines({
 
   return (
     <section>
-      <h2 className="text-sm font-semibold">Your machines</h2>
+      <h2 className="text-sm font-semibold">Your Zollis</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        Opt your own machines into this workspace&apos;s work. A machine
-        serves no workspace until it&apos;s ticked in here, even if you own
+        Opt your own Zollis into this Crew&apos;s work. A Zolli
+        serves no Crew until it&apos;s ticked in here, even if you own
         it.
       </p>
 
@@ -145,15 +146,15 @@ export function YourMachines({
             </button>
           </div>
         ) : machines.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No machines on your account yet.{" "}
-            <a
-              href="#connect-panel"
-              className="text-primary hover:underline"
-            >
-              Connect one below.
-            </a>
-          </p>
+          <div className="flex items-center gap-4 rounded-lg border border-border bg-surface px-4 py-4">
+            <ZolliCharacter role="scout" size={54} />
+            <p className="text-sm text-muted-foreground">
+              No Zollis on your account yet.{" "}
+              <a href="#connect-panel" className="text-brand-foreground hover:underline">
+                Connect one below.
+              </a>
+            </p>
+          </div>
         ) : (
           <div className="divide-y divide-border">
             {machines.map((m) => (
@@ -210,14 +211,14 @@ function MachineToggleRow({
         onChange={() => onToggle(machine, bound)}
         // User-visible too, just only to screen readers — same "workspace"
         // vocabulary as every other string on this page.
-        aria-label={`${bound ? "Remove" : "Add"} ${label} ${bound ? "from" : "to"} this workspace`}
+        aria-label={`${bound ? "Remove" : "Add"} ${label} ${bound ? "from" : "to"} this Crew`}
         className="h-4 w-4 shrink-0 rounded border-border accent-primary disabled:opacity-50"
       />
       <span
         className="status-dot"
         data-state={online ? "live" : undefined}
         style={{
-          background: online ? "var(--node-green)" : "oklch(1 0 0 / 0.25)",
+          background: online ? "var(--node-green)" : "var(--muted-foreground)",
         }}
       />
       <span className="min-w-0 flex-1 truncate font-mono">{label}</span>

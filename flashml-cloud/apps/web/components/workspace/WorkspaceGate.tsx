@@ -34,15 +34,15 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
             reworded into an access-denied message — that would confirm to
             an outsider that the id names a real workspace. */}
         <p className="text-sm text-muted-foreground">
-          This workspace doesn&apos;t exist, or you&apos;re not a member.
+          This Crew doesn&apos;t exist, or you&apos;re not a member.
         </p>
         {/* `/workspaces`, not `/pools`. `/pools` is a RESOLVER now
             (`WorkspaceResolver`): it drops you inside whichever workspace
             you were last in, which for someone who just failed to load one
             is the opposite of a way out. `/workspaces` is the page that
             actually lets you create or join one. */}
-        <Link href="/workspaces" className="text-sm text-primary hover:underline">
-          Create or join a workspace
+        <Link href="/workspaces" className="text-sm text-brand-foreground hover:underline">
+          Create or join a Crew
         </Link>
       </Shell>
     );
@@ -56,7 +56,7 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
         <button
           type="button"
           onClick={reload}
-          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+          className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
         >
           Try again
         </button>

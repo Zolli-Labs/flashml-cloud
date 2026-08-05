@@ -70,7 +70,7 @@ export function Swimlanes({
             >
               {node}
             </span>
-            <div className="relative h-6 flex-1 rounded-sm bg-white/[0.03]">
+            <div className="relative h-6 flex-1 rounded-sm bg-surface-2">
               {items.map((a, i) => {
                 const left = ((a.startedAt - start) / span) * 100;
                 const width =

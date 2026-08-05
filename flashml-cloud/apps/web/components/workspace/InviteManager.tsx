@@ -106,7 +106,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
       setInviteState(null);
       setLink(null);
       toast.success("Invite link revoked", {
-        description: "It can no longer be used to join this workspace.",
+        description: "It can no longer be used to join this Crew.",
       });
     } catch {
       toast.error("Couldn't revoke the invite link", {
@@ -139,7 +139,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
           membership. */}
       <p className="mt-1 text-xs text-muted-foreground">
         A standing link — anyone who opens it and signs in joins this
-        workspace if they&apos;re already admitted to FlashML; otherwise the
+        Crew if they&apos;re already admitted to ZolliAI Cloud; otherwise the
         join is saved and applied once an admin approves them. Either way it
         spends one use. Treat it like a password: it&apos;s good for the uses
         and time shown below, and Regenerate invalidates whatever copy is
@@ -178,7 +178,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
               type="button"
               onClick={copy}
               aria-label={copied ? "Copied" : "Copy invite link"}
-              className="shrink-0 rounded-md border border-border p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+              className="shrink-0 rounded-md border border-border bg-surface p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
             >
               {copied ? (
                 <Check
@@ -191,10 +191,10 @@ export function InviteManager({ poolId }: { poolId: string }) {
               )}
             </button>
           </div>
-          <p className="mt-2.5 flex items-start gap-1.5 text-xs text-[var(--warning)]">
+          <p className="mt-2.5 flex items-start gap-1.5 text-xs text-warning-foreground">
             <Warning className="mt-0.5 h-3.5 w-3.5 shrink-0" weight="fill" />
             <span>
-              This link is shown once. Copy it now — FlashML can&apos;t show
+              This link is shown once. Copy it now — ZolliAI can&apos;t show
               it to you again.
             </span>
           </p>
@@ -229,7 +229,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
                 <AlertDialogTitle>Revoke this invite link?</AlertDialogTitle>
                 <AlertDialogDescription>
                   Anyone still holding it can no longer use it to join this
-                  workspace. Members already in the workspace are unaffected.
+                  Crew. Members already in the Crew are unaffected.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

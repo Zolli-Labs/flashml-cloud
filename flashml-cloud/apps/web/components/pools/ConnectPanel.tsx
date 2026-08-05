@@ -37,7 +37,7 @@ function CopyBlock({ cmd }: { cmd: string }) {
   }
 
   return (
-    <div className="group relative rounded-lg border border-border/60 bg-black/25 pr-11">
+    <div className="group relative rounded-lg border border-border bg-surface-2/60 pr-11">
       <pre className="overflow-x-auto px-3.5 py-2.5 font-mono text-[11.5px] leading-relaxed text-foreground/90">
         <code className="whitespace-pre-wrap break-all">{cmd}</code>
       </pre>
@@ -45,7 +45,7 @@ function CopyBlock({ cmd }: { cmd: string }) {
         type="button"
         onClick={copy}
         aria-label={copied ? "Copied" : "Copy command"}
-        className="interactive absolute right-1.5 top-1.5 rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-white/5 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+        className="interactive absolute right-1.5 top-1.5 rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-surface hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
       >
         {copied ? (
           <Check
@@ -127,7 +127,7 @@ export function ConnectPanel({ poolId }: { poolId: string }) {
         {/* Verbatim from docs/guides/join-a-pool-colab.md, including the
             dated re-check line — this is a legal/ToS caveat, not marketing
             copy, and must not drift from the doc it was copied out of. */}
-        <div className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3.5 py-3 text-xs leading-relaxed text-amber-400">
+        <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3.5 py-3 text-xs leading-relaxed text-warning-foreground">
           <Warning className="mt-0.5 h-4 w-4 shrink-0" weight="fill" />
           <p>
             <strong className="font-semibold">Paid Colab only.</strong>{" "}
@@ -173,7 +173,7 @@ export function ConnectPanel({ poolId }: { poolId: string }) {
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
             Colab can&apos;t nest a Docker daemon inside its own container,
             so trusted is the only runner tier that works here — it runs
-            this workspace&apos;s jobs unsandboxed, directly in the runtime.
+            this Crew&apos;s jobs unsandboxed, directly in the runtime.
             Runs
             until the cell is interrupted or the runtime disconnects.
           </p>
@@ -215,7 +215,7 @@ export function ConnectPanel({ poolId }: { poolId: string }) {
             A pod is already a container (or a full VM on secure cloud) and
             can&apos;t nest a second Docker daemon inside itself, so the
             sandboxed runner tiers aren&apos;t available here — trusted runs
-            this workspace&apos;s jobs unsandboxed on the pod. Use{" "}
+            this Crew&apos;s jobs unsandboxed on the pod. Use{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
               tmux
             </code>{" "}

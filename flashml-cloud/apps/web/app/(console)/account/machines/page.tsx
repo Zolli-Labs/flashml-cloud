@@ -17,6 +17,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import { isOnline, relativeTime } from "@/lib/machine-status";
 import {
@@ -60,7 +61,7 @@ export default function MachinesPage() {
           return;
         }
         setError(
-          err instanceof Error ? err.message : "Couldn't load your machines."
+          err instanceof Error ? err.message : "Couldn't load your Zollis."
         );
         setState("error");
       });
@@ -93,9 +94,9 @@ export default function MachinesPage() {
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="title">My machines</h1>
+          <h1 className="title">My Zollis</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            Machines you own. Tick one into a workspace to let that team
+            Zollis you own. Tick one into a Crew to let your crewmates
             place jobs on it.
           </p>
         </div>
@@ -104,7 +105,7 @@ export default function MachinesPage() {
             type="button"
             onClick={load}
             aria-label="Refresh"
-            className="rounded-md p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+            className="rounded-md p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
           >
             <ArrowClockwise
               size={15}
@@ -115,7 +116,7 @@ export default function MachinesPage() {
             href="/activate"
             className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
           >
-            Attach a machine
+            Add a Zolli
           </Link>
         </div>
       </div>
@@ -148,7 +149,7 @@ export default function MachinesPage() {
             <button
               type="button"
               onClick={load}
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+              className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
             >
               Try again
             </button>
@@ -160,7 +161,7 @@ export default function MachinesPage() {
             <table className="w-full min-w-[620px] text-left">
               <thead>
                 <tr className="border-b border-border">
-                  {["Machine", "Platform", "Last seen", ""].map((h, i) => (
+                  {["Zolli", "Platform", "Last seen", ""].map((h, i) => (
                     <th
                       key={h || i}
                       className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
@@ -204,12 +205,12 @@ function MachineRow({
     setRevoking(true);
     try {
       await onRevoke(machine.id);
-      toast.success("Machine revoked", {
+      toast.success("Zolli revoked", {
         description: `${label} can no longer claim work.`,
       });
     } catch {
-      toast.error("Couldn't revoke that machine", {
-        description: "The machine is unchanged. Try again.",
+      toast.error("Couldn't revoke that Zolli", {
+        description: "The Zolli is unchanged. Try again.",
       });
     } finally {
       setRevoking(false);
@@ -230,7 +231,7 @@ function MachineRow({
                 ? "var(--muted-foreground)"
                 : online
                   ? "var(--node-green)"
-                  : "oklch(1 0 0 / 0.25)",
+                  : "var(--muted-foreground)",
             }}
           />
           <span className="min-w-0">
@@ -256,7 +257,7 @@ function MachineRow({
           {(machine.pools ?? []).map((pool) => (
             <span
               key={pool.id}
-              className="rounded-full border border-border/60 bg-white/[0.04] px-2 py-0.5 text-[10px] text-muted-foreground"
+              className="rounded-full border border-border bg-surface-2 px-2 py-0.5 text-[10px] text-muted-foreground"
             >
               {pool.name}
             </span>
@@ -315,9 +316,10 @@ function Empty() {
   return (
     <div className="flex flex-col items-center gap-5 py-14 text-center">
       <div>
-        <h2 className="text-base font-semibold">No machines yet</h2>
+        <ZolliCharacter role="scout" size={72} />
+        <h2 className="text-base font-semibold">No Zollis yet</h2>
         <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted-foreground">
-          Run these on the machine you want to lend. It can be this one.
+          Run these on the machine you want to turn into a Zolli. It can be this one.
         </p>
       </div>
       <EnrolInstructions base={cloudApiBase()} />

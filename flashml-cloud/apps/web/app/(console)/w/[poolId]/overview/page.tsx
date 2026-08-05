@@ -33,7 +33,7 @@ export default function WorkspaceOverviewPage() {
 
       <div className="mt-6 grid gap-3 sm:grid-cols-3">
         <Stat
-          label="Machines online"
+          label="Zollis online"
           value={online.length}
           total={machines.length}
         />
@@ -46,7 +46,7 @@ export default function WorkspaceOverviewPage() {
           <h2 className="text-sm font-semibold">Active jobs</h2>
           <Link
             href={workspacePath(pool.id, "jobs")}
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="text-xs text-brand-foreground hover:underline"
           >
             View all
           </Link>
@@ -61,9 +61,9 @@ export default function WorkspaceOverviewPage() {
                 <li key={j.job_id}>
                   <Link
                     href={`/jobs/${j.job_id}`}
-                    className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-white/[0.03]"
+                    className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2/70"
                   >
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-primary/15 text-primary">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-primary/15 text-brand-foreground">
                       <Lightning size={15} weight="fill" />
                     </span>
                     <span className="min-w-0 flex-1">
@@ -121,11 +121,11 @@ function EmptyJobs({ hasAny, poolId }: { hasAny: boolean; poolId: string }) {
       <p className="max-w-sm text-sm text-muted-foreground">
         {hasAny
           ? "Nothing running right now. Everything you have submitted has finished."
-          : "No jobs in this workspace yet."}
+          : "No jobs in this Crew yet."}
       </p>
       <Link
         href={workspacePath(poolId, "submit")}
-        className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
+        className="inline-flex items-center gap-1.5 text-sm text-brand-foreground hover:underline"
       >
         Submit a job
         <ArrowRight size={13} weight="bold" />

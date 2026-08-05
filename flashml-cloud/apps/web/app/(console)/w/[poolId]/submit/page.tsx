@@ -120,9 +120,9 @@ export default function SubmitPage() {
         </div>
 
         {findings.length > 0 && (
-          <Card className="border-amber-400/30">
+          <Card className="border-warning/40 bg-surface">
             <CardHeader>
-              <CardTitle className="text-sm font-mono text-amber-400">
+              <CardTitle className="font-mono text-sm text-warning-foreground">
                 Preflight noted {findings.length} warning
                 {findings.length === 1 ? "" : "s"}
               </CardTitle>
@@ -151,7 +151,7 @@ export default function SubmitPage() {
         <p className="text-sm text-muted-foreground mt-1">
           Paste a public GitHub repo with a <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">flashml.yaml</code> at its
           root. We stage the code, run it through preflight, and hand it to
-          the next available machine.
+          the next available Zolli.
         </p>
       </div>
 
@@ -203,23 +203,23 @@ export default function SubmitPage() {
             </div>
 
             <div>
-              <Label>Workspace</Label>
+              <Label>Crew</Label>
               <p className="mt-1.5 text-sm">
                 Runs in <span className="font-medium">{pool.name}</span>
               </p>
             </div>
 
             <p className="text-xs text-muted-foreground">
-              Jobs in this workspace run without a container sandbox on
-              your team&apos;s machines. Every member you invited can run
+              Jobs in this Crew run without a container sandbox on
+              your crewmates&apos; Zollis. Every member you invited can run
               code this job stages.
             </p>
 
             {machines.filter(isMachineOnline).length === 0 ? (
-              <div className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5 text-sm text-amber-400">
+              <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5 text-sm text-warning-foreground">
                 <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
                 <span>
-                  0 workers online in this workspace right now — the job
+                  0 Zollis online in this Crew right now — the job
                   will queue until one connects.
                 </span>
               </div>
@@ -277,7 +277,7 @@ function FindingsList({ findings }: { findings: PreflightFinding[] }) {
           className={`flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm ${
             f.level === "error"
               ? "border-destructive/30 bg-destructive/10"
-              : "border-amber-400/30 bg-amber-400/10"
+              : "border-warning/40 bg-warning/10"
           }`}
         >
           {f.level === "error" ? (
@@ -287,14 +287,14 @@ function FindingsList({ findings }: { findings: PreflightFinding[] }) {
             />
           ) : (
             <Warning
-              className="w-4 h-4 shrink-0 mt-0.5 text-amber-400"
+              className="mt-0.5 h-4 w-4 shrink-0 text-warning-foreground"
               weight="fill"
             />
           )}
           <div className="min-w-0">
             <div
               className={`font-mono text-[10px] uppercase tracking-wide ${
-                f.level === "error" ? "text-destructive" : "text-amber-400"
+                f.level === "error" ? "text-destructive" : "text-warning-foreground"
               }`}
             >
               {f.level} · {f.code}

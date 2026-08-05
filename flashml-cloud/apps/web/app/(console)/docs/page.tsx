@@ -23,7 +23,7 @@ import { cloudApiBase } from "@/lib/cloud-api";
 const REPO = "https://github.com/Zolli-Labs/flashml";
 
 const SECTIONS = [
-  { id: "attach", label: "Attach a machine" },
+  { id: "attach", label: "Add a Zolli" },
   { id: "run", label: "Run a job" },
   { id: "reading", label: "Reading a job" },
   { id: "glossary", label: "Glossary" },
@@ -69,12 +69,12 @@ export default function DocsPage() {
           </p>
 
           <section id="attach" className="scroll-mt-20 pt-12">
-            <h2 className="text-lg font-semibold">Attach a machine</h2>
+            <h2 className="text-lg font-semibold">Add a Zolli</h2>
             <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-              A machine has to be enrolled before it can claim work. Run this
+              A machine becomes a Zolli after it is enrolled. Run this
               on the machine you want to lend, then approve the code it prints
               on the{" "}
-              <Link href="/activate" className="text-primary hover:underline">
+              <Link href="/activate" className="text-brand-foreground hover:underline">
                 Activate
               </Link>{" "}
               page.
@@ -130,7 +130,7 @@ flashml/bin/flashnode login --coordinator ${base}`}
             </div>
 
             <h3 className="mt-8 text-sm font-semibold text-foreground">
-              From a notebook or a rented pod, for a team workspace
+              From a notebook or a rented pod, for a Crew
             </h3>
             <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
               A Colab notebook or a rented pod (RunPod and similar) can&apos;t
@@ -140,8 +140,8 @@ flashml/bin/flashnode login --coordinator ${base}`}
               </code>{" "}
               has nothing to check there &mdash; skip it. This path is also
               for a{" "}
-              <Link href="/pools" className="text-primary hover:underline">
-                team workspace
+              <Link href="/pools" className="text-brand-foreground hover:underline">
+                Crew
               </Link>{" "}
               you were invited to, not the open pool above: run{" "}
               <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
@@ -168,9 +168,9 @@ flashnode work --coordinator ${base} --runner trusted`}
                 <span className="text-muted-foreground">
                   No container, no network isolation &mdash; whatever the
                   job&apos;s command does, it does directly on this machine.
-                  No job from outside your workspace ever runs here &mdash;
-                  argv work is confined to your workspace by three
-                  fail-closed checks. Only run this for a workspace
+                  No job from outside your Crew ever runs here &mdash;
+                  argv work is confined to your Crew by three
+                  fail-closed checks. Only run this for a Crew
                   you&apos;d hand a shell account to.
                 </span>
               </p>
@@ -183,7 +183,7 @@ flashnode work --coordinator ${base} --runner trusted`}
             <h2 className="text-lg font-semibold">Run a job</h2>
             <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
               Point{" "}
-              <Link href="/submit" className="text-primary hover:underline">
+              <Link href="/submit" className="text-brand-foreground hover:underline">
                 Submit
               </Link>{" "}
               at a GitHub repository containing a{" "}
@@ -271,7 +271,7 @@ flashnode work --coordinator ${base} --runner trusted`}
               href={REPO}
               target="_blank"
               rel="noreferrer"
-              className="mt-3 inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+              className="mt-3 inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
             >
               <GithubLogo size={15} weight="fill" />
               Zolli-Labs/flashml

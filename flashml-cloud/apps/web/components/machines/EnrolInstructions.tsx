@@ -90,7 +90,7 @@ function CommandRow({ cmd }: { cmd: string }) {
   }
 
   return (
-    <div className="group relative rounded-lg border border-border/60 bg-black/25 pr-11">
+    <div className="group relative rounded-lg border border-border bg-surface-2/60 pr-11">
       <pre className="overflow-x-auto px-3.5 py-2.5 font-mono text-[11.5px] leading-relaxed text-foreground/90">
         <code className="whitespace-pre-wrap break-all">{cmd}</code>
       </pre>
@@ -98,10 +98,10 @@ function CommandRow({ cmd }: { cmd: string }) {
         type="button"
         onClick={copy}
         aria-label={copied ? "Copied" : "Copy command"}
-        className="interactive absolute right-1.5 top-1.5 rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-white/5 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+        className="interactive absolute right-1.5 top-1.5 rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-surface hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
       >
         {copied ? (
-          <Check className="h-3.5 w-3.5 text-primary" weight="bold" />
+          <Check className="h-3.5 w-3.5 text-brand-foreground" weight="bold" />
         ) : (
           <Copy className="h-3.5 w-3.5" />
         )}
@@ -149,7 +149,7 @@ export function EnrolInstructions({ base }: { base: string }) {
       <div
         role="tablist"
         aria-label="Operating system"
-        className="mb-4 inline-flex rounded-lg border border-border/60 bg-black/20 p-0.5"
+        className="mb-4 inline-flex rounded-lg border border-border bg-surface-2 p-0.5"
       >
         {tabs.map((t) => (
           <button
@@ -159,7 +159,7 @@ export function EnrolInstructions({ base }: { base: string }) {
             onClick={() => setPlatform(t.id)}
             className={`interactive rounded-[7px] px-3 py-1.5 text-xs font-medium ${
               platform === t.id
-                ? "bg-white/[0.07] text-foreground"
+                ? "bg-surface text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -186,7 +186,7 @@ export function EnrolInstructions({ base }: { base: string }) {
         <p>
           The last command prints a short code. Enter it at{" "}
           <span className="font-mono text-foreground">/activate</span> from any
-          signed-in browser — your phone works — to approve the machine.
+          signed-in browser — your phone works — to approve the Zolli.
         </p>
         {/*
           Git used to be listed here, and it is deliberately gone. It was only

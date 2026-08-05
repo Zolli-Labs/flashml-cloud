@@ -149,7 +149,7 @@ export default function AdminRequestsPage() {
             type="button"
             onClick={load}
             aria-label="Refresh"
-            className="rounded-md p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+            className="rounded-md p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
           >
             <ArrowClockwise
               size={15}
@@ -178,7 +178,7 @@ export default function AdminRequestsPage() {
             <button
               type="button"
               onClick={load}
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+              className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
             >
               Try again
             </button>
@@ -247,7 +247,7 @@ function RequestCard({
             {row.is_personal_email && (
               <Badge
                 variant="outline"
-                className="border-amber-400/30 bg-amber-400/10 text-amber-400"
+                className="border-warning/40 bg-warning/10 text-warning-foreground"
               >
                 personal
               </Badge>
@@ -261,7 +261,7 @@ function RequestCard({
           {row.compute_sources.map((source) => (
             <span
               key={source}
-              className="rounded-full border border-border/60 bg-white/[0.04] px-2 py-0.5 text-[10px] text-muted-foreground"
+              className="rounded-full border border-border bg-surface-2 px-2 py-0.5 text-[10px] text-muted-foreground"
             >
               {labelFor(COMPUTE_OPTIONS, source)}
             </span>

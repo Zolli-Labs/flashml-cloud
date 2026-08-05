@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { ArrowClockwise, Plus } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import { isActiveJob } from "@/lib/job-scope";
@@ -67,7 +68,7 @@ export default function WorkspaceJobsPage() {
         <div>
           <h2 className="text-sm font-semibold">Jobs</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Everything submitted in this workspace.
+            Everything submitted in this Crew.
           </p>
         </div>
         {/* No spin-while-loading here, unlike the source page: this tab
@@ -80,7 +81,7 @@ export default function WorkspaceJobsPage() {
           type="button"
           onClick={reload}
           aria-label="Refresh"
-          className="rounded-md p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+          className="rounded-md p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
         >
           <ArrowClockwise size={15} />
         </button>
@@ -95,7 +96,7 @@ export default function WorkspaceJobsPage() {
               onClick={() => setFilter(f.id)}
               className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
                 filter === f.id
-                  ? "bg-white/[0.09] text-foreground"
+                  ? "bg-surface-2 text-foreground"
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
@@ -134,11 +135,11 @@ export default function WorkspaceJobsPage() {
                 {shown.map((j) => (
                   <tr
                     key={j.job_id}
-                    className="group transition-colors hover:bg-white/[0.03]"
+                    className="group transition-colors hover:bg-surface-2/70"
                   >
                     <td className="px-3 py-3">
                       <Link href={`/jobs/${j.job_id}`} className="block min-w-0">
-                        <span className="block truncate font-mono text-sm group-hover:text-primary">
+                        <span className="block truncate font-mono text-sm group-hover:text-brand-foreground">
                           {j.spec?.metadata?.name ?? j.name ?? j.job_id}
                         </span>
                         <span className="meta block truncate">{j.job_id}</span>
@@ -187,8 +188,9 @@ function Empty({
   }
   return (
     <div className="flex flex-col items-center gap-3 py-16 text-center">
+      <ZolliCharacter role="worker" size={64} />
       <p className="max-w-sm text-sm text-muted-foreground">
-        No jobs in this workspace yet.
+        No jobs in this Crew yet.
       </p>
       <Link
         href={workspacePath(poolId, "submit")}

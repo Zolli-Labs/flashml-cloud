@@ -24,10 +24,10 @@ import type { JobState } from "@/lib/cloud-api";
  */
 const stateStyles: Record<JobState, string> = {
   PENDING: "text-muted-foreground border-muted",
-  SUBMITTED: "text-cyan border-cyan/40",
-  RUNNING: "text-cyan border-cyan/40",
-  RECOVERING: "text-amber-400 border-amber-400/40",
-  SUCCEEDED: "text-node-green border-node-green/40",
+  SUBMITTED: "text-brand-foreground border-brand/40",
+  RUNNING: "text-brand-foreground border-brand/40",
+  RECOVERING: "text-warning-foreground border-warning/50",
+  SUCCEEDED: "text-evergreen border-evergreen/40",
   FAILED: "text-destructive border-destructive/40",
   CANCELLED: "text-muted-foreground border-muted",
 };

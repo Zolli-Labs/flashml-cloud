@@ -25,7 +25,7 @@ export default function WorkspacePeoplePage() {
           Want to add someone?{" "}
           <Link
             href={workspacePath(pool.id, "settings")}
-            className="text-primary hover:underline"
+            className="text-brand-foreground hover:underline"
           >
             Manage the invite link in Settings
           </Link>

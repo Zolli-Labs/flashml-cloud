@@ -160,7 +160,7 @@ export default function JobDetailPage({
         <p className="text-sm text-muted-foreground">
           This job doesn&apos;t exist, or isn&apos;t yours.
         </p>
-        <Link href="/jobs" className="text-sm text-primary hover:underline">
+        <Link href="/jobs" className="text-sm text-brand-foreground hover:underline">
           Back to jobs
         </Link>
       </Shell>
@@ -175,7 +175,7 @@ export default function JobDetailPage({
         <button
           type="button"
           onClick={load}
-          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+          className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
         >
           Try again
         </button>
@@ -186,13 +186,13 @@ export default function JobDetailPage({
   const name = job.spec?.metadata?.name ?? job.name ?? job.job_id;
   const backHref =
     job.pool_id != null ? workspacePath(job.pool_id, "jobs") : "/workspaces";
-  const backLabel = job.pool_id != null ? "Jobs" : "Workspaces";
+  const backLabel = job.pool_id != null ? "Jobs" : "Crews";
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <Link
         href={backHref}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1.5 text-sm text-brand-foreground hover:underline"
       >
         <ArrowLeft className="h-3.5 w-3.5" /> {backLabel}
       </Link>
@@ -224,7 +224,7 @@ export default function JobDetailPage({
           </p>
         )}
         {stall && (
-          <p className="mt-3 flex items-start gap-2 border-t border-border pt-3 text-xs text-[var(--warning)]">
+          <p className="mt-3 flex items-start gap-2 border-t border-border pt-3 text-xs text-warning-foreground">
             <Warning className="mt-px h-3.5 w-3.5 shrink-0" weight="fill" />
             <span>{stall}</span>
           </p>
@@ -428,7 +428,7 @@ function PlacementView({
           <section className="panel p-4">
             <h2 className="text-sm font-semibold">Where the work is</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              Scrub or replay to see the fleet at any moment of this run.
+              Scrub or replay to see the Crew at any moment of this run.
             </p>
             <div className="mt-4">
               <FleetTopology attempts={attempts} now={now} />
@@ -436,7 +436,7 @@ function PlacementView({
           </section>
 
           <section className="panel p-4">
-            <h2 className="text-sm font-semibold">Attempts by machine</h2>
+            <h2 className="text-sm font-semibold">Attempts by Zolli</h2>
             <p className="mt-1 text-xs text-muted-foreground">
               Reconstructed from the coordinator&apos;s lease and commit
               events.
@@ -457,7 +457,7 @@ function PlacementView({
             <table className="w-full min-w-[520px] text-left">
               <thead>
                 <tr className="border-b border-border">
-                  {["Task", "State", "Attempts", "Machine", "Lease ends"].map(
+                  {["Task", "State", "Attempts", "Zolli", "Lease ends"].map(
                     (h) => (
                       <th key={h} className="label-caps px-4 py-2 font-medium">
                         {h}
@@ -508,7 +508,7 @@ function ledgerTone(type: string): string {
     type.includes("LOST") ||
     type.includes("FROZEN")
   ) {
-    return "text-[var(--warning)]";
+    return "text-warning-foreground";
   }
   if (
     type.includes("ACCEPTED") ||
@@ -660,7 +660,7 @@ function ArtifactRow({
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center justify-between gap-3 font-mono text-xs">
-        <span className="truncate text-primary">{artifact.uri}</span>
+        <span className="truncate text-brand-foreground">{artifact.uri}</span>
         <span className="flex shrink-0 items-center gap-2">
           <span className="text-muted-foreground">
             {artifact.backend} · {formatBytes(artifact.size_bytes)}
@@ -671,7 +671,7 @@ function ArtifactRow({
               onClick={download}
               disabled={downloading}
               aria-label="Download artifact"
-              className="rounded p-1 hover:bg-white/[0.06] disabled:opacity-50"
+              className="rounded p-1 hover:bg-surface-2 disabled:opacity-50"
             >
               <DownloadSimple className={downloading ? "animate-pulse" : ""} />
             </button>

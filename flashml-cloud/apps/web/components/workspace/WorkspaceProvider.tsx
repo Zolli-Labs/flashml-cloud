@@ -108,7 +108,7 @@ export function WorkspaceProvider({
           return;
         }
         setError(
-          err instanceof Error ? err.message : "Couldn't load this workspace."
+          err instanceof Error ? err.message : "Couldn't load this Crew."
         );
         setState("error");
       });

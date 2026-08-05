@@ -225,7 +225,7 @@ export default function AccountPage() {
           Display name
         </label>
         <p className="mt-1 text-xs text-muted-foreground">
-          How you appear in FlashML. Everything else on this page comes from
+          How you appear in ZolliAI. Everything else on this page comes from
           the account you signed in with.
         </p>
         <div className="mt-3 flex flex-wrap items-start gap-2">
@@ -280,7 +280,7 @@ export default function AccountPage() {
         <p className="mt-1 text-xs text-muted-foreground">
           {detailsEmpty
             ? "You signed up before we asked for this. Filling it in helps us build the right thing."
-            : "Used to understand who's on FlashML. Only you and the FlashML team see this."}
+            : "Used to understand who's on ZolliAI. Only you and the ZolliAI team see this."}
         </p>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -499,7 +499,7 @@ export default function AccountPage() {
                       toast.error("Your browser blocked clipboard access");
                     }
                   }}
-                  className="rounded p-1 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+                  className="rounded p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
                 >
                   <Copy size={12} />
                 </button>
@@ -515,11 +515,11 @@ export default function AccountPage() {
         <h2 className="text-sm font-semibold text-destructive">Sign out</h2>
         <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
           Signing out ends this browser session only. It does{" "}
-          <span className="text-foreground">not</span> revoke any machine:
-          machines hold their own tokens and keep claiming work until you
+          <span className="text-foreground">not</span> revoke any Zolli:
+          Zollis hold their own tokens and keep claiming work until you
           revoke them from{" "}
-          <Link href="/machines" className="text-primary hover:underline">
-            Machines
+          <Link href="/machines" className="text-brand-foreground hover:underline">
+            Zollis
           </Link>
           .
         </p>
