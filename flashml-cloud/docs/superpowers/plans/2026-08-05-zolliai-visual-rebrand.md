@@ -20,10 +20,17 @@
 - Use transforms and opacity for motion and honor `prefers-reduced-motion`.
 - Preserve the user's pre-existing dirty changes, especially in `ConsoleShell.tsx`, `OnboardingForm.tsx`, account/workspace components, and their tests.
 - Because all agents share one worktree, implementation agents must not stage or commit. The main orchestrator reviews, stages exact paths, and commits each accepted slice.
+- The user approved an exception from automated tests for visual-only layout,
+  copy, CSS, metadata, and font configuration. Do not add tests that grep source
+  text. Test new reusable logic and accessible SVG behavior; validate visual
+  work through the existing behavioral suite, build, and browser QA.
+- Dispatch fresh implementers sequentially in this shared dirty worktree. Use
+  multiple agents across tasks plus independent review agents, but never run
+  two implementation agents concurrently.
 
 ## File structure and ownership
 
-### Shared foundation — must finish before parallel work
+### Shared foundation — must finish before page work
 
 - `apps/web/lib/zolli-brand.ts` — role names, labels, descriptions, and colors.
 - `apps/web/lib/zolli-brand.test.ts` — exact role and accessible-name contract.
@@ -31,9 +38,8 @@
 - `apps/web/components/brand/ZolliCharacter.tsx` — reusable SVG character primitive.
 - `apps/web/app/globals.css` — warm theme, display typography, surface utilities, and mascot motion.
 - `apps/web/app/layout.tsx` — fonts, metadata, light color scheme, and light toast theme.
-- `apps/web/lib/zolli-theme.test.ts` — source-level theme and metadata contract.
 
-### Parallel workstream A — public landing
+### Workstream A — public landing
 
 - `apps/web/app/(marketing)/page.tsx`
 - `apps/web/components/nav/Navbar.tsx`
@@ -43,9 +49,8 @@
 - `apps/web/components/landing/RecoveryDemo.tsx`
 - `apps/web/components/landing/EventLedger.tsx`
 - `apps/web/components/landing/ClosingCta.tsx`
-- `apps/web/lib/landing-structure.test.ts` (new)
 
-### Parallel workstream B — shell, auth, and access states
+### Workstream B — shell, auth, and access states
 
 - `apps/web/components/shell/ConsoleShell.tsx`
 - `apps/web/components/shell/WorkspaceSwitcher.tsx`
@@ -60,9 +65,8 @@
 - `apps/web/app/(console)/activate/page.tsx`
 - `apps/web/app/(console)/pools/join/page.tsx`
 - `apps/web/app/(console)/workspaces/page.tsx`
-- `apps/web/lib/zolli-shell-copy.test.ts` (new)
 
-### Parallel workstream C — console pages and product surfaces
+### Workstream C — console pages and product surfaces
 
 - `apps/web/app/(console)/w/[poolId]/**`
 - `apps/web/app/(console)/jobs/[jobId]/page.tsx`
@@ -75,11 +79,9 @@
 - `apps/web/components/machines/EnrolInstructions.tsx`
 - `apps/web/components/pools/ConnectPanel.tsx`
 - `apps/web/components/workspace/**`
-- `apps/web/lib/zolli-console-copy.test.ts` (new)
 
 ### Orchestrator-owned integration
 
-- `apps/web/lib/zolli-visible-copy.test.ts` — allowlisted source scan for stale visible brand terms.
 - `PROGRESS.md` — verified work-journal entry after all checks pass.
 
 ---
@@ -164,45 +166,21 @@ git commit -m "feat(web): add Zolli brand primitives"
 ### Task 2: Install the warm ZolliAI theme and metadata
 
 **Files:**
-- Create: `flashml-cloud/apps/web/lib/zolli-theme.test.ts`
 - Modify: `flashml-cloud/apps/web/app/globals.css`
 - Modify: `flashml-cloud/apps/web/app/layout.tsx`
 
 **Interfaces:**
 - Consumes: `Mark` and `Wordmark` from Task 1 only indirectly through pages.
 - Produces: Tailwind-backed tokens `bg-cream`, `bg-surface`, `bg-surface-2`, `text-ink`, `text-muted`, `text-brand`, `text-evergreen`, and `font-display`.
-- Preserves: existing compatibility tokens such as `background`, `foreground`, `primary`, `border`, `node-green`, and `warning` so unconverted components remain legible during the parallel phase.
+- Preserves: existing compatibility tokens such as `background`, `foreground`, `primary`, `border`, `node-green`, and `warning` so unconverted components remain legible during the page phase.
 
-- [ ] **Step 1: Write the failing source contract**
+- [ ] **Step 1: Record the existing behavioral baseline**
 
-```ts
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+Run: `cd flashml-cloud/apps/web && npm test`
 
-describe("ZolliAI theme", () => {
-  const css = readFileSync("app/globals.css", "utf8");
-  const layout = readFileSync("app/layout.tsx", "utf8");
+Expected: 22 test files and 240 tests pass before the visual change.
 
-  it("defines the approved warm tokens", () => {
-    for (const value of ["#faf8f5", "#fffdf9", "#ef6828", "#1f6e5d"])
-      expect(css).toContain(value);
-  });
-
-  it("loads the ZolliAI type and metadata without forcing dark mode", () => {
-    expect(layout).toContain("Fraunces");
-    expect(layout).toContain('default: "ZolliAI"');
-    expect(layout).not.toContain("${geistMono.variable} dark");
-  });
-});
-```
-
-- [ ] **Step 2: Run the test and verify RED**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/zolli-theme.test.ts`
-
-Expected: FAIL on missing palette, Fraunces, and metadata.
-
-- [ ] **Step 3: Replace the token layer without removing compatibility names**
+- [ ] **Step 2: Replace the token layer without removing compatibility names**
 
 Use Inter for UI/body, Fraunces for `--font-display`, and Geist Mono for
 machine-emitted data. Set `color-scheme: light`. Retune grain, glass, focus,
@@ -210,23 +188,23 @@ shadows, scrollbars, skeletons, flow controls, and rules for warm surfaces.
 Add `.zolli-bob`, `.zolli-blink`, `.zolli-wave`, and `.zolli-handoff` using
 transform/opacity keyframes. Keep the existing reduced-motion override.
 
-- [ ] **Step 4: Update root layout**
+- [ ] **Step 3: Update root layout**
 
 Set title to `ZolliAI`, template to `%s · ZolliAI`, and truthful distributed
 compute copy. Remove the `dark` class. Set the Toaster to `theme="light"` and
 warm token classes. Preserve skip-link behavior and providers.
 
-- [ ] **Step 5: Verify GREEN and compile**
+- [ ] **Step 4: Verify behavior and compile**
 
-Run: `cd flashml-cloud/apps/web && npm test -- lib/zolli-theme.test.ts`
+Run: `cd flashml-cloud/apps/web && npm test`
 
-Expected: PASS.
+Expected: all baseline behavioral tests remain green.
 
 Run: `cd flashml-cloud/apps/web && npx tsc --noEmit`
 
 Expected: exit 0.
 
-- [ ] **Step 6: Orchestrator review and commit**
+- [ ] **Step 5: Orchestrator review and commit**
 
 Stage only Task 2 paths and commit:
 
@@ -239,7 +217,6 @@ git commit -m "feat(web): install ZolliAI visual system"
 **Files:**
 - Create: `flashml-cloud/apps/web/components/landing/CrewStory.tsx`
 - Create: `flashml-cloud/apps/web/components/landing/CrewRoles.tsx`
-- Create: `flashml-cloud/apps/web/lib/landing-structure.test.ts`
 - Modify: `flashml-cloud/apps/web/app/(marketing)/page.tsx`
 - Modify: `flashml-cloud/apps/web/components/nav/Navbar.tsx`
 - Modify: `flashml-cloud/apps/web/components/landing/Hero.tsx`
@@ -252,40 +229,7 @@ git commit -m "feat(web): install ZolliAI visual system"
 - Produces: anchors `#how-it-works`, `#crew`, and `#recover` used by the marketing navbar.
 - Preserves: sample-data disclosure and exact protocol event names.
 
-- [ ] **Step 1: Write the failing landing structure test**
-
-```ts
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
-
-describe("ZolliAI landing structure", () => {
-  const page = readFileSync("app/(marketing)/page.tsx", "utf8");
-  const hero = readFileSync("components/landing/Hero.tsx", "utf8");
-  const nav = readFileSync("components/nav/Navbar.tsx", "utf8");
-
-  it("renders the approved narrative in order", () => {
-    const names = ["<Hero", "<CrewStory", "<CrewRoles", "<RecoveryDemo", "<ClosingCta"];
-    const positions = names.map((name) => page.indexOf(name));
-    expect(positions.every((position) => position >= 0)).toBe(true);
-    expect(positions).toEqual([...positions].sort((a, b) => a - b));
-  });
-
-  it("uses the approved hero and navigation language", () => {
-    expect(hero).toContain("Every machine has a part to play");
-    for (const anchor of ["#how-it-works", "#crew", "#recover"])
-      expect(nav).toContain(anchor);
-    expect(nav).toContain("Build your crew");
-  });
-});
-```
-
-- [ ] **Step 2: Run the focused test and verify RED**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/landing-structure.test.ts`
-
-Expected: FAIL because the approved components and copy are absent.
-
-- [ ] **Step 3: Implement the responsive compressing navbar and hero**
+- [ ] **Step 1: Implement the responsive compressing navbar and hero**
 
 Use Motion's `useScroll`/`useMotionValueEvent` pattern from the ZolliAI
 reference. Desktop compresses after 100px; mobile uses an accessible menu with
@@ -293,13 +237,13 @@ reference. Desktop compresses after 100px; mobile uses an accessible menu with
 The hero renders the approved headline, two actions, all six characters, and
 only transform/opacity motion.
 
-- [ ] **Step 4: Implement the four-step Crew story and six-role section**
+- [ ] **Step 2: Implement the four-step Crew story and six-role section**
 
 Desktop may pin the step sequence; mobile must be ordinary document flow.
 Every role card consumes `ZOLLI_ROLES` and `ZolliCharacter` rather than
 duplicating role copy or SVG.
 
-- [ ] **Step 5: Retheme recovery proof and closing footer**
+- [ ] **Step 3: Retheme recovery proof and closing footer**
 
 Render friendly event sentences as the primary line and protocol names as
 secondary mono data. Keep the sample-run disclosure. Close with “Give every
@@ -307,17 +251,17 @@ machine a role in the crew” and links to create/open a Crew, docs, GitHub, and
 existing product routes. Do not invent privacy/terms routes in this visual POC
 and do not claim live system status.
 
-- [ ] **Step 6: Verify focused and complete tests**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/landing-structure.test.ts`
-
-Expected: PASS.
+- [ ] **Step 4: Verify behavior and compile**
 
 Run: `cd flashml-cloud/apps/web && npm test`
 
 Expected: all web tests pass.
 
-- [ ] **Step 7: Orchestrator visual review and commit**
+Run: `cd flashml-cloud/apps/web && npx tsc --noEmit`
+
+Expected: exit 0.
+
+- [ ] **Step 5: Orchestrator visual review and commit**
 
 Review at 1440px, 768px, and 390px. Stage only Task 3 paths and commit:
 
@@ -328,78 +272,49 @@ git commit -m "feat(web): introduce the Zolli Crew landing"
 ### Task 4: Rebrand the app shell, authentication, and entry states
 
 **Files:**
-- Create: `flashml-cloud/apps/web/lib/zolli-shell-copy.test.ts`
-- Modify: all files listed under parallel workstream B.
+- Modify: all files listed under workstream B.
 
 **Interfaces:**
 - Consumes: `Wordmark`, `ZolliCharacter`, `ZOLLI_ROLES`, warm theme tokens.
 - Preserves: `WORKSPACE_TABS`, `workspacePath`, `workspaceIdFromPath`, access gating, auth callbacks, invite tokens, and all API calls.
 - Produces: visible navigation labels `Crew`, `Zollis`, `My Zollis`, and `Build your crew` without renaming route or API identifiers.
 
-- [ ] **Step 1: Write the failing shell copy contract**
+- [ ] **Step 1: Capture the owned-file diff before editing**
 
-```ts
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+Run `git diff --` over the workstream-B paths and save the output path in the
+task report. This is the evidence used to preserve the user's existing changes.
 
-describe("ZolliAI shell copy", () => {
-  const shell = readFileSync("components/shell/ConsoleShell.tsx", "utf8");
-  const switcher = readFileSync("components/shell/WorkspaceSwitcher.tsx", "utf8");
-  const workspaces = readFileSync("app/(console)/workspaces/page.tsx", "utf8");
-  const signIn = readFileSync("app/(auth)/sign-in/SignInCard.tsx", "utf8");
-
-  it("uses Crew and Zolli at the presentation boundary", () => {
-expect(shell).toContain('machines: { label: "Zollis"');
-expect(shell).toContain('label="My Zollis"');
-expect(shell).toContain('aria-label="ZolliAI home"');
-expect(workspaces).toContain("Create a crew");
-expect(signIn).toContain("ZolliAI");
-  });
-
-  it("preserves the existing pool client boundary", () => {
-    expect(switcher).toMatch(/listPools|getPools/);
-    expect(switcher).toContain("pool");
-  });
-});
-```
-
-- [ ] **Step 2: Run the test and verify RED**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/zolli-shell-copy.test.ts`
-
-Expected: FAIL on old visible labels.
-
-- [ ] **Step 3: Reskin the shell while preserving the user's dirty changes**
+- [ ] **Step 2: Reskin the shell while preserving the user's dirty changes**
 
 Keep the current access-state fetch, admin loading behavior, workspace hint,
 mobile drawer, and personal-machine ownership semantics. Apply the warm rail,
 Crew switcher, Zolli labels, orange active state, and warm hover/focus classes.
 Add a compact Scout card linking to the existing activation flow.
 
-- [ ] **Step 4: Reskin auth, onboarding, and access screens**
+- [ ] **Step 3: Reskin auth, onboarding, and access screens**
 
 Use one character per state: Scout for signup/enrollment, Keeper for pending,
 and a direct non-playful declined state. Keep every field, validation rule,
 notice, redirect, and submission call intact. Change presentation and safe copy
 only.
 
-- [ ] **Step 5: Reskin activation, join, and Crew selection screens**
+- [ ] **Step 4: Reskin activation, join, and Crew selection screens**
 
 Use Crew/Zolli visible language but preserve exact enrollment commands, tokens,
 pool IDs, URLs, and API error meanings. Never replace a technical string inside
 `code`, CLI blocks, or request objects.
 
-- [ ] **Step 6: Verify focused and complete tests**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/zolli-shell-copy.test.ts`
-
-Expected: PASS.
+- [ ] **Step 5: Verify existing behavior and TypeScript**
 
 Run: `cd flashml-cloud/apps/web && npm test`
 
 Expected: all web tests pass, including the pre-existing access and onboarding tests.
 
-- [ ] **Step 7: Orchestrator behavior review and commit**
+Run: `cd flashml-cloud/apps/web && npx tsc --noEmit`
+
+Expected: exit 0.
+
+- [ ] **Step 6: Orchestrator behavior review and commit**
 
 Diff against the pre-task worktree to prove no access/auth behavior changed.
 Stage only Task 4 paths and commit:
@@ -411,8 +326,7 @@ git commit -m "feat(web): rebrand the ZolliAI entry experience"
 ### Task 5: Reskin all Crew, job, Zolli, account, docs, and admin pages
 
 **Files:**
-- Create: `flashml-cloud/apps/web/lib/zolli-console-copy.test.ts`
-- Modify: all files listed under parallel workstream C.
+- Modify: all files listed under workstream C.
 
 **Interfaces:**
 - Consumes: brand primitives and theme tokens from Tasks 1–2.
@@ -421,68 +335,43 @@ git commit -m "feat(web): rebrand the ZolliAI entry experience"
 - Produces: coherent warm panels, tables, forms, empty states, and safe visible
   Crew/Zolli vocabulary across all remaining frontend routes.
 
-- [ ] **Step 1: Write the failing page contract**
+- [ ] **Step 1: Capture the owned-file diff before editing**
 
-```ts
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+Run `git diff --` over the workstream-C paths and save the output path in the
+task report. Preserve every pre-existing identity, pluralization, account, and
+workspace change.
 
-describe("ZolliAI console copy", () => {
-  const overview = readFileSync("app/(console)/w/[poolId]/overview/page.tsx", "utf8");
-  const zollis = readFileSync("app/(console)/w/[poolId]/machines/page.tsx", "utf8");
-  const people = readFileSync("app/(console)/w/[poolId]/people/page.tsx", "utf8");
-  const docs = readFileSync("app/(console)/docs/page.tsx", "utf8");
-
-  it("uses the approved presentation terms", () => {
-    expect(overview).toMatch(/Your crew|Crew overview/);
-    expect(zollis).toContain("Zollis");
-    expect(people).toContain("Crew members");
-  });
-
-  it("keeps exact technical vocabulary in documentation", () => {
-    for (const term of ["flashnode", "FLASHML_", "/pools/"])
-      expect(docs).toContain(term);
-  });
-});
-```
-
-- [ ] **Step 2: Run the test and verify RED**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/zolli-console-copy.test.ts`
-
-Expected: FAIL because visible route copy still uses the old product language.
-
-- [ ] **Step 3: Reskin Crew-scoped routes and shared workspace components**
+- [ ] **Step 2: Reskin Crew-scoped routes and shared workspace components**
 
 Convert headings, descriptions, breadcrumbs, empty states, and button labels to
 Crew/Zolli language. Retain internal variable names and API calls. Preserve the
 user's current identity/pluralization fixes in `MemberTable.tsx`,
 `WorkspaceHeader.tsx`, `member-identity.ts`, and `plural.ts`.
 
-- [ ] **Step 4: Reskin jobs and visualization components**
+- [ ] **Step 3: Reskin jobs and visualization components**
 
 Use warm neutral data surfaces and semantic status colors. Keep event names,
 job IDs, loss values, credit counts, graph behavior, and topology logic exact.
 Characters may appear only in an empty state or recovery summary, not inside
 the topology, swimlanes, or ledger rows.
 
-- [ ] **Step 5: Reskin personal Zollis, account, admin, docs, error, and 404**
+- [ ] **Step 4: Reskin personal Zollis, account, admin, docs, error, and 404**
 
 Preserve form fields, access explanations, admin decisions, and enrollment
 commands. Use Scout for no-Zolli states and restrained logo/character art for
 404. Errors remain direct and actionable.
 
-- [ ] **Step 6: Verify focused and complete tests**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/zolli-console-copy.test.ts`
-
-Expected: PASS.
+- [ ] **Step 5: Verify existing behavior and TypeScript**
 
 Run: `cd flashml-cloud/apps/web && npm test`
 
 Expected: all web tests pass, including job, workspace, invite, identity, and route tests.
 
-- [ ] **Step 7: Orchestrator behavior review and commit**
+Run: `cd flashml-cloud/apps/web && npx tsc --noEmit`
+
+Expected: exit 0.
+
+- [ ] **Step 6: Orchestrator behavior review and commit**
 
 Inspect route/API diffs and stage only Task 5 paths. Commit:
 
@@ -493,7 +382,6 @@ git commit -m "feat(web): apply the Zolli Crew console system"
 ### Task 6: Integrate, audit visible copy, and remove dark-theme residue
 
 **Files:**
-- Create: `flashml-cloud/apps/web/lib/zolli-visible-copy.test.ts`
 - Modify: only frontend files required by concrete failures found in this audit.
 
 **Interfaces:**
@@ -502,69 +390,20 @@ git commit -m "feat(web): apply the Zolli Crew console system"
   technical contexts and that no incompatible dark-only utility remains on a
   user-facing warm surface.
 
-- [ ] **Step 1: Write the failing whole-frontend audit**
+- [ ] **Step 1: Audit visible vocabulary and dark-only utilities**
 
-```ts
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+Run `rg -n 'FlashML|Workspace|My machines|Machines|bg-black|bg-white/\\[|text-white/\\[|border-white/\\[' app components -g '*.tsx'`.
+Inspect every match and record the technical/visible classification in the task
+report. This is a review artifact, not a permanent source-grep test.
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const path = join(dir, entry);
-    return statSync(path).isDirectory() ? walk(path) : path.endsWith(".tsx") ? [path] : [];
-  });
-}
-
-const technicalBrandFiles = new Set([
-  "app/(console)/docs/page.tsx",
-  "components/machines/EnrolInstructions.tsx",
-]);
-const overlayFiles = new Set([
-  "components/shell/ConsoleShell.tsx",
-  "components/nav/UserMenu.tsx",
-]);
-
-describe("ZolliAI visible-copy audit", () => {
-  const files = [...walk("app"), ...walk("components")];
-
-  it("contains no stale visible brand vocabulary outside technical surfaces", () => {
-    const offenders = files.flatMap((file) => {
-      if (technicalBrandFiles.has(file)) return [];
-      return readFileSync(file, "utf8")
-        .split("\n")
-        .map((line, index) => ({ file, line, index: index + 1 }))
-        .filter(({ line }) => /[>\"'](?:FlashML|Workspace|My machines|Machines)[<\"']/.test(line))
-        .map(({ file, index, line }) => `${file}:${index}: ${line.trim()}`);
-    });
-    expect(offenders).toEqual([]);
-  });
-
-  it("contains no unreviewed dark-only utility classes", () => {
-    const offenders = files.flatMap((file) => {
-      if (overlayFiles.has(file)) return [];
-      const source = readFileSync(file, "utf8");
-      return /(?:bg-black|bg-white\/\[|text-white\/\[|border-white\/\[)/.test(source) ? [file] : [];
-    });
-    expect(offenders).toEqual([]);
-  });
-});
-```
-
-- [ ] **Step 2: Run the audit and inspect every failure**
-
-Run: `cd flashml-cloud/apps/web && npm test -- lib/zolli-visible-copy.test.ts`
-
-Expected: FAIL with an actionable list rather than a single boolean.
-
-- [ ] **Step 3: Fix only confirmed visual residue**
+- [ ] **Step 2: Fix only confirmed visual residue**
 
 For each failure, classify it as visible brand copy, technical vocabulary, a
 comment, or a valid overlay. Change visible brand copy; add narrow allowlist
 entries for exact technical uses; replace dark-only utility classes with theme
 tokens. Do not blanket-replace source text.
 
-- [ ] **Step 4: Run the complete static verification**
+- [ ] **Step 3: Run the complete static verification**
 
 Run: `cd flashml-cloud/apps/web && npm test`
 
@@ -582,7 +421,7 @@ Run: `cd flashml-cloud/apps/web && npm run build`
 
 Expected: production build exits 0 and lists all existing routes.
 
-- [ ] **Step 5: Orchestrator review and commit**
+- [ ] **Step 4: Orchestrator review and commit**
 
 Review the complete diff for backend/API/route changes and commit the exact
 integration files:
