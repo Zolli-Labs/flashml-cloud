@@ -17,9 +17,9 @@ import {
 export function DeclinedScreen() {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
-      <Card className="w-full max-w-sm">
+      <Card className="w-full max-w-sm border-border bg-surface shadow-sm">
         <CardHeader>
-          <CardTitle>Not right now</CardTitle>
+          <CardTitle className="font-display text-2xl">Not right now</CardTitle>
           <CardDescription>
             Your request wasn&apos;t approved for this alpha. That&apos;s a
             capacity decision, not a permanent one.

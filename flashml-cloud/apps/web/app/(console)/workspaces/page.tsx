@@ -47,7 +47,7 @@ export default function WorkspacesPage() {
       // without this the rail would not list the workspace you just created
       // and just navigated into.
       notifyWorkspacesChanged();
-      toast.success("Workspace created", { description: pool.name });
+      toast.success("Crew created", { description: pool.name });
       router.push(workspacePath(pool.id, "overview"));
     } catch (err) {
       if (err instanceof NotAuthenticated) {
@@ -57,7 +57,7 @@ export default function WorkspacesPage() {
       setError(
         err instanceof ApiError
           ? err.detail
-          : "Couldn't create that workspace. Try again."
+          : "Couldn't create that Crew. Try again."
       );
     } finally {
       setSubmitting(false);
@@ -66,15 +66,15 @@ export default function WorkspacesPage() {
 
   return (
     <div className="mx-auto max-w-xl px-4 py-8 sm:px-6">
-      <h1 className="title">Workspaces</h1>
+      <p className="label-caps text-brand-foreground">ZolliAI Cloud</p>
+      <h1 className="title mt-2">Build your crew</h1>
       <p className="mt-1.5 text-sm text-muted-foreground">
-        A workspace is where you and the people you invite share machines
-        and jobs.
+        A Crew is where you and the people you invite share Zollis and jobs.
       </p>
 
-      <Card className="mt-6">
+      <Card className="mt-6 border-border bg-surface shadow-sm">
         <CardHeader>
-          <CardTitle className="text-sm">Create a workspace</CardTitle>
+          <CardTitle className="text-sm">Create a Crew</CardTitle>
           <CardDescription>
             Name it after your team or your project. You can rename it
             later.
@@ -95,8 +95,8 @@ export default function WorkspacesPage() {
                   setName(e.target.value);
                   setError(null);
                 }}
-                placeholder="Workspace name"
-                aria-label="Workspace name"
+                placeholder="Crew name"
+                aria-label="Crew name"
                 disabled={submitting}
                 autoFocus
               />
@@ -109,7 +109,7 @@ export default function WorkspacesPage() {
               disabled={submitting || name.trim().length === 0}
               className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {submitting ? "Creating…" : "Create workspace"}
+              {submitting ? "Creating…" : "Create Crew"}
             </button>
           </form>
         </CardContent>
@@ -122,13 +122,13 @@ export default function WorkspacesPage() {
           token is a working screen, not an error. */}
       <p className="mt-4 text-sm text-muted-foreground">
         Been sent an invite link? Open it and you&apos;ll join that
-        workspace.
+        Crew.
       </p>
       <Link
         href="/pools/join"
         className="mt-1 inline-block text-xs text-muted-foreground hover:text-foreground hover:underline"
       >
-        Have an invite code?
+        Have a Crew invite code?
       </Link>
     </div>
   );

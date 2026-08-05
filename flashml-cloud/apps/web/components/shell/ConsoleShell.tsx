@@ -22,6 +22,7 @@ import { Shortcuts } from "@/components/shell/Shortcuts";
 import { WorkspaceHintProvider } from "@/components/shell/WorkspaceHint";
 import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { Wordmark } from "@/components/brand/Mark";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { UserMenu } from "@/components/nav/UserMenu";
 import { DeclinedScreen } from "@/components/onboarding/DeclinedScreen";
 import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
@@ -56,7 +57,7 @@ const WORKSPACE_TAB_ITEMS: Record<
 > = {
   overview: { label: "Overview", icon: House },
   jobs: { label: "Jobs", icon: ListChecks },
-  machines: { label: "Machines", icon: Desktop },
+  machines: { label: "Zollis", icon: Desktop },
   people: { label: "People", icon: UsersThree },
   settings: { label: "Settings", icon: Gear },
 };
@@ -87,8 +88,8 @@ function NavItem({
       aria-current={active ? "page" : undefined}
       className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
         active
-          ? "bg-white/[0.07] font-medium text-foreground"
-          : "text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
+          ? "bg-primary/10 font-medium text-brand-foreground"
+          : "text-muted-foreground hover:bg-surface hover:text-foreground"
       }`}
     >
       <Icon size={17} weight={active ? "fill" : "regular"} />
@@ -172,9 +173,9 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
 
   const rail = (
     <>
-      <div className="flex h-14 items-center px-4">
-        <Link href="/" aria-label="FlashML home">
-          <Wordmark />
+      <div className="flex h-16 items-center px-4">
+        <Link href="/" aria-label="ZolliAI home">
+          <Wordmark product />
         </Link>
       </div>
 
@@ -201,7 +202,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                   new KeyboardEvent("keydown", { key: "k", metaKey: true })
                 );
               }}
-              className="flex w-full items-center gap-2 rounded-md border border-border bg-background/60 px-2.5 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 text-left text-sm text-muted-foreground shadow-sm transition-colors hover:border-primary/30 hover:bg-surface-2 hover:text-foreground"
             >
               <MagnifyingGlass size={14} />
               <span className="flex-1">Search</span>
@@ -242,11 +243,32 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
               <p className="label-caps px-2.5 pb-1">My account</p>
               <NavItem
                 href="/account/machines"
-                label="My machines"
+                label="My Zollis"
                 icon={Desktop}
                 active={isActive("/account/machines")}
               />
             </div>
+
+            <Link
+              href="/activate"
+              className="mt-5 flex items-center gap-2.5 rounded-lg border border-primary/20 bg-surface px-2.5 py-2 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-primary/5"
+            >
+              <ZolliCharacter
+                role="scout"
+                size={42}
+                mood="waving"
+                className="shrink-0"
+                label="Scout, your guide for adding a Zolli"
+              />
+              <span className="min-w-0">
+                <span className="block text-xs font-semibold text-foreground">
+                  Add a Zolli
+                </span>
+                <span className="mt-0.5 block text-[11px] leading-tight text-muted-foreground">
+                  Enter an activation code
+                </span>
+              </span>
+            </Link>
 
             {/* Hidden until `GET /me` says otherwise, so a non-admin never
                 sees it flash. The API enforces admin on every queue route
@@ -277,7 +299,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           href={REPO}
           target="_blank"
           rel="noreferrer"
-          className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
+          className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
         >
           <GithubLogo size={17} />
           Source
@@ -290,8 +312,8 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-dvh">
       <CommandPalette />
       <Shortcuts />
-      {/* Desktop rail. A step DARKER than the content column, so the content
-          reads as the lit surface. */}
+      {/* Desktop rail. A warm sand step separates navigation from the cream
+          canvas while keeping the console in the same ZolliAI system. */}
       <aside className="hidden w-[248px] shrink-0 flex-col border-r border-border bg-bg-rail lg:flex">
         {rail}
       </aside>
@@ -306,20 +328,20 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             onClick={() => setRailOpen(false)}
             className="fixed inset-0 z-40 bg-black/60 lg:hidden"
           />
-          <aside className="fixed inset-y-0 left-0 z-50 flex w-[248px] flex-col border-r border-border bg-bg-rail lg:hidden">
+          <aside className="fixed inset-y-0 left-0 z-50 flex w-[248px] flex-col border-r border-border bg-bg-rail shadow-xl lg:hidden">
             {rail}
           </aside>
         </>
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-border bg-background px-4 sm:px-6">
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-border bg-surface/95 px-4 shadow-sm backdrop-blur sm:px-6">
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
               onClick={() => setRailOpen(true)}
               aria-label="Open navigation"
-              className="-ml-1 rounded-md p-1.5 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground lg:hidden"
+              className="-ml-1 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground lg:hidden"
             >
               <SidebarSimple size={18} />
             </button>

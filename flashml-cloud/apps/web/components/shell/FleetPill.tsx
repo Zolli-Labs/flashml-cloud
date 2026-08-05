@@ -61,7 +61,7 @@ export function FleetPill() {
   const live = fleet.online > 0;
 
   return (
-    <div className="hidden items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 sm:inline-flex">
+    <div className="hidden items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 shadow-sm sm:inline-flex">
       <span
         className="status-dot"
         data-state={live && fleet.running > 0 ? "live" : undefined}
@@ -72,14 +72,14 @@ export function FleetPill() {
       <span className="font-mono text-xs tabular-nums text-foreground">
         {fleet.online}
       </span>
-      <span className="text-xs text-muted-foreground">online</span>
+      <span className="text-xs text-muted-foreground">Zollis online</span>
       <span aria-hidden className="text-xs text-muted-foreground/40">
         /
       </span>
       <span className="font-mono text-xs tabular-nums text-foreground">
         {fleet.running}
       </span>
-      <span className="text-xs text-muted-foreground">running</span>
+      <span className="text-xs text-muted-foreground">jobs running</span>
     </div>
   );
 }

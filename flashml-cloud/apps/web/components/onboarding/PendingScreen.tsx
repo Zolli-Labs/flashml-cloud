@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -28,15 +29,21 @@ import {
 export function PendingScreen({ email }: { email: string | null }) {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>Request received</CardTitle>
+      <Card className="w-full max-w-sm border-border bg-surface shadow-md">
+        <CardHeader className="items-center text-center">
+          <ZolliCharacter
+            role="keeper"
+            size={88}
+            mood="focused"
+            label="Keeper is holding your place while access is reviewed"
+          />
+          <CardTitle className="font-display text-2xl">Request received</CardTitle>
           <CardDescription>
-            A human reads every request — FlashML is a small alpha, not an
+            A human reads every request — ZolliAI Cloud is a small alpha, not an
             automated signup.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col items-start gap-3">
+        <CardContent className="flex flex-col items-center gap-3 text-center">
           <p className="text-sm text-muted-foreground">
             We&apos;ll get back to you at{" "}
             <span className="text-foreground">
@@ -56,9 +63,9 @@ export function PendingScreen({ email }: { email: string | null }) {
           </Button>
           <Link
             href="/pools/join"
-            className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+            className="text-xs text-muted-foreground hover:text-brand-foreground hover:underline"
           >
-            Have an invite code?
+            Have a Crew invite code?
           </Link>
         </CardContent>
       </Card>

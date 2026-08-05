@@ -11,7 +11,7 @@ import {
   InputOTPSlot,
 } from "@/components/ui/input-otp";
 import { Spinner } from "@/components/ui/spinner";
-import { Mark } from "@/components/brand/Mark";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import {
   ApiError,
   NotAuthenticated,
@@ -112,7 +112,7 @@ function ActivateInner() {
           );
         } else if (err instanceof ApiError && err.status === 409) {
           setErrorMessage(
-            "That machine is already enrolled under a different code. Revoke it from Machines first if this isn't expected."
+            "That Zolli is already enrolled under a different code. Revoke it from My Zollis first if this isn't expected."
           );
         } else if (err instanceof ApiError) {
           setErrorMessage(err.detail);
@@ -144,15 +144,15 @@ function ActivateInner() {
               weight="fill"
             />
           </div>
-          <h1 className="mt-5 text-lg font-semibold">Machine approved</h1>
+          <h1 className="mt-5 font-display text-2xl font-semibold">Zolli approved</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {label ? (
               <>
                 <span className="font-mono text-foreground">{label}</span> is
-                linked to your account.
+                linked to your account as a Zolli.
               </>
             ) : (
-              "That machine is linked to your account."
+              "That Zolli is linked to your account."
             )}
           </p>
           {poolId && (
@@ -175,8 +175,8 @@ function ActivateInner() {
             <p className="text-sm font-medium">What happens next</p>
             <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
               It appears under{" "}
-              <Link href="/machines" className="text-primary hover:underline">
-                Machines
+              <Link href="/machines" className="text-brand-foreground hover:underline">
+                My Zollis
               </Link>{" "}
               and starts claiming work once the agent is running on that
               laptop.
@@ -187,7 +187,7 @@ function ActivateInner() {
             href="/machines"
             className="interactive mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:brightness-110"
           >
-            Go to Machines
+            Go to My Zollis
             <ArrowRight className="h-4 w-4" weight="bold" />
           </Link>
         </div>
@@ -197,12 +197,17 @@ function ActivateInner() {
 
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
-      <div className="w-full max-w-sm">
+      <div className="panel w-full max-w-sm p-6 shadow-md sm:p-7">
         <div className="text-center">
-          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-primary">
-            <Mark size={22} className="text-primary-foreground" />
-          </div>
-          <h1 className="mt-4 text-lg font-semibold">Approve a machine</h1>
+          <ZolliCharacter
+            role="scout"
+            size={78}
+            mood="waving"
+            className="mx-auto"
+            label="Scout guides Zolli activation"
+          />
+          <p className="label-caps mt-1 text-brand-foreground">Add a Zolli</p>
+          <h1 className="mt-2 font-display text-2xl font-semibold">Approve a Zolli</h1>
           <p className="mx-auto mt-2 max-w-72 text-sm leading-relaxed text-muted-foreground">
             Enter the code shown on the laptop running{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
@@ -277,7 +282,7 @@ function ActivateInner() {
                 Approving…
               </>
             ) : (
-              "Approve machine"
+              "Approve Zolli"
             )}
           </button>
 

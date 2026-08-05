@@ -56,16 +56,17 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
   const current = pools.find((p) => p.id === currentId) ?? null;
 
   return (
-    <div className="relative px-3 pb-2">
+    <div className="relative px-3 pb-3">
+      <p className="label-caps mb-1.5 px-0.5">Crew</p>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-md border border-border bg-background/60 px-2.5 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-white/[0.04]"
+        className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-2 text-left text-sm text-foreground shadow-sm transition-colors hover:border-primary/30 hover:bg-surface-2"
       >
         <span className="min-w-0 flex-1 truncate font-medium">
-          {current ? current.name : "Choose a workspace"}
+          {current ? current.name : "Choose a Crew"}
         </span>
         <CaretUpDown size={14} className="shrink-0 text-muted-foreground" />
       </button>
@@ -77,13 +78,13 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
               than a document-level listener. */}
           <button
             type="button"
-            aria-label="Close workspace menu"
+            aria-label="Close Crew menu"
             onClick={() => setOpen(false)}
             className="fixed inset-0 z-40"
           />
           <div
             role="menu"
-            className="absolute left-3 right-3 top-full z-50 mt-1.5 overflow-hidden rounded-md border border-border bg-bg-rail shadow-lg"
+            className="absolute left-3 right-3 top-full z-50 mt-1.5 overflow-hidden rounded-lg border border-border bg-surface shadow-lg"
           >
             <ul className="max-h-64 overflow-y-auto py-1">
               {pools.map((p) => {
@@ -94,12 +95,12 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
                       href={workspacePath(p.id, "overview")}
                       role="menuitem"
                       onClick={() => setOpen(false)}
-                      className="flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
+                      className="flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-primary/5 hover:text-foreground"
                     >
                       <Check
                         size={13}
                         weight="bold"
-                        className={isCurrent ? "shrink-0 text-foreground" : "shrink-0 text-transparent"}
+                        className={isCurrent ? "shrink-0 text-brand-foreground" : "shrink-0 text-transparent"}
                       />
                       <span className="min-w-0 flex-1 truncate">{p.name}</span>
                       <span className="meta shrink-0">{p.member_count}</span>
@@ -116,10 +117,10 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
                 href="/workspaces"
                 role="menuitem"
                 onClick={() => setOpen(false)}
-                className="flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
+                className="flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-primary/5 hover:text-foreground"
               >
                 <Plus size={14} className="shrink-0" />
-                New workspace
+                New Crew
               </Link>
             </div>
           </div>

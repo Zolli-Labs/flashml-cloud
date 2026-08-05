@@ -9,6 +9,8 @@ import { Label } from "@/components/ui/label";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
 import { safeNext } from "@/lib/safe-next";
 import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
+import { Wordmark } from "@/components/brand/Mark";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { GoogleMark } from "./GoogleMark";
 
 type Pending = "password" | "google" | null;
@@ -184,8 +186,9 @@ export function SignInCard() {
 
   if (needsConfirmation) {
     return (
-      <section className="glass w-full max-w-sm rounded-xl p-7 rise">
-        <h1 className="text-xl font-semibold tracking-tight">
+      <section className="glass w-full max-w-sm rounded-2xl p-7 rise">
+        <Wordmark product className="mb-6" />
+        <h1 className="font-display text-2xl font-semibold tracking-tight">
           Account created, but not usable yet
         </h1>
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
@@ -200,7 +203,7 @@ export function SignInCard() {
         </p>
         <button
           type="button"
-          className="mt-5 text-sm font-medium text-primary underline underline-offset-4 hover:no-underline"
+          className="mt-5 text-sm font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
           onClick={() => {
             setNeedsConfirmation(false);
             setMode("signin");
@@ -216,15 +219,29 @@ export function SignInCard() {
   const signingUp = mode === "signup";
 
   return (
-    <section className="glass w-full max-w-sm rounded-xl p-7 rise">
-      <h1 className="text-xl font-semibold tracking-tight">
-        {signingUp ? "Create an account" : "Sign in"}
-      </h1>
-      <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-        {signingUp
-          ? "Submit training jobs, or lend a machine to the pool."
-          : "Welcome back."}
-      </p>
+    <section className="glass w-full max-w-sm rounded-2xl p-7 rise">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <Wordmark product className="mb-5" />
+          <h1 className="font-display text-2xl font-semibold tracking-tight">
+            {signingUp ? "Build your crew" : "Sign in"}
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            {signingUp
+              ? "Create your account, then tell us what you want your Crew to run."
+              : "Welcome back to ZolliAI Cloud."}
+          </p>
+        </div>
+        {signingUp ? (
+          <ZolliCharacter
+            role="scout"
+            size={70}
+            mood="waving"
+            className="-mr-2 mt-5 shrink-0"
+            label="Scout welcomes you to ZolliAI"
+          />
+        ) : null}
+      </div>
 
       <form onSubmit={submitPassword} className="mt-6 flex flex-col gap-4">
         <div className="flex flex-col gap-2">
@@ -319,7 +336,7 @@ export function SignInCard() {
       {notice ? (
         <p
           role="status"
-          className="mt-4 rounded-lg border border-border bg-white/[0.03] px-3 py-2 text-xs leading-relaxed text-muted-foreground"
+          className="mt-4 rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs leading-relaxed text-muted-foreground"
         >
           {notice}
         </p>
@@ -354,7 +371,7 @@ export function SignInCard() {
             setPassword("");
             reset();
           }}
-          className="font-medium text-primary underline underline-offset-4 hover:no-underline"
+          className="font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
         >
           {signingUp ? "Sign in" : "Create one"}
         </button>

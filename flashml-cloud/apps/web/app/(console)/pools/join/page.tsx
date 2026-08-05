@@ -56,15 +56,15 @@ function Loading() {
 function InviteSaved({ name }: { name: string }) {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
-      <Card className="w-full max-w-sm">
+      <Card className="w-full max-w-sm border-border bg-surface shadow-sm">
         <CardHeader>
-          <CardTitle>Invite saved</CardTitle>
+          <CardTitle className="font-display text-2xl">Crew invite saved</CardTitle>
           <CardDescription>{bankedJoinTail(name)}</CardDescription>
         </CardHeader>
         <CardContent>
           <Link
             href="/overview"
-            className="text-sm text-primary hover:underline"
+            className="text-sm text-brand-foreground hover:underline"
           >
             Finish your request
           </Link>
@@ -139,15 +139,15 @@ function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
 
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
-      <Card className="w-full max-w-sm">
+      <Card className="w-full max-w-sm border-border bg-surface shadow-sm">
         <CardHeader>
-          <CardTitle>
-            {invalidLink ? "That invite link didn't work" : "Join with a code"}
+          <CardTitle className="font-display text-2xl">
+            {invalidLink ? "That Crew invite didn't work" : "Join a Crew"}
           </CardTitle>
           <CardDescription>
             {invalidLink
               ? "It may be mistyped, expired, or already used — the API folds all three into one answer, so we cannot say which. Paste a fresh invite link or code below."
-              : "Paste the invite link or code someone on FlashML sent you."}
+              : "Paste the invite link or code someone on ZolliAI sent you."}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -184,7 +184,7 @@ function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
               disabled={submitting || value.trim().length === 0}
               className="interactive rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {submitting ? "Joining…" : "Join"}
+              {submitting ? "Joining…" : "Join Crew"}
             </button>
           </form>
         </CardContent>

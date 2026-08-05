@@ -44,7 +44,7 @@ export function UserMenu() {
     return (
       <Link
         href="/sign-in"
-        className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+        className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-primary/10 hover:text-brand-foreground"
       >
         Sign in
       </Link>
@@ -59,7 +59,7 @@ export function UserMenu() {
       <Link
         href="/account"
         title={session.email ?? undefined}
-        className="flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors hover:bg-surface-2"
+        className="flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors hover:bg-primary/10"
       >
         <Avatar src={session.avatarUrl} initials={initials} size={26} />
         <span className="hidden max-w-40 truncate text-xs text-muted-foreground lg:inline">
@@ -70,7 +70,7 @@ export function UserMenu() {
         type="button"
         onClick={signOut}
         aria-label="Sign out"
-        className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+        className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-brand-foreground"
       >
         <SignOut className="h-4 w-4" />
       </button>

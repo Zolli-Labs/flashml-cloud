@@ -12,7 +12,7 @@ import { Kbd } from "@/components/ui/kbd";
 const GOTO: Record<string, { href: string; label: string }> = {
   o: { href: "/overview", label: "Overview" },
   j: { href: "/jobs", label: "Jobs" },
-  m: { href: "/machines", label: "Machines" },
+  m: { href: "/machines", label: "Zollis" },
   s: { href: "/submit", label: "Submit a job" },
   a: { href: "/account", label: "Account" },
   d: { href: "/docs", label: "Documentation" },
@@ -108,7 +108,7 @@ export function Shortcuts() {
         <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
         <dl className="mt-4 space-y-2.5">
           <Row keys={["?"]} label="This list" />
-          <Row keys={["⌘", "K"]} label="Search jobs, machines, pages" />
+          <Row keys={["⌘", "K"]} label="Search jobs, Zollis, pages" />
           <div className="pt-1.5">
             <div className="meta uppercase tracking-[0.12em]">Go to</div>
           </div>

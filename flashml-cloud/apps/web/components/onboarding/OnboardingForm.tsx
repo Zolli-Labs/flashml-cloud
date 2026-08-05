@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Warning } from "@phosphor-icons/react";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -128,17 +129,28 @@ export function OnboardingForm({
   const useCaseTooLong = useCaseCount > USE_CASE_MAX;
 
   return (
-    <section className="glass w-full max-w-xl rounded-xl p-7 sm:p-8 rise">
-      {stepLabel && (
-        <p className="label-caps mb-3 text-primary">{stepLabel}</p>
-      )}
-      <h1 className="text-xl font-semibold tracking-tight">
-        {stepLabel ? "Request access" : "Tell us about you"}
-      </h1>
-      <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-        FlashML is a small alpha. A human reads every request — this is what
-        they read.
-      </p>
+    <section className="glass w-full max-w-xl rounded-2xl p-7 sm:p-8 rise">
+      <div className="flex items-start justify-between gap-5">
+        <div className="min-w-0">
+          {stepLabel && (
+            <p className="label-caps mb-3 text-brand-foreground">{stepLabel}</p>
+          )}
+          <h1 className="font-display text-2xl font-semibold tracking-tight">
+            {stepLabel ? "Request access" : "Tell us about you"}
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            ZolliAI Cloud is a small alpha. A human reads every request — this
+            is what they read.
+          </p>
+        </div>
+        <ZolliCharacter
+          role="scout"
+          size={76}
+          mood="waving"
+          className="-mr-2 shrink-0"
+          label="Scout guides your ZolliAI enrollment"
+        />
+      </div>
 
       <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-5">
         <GroupHeading>You</GroupHeading>
@@ -255,7 +267,7 @@ export function OnboardingForm({
 
         <div className="flex flex-col gap-2">
           <Label htmlFor="use-case" className="text-xs font-medium">
-            What do you want to run on FlashML?
+            What do you want your Crew to run?
           </Label>
           <textarea
             id="use-case"
@@ -267,7 +279,7 @@ export function OnboardingForm({
             onChange={(e) => set("use_case", e.target.value)}
             disabled={submitting}
             aria-describedby="use-case-count"
-            className="w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-2 text-base transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30"
+            className="w-full min-w-0 rounded-lg border border-input bg-surface px-2.5 py-2 text-base transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm"
           />
           <p
             id="use-case-count"
@@ -310,7 +322,7 @@ export function OnboardingForm({
 
         <div className="flex flex-col gap-2">
           <Label htmlFor="heard-from" className="text-xs font-medium">
-            How did you hear about FlashML?
+            How did you hear about ZolliAI?
           </Label>
           <p className="text-xs text-muted-foreground">Optional.</p>
           {/* Same reasoning as the role Select above: `draft.heard_from`
