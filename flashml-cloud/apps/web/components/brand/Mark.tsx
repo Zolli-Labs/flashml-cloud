@@ -1,4 +1,9 @@
-/** The ZolliAI mark: a Z formed from a connected crew of compute nodes. */
+import Image from "next/image";
+
+const SYMBOL_SRC = "/brand/logos/logo-symbol-orange.png";
+const WORDMARK_SRC = "/brand/logos/logo-primary.png";
+
+/** The canonical connected-node Zolli symbol. Decorative by default. */
 export function Mark({
   size = 24,
   className = "",
@@ -7,30 +12,23 @@ export function Mark({
   className?: string;
 }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      className={className}
-      aria-hidden
+    <span
+      aria-hidden="true"
+      className={`relative inline-block shrink-0 ${className}`}
+      style={{ width: size, height: size }}
     >
-      <g stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M4 5h16L4 19h16" />
-        <path d="m4 5 8 7 8-7M4 19l8-7 8 7" opacity="0.42" />
-      </g>
-      <g fill="currentColor">
-        <circle cx="4" cy="5" r="2" />
-        <circle cx="20" cy="5" r="2" />
-        <circle cx="12" cy="12" r="2" />
-        <circle cx="4" cy="19" r="2" />
-        <circle cx="20" cy="19" r="2" />
-      </g>
-    </svg>
+      <Image
+        src={SYMBOL_SRC}
+        alt=""
+        fill
+        sizes={`${size}px`}
+        className="object-contain"
+      />
+    </span>
   );
 }
 
-/** The connected-node mark paired with the ZolliAI wordmark. */
+/** The canonical horizontal Zolli lockup, optionally paired with Cloud. */
 export function Wordmark({
   size = 22,
   className = "",
@@ -42,10 +40,20 @@ export function Wordmark({
 }) {
   return (
     <span className={`inline-flex items-center gap-2 ${className}`}>
-      <Mark size={size} className="text-foreground" />
-      <span className="font-mono text-sm font-bold tracking-tight">
-        Zolli<span className="text-brand-foreground">AI</span>{product && <span className="text-muted-foreground"> Cloud</span>}
-      </span>
+      <Image
+        src={WORDMARK_SRC}
+        alt="Zolli"
+        width={1200}
+        height={400}
+        sizes={`${size * 3}px`}
+        className="h-auto shrink-0 object-contain"
+        style={{ width: size * 3 }}
+      />
+      {product && (
+        <span className="font-mono text-sm font-bold tracking-tight text-muted-foreground">
+          Cloud
+        </span>
+      )}
     </span>
   );
 }

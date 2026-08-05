@@ -23,6 +23,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ?? "https://zolliai.com",
+  ),
   title: {
     default: "ZolliAI",
     template: "%s · ZolliAI",
@@ -36,11 +39,48 @@ export const metadata: Metadata = {
     "spot instances",
     "gpu aggregation",
   ],
+  icons: {
+    icon: [
+      {
+        url: "/brand/icons/favicon-32.png",
+        sizes: "32x32",
+        type: "image/png",
+      },
+      {
+        url: "/brand/icons/favicon-64.png",
+        sizes: "64x64",
+        type: "image/png",
+      },
+    ],
+    apple: [
+      {
+        url: "/brand/icons/apple-touch-icon-180.png",
+        sizes: "180x180",
+        type: "image/png",
+      },
+    ],
+  },
+  manifest: "/manifest.webmanifest",
   openGraph: {
     title: "ZolliAI",
     description:
       "Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew.",
     type: "website",
+    images: [
+      {
+        url: "/brand/social/og-image-1200x630.png",
+        width: 1200,
+        height: 630,
+        alt: "Zolli — distributed compute that survives failure",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ZolliAI",
+    description:
+      "Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew.",
+    images: ["/brand/social/og-image-1200x630.png"],
   },
 };
 

@@ -33,15 +33,15 @@
 - Consumes: canonical v3 pack filenames.
 - Produces: stable `/brand/logos/`, `/brand/icons/`, `/brand/social/`, and `/brand/characters/` URLs.
 
-- [ ] **Step 1: Copy only the approved runtime files**
+- [x] **Step 1: Copy only the approved runtime files**
 
 Copy canonical logos, all production icons, both social images, six standalone characters, and `brand-tokens.json` without modification.
 
-- [ ] **Step 2: Synchronize Next metadata icons**
+- [x] **Step 2: Synchronize Next metadata icons**
 
 Replace `app/icon.png` with `icons/favicon-128.png` and `app/apple-icon.png` with `icons/apple-touch-icon-180.png`.
 
-- [ ] **Step 3: Verify the asset inventory**
+- [x] **Step 3: Verify the asset inventory**
 
 Run:
 
@@ -63,11 +63,11 @@ Expected: only the approved production set exists, and all image files are valid
 - Consumes: `/brand/logos/logo-primary.png`, `/brand/logos/logo-symbol-orange.png`, and `/brand/characters/<role>.png`.
 - Produces: compatible `Mark`, `Wordmark`, and `ZolliCharacter` React components.
 
-- [ ] **Step 1: Write failing component contract tests**
+- [x] **Step 1: Write failing component contract tests**
 
 Assert that the mark renders `/brand/logos/logo-symbol-orange.png`, the wordmark renders `/brand/logos/logo-primary.png`, each role maps to its matching `/brand/characters/<role>.png`, labelled characters remain exposed, decorative characters remain hidden, and animated characters retain motion-safe classes.
 
-- [ ] **Step 2: Run the targeted test and verify RED**
+- [x] **Step 2: Run the targeted test and verify RED**
 
 Run:
 
@@ -77,11 +77,11 @@ npm test -- lib/zolli-brand.test.ts
 
 Expected: FAIL because the current components render generated SVG paths instead of canonical image URLs.
 
-- [ ] **Step 3: Implement the image-backed adapters**
+- [x] **Step 3: Implement the image-backed adapters**
 
 Use `next/image` with explicit intrinsic dimensions, preserve caller-controlled display size and `className`, and retain the existing `product` and accessibility behavior.
 
-- [ ] **Step 4: Run the targeted test and verify GREEN**
+- [x] **Step 4: Run the targeted test and verify GREEN**
 
 Run:
 
@@ -102,15 +102,15 @@ Expected: PASS.
 - Consumes: shared `Wordmark` component and stable `/brand/` URLs.
 - Produces: canonical auth branding, icon metadata, social previews, and install metadata.
 
-- [ ] **Step 1: Replace the auth-local wordmark**
+- [x] **Step 1: Replace the auth-local wordmark**
 
 Remove `AuthWordmark`; render the shared `Wordmark` at desktop and compact sizes.
 
-- [ ] **Step 2: Declare metadata images**
+- [x] **Step 2: Declare metadata images**
 
 Add root `icons`, Open Graph image metadata, and Twitter card metadata using canonical `/brand/` paths.
 
-- [ ] **Step 3: Add the web manifest**
+- [x] **Step 3: Add the web manifest**
 
 Return a `MetadataRoute.Manifest` named `ZolliAI Cloud` with `#FFFDF3` background, `#FF7427` theme, standalone display, and the 192px and 512px canonical icons.
 
@@ -123,7 +123,7 @@ Return a `MetadataRoute.Manifest` named `ZolliAI Cloud` with `#FFFDF3` backgroun
 - Consumes: all implementation changes.
 - Produces: verified frontend brand integration and checked plan status.
 
-- [ ] **Step 1: Run targeted and full automated checks**
+- [x] **Step 1: Run targeted and full automated checks**
 
 ```bash
 npm test -- lib/zolli-brand.test.ts
@@ -134,11 +134,11 @@ npm run build
 
 Expected: every command exits 0.
 
-- [ ] **Step 2: Inspect the running frontend**
+- [x] **Step 2: Inspect the running frontend**
 
 Verify the landing page and sign-in page at desktop and mobile widths, including logo sharpness, mascot cropping, accessible names, and absence of layout shift.
 
-- [ ] **Step 3: Review the final diff**
+- [x] **Step 3: Review the final diff**
 
 ```bash
 git diff --check
@@ -147,6 +147,6 @@ git status --short
 
 Expected: no whitespace errors; unrelated dirty files remain untouched.
 
-- [ ] **Step 4: Mark completed checklist items**
+- [x] **Step 4: Mark completed checklist items**
 
 Change only completed plan steps from `- [ ]` to `- [x]` so the document reflects verified reality.

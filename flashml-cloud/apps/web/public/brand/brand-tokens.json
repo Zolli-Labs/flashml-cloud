@@ -1,0 +1,18 @@
+{
+  "brand": {
+    "name": "Zolli",
+    "tagline": "Distributed compute that survives failure."
+  },
+  "colors": {
+    "primaryOrange": "#FF7427",
+    "charcoal": "#393939",
+    "cream": "#FFFDF3",
+    "white": "#FFFFFF"
+  },
+  "recommendedUsage": {
+    "lightBackgroundLogo": "logos/logo-primary.png",
+    "darkBackgroundLogo": "logos/logo-reversed-white.png",
+    "compactMark": "logos/logo-symbol-orange.png",
+    "appIcon": "icons/app-icon-solid-1024.png"
+  }
+}

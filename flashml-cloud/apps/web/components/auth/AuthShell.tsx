@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { motion, useReducedMotion } from "motion/react";
 import { AuthCharacters } from "@/components/auth/AuthCharacters";
-import { Mark } from "@/components/brand/Mark";
+import { Wordmark } from "@/components/brand/Mark";
 
 export type AuthMode = "signin" | "signup";
 
@@ -64,19 +64,6 @@ function HomeLink() {
   );
 }
 
-function AuthWordmark({ compact = false }: { compact?: boolean }) {
-  return (
-    <span className="inline-flex items-center gap-2">
-      <Mark size={compact ? 24 : 28} className="text-brand" />
-      <span
-        className={`${compact ? "text-lg" : "text-xl"} font-sans font-extrabold tracking-[-0.04em] text-brand-foreground`}
-      >
-        Zolli<span className="text-muted-foreground">AI</span>
-      </span>
-    </span>
-  );
-}
-
 export function AuthShell({
   mode,
   onModeChange,
@@ -96,7 +83,7 @@ export function AuthShell({
 
         <div className="relative z-10 flex items-center justify-between px-10 pt-10 xl:px-14 xl:pt-12">
           <Link href="/" aria-label="ZolliAI home" className="inline-flex">
-            <AuthWordmark />
+            <Wordmark size={28} />
           </Link>
           <HomeLink />
         </div>
@@ -129,7 +116,7 @@ export function AuthShell({
         <div className="w-full max-w-[470px]">
           <div className="mb-7 flex items-center justify-between lg:hidden">
             <Link href="/" aria-label="ZolliAI home" className="inline-flex">
-              <AuthWordmark compact />
+              <Wordmark size={24} />
             </Link>
             <HomeLink />
           </div>
