@@ -23,6 +23,14 @@
   --color-primary: var(--primary);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  /* Without these two, `bg-popover` and `text-popover-foreground` generate
+     NOTHING in Tailwind v4 — utilities come from `--color-*` entries here,
+     not from the `--popover` values in `:root`. Every popover surface was
+     therefore rendering with no background: the select menu, the account
+     dropdown and the confirm dialogs were all transparent, with the page
+     behind them showing straight through the options. */
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);

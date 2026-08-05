@@ -339,7 +339,18 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             // same treatment `app/(auth)/sign-in/page.tsx` gives its card, so
             // signing up and being asked to wait look like one flow rather
             // than two unrelated screens.
-            <div className="flex min-h-full items-center justify-center px-4 py-12">
+            // `min-h-[calc(100dvh-3.5rem)]`, NOT `min-h-full`: a percentage
+            // min-height resolves against the parent's height, and `<main>`
+            // is `flex-1` with no definite height — so `min-h-full` computed
+            // to nothing, and a form taller than the viewport overflowed
+            // with its end unreachable. 3.5rem is the `h-14` header above.
+            //
+            // `min-h-*` and not `h-*`: with a fixed height plus
+            // `items-center`, content taller than the box overflows in both
+            // directions and the overflow cannot be scrolled to. A minimum
+            // lets the container grow instead, so short cards centre and
+            // tall ones simply make the page scroll.
+            <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-12">
               {screen === "onboarding" ? (
                 // Not a route of its own: the form has to stand in for
                 // whatever page the user asked for, or a bookmarked `/jobs`
