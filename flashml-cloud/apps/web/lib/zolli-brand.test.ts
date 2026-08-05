@@ -1,3 +1,5 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { ZOLLI_ROLES } from "@/lib/zolli-brand";
@@ -32,5 +34,15 @@ describe("ZolliCharacter accessibility", () => {
     expect(labelledCharacter.props["aria-hidden"]).toBeUndefined();
     expect(decorativeCharacter.props).toMatchObject({ "aria-hidden": true });
     expect(decorativeCharacter.props.role).toBeUndefined();
+  });
+
+  it("limits animated characters to motion-safe CSS and disables them for reduced motion", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ZolliCharacter, { role: "captain", animated: true }),
+    );
+
+    expect(markup).toContain("motion-safe:animate-bounce");
+    expect(markup).toContain("motion-reduce:animate-none");
+    expect(markup).not.toContain("<animateTransform");
   });
 });

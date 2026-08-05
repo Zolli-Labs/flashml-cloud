@@ -90,8 +90,7 @@ export function ZolliCharacter({
       aria-hidden={label ? undefined : true}
     >
       {label && <title>{label}</title>}
-      <g>
-        {animated && <animateTransform attributeName="transform" type="translate" values="0 0;0 -3;0 0" dur="2.4s" repeatCount="indefinite" />}
+      <g className={animated ? "motion-safe:animate-bounce motion-reduce:animate-none" : undefined}>
         <Arms mood={mood} />
         <Body color={color} />
         <RoleAccessory role={role} />
