@@ -63,17 +63,21 @@ function SelectContent({
   sideOffset = 4,
   align = "center",
   alignOffset = 0,
-  // Base UI's default is `true`, which anchors the SELECTED item over the
-  // trigger. That needs vertical room on both sides of the trigger, and when
-  // there isn't any — a select low in a long form, which is every select we
-  // have — `--available-height` collapses and the popup renders as a squashed
-  // strip a few pixels tall with the options unreadable.
+  // Base UI's default. Leave it alone.
   //
-  // `false` drops the popup below the trigger like an ordinary menu and lets
-  // it use the full remaining height. Changed as the default rather than per
-  // call site because all five of our selects live in long forms (the
-  // onboarding request and the account page) and every one of them hit it.
-  alignItemWithTrigger = false,
+  // It was briefly set to `false` here to "fix" a popup that appeared
+  // collapsed. That was a misdiagnosis: the popup had no BACKGROUND (the
+  // theme was missing `--color-popover`, so `bg-popover` generated nothing)
+  // and the page showing through it read as a broken menu. Base UI already
+  // handles the case this was meant to address — item alignment "is
+  // automatically disabled if there is not enough space", per its own docs.
+  //
+  // `false` also broke opening by click. `SelectTrigger` opens the popup
+  // UNDER the cursor on mousedown so the following mouseup can land on an
+  // item; positioned below the trigger instead, that mouseup lands back on
+  // the trigger and toggles the popup straight shut. The menu flashed open
+  // and vanished unless you held the button down.
+  alignItemWithTrigger = true,
   ...props
 }: SelectPrimitive.Popup.Props &
   Pick<
@@ -93,7 +97,7 @@ function SelectContent({
         <SelectPrimitive.Popup
           data-slot="select-content"
           data-align-trigger={alignItemWithTrigger}
-          className={cn("relative isolate z-50 max-h-(--available-height) min-h-9 w-(--anchor-width) min-w-36 origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 data-[align-trigger=true]:animate-none data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95", className )}
+          className={cn("relative isolate z-50 max-h-(--available-height) w-(--anchor-width) min-w-36 origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 data-[align-trigger=true]:animate-none data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95", className )}
           {...props}
         >
           <SelectScrollUpButton />
