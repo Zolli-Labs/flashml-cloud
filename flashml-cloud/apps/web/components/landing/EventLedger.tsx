@@ -16,12 +16,12 @@ import type { LedgerEvent, LedgerTone } from "@/lib/landing/sample-ledger";
 
 const TONE_TEXT: Record<LedgerTone, string> = {
   note: "text-muted-foreground",
-  alert: "text-[var(--warning)]",
+  alert: "text-warning-foreground",
   good: "text-[var(--node-green)]",
 };
 
 const TONE_MARK: Record<LedgerTone, string> = {
-  note: "bg-white/20",
+  note: "bg-surface-2",
   alert: "bg-[var(--warning)]",
   good: "bg-[var(--node-green)]",
 };
@@ -53,13 +53,13 @@ export function LedgerRow({ event }: { event: LedgerEvent }) {
         aria-hidden
         className={`mt-[6px] h-1 w-1 self-start rounded-full ${TONE_MARK[event.tone]}`}
       />
-      <span className="font-mono tabular-nums text-white/35">
+      <span className="font-mono tabular-nums text-muted-foreground">
         {formatOffset(event.at)}
       </span>
       <span className={`truncate font-mono ${TONE_TEXT[event.tone]}`}>
         {event.type}
       </span>
-      <span className="truncate font-mono text-white/35">{event.detail}</span>
+      <span className="truncate font-mono text-muted-foreground">{event.detail}</span>
     </motion.li>
   );
 }
@@ -102,10 +102,10 @@ export function EventLedger({
   return (
     <div className={className}>
       <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
           event ledger
         </span>
-        <span className="font-mono text-[10px] text-white/30">{label}</span>
+        <span className="font-mono text-[10px] text-muted-foreground">{label}</span>
       </div>
       <ul
         aria-label="FlashML coordinator event ledger, sample data"

@@ -80,7 +80,7 @@ export function FrameworkStack() {
                   <Logo key={i.title} icon={i} />
                 ))}
               </div>
-              <div className="mt-4 font-mono text-sm text-primary">
+              <div className="mt-4 font-mono text-sm text-brand-foreground">
                 {img.alias}
               </div>
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">

@@ -25,7 +25,7 @@ export function Navbar() {
               stage label, not information anyone needs, and it undersells
               the product to every first-time visitor. */}
           <span className="font-mono font-bold tracking-tight text-foreground">
-            Flash<span className="text-cyan">ML</span>
+            Flash<span className="text-brand-foreground">ML</span>
           </span>
         </Link>
 
@@ -42,8 +42,8 @@ export function Navbar() {
                 className={`
                   px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-150
                   ${active
-                    ? "bg-cyan/10 text-cyan border border-cyan/25"
-                    : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                    ? "bg-cyan/10 text-brand-foreground border border-cyan/25"
+                    : "text-muted-foreground hover:text-foreground hover:bg-surface-2"
                   }
                 `}
               >
@@ -56,7 +56,7 @@ export function Navbar() {
         <div className="flex items-center gap-3">
           <Link
             href="/submit"
-            className="hidden md:inline-flex px-4 py-1.5 rounded-md bg-cyan text-background text-sm font-semibold hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
+            className="hidden md:inline-flex px-4 py-1.5 rounded-md bg-cyan text-foreground text-sm font-semibold hover:bg-cyan/90 active:scale-[0.98] transition-all glow-cyan"
           >
             Submit a job
           </Link>

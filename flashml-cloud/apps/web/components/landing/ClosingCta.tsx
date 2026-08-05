@@ -42,7 +42,7 @@ export function ClosingCta() {
             href={REPO}
             target="_blank"
             rel="noreferrer"
-            className="interactive inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.04] px-6 py-3 text-sm font-medium text-foreground transition-colors hover:bg-white/[0.08]"
+            className="interactive inline-flex items-center gap-2 rounded-full border border-border bg-surface px-6 py-3 text-sm font-medium text-foreground transition-colors hover:bg-surface-2"
           >
             <GithubLogo size={16} weight="fill" />
             Read the source

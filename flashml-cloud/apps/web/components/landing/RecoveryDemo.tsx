@@ -40,7 +40,7 @@ export function RecoveryDemo() {
   return (
     <section
       id="recover"
-      className="border-y border-border bg-white/[0.015] py-20 md:py-28"
+      className="border-y border-border bg-surface-2 py-20 md:py-28"
     >
       <div className="mx-auto max-w-7xl px-4 sm:px-6">
         <Reveal>
@@ -65,7 +65,7 @@ export function RecoveryDemo() {
                   borderColor:
                     active === i
                       ? "var(--primary)"
-                      : "oklch(1 0 0 / 0.09)",
+                      : "var(--border)",
                 }}
               >
                 {/* Inactive beats dim, but not out of legibility. At 0.35 on
@@ -94,7 +94,7 @@ export function RecoveryDemo() {
                 <div className="flex items-center justify-between border-b border-border px-4 py-3">
                   {/* Remounts with the beat so the countdown restarts. */}
                   <LeaseRing key={active} state={RING_STATE[active]} />
-                  <span className="font-mono text-[10px] text-white/30">
+                  <span className="font-mono text-[10px] text-muted-foreground">
                     sample run
                   </span>
                 </div>

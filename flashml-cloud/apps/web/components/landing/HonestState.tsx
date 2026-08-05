@@ -24,7 +24,7 @@ const NOT_YET = [
 
 export function HonestState() {
   return (
-    <section className="border-t border-border bg-white/[0.015] py-20 md:py-28">
+    <section className="border-t border-border bg-surface-2 py-20 md:py-28">
       <div className="mx-auto max-w-7xl px-4 sm:px-6">
         <Reveal>
           <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">

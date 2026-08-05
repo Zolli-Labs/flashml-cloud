@@ -16,7 +16,7 @@ const STATUS_COPY: Record<Status, string> = {
 
 const STATUS_STYLE: Record<Status, string> = {
   today: "text-[var(--node-green)] border-[var(--node-green)]/30 bg-[var(--node-green)]/10",
-  "gpu-gated": "text-[var(--warning)] border-[var(--warning)]/30 bg-[var(--warning)]/10",
+  "gpu-gated": "text-warning-foreground border-[var(--warning)]/30 bg-[var(--warning)]/10",
 };
 
 function StatusChip({ status }: { status: Status }) {
@@ -31,7 +31,7 @@ function StatusChip({ status }: { status: Status }) {
 
 function IconTile({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-10 w-10 items-center justify-center rounded-[10px] bg-primary/15 text-primary transition-colors duration-300 group-hover:bg-primary/25">
+    <div className="flex h-10 w-10 items-center justify-center rounded-[10px] bg-primary/15 text-brand-foreground transition-colors duration-300 group-hover:bg-primary/25">
       {children}
     </div>
   );

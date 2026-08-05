@@ -12,7 +12,9 @@
   --color-surface-2: var(--surface-2);
   --color-ink: var(--ink);
   --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
   --color-evergreen: var(--evergreen);
+  --color-warning-foreground: var(--warning-foreground);
   --font-sans: var(--font-inter);
   --font-mono: var(--font-geist-mono);
   --font-display: var(--font-fraunces);
@@ -65,7 +67,9 @@
   --muted-ink: #746b62;
   --brand: #ef6828;
   --brand-hover: #d95319;
+  --brand-foreground: #a34015;
   --evergreen: #1f6e5d;
+  --warning-foreground: #8a5a00;
 
   /* Existing component names, deliberately mapped to their warm peers. */
   --background: var(--cream);
@@ -77,7 +81,7 @@
   --popover-foreground: var(--ink);
   --bg-rail: var(--surface-2);
   --primary: var(--brand);
-  --primary-foreground: #fffdf9;
+  --primary-foreground: var(--ink);
   --secondary: var(--surface-2);
   --secondary-foreground: var(--ink);
   --muted-foreground: var(--muted-ink);
@@ -87,8 +91,9 @@
   --node-green: var(--evergreen);
   --warning: #e7ad2b;
   --border: #e6dbd0;
-  --input: #dccdc0;
-  --ring: rgb(239 104 40 / 0.72);
+  --input: #a38269;
+  --focus: #a34015;
+  --ring: var(--focus);
   --accent-text: var(--brand-hover);
 
   /* Migration shims for unconverted console components. Do not use in new
@@ -165,13 +170,6 @@
   [data-numeric] {
     font-variant-numeric: tabular-nums;
   }
-}
-
-/* `muted` remains the shadcn surface compatibility token for existing
-   `bg-muted` controls. This text utility gives new ZolliAI copy the warm
-   muted-ink token without making those old controls dark. */
-.text-muted {
-  color: var(--muted-foreground);
 }
 
 /* ─── Grain ───────────────────────────────────────────────────────
@@ -307,8 +305,19 @@
   outline: none;
   box-shadow:
     0 0 0 2px var(--background),
-    0 0 0 4px var(--brand);
+    0 0 0 4px var(--focus);
   border-radius: var(--radius-sm);
+}
+
+/* The dark-theme utility classes below predate the warm system. Keeping
+   these controls visibly responsive is a compatibility concern, not a page
+   reskin: they now step to the sand surface wherever they still appear. */
+body [class~="hover:bg-white/5"]:hover,
+body [class~="hover:bg-white/[0.03]"]:hover,
+body [class~="hover:bg-white/[0.04]"]:hover,
+body [class~="hover:bg-white/[0.06]"]:hover,
+body [class~="hover:bg-white/[0.08]"]:hover {
+  background-color: var(--surface-2);
 }
 
 /* ─── Terminal / code ─────────────────────────────────────────────── */

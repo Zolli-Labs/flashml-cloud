@@ -32,7 +32,7 @@ const WITH = [
 
 const TONE: Record<string, string> = {
   dim: "text-muted-foreground",
-  warn: "text-[var(--warning)]",
+  warn: "text-warning-foreground",
   good: "text-[var(--node-green)]",
 };
 
