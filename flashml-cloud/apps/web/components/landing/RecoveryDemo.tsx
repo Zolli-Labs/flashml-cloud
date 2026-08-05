@@ -68,19 +68,28 @@ export function RecoveryDemo() {
                       : "var(--border)",
                 }}
               >
-                {/* Inactive beats dim, but not out of legibility. At 0.35 on
-                    muted-foreground the body text fell under AA against this
-                    background, which turns a focus effect into a contrast
-                    failure for anyone reading ahead. */}
+                {/* Keep every body copy at full opacity: people must be able
+                    to read ahead. The active beat earns emphasis from ink
+                    versus muted ink, not from a contrast-breaking fade. */}
                 <h3
-                  className="text-xl font-semibold transition-opacity duration-300 md:text-2xl"
-                  style={{ opacity: active === i ? 1 : 0.62 }}
+                  className="text-xl font-semibold transition-colors duration-300 md:text-2xl"
+                  style={{
+                    color:
+                      active === i
+                        ? "var(--foreground)"
+                        : "var(--muted-foreground)",
+                  }}
                 >
                   {b.title}
                 </h3>
                 <p
-                  className="mt-3 max-w-[52ch] text-sm leading-relaxed text-muted-foreground transition-opacity duration-300 md:text-base"
-                  style={{ opacity: active === i ? 1 : 0.6 }}
+                  className="mt-3 max-w-[52ch] text-sm leading-relaxed transition-colors duration-300 md:text-base"
+                  style={{
+                    color:
+                      active === i
+                        ? "var(--foreground)"
+                        : "var(--muted-foreground)",
+                  }}
                 >
                   {b.body}
                 </p>

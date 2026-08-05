@@ -25,7 +25,6 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
@@ -64,7 +63,7 @@
   --surface-2: #f3ece4;
   --ink: #1a1714;
   --muted: var(--surface-2);
-  --muted-ink: #746b62;
+  --muted-ink: #6f645a;
   --brand: #ef6828;
   --brand-hover: #d95319;
   --brand-foreground: #a34015;
@@ -170,6 +169,18 @@
   [data-numeric] {
     font-variant-numeric: tabular-nums;
   }
+}
+
+/* `muted` remains a sand fill for the existing shadcn controls. It is not a
+   Tailwind color namespace: registering it would also generate an unsafe
+   generic text utility. Keep readable copy on
+   `text-muted-foreground` instead. */
+@utility bg-muted {
+  background-color: var(--muted);
+}
+
+@utility bg-muted-50 {
+  background-color: color-mix(in srgb, var(--muted) 50%, transparent);
 }
 
 /* ─── Grain ───────────────────────────────────────────────────────
