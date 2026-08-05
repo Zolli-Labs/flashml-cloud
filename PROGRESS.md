@@ -172,6 +172,30 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-05 — Ship the ZolliAI visual rebrand POC (flashml-cloud/web)
+
+What/why: rebranded the complete web frontend from FlashML Cloud to ZolliAI's
+warm cream/orange visual system. Each hosted machine is presented as a Zolli
+and a workspace fleet as a Crew, with six accessible character roles, a new
+animated landing narrative, and matching auth, onboarding, console, empty,
+error, and documentation surfaces. The backend, API, routes, runtime, CLI,
+protocol names, and data contracts remain FlashML and are deliberately deferred.
+
+How verified: web Vitest 23 files/243 tests passed; ESLint and
+`tsc --noEmit` exited 0; the network-enabled Next.js production build compiled
+and generated 19/19 static pages. Browser QA covered 1440, 768, and 390 px:
+responsive nav compression/menu, anchors, CTA routes, sign-in/signup toggle,
+keyboard Escape/focus behavior, clean console, and no horizontal overflow.
+
+Gotchas: authenticated Crew-console routes were not re-exercised end to end in
+this visual slice because QA had no authenticated browser session. The one
+visible `machine online` string in `WorkspaceHeader` belongs to a concurrent
+uncommitted console change and was preserved. Use `localhost`, not `127.0.0.1`,
+for browser QA so the Next.js HMR websocket and client motion hydrate normally.
+
+Next: validate authenticated Crew flows against the dev stack, then plan the
+separate underlying FlashML runtime/API/package rebrand if ZolliAI is adopted.
+
 ### 2026-08-04 — Workspace console: /w/[poolId] tabs over one WorkspaceProvider, plus dead-code sweep (flashml-cloud)
 
 What/why: 18-task plan lands the console as workspace-scoped: `/w/[poolId]/`
