@@ -2,19 +2,22 @@
 
 import { useState, type FormEvent } from "react";
 import { useSearchParams } from "next/navigation";
-import { Eye, EyeSlash, Warning } from "@phosphor-icons/react";
+import { ArrowRight, Eye, EyeSlash, Warning } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createBrowserSupabaseClient } from "@/lib/supabase";
 import { safeNext } from "@/lib/safe-next";
 import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
-import { Wordmark } from "@/components/brand/Mark";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
+import { AuthShell, type AuthMode } from "@/components/auth/AuthShell";
+import {
+  AuthInteractionProvider,
+  useAuthInteraction,
+} from "@/components/auth/AuthInteraction";
 import { GoogleMark } from "./GoogleMark";
 
 type Pending = "password" | "google" | null;
-type Mode = "signin" | "signup";
+type Mode = AuthMode;
 
 /** Which screen of the signup wizard is showing.
  *
@@ -49,6 +52,14 @@ type Step = "credentials" | "details";
 const MIN_PASSWORD_LENGTH = 8;
 
 export function SignInCard() {
+  return (
+    <AuthInteractionProvider>
+      <SignInCardContent />
+    </AuthInteractionProvider>
+  );
+}
+
+function SignInCardContent() {
   const searchParams = useSearchParams();
   const [mode, setMode] = useState<Mode>("signin");
   const [step, setStep] = useState<Step>("credentials");
@@ -59,6 +70,7 @@ export function SignInCard() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [revealed, setRevealed] = useState(false);
+  const interaction = useAuthInteraction();
 
   // `safeNext`, not a bare `|| "/machines"`: `next` is attacker-controlled
   // (a crafted sign-in link, or middleware forwarding a crafted pathname),
@@ -69,6 +81,16 @@ export function SignInCard() {
   function reset() {
     setError(null);
     setNotice(null);
+  }
+
+  function switchMode(nextMode: Mode) {
+    setMode(nextMode);
+    setPassword("");
+    setRevealed(false);
+    interaction.setTyping(false);
+    interaction.setHasPassword(false);
+    interaction.setPasswordVisible(false);
+    reset();
   }
 
   async function submitPassword(event: FormEvent<HTMLFormElement>) {
@@ -177,76 +199,62 @@ export function SignInCard() {
   // above uses it.
   if (step === "details") {
     return (
-      <OnboardingForm
-        stepLabel="Step 2 of 2"
-        onSubmitted={() => window.location.assign(next)}
-      />
+      <main
+        id="content"
+        className="flex min-h-dvh items-center justify-center bg-cream px-4 py-12"
+      >
+        <OnboardingForm
+          stepLabel="Step 2 of 2"
+          onSubmitted={() => window.location.assign(next)}
+        />
+      </main>
     );
   }
 
   if (needsConfirmation) {
     return (
-      <section className="glass w-full max-w-sm rounded-2xl p-7 rise">
-        <Wordmark product className="mb-6" />
-        <h1 className="font-display text-2xl font-semibold tracking-tight">
-          Account created, but not usable yet
-        </h1>
-        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          This deployment still requires email confirmation, so the account
-          can&apos;t sign in until a confirmation link is opened.
-        </p>
-        <p className="mt-4 text-sm leading-relaxed text-muted-foreground">
-          If you run this deployment: turn off{" "}
-          <span className="font-medium text-foreground">Confirm email</span> in
-          Supabase under Authentication → Sign In / Providers → Email, then
-          sign in normally. No email is involved once it is off.
-        </p>
-        <button
-          type="button"
-          className="mt-5 text-sm font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
-          onClick={() => {
-            setNeedsConfirmation(false);
-            setMode("signin");
-            reset();
-          }}
-        >
-          Back to sign in
-        </button>
-      </section>
+      <main
+        id="content"
+        className="flex min-h-dvh items-center justify-center bg-cream px-4 py-12"
+      >
+        <section className="glass w-full max-w-sm rounded-2xl p-7 rise">
+          <p className="label-caps mb-3 text-brand-foreground">Account status</p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">
+            Account created, but not usable yet
+          </h1>
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+            This deployment still requires email confirmation, so the account
+            can&apos;t sign in until a confirmation link is opened.
+          </p>
+          <p className="mt-4 text-sm leading-relaxed text-muted-foreground">
+            If you run this deployment: turn off{" "}
+            <span className="font-medium text-foreground">Confirm email</span> in
+            Supabase under Authentication → Sign In / Providers → Email, then
+            sign in normally. No email is involved once it is off.
+          </p>
+          <button
+            type="button"
+            className="mt-5 text-sm font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
+            onClick={() => {
+              setNeedsConfirmation(false);
+              switchMode("signin");
+            }}
+          >
+            Back to sign in
+          </button>
+        </section>
+      </main>
     );
   }
 
   const signingUp = mode === "signup";
 
   return (
-    <section className="glass w-full max-w-sm rounded-2xl p-7 rise">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <Wordmark product className="mb-5" />
-          <h1 className="font-display text-2xl font-semibold tracking-tight">
-            {signingUp ? "Build your crew" : "Sign in"}
-          </h1>
-          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            {signingUp
-              ? "Create your account, then tell us what you want your Crew to run."
-              : "Welcome back to ZolliAI Cloud."}
-          </p>
-        </div>
-        {signingUp ? (
-          <ZolliCharacter
-            role="scout"
-            size={70}
-            mood="waving"
-            className="-mr-2 mt-5 shrink-0"
-            label="Scout welcomes you to ZolliAI"
-          />
-        ) : null}
-      </div>
-
-      <form onSubmit={submitPassword} className="mt-6 flex flex-col gap-4">
+    <AuthShell mode={mode} onModeChange={switchMode}>
+      <form onSubmit={submitPassword} className="flex flex-col gap-5">
         <div className="flex flex-col gap-2">
-          <Label htmlFor="email" className="text-xs font-medium">
-            Email
+          <Label htmlFor="email" className="text-sm font-medium">
+            Email address
           </Label>
           <Input
             id="email"
@@ -258,13 +266,15 @@ export function SignInCard() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            onFocus={() => interaction.setTyping(true)}
+            onBlur={() => interaction.setTyping(false)}
             disabled={pending !== null}
-            className="h-11"
+            className="h-12 rounded-xl bg-surface px-4 text-[15px]"
           />
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label htmlFor="password" className="text-xs font-medium">
+          <Label htmlFor="password" className="text-sm font-medium">
             Password
           </Label>
           <div className="relative">
@@ -282,14 +292,23 @@ export function SignInCard() {
               required
               minLength={signingUp ? MIN_PASSWORD_LENGTH : undefined}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                interaction.setHasPassword(e.target.value.length > 0);
+              }}
+              onFocus={() => interaction.setTyping(true)}
+              onBlur={() => interaction.setTyping(false)}
               disabled={pending !== null}
-              className="h-11 pr-11"
+              className="h-12 rounded-xl bg-surface px-4 pr-12 text-[15px]"
             />
             <button
               type="button"
-              onClick={() => setRevealed((v) => !v)}
-              className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md p-2 text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => {
+                const nextRevealed = !revealed;
+                setRevealed(nextRevealed);
+                interaction.setPasswordVisible(nextRevealed);
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-2 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2"
               aria-label={revealed ? "Hide password" : "Show password"}
             >
               {revealed ? (
@@ -310,7 +329,7 @@ export function SignInCard() {
         <Button
           type="submit"
           size="lg"
-          className="interactive h-11 w-full"
+          className="interactive h-12 w-full rounded-xl font-semibold shadow-[0_12px_30px_-16px_rgba(239,104,40,0.8)]"
           disabled={pending !== null}
         >
           {pending === "password"
@@ -320,6 +339,7 @@ export function SignInCard() {
             : signingUp
               ? "Create account"
               : "Sign in"}
+          {pending !== "password" ? <ArrowRight className="ml-1 h-4 w-4" /> : null}
         </Button>
       </form>
 
@@ -354,7 +374,7 @@ export function SignInCard() {
         type="button"
         variant="outline"
         size="lg"
-        className="interactive h-11 w-full gap-2.5"
+        className="interactive h-12 w-full gap-2.5 rounded-xl bg-surface"
         disabled={pending !== null}
         onClick={signInWithGoogle}
       >
@@ -362,21 +382,17 @@ export function SignInCard() {
         {pending === "google" ? "Redirecting…" : "Continue with Google"}
       </Button>
 
-      <p className="mt-7 border-t border-border pt-5 text-center text-sm text-muted-foreground">
+      <p className="mt-7 text-center text-sm text-muted-foreground">
         {signingUp ? "Already have an account?" : "No account yet?"}{" "}
         <button
           type="button"
-          onClick={() => {
-            setMode(signingUp ? "signin" : "signup");
-            setPassword("");
-            reset();
-          }}
+          onClick={() => switchMode(signingUp ? "signin" : "signup")}
           className="font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
         >
           {signingUp ? "Sign in" : "Create one"}
         </button>
       </p>
-    </section>
+    </AuthShell>
   );
 }
 
