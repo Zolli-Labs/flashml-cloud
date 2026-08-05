@@ -171,7 +171,11 @@ git commit -m "feat(web): add Zolli brand primitives"
 
 **Interfaces:**
 - Consumes: `Mark` and `Wordmark` from Task 1 only indirectly through pages.
-- Produces: Tailwind-backed tokens `bg-cream`, `bg-surface`, `bg-surface-2`, `text-ink`, `text-muted`, `text-brand`, `text-evergreen`, and `font-display`.
+- Produces: Tailwind-backed tokens `bg-cream`, `bg-surface`, `bg-surface-2`,
+  `text-ink`, `text-muted-foreground`, accessible small-copy brand/status
+  foregrounds, `text-evergreen`, and `font-display`. `bg-muted` remains the
+  sand compatibility surface; no `text-muted` alias is created because
+  Tailwind color tokens cannot safely mean different colors by utility type.
 - Preserves: existing compatibility tokens such as `background`, `foreground`, `primary`, `border`, `node-green`, and `warning` so unconverted components remain legible during the page phase.
 
 - [ ] **Step 1: Record the existing behavioral baseline**
