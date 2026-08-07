@@ -102,6 +102,15 @@ export class PreflightRejected extends Error {
 // types — mirror the API's response shapes
 // ---------------------------------------------------------------------------
 
+/** The four-state access model. `admitted` alone could not express a
+ * signed-in account that has not filled the onboarding form: it is
+ * neither admitted nor refused. */
+export type AccessState =
+  | "needs_onboarding"
+  | "pending"
+  | "admitted"
+  | "declined";
+
 /** `GET /v1alpha1/me` — public.profiles, upserted on first sign-in. */
 export interface Profile {
   id: string;
@@ -115,8 +124,24 @@ export interface Profile {
    * reachable for an un-admitted account on purpose (`admitted_user`'s own
    * docstring: "reads stay open") specifically so the console can read
    * this flag and show the invite gate instead of a silent 403 on every
-   * other route. */
+   * other route.
+   *
+   * Kept alongside `access` rather than replaced: it predates this and
+   * other readers rely on it. */
   admitted: boolean;
+  access: AccessState;
+  /** Whether this account can open the access-request queue. Read-only
+   * everywhere — granted by one manual SQL UPDATE and by nothing else, and
+   * `PATCH /v1alpha1/me` refuses it. The console reads it for one purpose:
+   * whether to draw the Admin entry in the rail. Every admin route
+   * re-checks it server-side, so a client that lies to itself here gains
+   * nothing but a link to a 403. */
+  is_admin: boolean;
+  first_name: string | null;
+  last_name: string | null;
+  company_name: string | null;
+  role: string | null;
+  team_size: string | null;
 }
 
 /** One of `GET /v1alpha1/machines`' `pools` chips — the pools a machine is
@@ -154,6 +179,37 @@ export interface Machine {
    * same reasoning `listJobRounds` documents elsewhere for a single-query
    * join over an N+1 loop. Empty, never absent, for an unbound machine. */
   pools: PoolChip[];
+}
+
+/** A row of `GET /v1alpha1/pools/{id}/machines` — every machine bound to a
+ * pool, across all its members, which `listMachines()` cannot return
+ * because it is scoped to the caller by design.
+ *
+ * Deliberately NOT derived from `Machine`. This route is read by every
+ * MEMBER of a pool, so it returns strictly less than the owner's own view:
+ * no `token_prefix`, `capabilities`, `platform`, `created_at` or
+ * `revoked_at` — see `_POOL_MACHINE_COLUMNS` in `apps/api/.../db.py` for
+ * why. Spelling the fields out here rather than `Omit`-ing them off
+ * `Machine` keeps the two shapes independent: adding a column to the
+ * owner's view must not silently widen this one, and reading a field the
+ * API no longer sends should be a compile error.
+ *
+ * No `pools` field either: this response already answers "which pool", so a
+ * per-machine chip list would be a longer way of saying the id in the URL. */
+export interface PoolMachine {
+  id: string;
+  node_id: string;
+  name: string | null;
+  owner_id: string;
+  owner_display_name: string | null;
+  status: "pending" | "active" | "revoked" | string;
+  last_seen_at: string | null;
+  /** Same three flags `machineBadge` reads, and `module_capable` alongside
+   * them — see `Machine` above for what each means. */
+  sandbox_capable: boolean;
+  argv_capable: boolean;
+  unsandboxed_argv_capable: boolean;
+  module_capable: boolean;
 }
 
 export interface ApproveDeviceCodeResult {
@@ -220,6 +276,15 @@ export interface JobRecord {
   name?: string;
   /** "federated" for a federated run; absent otherwise. */
   mode?: string;
+  /** The pool this job belongs to, or null for every job submitted before
+   * pools shipped. OPTIONAL, not merely nullable: the web and API deploy
+   * separately, so a browser running this code will briefly talk to an API
+   * that has never heard of the field. `lib/job-scope.ts` treats absent and
+   * null identically for exactly that reason. */
+  pool_id?: string | null;
+  /** Display name of whoever submitted this, for the attribution that makes
+   * a shared workspace read as shared. Null when they never set one. */
+  submitted_by?: string | null;
   backend?: string;
   deployment_profile?: string;
   runtime_execution_id?: string | null;
@@ -457,10 +522,12 @@ export function getMe(): Promise<Profile> {
   return request<Profile>("/v1alpha1/me");
 }
 
-/** `PATCH /v1alpha1/me` — sets the display name, the only profile field a
- * user owns. Email and avatar belong to the identity provider, `github_login`
- * is written by enrolment, and the role flags are roles rather than
- * preferences, so none of them are editable here.
+/** `PATCH /v1alpha1/me` — sets the display name. Kept alongside the wider
+ * `updateProfile` below for its existing callers, who only ever touch this
+ * one field. Email and avatar belong to the identity provider,
+ * `github_login` is written by enrolment, and the role flags are roles
+ * rather than preferences, so none of them are editable here or through
+ * `updateProfile`.
  *
  * The API rejects an empty string rather than treating it as "leave it
  * alone", because clearing a field and not touching it are different
@@ -513,10 +580,40 @@ export function listPools(): Promise<PoolSummary[]> {
  * creation, the thing the alpha gate exists to block) — a 401-shaped
  * `NotAuthenticated` never fires here for "not admitted"; that case
  * surfaces as a plain `ApiError` with the API's own detail
- * ("invite required"), same as any other refusal. */
+ * ("access not yet approved"), same as any other refusal. */
 export function createPool(name: string): Promise<Pool> {
   return request<Pool>("/v1alpha1/pools", {
     method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** `GET /v1alpha1/pools/{id}/machines` — the workspace's whole fleet, one
+ * row per bound machine across every member.
+ *
+ * Member-scoped server-side: a non-member gets 404, indistinguishable from
+ * a pool that does not exist, so `NotFound` from here must never be
+ * reworded into an access-denied message.
+ *
+ * Machines whose owner has left the pool are already excluded by the query
+ * (`list_pool_machines`), matching what placement actually sees — so the
+ * count rendered from this list is the workspace's real capacity, not an
+ * optimistic one. */
+export function listPoolMachines(poolId: string): Promise<PoolMachine[]> {
+  return request<PoolMachine[]>(
+    `/v1alpha1/pools/${encodeURIComponent(poolId)}/machines`
+  );
+}
+
+/** `PATCH /v1alpha1/pools/{id}` — rename, owner only.
+ *
+ * A member who is not the owner gets 404, the same as a stranger: the
+ * caller cannot distinguish the two and must not try to. The API trims and
+ * caps at 200 characters, so the returned `Pool` is the authority on what
+ * the name actually became — render that, not the string you sent. */
+export function renamePool(poolId: string, name: string): Promise<Pool> {
+  return request<Pool>(`/v1alpha1/pools/${encodeURIComponent(poolId)}`, {
+    method: "PATCH",
     body: JSON.stringify({ name }),
   });
 }
@@ -631,12 +728,19 @@ export function revokePoolInvites(poolId: string): Promise<{ revoked: number }> 
 
 /** `POST /v1alpha1/invites/accept` — deliberately callable by a
  * signed-in-but-not-yet-admitted account (the API's `accept_invite` sits on
- * `current_user`, not `admitted_user`): this call IS the admission
- * bootstrap, not something gated behind having already passed it. */
+ * `current_user`, not `admitted_user`): the only path into a workspace
+ * cannot require already being in one.
+ *
+ * This call joins a WORKSPACE. It does not admit the account — admission is
+ * a separate, admin-granted decision (see `AccessState`/`submitAccessRequest`).
+ * `joined` reports which happened: `true` for an already-admitted caller,
+ * who is added to the pool immediately; `false` for anyone else, whose join
+ * is banked on their access request and only applied when an admin later
+ * approves them. */
 export function acceptInvite(
   token: string
-): Promise<{ pool_id: string; name: string }> {
-  return request<{ pool_id: string; name: string }>(
+): Promise<{ pool_id: string; name: string; joined: boolean }> {
+  return request<{ pool_id: string; name: string; joined: boolean }>(
     "/v1alpha1/invites/accept",
     { method: "POST", body: JSON.stringify({ token }) }
   );
@@ -762,5 +866,113 @@ export function submitFromRepo(
   return request<SubmitFromRepoResult>("/v1alpha1/jobs/from-repo", {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+// -- onboarding and access -----------------------------------------------
+
+export interface OnboardingSubmission {
+  first_name: string;
+  last_name: string;
+  company_name: string;
+  role: string;
+  team_size: string;
+  use_case: string;
+  compute_sources: string[];
+  heard_from?: string;
+}
+
+/** `POST /v1alpha1/access-request` — callable by a not-yet-admitted
+ * account on purpose: this IS how an account asks to be admitted. A 409
+ * means the account's access is already decided (admitted or declined); an
+ * already-admitted user edits these same fields through `updateProfile`
+ * instead. */
+export function submitAccessRequest(
+  body: OnboardingSubmission
+): Promise<{ access: AccessState }> {
+  return request<{ access: AccessState }>("/v1alpha1/access-request", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** A row of `GET /v1alpha1/admin/access-requests` — one account's
+ * onboarding submission plus the admin-facing context around it:
+ * `pending_pool_name`/`invited_by_name` surface which invite (if any) is
+ * banked on this decision, so an admin approving or declining can see what
+ * they're admitting the account into. */
+export interface AccessRequestRow {
+  user_id: string;
+  email: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  company_name: string | null;
+  role: string | null;
+  team_size: string | null;
+  email_domain: string | null;
+  is_personal_email: boolean | null;
+  use_case: string | null;
+  compute_sources: string[];
+  heard_from: string | null;
+  requested_at: string;
+  pending_pool_name: string | null;
+  invited_by_name: string | null;
+}
+
+/** `GET /v1alpha1/admin/access-requests` — admin only. A non-admin gets a
+ * plain `ApiError` carrying the API's "admin required", not a
+ * `NotAuthenticated`: this is an authorization failure on an authenticated
+ * caller, not a signed-out one. An unrecognised `status` is a 400, not an
+ * empty list — a typo must not read as "nobody is waiting". */
+export function listAccessRequests(
+  status: string = "pending"
+): Promise<AccessRequestRow[]> {
+  return request<AccessRequestRow[]>(
+    `/v1alpha1/admin/access-requests?status=${encodeURIComponent(status)}`
+  );
+}
+
+/** `POST /v1alpha1/admin/access-requests/{userId}/approve` — admin only.
+ * 404s (via `NotFound`) when there was no pending request for this user;
+ * `NotFound` here means "nothing to approve", not "unknown user". */
+export function approveAccessRequest(userId: string): Promise<void> {
+  return request<void>(
+    `/v1alpha1/admin/access-requests/${encodeURIComponent(userId)}/approve`,
+    { method: "POST" }
+  );
+}
+
+/** The decline counterpart of `approveAccessRequest` — same route shape,
+ * same 404-means-nothing-pending doctrine. */
+export function declineAccessRequest(userId: string): Promise<void> {
+  return request<void>(
+    `/v1alpha1/admin/access-requests/${encodeURIComponent(userId)}/decline`,
+    { method: "POST" }
+  );
+}
+
+/** `PATCH /v1alpha1/me` with the wider profile field set the onboarding
+ * form collects. Sibling to `updateMe` (display name only), not a
+ * replacement for it — see `updateMe`'s docstring for which fields are
+ * user-owned at all. The API silently drops anything outside this set
+ * rather than rejecting it, so a caller passing e.g. `is_admin` here would
+ * see it ignored, not erred on; the `Pick` below stops that at compile
+ * time instead. */
+export function updateProfile(
+  fields: Partial<
+    Pick<
+      Profile,
+      | "display_name"
+      | "first_name"
+      | "last_name"
+      | "company_name"
+      | "role"
+      | "team_size"
+    >
+  >
+): Promise<Profile> {
+  return request<Profile>("/v1alpha1/me", {
+    method: "PATCH",
+    body: JSON.stringify(fields),
   });
 }

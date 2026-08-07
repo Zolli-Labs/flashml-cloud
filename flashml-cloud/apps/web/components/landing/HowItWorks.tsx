@@ -33,7 +33,7 @@ export function HowItWorks() {
             {i > 0 && <hr className="rule-fade border-0" />}
             <div className="grid gap-4 py-9 md:grid-cols-12 md:gap-10 md:py-12">
               <div className="md:col-span-3">
-                <span className="font-mono text-2xl font-medium tracking-tight text-primary md:text-3xl">
+                <span className="font-mono text-2xl font-medium tracking-tight text-brand-foreground md:text-3xl">
                   {s.verb}
                 </span>
               </div>

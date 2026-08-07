@@ -20,17 +20,32 @@ constraints — the two that matter most for anyone touching this code:
 
 ## Environment variables
 
-Create `apps/web/.env.local` (gitignored) with:
+**There is no `apps/web/.env.local`.** It was removed on 2026-08-04: it held
+a second copy of the three `NEXT_PUBLIC_*` values that already live in the
+repo root's `.env.dev`, and a duplicated publishable key is a second thing to
+rotate and a second thing to get wrong.
+
+The three values now come from one place. `scripts/dev.sh` sources
+`.env.dev` with `set -a`, so they are in the environment of the `npm run dev`
+it starts, and Next.js inlines them from `process.env`:
 
 ```bash
-# Supabase project — safe for the browser: anon key only, never the
-# service-role key.
-NEXT_PUBLIC_SUPABASE_URL=https://yualksqjjvlfscbbsygq.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<the anon/publishable key, from Supabase dashboard → Project Settings → API>
-
-# The cloud API this app calls for everything else (apps/api).
-NEXT_PUBLIC_CLOUD_API=http://localhost:8000
+./scripts/dev.sh --all        # from the repo root
 ```
+
+**`npm run dev` on its own has no environment at all** — no Supabase URL, no
+key, no API base. That was never a complete way to run this app anyway (the
+API refuses to serve without a coordinator behind it), so the shortcut this
+removes was already a half-working one.
+
+The three values, all defined in `.env.dev` (template: `.env.dev.example`,
+which also documents where else each must exist):
+
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project the browser signs in against |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | publishable key — **never** the service-role key |
+| `NEXT_PUBLIC_CLOUD_API` | which `apps/api` deployment this console calls |
 
 Nothing else is read from `process.env` in browser-reachable code. If you
 find yourself adding a new `NEXT_PUBLIC_*` variable, ask whether the value

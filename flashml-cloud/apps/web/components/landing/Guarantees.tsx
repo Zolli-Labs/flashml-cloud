@@ -55,7 +55,7 @@ export function Guarantees() {
             <Icon
               size={22}
               weight="duotone"
-              className="text-primary transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:-translate-y-0.5"
+              className="text-brand-foreground transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:-translate-y-0.5"
             />
             <h3 className="mt-5 text-lg font-semibold">{title}</h3>
             <p className="mt-2.5 max-w-[46ch] text-sm leading-relaxed text-muted-foreground">

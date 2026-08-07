@@ -17,20 +17,28 @@ import {
   PreflightRejected,
   cloudApiBase,
   acceptInvite,
+  approveAccessRequest,
   approveDeviceCode,
   bindMachineToPool,
   createPool,
   createPoolInvite,
+  declineAccessRequest,
   getJob,
+  getMe,
   getPool,
   getPoolInviteState,
+  listAccessRequests,
   listJobContributions,
   listJobRounds,
   listMachines,
+  listPoolMachines,
   listPools,
+  renamePool,
   revokePoolInvites,
+  submitAccessRequest,
   submitFromRepo,
   unbindMachineFromPool,
+  updateProfile,
 } from "./cloud-api";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -611,6 +619,173 @@ describe("cloud-api", () => {
       expect(init.method).toBe("DELETE");
       expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
       expect(result).toEqual({ revoked: 3 });
+    });
+  });
+
+  it("lists a pool's machines from the pool-scoped route", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, [{ id: "m1", owner_display_name: "Grace" }])
+    );
+
+    const rows = await listPoolMachines("vision");
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/v1alpha1\/pools\/vision\/machines$/);
+    expect(rows[0].owner_display_name).toBe("Grace");
+  });
+
+  it("renames a pool with a PATCH carrying a JSON name body", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { id: "vision", name: "Vision Lab" })
+    );
+
+    const pool = await renamePool("vision", "Vision Lab");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/v1alpha1\/pools\/vision$/);
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body)).toEqual({ name: "Vision Lab" });
+    expect(pool.name).toBe("Vision Lab");
+  });
+
+  it("escapes a pool id that would otherwise break the path", async () => {
+    // Guards the encodeURIComponent in both new calls: an unescaped id
+    // containing a slash would silently address a different route.
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+    await listPoolMachines("a/b");
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/v1alpha1\/pools\/a%2Fb\/machines$/);
+  });
+
+  describe("access requests", () => {
+    it("POSTs the onboarding submission to /v1alpha1/access-request", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, { access: "pending" }));
+
+      const result = await submitAccessRequest({
+        first_name: "Ha",
+        last_name: "Nguyen",
+        company_name: "VinAI",
+        role: "researcher",
+        team_size: "2_5",
+        use_case: "Fine-tune across the lab.",
+        compute_sources: ["own_machines"],
+      });
+
+      expect(result.access).toBe("pending");
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toContain("/v1alpha1/access-request");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body).company_name).toBe("VinAI");
+    });
+
+    it("surfaces a 409 as an ApiError carrying the API's detail", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(409, { detail: "this account's access is already decided" })
+      );
+
+      await expect(
+        submitAccessRequest({
+          first_name: "Ha",
+          last_name: "Nguyen",
+          company_name: "VinAI",
+          role: "researcher",
+          team_size: "2_5",
+          use_case: "x",
+          compute_sources: [],
+        })
+      ).rejects.toBeInstanceOf(ApiError);
+    });
+
+    it("lists the queue and passes the status through as a query param", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, []));
+
+      await listAccessRequests("declined");
+
+      expect(fetchMock.mock.calls[0][0]).toContain("status=declined");
+    });
+
+    it("POSTs to the approve route with the user id encoded", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, { status: "admitted" }));
+
+      await approveAccessRequest("a b/c");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toContain(encodeURIComponent("a b/c"));
+      expect(url).toContain("/approve");
+      expect(init.method).toBe("POST");
+    });
+
+    it("POSTs to the decline route", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, { status: "declined" }));
+
+      await declineAccessRequest("u1");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toContain("/decline");
+      expect(init.method).toBe("POST");
+    });
+  });
+
+  describe("acceptInvite after decoupling", () => {
+    it("reports joined:false when the account is not yet admitted", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { pool_id: "p1", name: "Lab", joined: false })
+      );
+
+      const result = await acceptInvite("fmi_abc");
+
+      expect(result.joined).toBe(false);
+      expect(result.name).toBe("Lab");
+    });
+  });
+
+  describe("getMe", () => {
+    it("surfaces access and is_admin, the two fields the shell switches on", async () => {
+      // The rail draws the Admin entry from this one response — adding a
+      // second request for `is_admin` would cost a round trip per console
+      // session for a boolean already on the wire.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          id: "u1",
+          admitted: false,
+          access: "pending",
+          is_admin: true,
+        })
+      );
+
+      const me = await getMe();
+
+      expect(me.access).toBe("pending");
+      expect(me.is_admin).toBe(true);
+    });
+  });
+
+  describe("updateProfile", () => {
+    it("PATCHes only the fields it is given", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { id: "u1", first_name: "Ha", company_name: "VinAI" })
+      );
+
+      await updateProfile({ first_name: "Ha", company_name: "VinAI" });
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.method).toBe("PATCH");
+      const body = JSON.parse(init.body);
+      expect(body).toEqual({ first_name: "Ha", company_name: "VinAI" });
+      expect(body).not.toHaveProperty("is_admin");
     });
   });
 });

@@ -9,12 +9,14 @@ import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { FleetTopology } from "@/components/jobs/FleetTopology";
 import { RoundProgress } from "@/components/jobs/RoundProgress";
 import { MemberCredits } from "@/components/jobs/MemberCredits";
+import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
 import { formatBytes } from "@/lib/utils";
 import {
   deriveAttempts,
   deriveProgress,
   deriveStallReason,
 } from "@/lib/job-activity";
+import { workspacePath } from "@/lib/workspace-scope";
 import {
   ApiError,
   NotAuthenticated,
@@ -129,6 +131,15 @@ export default function JobDetailPage({
     [job, tasks, events, now]
   );
 
+  // This route's path carries no pool id, so the rail would otherwise show
+  // no workspace tabs and "Choose a workspace" — one click out of a
+  // workspace losing all of its navigation. The job says which workspace it
+  // belongs to; the same `pool_id` the back link below uses. Above the early
+  // returns because it is a hook: while `job` is still null this passes
+  // `undefined`, which leaves the rail exactly as the URL alone would have
+  // it.
+  useWorkspaceHint(job?.pool_id);
+
   // Default the view by state: a failed job opens on the ledger, because
   // "why" is the only question you have. Opening it on a truncated metric
   // chart is a small cruelty. Once the user picks a view, theirs wins.
@@ -149,7 +160,7 @@ export default function JobDetailPage({
         <p className="text-sm text-muted-foreground">
           This job doesn&apos;t exist, or isn&apos;t yours.
         </p>
-        <Link href="/jobs" className="text-sm text-primary hover:underline">
+        <Link href="/jobs" className="text-sm text-brand-foreground hover:underline">
           Back to jobs
         </Link>
       </Shell>
@@ -164,7 +175,7 @@ export default function JobDetailPage({
         <button
           type="button"
           onClick={load}
-          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-white/[0.06]"
+          className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
         >
           Try again
         </button>
@@ -173,21 +184,29 @@ export default function JobDetailPage({
   }
 
   const name = job.spec?.metadata?.name ?? job.name ?? job.job_id;
+  const backHref =
+    job.pool_id != null ? workspacePath(job.pool_id, "jobs") : "/workspaces";
+  const backLabel = job.pool_id != null ? "Jobs" : "Crews";
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <Link
-        href="/jobs"
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        href={backHref}
+        className="inline-flex items-center gap-1.5 text-sm text-brand-foreground hover:underline"
       >
-        <ArrowLeft className="h-3.5 w-3.5" /> Jobs
+        <ArrowLeft className="h-3.5 w-3.5" /> {backLabel}
       </Link>
 
       <div className="mt-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="truncate font-mono text-2xl font-semibold">{name}</h1>
           <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
-            {[job.job_id, job.backend, job.deployment_profile]
+            {[
+              job.job_id,
+              job.backend,
+              job.deployment_profile,
+              job.submitted_by ? `by ${job.submitted_by}` : null,
+            ]
               .filter(Boolean)
               .join(" · ")}
           </p>
@@ -205,7 +224,7 @@ export default function JobDetailPage({
           </p>
         )}
         {stall && (
-          <p className="mt-3 flex items-start gap-2 border-t border-border pt-3 text-xs text-[var(--warning)]">
+          <p className="mt-3 flex items-start gap-2 border-t border-border pt-3 text-xs text-warning-foreground">
             <Warning className="mt-px h-3.5 w-3.5 shrink-0" weight="fill" />
             <span>{stall}</span>
           </p>
@@ -363,9 +382,9 @@ function NoMetrics() {
     <section className="rounded-lg border border-border bg-surface p-6">
       <h2 className="text-sm font-semibold">No training metrics for this job</h2>
       <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-        FlashML records a mean loss per round for federated runs. Independent
-        jobs report no model metrics today, so there is nothing to chart here
-        rather than an empty axis.
+        ZolliAI displays the mean loss that FlashML records for each federated
+        round. Independent jobs report no model metrics today, so there is
+        nothing to chart here rather than an empty axis.
       </p>
       <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted-foreground">
         Per-step curves need the workload to emit them through the event
@@ -409,7 +428,7 @@ function PlacementView({
           <section className="panel p-4">
             <h2 className="text-sm font-semibold">Where the work is</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              Scrub or replay to see the fleet at any moment of this run.
+              Scrub or replay to see the Crew at any moment of this run.
             </p>
             <div className="mt-4">
               <FleetTopology attempts={attempts} now={now} />
@@ -417,7 +436,7 @@ function PlacementView({
           </section>
 
           <section className="panel p-4">
-            <h2 className="text-sm font-semibold">Attempts by machine</h2>
+            <h2 className="text-sm font-semibold">Attempts by Zolli</h2>
             <p className="mt-1 text-xs text-muted-foreground">
               Reconstructed from the coordinator&apos;s lease and commit
               events.
@@ -438,7 +457,7 @@ function PlacementView({
             <table className="w-full min-w-[520px] text-left">
               <thead>
                 <tr className="border-b border-border">
-                  {["Task", "State", "Attempts", "Machine", "Lease ends"].map(
+                  {["Task", "State", "Attempts", "Zolli", "Lease ends"].map(
                     (h) => (
                       <th key={h} className="label-caps px-4 py-2 font-medium">
                         {h}
@@ -489,7 +508,7 @@ function ledgerTone(type: string): string {
     type.includes("LOST") ||
     type.includes("FROZEN")
   ) {
-    return "text-[var(--warning)]";
+    return "text-warning-foreground";
   }
   if (
     type.includes("ACCEPTED") ||
@@ -641,7 +660,7 @@ function ArtifactRow({
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center justify-between gap-3 font-mono text-xs">
-        <span className="truncate text-primary">{artifact.uri}</span>
+        <span className="truncate text-brand-foreground">{artifact.uri}</span>
         <span className="flex shrink-0 items-center gap-2">
           <span className="text-muted-foreground">
             {artifact.backend} · {formatBytes(artifact.size_bytes)}
@@ -652,7 +671,7 @@ function ArtifactRow({
               onClick={download}
               disabled={downloading}
               aria-label="Download artifact"
-              className="rounded p-1 hover:bg-white/[0.06] disabled:opacity-50"
+              className="rounded p-1 hover:bg-surface-2 disabled:opacity-50"
             >
               <DownloadSimple className={downloading ? "animate-pulse" : ""} />
             </button>

@@ -7,8 +7,17 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --color-cream: var(--cream);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-evergreen: var(--evergreen);
+  --color-warning-foreground: var(--warning-foreground);
+  --font-sans: var(--font-inter);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-fraunces);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -16,13 +25,20 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary: var(--primary);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  /* Without these two, `bg-popover` and `text-popover-foreground` generate
+     NOTHING in Tailwind v4 — utilities come from `--color-*` entries here,
+     not from the `--popover` values in `:root`. Every popover surface was
+     therefore rendering with no background: the select menu, the account
+     dropdown and the confirm dialogs were all transparent, with the page
+     behind them showing straight through the options. */
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -31,94 +47,64 @@
   --color-cyan-dim: var(--cyan-dim);
   --color-node-green: var(--node-green);
   --color-warning: var(--warning);
-  --color-surface: var(--surface);
   --color-surface-elevated: var(--surface-elevated);
   --color-bg-rail: var(--bg-rail);
   --color-accent-text: var(--accent-text);
 }
 
-/* ─── FlashML theme ───────────────────────────────────────────────
-   Dark, single-accent, indigo. Per
-   docs/superpowers/specs/2026-08-02-console-and-landing-redesign-design.md §4.1.
+/* ─── ZolliAI theme ───────────────────────────────────────────────
+   Warm paper surfaces give both the marketing site and console a common
+   visual language. Orange is reserved for brand and interaction; green,
+   amber, and red remain semantic system states. Compatibility names stay
+   in place while individual routes migrate to the ZolliAI vocabulary. */
+:root {
+  --cream: #faf8f5;
+  --surface: #fffdf9;
+  --surface-2: #f3ece4;
+  --ink: #1a1714;
+  --muted: var(--surface-2);
+  --muted-ink: #6f645a;
+  --brand: #ef6828;
+  --brand-hover: #d95319;
+  --brand-foreground: #a34015;
+  --evergreen: #1f6e5d;
+  --warning-foreground: #8a5a00;
 
-   Two rules the whole palette exists to enforce:
+  /* Existing component names, deliberately mapped to their warm peers. */
+  --background: var(--cream);
+  --foreground: var(--ink);
+  --surface-elevated: var(--surface);
+  --card: var(--surface);
+  --card-foreground: var(--ink);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink);
+  --bg-rail: var(--surface-2);
+  --primary: var(--brand);
+  --primary-foreground: var(--ink);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--ink);
+  --muted-foreground: var(--muted-ink);
+  --accent: #f3ece4;
+  --accent-foreground: var(--ink);
+  --destructive: #b64a42;
+  --node-green: var(--evergreen);
+  --warning: #e7ad2b;
+  --border: #e6dbd0;
+  --input: #a38269;
+  --focus: #a34015;
+  --ring: var(--focus);
+  --accent-text: var(--brand-hover);
 
-   1. INDIGO IS INTERACTIVE ONLY. Primary actions, links, icon tiles,
-      the current page, the focus ring. Nothing else. The previous teal
-      was on the nav AND the buttons AND the links AND the artifact URIs
-      AND the loss bars AND the headings, which is why it carried no
-      meaning. Every status uses a semantic hue instead.
+  /* Migration shims for unconverted console components. Do not use in new
+     UI; pages will move to `brand` and `evergreen` as they are reskinned. */
+  --cyan: var(--brand);
+  --cyan-dim: rgb(239 104 40 / 0.14);
 
-   2. DEPTH COMES FROM BORDER PLUS SURFACE STEP, never bloom. "Live" is
-      expressed as motion, not as colour, which keeps green/amber/red
-      unambiguous.
-   ─────────────────────────────────────────────────────────────────── */
-:root,
-.dark {
-  /* Base. Not a void: a very low lightness makes every hairline float,
-     and the surface steps below need somewhere to sit. */
-  --background: oklch(0.175 0.004 285);
-  --foreground: oklch(0.97 0 0);
-
-  /* Surface steps. Three, so elevation is legible without a border on
-     every element. */
-  --surface: oklch(0.195 0.005 285);
-  --surface-elevated: oklch(0.235 0.006 285);
-  --card: oklch(0.195 0.005 285);
-  --card-foreground: oklch(0.97 0 0);
-
-  --popover: oklch(0.235 0.006 285);
-  --popover-foreground: oklch(0.97 0 0);
-
-  /* The rail is a step DOWN from the content column, not up. */
-  --bg-rail: oklch(0.155 0.004 285);
-
-  /* Primary. Indigo, high chroma, and it earns that saturation by being
-     rare. */
-  --primary: oklch(0.55 0.21 285);
-  --primary-foreground: oklch(0.99 0 0);
-
-  --secondary: oklch(0.235 0.006 285);
-  --secondary-foreground: oklch(0.88 0.003 285);
-
-  --muted: oklch(0.235 0.006 285);
-  --muted-foreground: oklch(0.70 0.008 285);
-
-  /* Hover surfaces are NEUTRAL. A tinted hover on every control is what
-     made the old UI feel uniformly electric. */
-  --accent: oklch(1 0 0 / 0.06);
-  --accent-foreground: oklch(0.97 0 0);
-
-  /* Status. Semantic, and none of them is indigo. */
-  --destructive: oklch(0.62 0.20 25); /* failed, rejected            */
-  --node-green: oklch(0.72 0.17 150); /* accepted, healthy           */
-  --warning: oklch(0.78 0.14 80); /* recovering, degraded, expired   */
-
-  --border: oklch(1 0 0 / 0.09);
-  --input: oklch(1 0 0 / 0.11);
-  --ring: oklch(0.55 0.21 285 / 0.65);
-
-  /* Landing only. The lighter indigo used for the second half of a
-     two-tone headline; too light for UI chrome, correct for display type
-     where it needs to read against the background at 60px. */
-  --accent-text: oklch(0.80 0.13 285);
-
-  /* MIGRATION SHIM. `--cyan` and `--cyan-dim` are referenced by the
-     console pages (text-cyan, bg-cyan/10, border-cyan/30) which are not
-     part of this landing change. Pointing them at the new accent keeps
-     those screens coherent instead of half-migrated. Both names go away
-     with P1 (design system + shell); do not use them in new code. */
-  --cyan: oklch(0.55 0.21 285);
-  --cyan-dim: oklch(0.55 0.21 285 / 0.14);
-
-  /* Shadows carry the background hue, so elevation reads as this surface
-     being lit rather than a sticker dropped onto it. */
-  --shadow-color: 285 30% 4%;
-  --shadow-sm: 0 1px 2px oklch(0.08 0.01 285 / 0.4);
-  --shadow-md: 0 4px 12px -2px oklch(0.08 0.01 285 / 0.45);
-  --shadow-lg: 0 16px 40px -12px oklch(0.08 0.01 285 / 0.6);
-
-  --radius: 0.5rem;
+  --shadow-color: 24 24% 28%;
+  --shadow-sm: 0 1px 2px rgb(89 68 49 / 0.08);
+  --shadow-md: 0 8px 20px -12px rgb(89 68 49 / 0.2);
+  --shadow-lg: 0 20px 44px -24px rgb(89 68 49 / 0.28);
+  --radius: 0.625rem;
 }
 
 @layer base {
@@ -129,7 +115,7 @@
 
   html {
     @apply antialiased;
-    color-scheme: dark;
+    color-scheme: light;
     scroll-behavior: smooth;
   }
 
@@ -154,8 +140,8 @@
   }
 
   ::selection {
-    background: oklch(0.55 0.21 285 / 0.35);
-    color: oklch(0.99 0 0);
+    background: rgb(239 104 40 / 0.22);
+    color: var(--ink);
   }
 
   /* Display type: large, tight, and heavy. Default tracking at these
@@ -185,10 +171,22 @@
   }
 }
 
+/* `muted` remains a sand fill for the existing shadcn controls. It is not a
+   Tailwind color namespace: registering it would also generate an unsafe
+   generic text utility. Keep readable copy on
+   `text-muted-foreground` instead. */
+@utility bg-muted {
+  background-color: var(--muted);
+}
+
+@utility bg-muted-50 {
+  background-color: color-mix(in srgb, var(--muted) 50%, transparent);
+}
+
 /* ─── Grain ───────────────────────────────────────────────────────
-   A fixed, non-interactive noise layer. Large flat dark surfaces band
-   visibly on 8-bit panels, and the grain both hides that and gives the
-   glass below something to refract. Inlined as a data URI because a
+   A fixed, non-interactive paper texture. Large flat light surfaces can
+   feel sterile, so the grain gives glass something gentle to refract. It is
+   inlined as a data URI because a
    published Artifact/CSP context cannot fetch an external asset, and
    because one more network round-trip for 400 bytes is not worth it.
    ─────────────────────────────────────────────────────────────────── */
@@ -198,7 +196,7 @@
   inset: 0;
   z-index: 1;
   pointer-events: none;
-  opacity: 0.032;
+  opacity: 0.024;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -216,25 +214,25 @@
    and in a console where a changing value means a machine died, that is
    not a cosmetic cost. */
 .glass {
-  background: oklch(0.195 0.005 285 / 0.62);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border: 1px solid oklch(1 0 0 / 0.07);
+  background: rgb(255 253 249 / 0.78);
+  backdrop-filter: blur(20px) saturate(130%);
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
+  border: 1px solid rgb(230 219 208 / 0.92);
   box-shadow:
-    inset 0 1px 0 0 oklch(1 0 0 / 0.06),
-    inset 0 -1px 0 0 oklch(0 0 0 / 0.18),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.8),
+    inset 0 -1px 0 0 rgb(113 84 61 / 0.05),
     var(--shadow-md);
 }
 
 /* Denser variant for panels that sit over content and must stay legible
    while it scrolls behind them. */
 .glass-strong {
-  background: oklch(0.195 0.005 285 / 0.85);
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  border: 1px solid oklch(1 0 0 / 0.09);
+  background: rgb(255 253 249 / 0.92);
+  backdrop-filter: blur(28px) saturate(130%);
+  -webkit-backdrop-filter: blur(28px) saturate(130%);
+  border: 1px solid rgb(230 219 208 / 0.96);
   box-shadow:
-    inset 0 1px 0 0 oklch(1 0 0 / 0.07),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.9),
     var(--shadow-lg);
 }
 
@@ -244,7 +242,7 @@
 @supports not (backdrop-filter: blur(1px)) {
   .glass,
   .glass-strong {
-    background: oklch(0.195 0.005 285 / 0.97);
+    background: var(--surface);
   }
 }
 
@@ -252,7 +250,7 @@
 @media (prefers-reduced-transparency: reduce) {
   .glass,
   .glass-strong {
-    background: oklch(0.195 0.005 285 / 0.97);
+    background: var(--surface);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
@@ -275,7 +273,7 @@
 
 .ring-accent,
 .glow-green {
-  box-shadow: 0 0 0 1px oklch(0.55 0.21 285 / 0.35);
+  box-shadow: 0 0 0 1px rgb(239 104 40 / 0.42);
 }
 
 /* Was a text-shadow bloom on headings. Headings earn emphasis from size
@@ -307,7 +305,7 @@
 
 .card-hover:hover {
   transform: translateY(-2px);
-  border-color: oklch(1 0 0 / 0.14);
+  border-color: #d8c5b4;
   box-shadow: var(--shadow-lg);
 }
 
@@ -318,8 +316,19 @@
   outline: none;
   box-shadow:
     0 0 0 2px var(--background),
-    0 0 0 4px oklch(0.66 0.19 285 / 0.95);
+    0 0 0 4px var(--focus);
   border-radius: var(--radius-sm);
+}
+
+/* The dark-theme utility classes below predate the warm system. Keeping
+   these controls visibly responsive is a compatibility concern, not a page
+   reskin: they now step to the sand surface wherever they still appear. */
+body [class~="hover:bg-white/5"]:hover,
+body [class~="hover:bg-white/[0.03]"]:hover,
+body [class~="hover:bg-white/[0.04]"]:hover,
+body [class~="hover:bg-white/[0.06]"]:hover,
+body [class~="hover:bg-white/[0.08]"]:hover {
+  background-color: var(--surface-2);
 }
 
 /* ─── Terminal / code ─────────────────────────────────────────────── */
@@ -344,11 +353,11 @@
 
 @keyframes halo {
   0% {
-    box-shadow: 0 0 0 0 oklch(0.72 0.17 150 / 0.5);
+    box-shadow: 0 0 0 0 rgb(31 110 93 / 0.38);
   }
   70%,
   100% {
-    box-shadow: 0 0 0 6px oklch(0.72 0.17 150 / 0);
+    box-shadow: 0 0 0 6px rgb(31 110 93 / 0);
   }
 }
 
@@ -370,6 +379,7 @@
    into three and four lines. The ceiling is set by the longest line that
    has to fit, not by how large it can be made to look in isolation. */
 .display {
+  font-family: var(--font-fraunces), Georgia, serif;
   font-size: clamp(2.5rem, 6.5vw, 4.5rem);
   line-height: 0.98;
   letter-spacing: -0.042em;
@@ -378,6 +388,7 @@
 }
 
 .title {
+  font-family: var(--font-fraunces), Georgia, serif;
   font-size: clamp(1.75rem, 3.4vw, 2.75rem);
   line-height: 1.05;
   letter-spacing: -0.03em;
@@ -466,6 +477,85 @@
   animation: rise 420ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
 
+/* ─── Zolli motion ────────────────────────────────────────────────
+   These are deliberately small, transform/opacity-only gestures for the
+   character system. They are opt-in so dense operational UI stays still.
+   The base reduced-motion rule above stops all four without hiding a Zolli
+   or any state it illustrates. */
+@keyframes zolli-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes zolli-blink {
+  0%,
+  92%,
+  100% {
+    opacity: 1;
+  }
+  94%,
+  96% {
+    opacity: 0.18;
+  }
+}
+
+@keyframes zolli-wave {
+  0%,
+  72%,
+  100% {
+    transform: rotate(0deg);
+  }
+  80% {
+    transform: rotate(12deg);
+  }
+  88% {
+    transform: rotate(-8deg);
+  }
+}
+
+@keyframes zolli-handoff {
+  0%,
+  100% {
+    opacity: 0.7;
+    transform: translateX(0);
+  }
+  48% {
+    opacity: 1;
+    transform: translateX(8px);
+  }
+  52% {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  56% {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+}
+
+.zolli-bob {
+  animation: zolli-bob 3.6s ease-in-out infinite;
+}
+
+.zolli-blink {
+  animation: zolli-blink 5.4s ease-in-out infinite;
+}
+
+.zolli-wave {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: zolli-wave 3.2s ease-in-out infinite;
+}
+
+.zolli-handoff {
+  animation: zolli-handoff 2.8s ease-in-out infinite;
+}
+
 /* ─── Skeletons ───────────────────────────────────────────────────
    Shaped like the content they replace. A centred spinner tells you
    something is happening; a skeleton tells you what is arriving.
@@ -479,7 +569,7 @@
 .skeleton {
   position: relative;
   overflow: hidden;
-  background: oklch(1 0 0 / 0.045);
+  background: #eee5dc;
   border-radius: var(--radius-sm);
 }
 
@@ -491,7 +581,7 @@
   background: linear-gradient(
     90deg,
     transparent,
-    oklch(1 0 0 / 0.05),
+    rgb(255 253 249 / 0.84),
     transparent
   );
   animation: shimmer 1.6s infinite;
@@ -525,19 +615,19 @@
 }
 
 .flashml-flow {
-  --xy-controls-button-background-color: oklch(0.195 0.005 285 / 0.92);
-  --xy-controls-button-background-color-hover: oklch(0.235 0.006 285 / 0.96);
-  --xy-controls-button-color: oklch(0.70 0.008 285);
-  --xy-controls-button-color-hover: oklch(0.97 0 0);
-  --xy-controls-button-border-color: oklch(1 0 0 / 0.1);
-  --xy-controls-box-shadow: 0 0 0 1px oklch(1 0 0 / 0.08), var(--shadow-md);
+  --xy-controls-button-background-color: rgb(255 253 249 / 0.94);
+  --xy-controls-button-background-color-hover: var(--surface-2);
+  --xy-controls-button-color: var(--muted-foreground);
+  --xy-controls-button-color-hover: var(--ink);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: 0 0 0 1px rgb(230 219 208 / 0.8), var(--shadow-md);
 }
 
 .flashml-flow .react-flow__controls {
   overflow: hidden;
-  border: 1px solid oklch(1 0 0 / 0.08);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: oklch(0.175 0.004 285 / 0.92);
+  background: rgb(255 253 249 / 0.94);
 }
 
 .flashml-flow .react-flow__controls-button {
@@ -560,8 +650,8 @@
   background: linear-gradient(
     90deg,
     transparent,
-    oklch(1 0 0 / 0.12) 15%,
-    oklch(1 0 0 / 0.12) 85%,
+    rgb(115 90 69 / 0.24) 15%,
+    rgb(115 90 69 / 0.24) 85%,
     transparent
   );
 }
@@ -577,13 +667,13 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: oklch(1 0 0 / 0.1);
+  background: #cfbcab;
   border-radius: 9999px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: oklch(1 0 0 / 0.18);
+  background: #b79f8b;
   background-clip: content-box;
 }

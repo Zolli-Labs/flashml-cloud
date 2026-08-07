@@ -57,6 +57,7 @@ from starlette.concurrency import run_in_threadpool
 
 from flashruntime.protocol.v1alpha1 import JobSpec, NodeHeartbeat, NodeRegistration
 
+from flashml_cloud_api import access
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
@@ -75,6 +76,7 @@ from flashml_cloud_api.compile import (
     compile_to_jobspec,
 )
 from flashml_cloud_api.db import Machine
+from flashml_cloud_api.emails import derive_email_facts
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import UnknownImage, resolve_image
 from flashml_cloud_api.preflight import preflight, safe_text
@@ -290,6 +292,19 @@ def looks_like_machine_token(token: str | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Backoff between retries of an idempotent coordinator call that answered
+# with a gateway error. Sized for a cold start, not for a network blip: the
+# dev coordinator runs on a Render free plan and takes ~21s to wake, and a
+# submission that fails while it boots is indistinguishable to the user from
+# a broken repo. The sum outlasts a measured cold start with room to spare.
+GATEWAY_RETRY_DELAYS: tuple[float, ...] = (2.0, 5.0, 12.0)
+
+# Gateway-shaped statuses: the hop in front of the coordinator answered, the
+# coordinator itself did not. Anything else — a 4xx especially — is a real
+# answer and repeating it just multiplies a request that cannot succeed.
+GATEWAY_STATUSES = frozenset({502, 503, 504})
+
+
 class CoordinatorClient:
     """The only holder of the operator credential.
 
@@ -371,6 +386,33 @@ class CoordinatorClient:
                 raise HTTPException(
                     status_code=502, detail="coordinator unavailable"
                 ) from None
+
+
+async def forward_idempotent(
+    coordinator: CoordinatorClient,
+    method: str,
+    path: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """``forward`` plus a retry while the coordinator is still coming up.
+
+    ONLY for calls that are safe to repeat. The artifact PUT qualifies
+    because its key is a freshly minted uuid: a retry writes the same bytes
+    to the same never-before-used key, so repeating it cannot overwrite
+    another user's staged code, nor an earlier attempt of this same request.
+    Do not reach for this on job submission — a repeated POST there is a
+    duplicate job.
+    """
+    last = await coordinator.forward(method, path, **kwargs)
+    if last.status_code not in GATEWAY_STATUSES:
+        return last
+
+    for delay in GATEWAY_RETRY_DELAYS:
+        await asyncio.sleep(delay)
+        last = await coordinator.forward(method, path, **kwargs)
+        if last.status_code not in GATEWAY_STATUSES:
+            return last
+    return last
 
 
 def _passthrough(r: httpx.Response) -> Response:
@@ -499,6 +541,25 @@ async def _json_object(request: Request) -> dict[str, Any]:
     return parsed
 
 
+def _validated_pool_name(payload: dict[str, Any]) -> str:
+    """The one definition of a legal pool name, shared by the create and
+    rename routes.
+
+    They must agree — a name create would reject is a name rename must
+    reject too — and one function is what makes that structural instead of
+    two blocks that happen to match today.
+    """
+    raw = payload.get("name")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    name = raw.strip()
+    if len(name) > 200:
+        raise HTTPException(
+            status_code=400, detail="name is limited to 200 characters"
+        )
+    return name
+
+
 def _opt_str(value: Any, limit: int = 256) -> str | None:
     if not isinstance(value, str) or not value:
         return None
@@ -510,6 +571,17 @@ def _seg(value: str) -> str:
     shape of the forwarded URL (see ``PATH_SEGMENT_RE``)."""
     if not isinstance(value, str) or not PATH_SEGMENT_RE.match(value):
         raise HTTPException(status_code=400, detail="invalid path segment")
+    return value
+
+
+def _uuid_or_400(value: str) -> str:
+    """A path segment that reaches a WHERE clause. psycopg parameterises it
+    safely, but a malformed uuid raises a DataError that would surface as a
+    500 — a 400 is the honest answer."""
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="invalid user id") from None
     return value
 
 
@@ -697,13 +769,35 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ) -> str:
-        """current_user plus the alpha's invite gate. Reads (jobs, machines,
-        /me) stay open to un-admitted accounts — the console needs /me to
-        know to SHOW the enter-invite screen — but everything that creates
-        state requires admission. 403, not 404: unlike a resource id, the
-        gate's existence is not a secret."""
+        """current_user plus the account-admission gate. Reads (jobs,
+        machines, /me) stay open to un-admitted accounts — the console needs
+        /me to know which screen to show instead of the product — but
+        everything that creates state requires admission. Admission is no
+        longer invite-driven: an admin grants it by deciding the account's
+        access request (see ``access_state_for`` / 0009). 403, not 404:
+        unlike a resource id, the gate's existence is not a secret."""
         if not dbmod.profile_is_admitted(db, user_id):
-            raise HTTPException(status_code=403, detail="invite required")
+            raise HTTPException(status_code=403, detail="access not yet approved")
+        return user_id
+
+    def admin_user(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ) -> str:
+        """current_user plus the admin flag. 403, not 404, for the same
+        reason `admitted_user` gives: unlike a resource id, the gate's
+        existence is not a secret.
+
+        `is_admin` has no granting route anywhere in this API, deliberately.
+        It is set with one UPDATE against the owner's own row.
+
+        Admission is NOT admin: an ordinary account that is fully through
+        the gate still fails here, which is the whole point — the queue is
+        the only surface that grants product access, so anything less than
+        this would let any signed-in account admit itself.
+        """
+        if not dbmod.profile_is_admin(db, user_id):
+            raise HTTPException(status_code=403, detail="admin required")
         return user_id
 
     async def proxy(
@@ -860,17 +954,30 @@ def create_cloud_app(
     ):
         # Additive: every existing key from upsert_profile is unchanged, and
         # this is the one route an un-admitted account MUST be able to
-        # read — it is how the console learns to show the enter-invite
-        # screen instead of the product itself.
+        # read — it is how the console learns which screen to show instead
+        # of the product itself.
         profile = _jsonable(dbmod.upsert_profile(db, user_id))
         profile["admitted"] = dbmod.profile_is_admitted(db, user_id)
+        # `access` is the four-state version `admitted` cannot express:
+        # a signed-in account that has not filled the form is neither
+        # admitted nor refused.
+        profile["access"] = dbmod.access_state_for(db, user_id)
+        # Read-only, and the console's only source for whether to draw the
+        # admin queue's entry in its rail. Still granted by one manual SQL
+        # UPDATE and by nothing else: `PATCH /me` never writes it, and
+        # the `admin_user` dependency re-checks it on every queue route, so
+        # exposing it here changes what is *drawn*, never what is allowed.
+        profile["is_admin"] = dbmod.profile_is_admin(db, user_id)
         return profile
 
-    # Display name is the ONE profile field a user owns. Email and avatar come
-    # from the identity provider and are not ours to edit; github_login is set
-    # by enrolment; is_host/is_developer are roles, not preferences. So this
-    # takes exactly one field and ignores anything else in the body rather
-    # than letting a client hand us a role.
+    #: Fields a user owns. Everything absent from this map is either the
+    #: identity provider's (email, avatar), written by enrolment
+    #: (github_login), or a role rather than a preference (is_host,
+    #: is_developer, is_admin, admitted_at). A client handing us one of
+    #: those is not rejected with an error naming it; it is never read.
+    _PATCHABLE_TEXT = {"first_name": 80, "last_name": 80, "company_name": 160}
+    _PATCHABLE_ENUM = {"role": access.ROLES, "team_size": access.TEAM_SIZES}
+
     @app.patch("/v1alpha1/me", tags=["browser"])
     async def update_me(
         request: Request,
@@ -878,13 +985,13 @@ def create_cloud_app(
         db: psycopg.Connection = Depends(db_conn),
     ):
         payload = await _json_object(request)
+        fields: dict[str, str] = {}
+
         raw = payload.get("display_name")
         if raw is not None and not isinstance(raw, str):
             raise HTTPException(
                 status_code=400, detail="display_name must be a string or null"
             )
-
-        name: str | None = None
         if isinstance(raw, str):
             name = raw.strip()
             if len(name) > 80:
@@ -899,8 +1006,133 @@ def create_cloud_app(
                 raise HTTPException(
                     status_code=400, detail="display_name cannot be empty"
                 )
+            fields["display_name"] = name
 
-        return _jsonable(dbmod.upsert_profile(db, user_id, display_name=name))
+        for field, cap in _PATCHABLE_TEXT.items():
+            value = payload.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise HTTPException(status_code=400, detail=f"{field} must be a string")
+            trimmed = value.strip()
+            if not trimmed:
+                raise HTTPException(status_code=400, detail=f"{field} cannot be empty")
+            if len(trimmed) > cap:
+                raise HTTPException(
+                    status_code=400, detail=f"{field} is limited to {cap} characters"
+                )
+            fields[field] = trimmed
+
+        for field, allowed in _PATCHABLE_ENUM.items():
+            value = payload.get(field)
+            if value is None:
+                continue
+            if value not in allowed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field} must be one of: {', '.join(sorted(allowed))}",
+                )
+            fields[field] = value
+
+        return _jsonable(dbmod.update_profile_fields(db, user_id, **fields))
+
+    # `current_user`, not `admitted_user`: this route is how an un-admitted
+    # account asks to be admitted. Gating it behind admission would make the
+    # only way in require already being in.
+    @app.post("/v1alpha1/access-request", tags=["browser"])
+    async def create_access_request(
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # A POSITIVE allow-list, not a denylist of decided states: only
+        # "needs_onboarding" (never asked) and "pending" (already asked,
+        # not yet decided — resubmitting to edit the answer is allowed)
+        # may proceed. `access_state_for` is the single source of truth for
+        # this account's state, and any state this route doesn't
+        # explicitly recognise as submittable — "admitted", "declined", or
+        # one added later — must fail closed (refused) rather than open
+        # (silently allowed through), which a denylist of just
+        # ("admitted", "declined") would not guarantee.
+        #
+        # This also closes a real defect: `submit_access_request`'s
+        # bare-INSERT branch (the first time an account ever submits) has
+        # no `where status = 'pending'` guard, because there is no existing
+        # row for it to guard. An account carrying `admitted_at` with NO
+        # access_requests row — exactly what a hand-run
+        # `UPDATE public.profiles SET admitted_at = now()` produces — would
+        # otherwise sail through that bare INSERT and manufacture a fresh
+        # `pending` row for an account that is already admitted.
+        state = dbmod.access_state_for(db, user_id)
+        if state not in ("needs_onboarding", "pending"):
+            # Re-submitting after a decision would reset it to pending —
+            # silently un-deciding something an admin decided. An admitted
+            # account edits these fields through PATCH /v1alpha1/me.
+            raise HTTPException(
+                status_code=409, detail="this account's access is already decided"
+            )
+
+        payload = await _json_object(request)
+        try:
+            submission = access.parse_submission(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        # Derived, never accepted from the body: the domain is a fact about
+        # the verified signup address, not a claim the client gets to make.
+        domain, personal = derive_email_facts(dbmod.email_for_user(db, user_id))
+
+        dbmod.upsert_profile(db, user_id)  # the FK target must exist
+        dbmod.submit_access_request(
+            db, user_id, submission,
+            email_domain=domain, is_personal_email=personal,
+        )
+        return {"access": dbmod.access_state_for(db, user_id)}
+
+    # -- the admin queue ----------------------------------------------------
+    #
+    # EVERY route below sits on ``admin_user``. One of them left on
+    # ``current_user`` would not be a smaller bug than three: this is the
+    # only surface in the system that grants product access, so a single
+    # ungated write is a privilege escalation for every signed-in account.
+
+    @app.get("/v1alpha1/admin/access-requests", tags=["admin"])
+    async def list_requests(
+        status: str = "pending",
+        _admin: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        # Validated HERE, because `list_access_requests` does not check its
+        # argument against the CHECK constraint — an unknown status matches
+        # no row and returns [], which renders as "nobody is waiting". A
+        # typo must not look like an empty queue.
+        if status not in ("pending", "admitted", "declined"):
+            raise HTTPException(status_code=400, detail="unknown status")
+        return [_jsonable(r) for r in dbmod.list_access_requests(db, status=status)]
+
+    @app.post("/v1alpha1/admin/access-requests/{user_id}/approve", tags=["admin"])
+    async def approve_request(
+        user_id: str,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        _uuid_or_400(user_id)
+        # 404, not 200, when nothing was pending: reporting success for a
+        # call that changed nothing is how a queue silently stops working.
+        if not dbmod.approve_access_request(db, user_id, decided_by=admin_id):
+            raise HTTPException(status_code=404, detail="no pending request")
+        return {"user_id": user_id, "status": "admitted"}
+
+    @app.post("/v1alpha1/admin/access-requests/{user_id}/decline", tags=["admin"])
+    async def decline_request(
+        user_id: str,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        _uuid_or_400(user_id)
+        if not dbmod.decline_access_request(db, user_id, decided_by=admin_id):
+            raise HTTPException(status_code=404, detail="no pending request")
+        return {"user_id": user_id, "status": "declined"}
 
     @app.get("/v1alpha1/machines", tags=["browser"])
     async def list_machines(
@@ -1030,14 +1262,7 @@ def create_cloud_app(
         db: psycopg.Connection = Depends(db_conn),
     ):
         payload = await _json_object(request)
-        raw_name = payload.get("name")
-        if not isinstance(raw_name, str) or not raw_name.strip():
-            raise HTTPException(status_code=400, detail="name is required")
-        name = raw_name.strip()
-        if len(name) > 200:
-            raise HTTPException(
-                status_code=400, detail="name is limited to 200 characters"
-            )
+        name = _validated_pool_name(payload)
         pool = dbmod.create_pool(db, name=name, owner_id=user_id)
         return _jsonable(pool)
 
@@ -1066,6 +1291,64 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown pool")
         members = dbmod.list_pool_members(db, pool_id)
         return {**_jsonable(pool), "members": [_jsonable(m) for m in members]}
+
+    @app.get("/v1alpha1/pools/{pool_id}/machines", tags=["browser"])
+    async def list_pool_machines_route(
+        pool_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Every machine this pool has, across all of its members.
+
+        Authorize BEFORE listing, exactly as ``get_pool_route`` does:
+        ``list_pool_machines`` takes no viewer param by design, so membership
+        has to be established here, first, or any pool's fleet would be
+        readable by anyone who could guess an id. 404, not 403 — see
+        ``fetch_pool_for_member``'s own docstring.
+        """
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            # A pool_id that is not even a uuid. Same answer as one that
+            # simply is not yours.
+            pool = None
+        if pool is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        return [_jsonable(m) for m in dbmod.list_pool_machines(db, pool_id)]
+
+    @app.patch("/v1alpha1/pools/{pool_id}", tags=["browser"])
+    async def rename_pool_route(
+        pool_id: str,
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Rename a pool. Owner only — checked here, against this pool's
+        row, before anything is written. 404, not 403, whether the pool does
+        not exist, the caller is a stranger to it, or the caller is a member
+        who simply isn't its owner: the same doctrine, and for the same
+        reason, as the three invite routes.
+
+        Not gated by ``admitted_user``, for the reason
+        ``create_pool_invite_route`` states: renaming a pool already requires
+        owning one, and owning one already required admission at create time.
+        """
+        try:
+            pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            pool = None
+        if pool is None or str(pool["owner_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="unknown pool")
+
+        # Ownership first, validation second: a non-owner must get the same
+        # 404 for a well-formed name as for a malformed one, or the error
+        # code itself tells them the pool is real.
+        name = _validated_pool_name(await _json_object(request))
+
+        updated = dbmod.rename_pool(db, pool_id=pool_id, name=name)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="unknown pool")
+        return _jsonable(updated)
 
     @app.put(
         "/v1alpha1/pools/{pool_id}/machines/{machine_id}",
@@ -1248,17 +1531,25 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The admission bootstrap itself — deliberately on ``current_user``,
-        not ``admitted_user``: the entire point of this route is that an
-        un-admitted, possibly brand-new account can call it.
+        """Redeem a workspace invite — deliberately on ``current_user``, not
+        ``admitted_user``: a not-yet-admitted account is exactly who calls
+        this, and gating it behind admission would make the only path in
+        require already being in.
+
+        Accepting no longer admits (0009). An admitted caller joins the
+        pool outright; anybody else has the join banked on their access
+        request and lands in the pool when an admin approves them. That is
+        what ``joined`` reports, so the console can tell "you are in the
+        workspace" from "you will be, once you are approved".
         """
         payload = await _json_object(request)
         token = payload.get("token")
         if not isinstance(token, str) or not token:
             raise HTTPException(status_code=400, detail="token required")
         # The account may be signing in for the very first time — upsert
-        # the profile row before consuming the invite, since consume_pool_
-        # invite's membership/admission writes both carry a FK to it.
+        # the profile row before consuming the invite. Both of consume_pool_
+        # invite's outcomes carry a FK to it: pool_members.user_id when the
+        # join lands, access_requests.user_id when it is only banked.
         dbmod.upsert_profile(db, user_id)
         result = dbmod.consume_pool_invite(
             db, token_hash=hash_invite_token(token), user_id=user_id
@@ -1267,7 +1558,11 @@ def create_cloud_app(
             # Unknown, expired, and exhausted all land here, indistinguishably
             # — same fold consume_pool_invite itself documents.
             raise HTTPException(status_code=404, detail="invalid or expired invite")
-        return {"pool_id": str(result["pool_id"]), "name": result["name"]}
+        return {
+            "pool_id": str(result["pool_id"]),
+            "name": result["name"],
+            "joined": result["admitted"],
+        }
 
     # -- browser-facing: job ownership --------------------------------------
     #
@@ -1463,7 +1758,8 @@ def create_cloud_app(
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
 
-        upload = await coordinator.forward(
+        upload = await forward_idempotent(
+            coordinator,
             "PUT",
             f"/v1alpha1/artifacts/{code_key}",
             content=tar_bytes,
@@ -1474,6 +1770,19 @@ def create_cloud_app(
                 json.dumps({"text": "staging the repo artifact failed",
                             "status": upload.status_code})
             )
+            # Two different failures, two different things for the user to do.
+            # A gateway status means the coordinator is still booting and
+            # waiting is the whole fix; the old copy ("could not stage the
+            # repo") sent people off to debug a repo that was never the
+            # problem.
+            if upload.status_code in GATEWAY_STATUSES:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "the coordinator is starting up and did not accept the "
+                        "upload in time — try again in about a minute"
+                    ),
+                )
             raise HTTPException(status_code=502, detail="could not stage the repo")
 
         if config.is_federated:
@@ -1585,45 +1894,30 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        owned = dbmod.list_job_ids_for_owner(db, user_id)
+        # One query for both halves of visibility — owned, and reachable
+        # through a shared pool — carrying the pool_id and submitter the
+        # console renders. This replaced two queries whose ids were unioned
+        # in Python; the union is now in the SQL, and it no longer discards
+        # the columns that came back with it.
+        scopes = dbmod.list_job_scopes_for_viewer(db, user_id)
         # A federated parent id names no coordinator job, so it can never
         # match anything in the coordinator's list; dropping it here is what
         # lets a user whose only jobs are federated skip the round trip
         # entirely instead of fetching a list to throw all of it away.
-        owned = {j for j in owned if not fedavgmod.is_federated_job_id(j)}
-        # The third source: jobs the caller can see through pool membership
-        # but does not own outright. Same federated-id drop as `owned`, same
-        # reason — a pool-scoped federated parent id is still not anything
-        # the coordinator's list can match.
-        pool_ids = {
-            j for j in dbmod.list_pool_job_ids_for_member(db, user_id)
-            if not fedavgmod.is_federated_job_id(j)
-        }
-        # A plain set union, not two separate membership checks against the
-        # coordinator's list: a viewer who is also the owner has their job
-        # id in both `owned` and `pool_ids`, and this is what collapses that
-        # back to exactly one entry rather than two.
-        seen = owned | pool_ids
+        seen = {j for j in scopes if not fedavgmod.is_federated_job_id(j)}
+
         # A federated run is one coordinator job per round, so it is not in
         # the coordinator's list at all and has to be added from this table.
-        # Empty for every user who has never submitted one, which is what
-        # keeps this list byte-identical to before for them.
-        #
-        # `list_federated_jobs_for_viewer`, not `..._for_owner`: a pool
-        # member must be able to *discover* a teammate's federated run here,
-        # not merely open it once they already have its id.
-        # `fetch_job_for_viewer` already admits that direct-by-id read; this
-        # is the other half — without it the run would never surface in the
-        # list at all for anyone but its owner. One flat `WHERE owner_id = %s
-        # OR EXISTS(...)` select, so — unlike the coordinator-sourced half
-        # above — no separate dedup is needed here: a job id appears in this
-        # table once, and this query returns each matching row once.
+        # `list_federated_jobs_for_viewer` applies the same owner-or-member
+        # predicate as `scopes`, so every id it returns is already a key
+        # there — the `.get` default is belt-and-braces, not a real branch.
         federated = [
             {
                 "job_id": row["id"],
                 "name": row.get("name"),
                 "state": row.get("status"),
                 "mode": "federated",
+                **scopes.get(row["id"], {"pool_id": None, "submitted_by": None}),
             }
             for row in dbmod.list_federated_jobs_for_viewer(db, user_id)
         ]
@@ -1641,11 +1935,14 @@ def create_cloud_app(
         if not isinstance(jobs, list):
             return _passthrough(r)
         # The coordinator has no notion of accounts and returns every job
-        # unscoped behind the operator token; this table (owned or reachable
+        # unscoped behind the operator token; `scopes` (owned or reachable
         # through a shared pool) is the only place that filter can be
-        # applied.
+        # applied — and now also the only place the workspace label comes
+        # from, since the coordinator has never heard of pools.
         return [
-            j for j in jobs if isinstance(j, dict) and j.get("job_id") in seen
+            {**j, **scopes[j["job_id"]]}
+            for j in jobs
+            if isinstance(j, dict) and j.get("job_id") in seen
         ] + federated
 
     @app.get("/v1alpha1/jobs/{job_id}", tags=["browser"])
@@ -1688,9 +1985,30 @@ def create_cloud_app(
                 "finished_at": (
                     str(row["finished_at"]) if row.get("finished_at") else None
                 ),
+                "pool_id": (
+                    None if row.get("pool_id") is None else str(row["pool_id"])
+                ),
+                "submitted_by": dbmod.display_name_for(db, row["owner_id"]),
             }
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}")
-        return _passthrough(r)
+        # Merge the workspace label in rather than passing the coordinator's
+        # body straight through: the detail page renders its own breadcrumb
+        # and may have been deep-linked, so it cannot rely on having loaded
+        # the list. `row` is already in hand from the visibility check above,
+        # so this costs one profile lookup and no extra job query.
+        if r.status_code >= 300:
+            return _passthrough(r)
+        try:
+            job = r.json()
+        except ValueError:
+            return _passthrough(r)
+        if not isinstance(job, dict):
+            return _passthrough(r)
+        job["pool_id"] = (
+            None if row.get("pool_id") is None else str(row["pool_id"])
+        )
+        job["submitted_by"] = dbmod.display_name_for(db, row["owner_id"])
+        return job
 
     @app.get("/v1alpha1/jobs/{job_id}/rounds", tags=["browser"])
     async def get_job_rounds(

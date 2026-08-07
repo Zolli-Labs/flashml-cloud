@@ -172,6 +172,180 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-05 — Ship the ZolliAI visual rebrand POC (flashml-cloud/web)
+
+What/why: rebranded the complete web frontend from FlashML Cloud to ZolliAI's
+warm cream/orange visual system. Each hosted machine is presented as a Zolli
+and a workspace fleet as a Crew, with six accessible character roles, a new
+animated landing narrative, and matching auth, onboarding, console, empty,
+error, and documentation surfaces. The backend, API, routes, runtime, CLI,
+protocol names, and data contracts remain FlashML and are deliberately deferred.
+
+How verified: web Vitest 23 files/243 tests passed; ESLint and
+`tsc --noEmit` exited 0; the network-enabled Next.js production build compiled
+and generated 19/19 static pages. Browser QA covered 1440, 768, and 390 px:
+responsive nav compression/menu, anchors, CTA routes, sign-in/signup toggle,
+keyboard Escape/focus behavior, clean console, and no horizontal overflow.
+
+Gotchas: authenticated Crew-console routes were not re-exercised end to end in
+this visual slice because QA had no authenticated browser session. The one
+visible `machine online` string in `WorkspaceHeader` belongs to a concurrent
+uncommitted console change and was preserved. Use `localhost`, not `127.0.0.1`,
+for browser QA so the Next.js HMR websocket and client motion hydrate normally.
+
+Next: validate authenticated Crew flows against the dev stack, then plan the
+separate underlying FlashML runtime/API/package rebrand if ZolliAI is adopted.
+
+### 2026-08-04 — Hands-on QA of the dev console: 65 cases, 11 bugs, 6 fixed (flashml-cloud)
+
+What/why: first end-to-end manual pass over the deployed dev environment —
+signup, admission, workspaces, invites, submit, device enrolment, admin
+queue — driven through a real browser plus a real `flashnode` agent. 65
+cases, 54 passed, 11 defects. Six fixed here; the rest are logged below with
+the reason they were left.
+
+How verified: api `pytest -q` 770 passed/1 skipped/1 deselected/1 xfailed
+(was 767 — three new retry tests); web `vitest` 22 files/240 passed (was
+20/223 — `plural`, `member-identity`, plus cases in `onboarding-options` and
+`access-screen`); `make e2e` 70 passed; `npx next build` clean with `.env.dev`
+loaded. Each fix re-checked in the browser against the dev stack: dropdowns
+now read "ML engineer"/"2–5 people", header reads "1 person", the People row
+no longer prints a UUID, `/admin/requests` shows "Checking your access…" for
+a non-admin while a real admin still reaches the queue.
+
+Root causes, not symptoms:
+- **Repo submit failed on the first try of every session (was the worst
+  one).** The API packs the repo, then PUTs the tarball to the coordinator;
+  `flashml-dev-coordinator` is a Render FREE web service and spins down, so
+  that PUT got a 502 while it cold-started (measured: 21.3s to answer
+  `/healthz`). The user was told "could not stage the repo", which sends
+  people to debug a repo that was fine. Fixed with `forward_idempotent` —
+  retry only on 502/503/504, only for calls safe to repeat (the artifact key
+  is a fresh uuid), delays (2, 5, 12)s — plus a message that names the real
+  cause. Prod's coordinator is a starter-plan pserv and does not spin down
+  the same way.
+- **Base UI's `Select.Value` renders the VALUE, not the item's label.** This
+  is not Radix. Every trigger showed `ml_engineer` / `2_5` / `friend` while
+  the open list beside it showed the right words. `labelFor()` + a child
+  function at all five call sites.
+- **`FLASHML_CONSOLE_URL` was set on no service, ever.** The fallback is a
+  relative `/activate`, and `settings.py` justified that as cosmetic because
+  "a human can still find the page from whatever host they are on". They
+  cannot: the string is printed by `flashnode login` into a TERMINAL on a
+  volunteer's own laptop. Set on both API services in `render.yaml`, comment
+  corrected, and `from_env` now warns when it is unset.
+- **The optimistic access gate was right everywhere except `/admin`.**
+  Rendering the console while `GET /me` is in flight avoids a spinner for the
+  admitted majority — but on the admin queue it painted the whole page to an
+  account that was neither admitted nor admin. Nothing leaked (no request
+  fires, the API refuses independently); the cost/benefit simply inverts on a
+  route only admins open. `ADMIN_ROUTE` + a `loading` screen.
+
+Gotchas: **`render.yaml` is not the deployed truth** — per the 2026-08-02
+entry, autoDeploy never re-reads the blueprint, so `FLASHML_CONSOLE_URL` must
+also be set in the Render dashboard (or the blueprint re-synced) or the fix
+ships as a no-op. Also: `./scripts/dev.sh --all` starts an API and
+coordinator the console never calls — `.env.dev(.example)` points
+`NEXT_PUBLIC_CLOUD_API` at `flashml-dev-api.onrender.com`, so local API edits
+do not reach the local console, and `AGENTS.md`'s stated reason for running
+`dev.sh` no longer describes what happens.
+
+Next: `flashnode work` ignores the coordinator `login` enrolled against and
+dies on a bare 401 — the CLI prints that exact command as the next step, so a
+volunteer's first move fails. It lives in the PUBLIC repo, so it needs a
+flashnode release plus the four pins moved together. Parking lot, all
+deliberately not done: the `/pools/join` nav rail showing "My machines" to a
+pending user; "Cancel job" offering a confirm for a federated cancel the API
+answers 501 to; the account display name going stale in the header until
+reload; decline having no confirmation step where job-cancel has one.
+
+### 2026-08-04 — Workspace console: /w/[poolId] tabs over one WorkspaceProvider, plus dead-code sweep (flashml-cloud)
+
+What/why: 18-task plan lands the console as workspace-scoped: `/w/[poolId]/`
+(Overview, Jobs, Machines, People, Settings, submit) over one
+`WorkspaceProvider`, fetched once and keyed on `poolId` so switching
+remounts. API grew `pool_id`+submitter on job rows (collapsing two scoping
+queries into one), `GET /pools/{id}/machines`, `PATCH /pools/{id}` rename.
+Machines stay personal; jobs always belong to a workspace, so submit's "no
+pool — public queue" option is gone — its `lib/pool-selection.ts` support is
+now dead, deleted with its test (grep confirmed hits only in those two
+files). Legacy `/overview|/jobs|/pools|/submit` are resolvers;
+`/pools/[poolId]` redirects into `/w/[poolId]`. The personal fleet moved to
+`/account/machines` (static redirect from `/machines`). Spec:
+`flashml-cloud/docs/superpowers/specs/2026-08-03-workspace-console-design.md`.
+
+How verified: web tsc clean; `npm test` 16 files/176 passed (was 17/185 —
+`pool-selection.test.ts` deleted, then `earlierJobs`/`isEarlierJob` cases
+removed; both expected, neither a regression); `npm run build` lists
+`/pools/join`, `/workspaces`, `/account/machines`, all 7 `/w/[poolId]/*`
+routes. api `pytest -q`: 766 passed/1 skipped/1 deselected/1 xfailed.
+
+Gotchas: a `next.config.ts` redirect for `/pools/:poolId` would swallow
+`/pools/join` (config redirects match before routing) — the redirect lives
+in the page instead. UI says "workspace", code says "pool", deliberately;
+noted in `flashml-cloud/AGENTS.md`. Two "onboarding" features nearly shipped
+and are distinct: account-admission shell state (separate workstream) vs.
+no-workspace-yet route, which is `/workspaces`. Spec §1.3 was REVERSED
+mid-plan: the "Earlier jobs" page for pre-workspace rows was cancelled once
+the owner checked the data and found them to be their own test rows, not
+tester history. Those jobs now appear in no list; they stay in the database
+and stay reachable at `/jobs/<id>`. The design weighed three options against
+an assumption about production data — check the rows first next time.
+
+Next: 18/18 tasks done. Parking lot, from the design doc §9 and the final
+review: activity feed; remove-member/leave/delete-workspace routes; roles
+beyond owner/member; and the `token_prefix` breadth on
+`GET /pools/{id}/machines`.
+
+### 2026-08-04 — Signup profile + access requests: an invite joins a workspace, an admin grants access (flashml-cloud)
+
+What/why: two problems, one flow. Nothing was known about anyone — an
+account was an email and maybe a display name — and uninvited signup was a
+dead end: you landed in the console, were told to paste a code you did not
+have, and nothing queued or notified. `admitted_at` meant two things at
+once (allowed into FlashML, member of a pool), so redeeming a pool invite
+was the only door. Those are now separate. Access is an account property an
+admin decides through `public.access_requests`; pool membership stays a
+workspace property its owner decides. An onboarding form doubles as the
+access request, and an admin queue approves or declines it.
+
+How verified: api 766 passed / 1 skipped (pre-existing `test_compile`
+gpuPerTask) / 1 deselected (network-marked) / 1 xfailed; web 214 passed
+across 18 files; `tsc --noEmit`, `npm run lint`, `npm run build` all clean.
+26 commits on `access-requests`, every task individually reviewed plus a
+final whole-branch review. Three properties were mutation-tested rather
+than read: removing `with db.transaction():` from `approve_access_request`
+fails exactly the new rollback test; downgrading the admin gate to
+`current_user` fails two authorization tests; changing `INVITE_ROUTE` fails
+only its pinned-value assertion. Migrations 0001–0008 untouched (no
+checksum drift); 0009 is additive and its backfill is idempotent.
+
+Gotchas: (1) `access` is DERIVED, never stored — the request row wins,
+falling back to `profiles.admitted_at` when there is no row, with a
+`pending` row carrying a NULL `use_case` (an invite-banked stub) reading as
+`needs_onboarding`. 0009's backfill is load-bearing: without it every
+grandfathered tester would be shown a signup form. (2) Approval is SILENT.
+There is no email provider anywhere in this repo and Supabase's built-in
+SMTP is ~2/hour project-wide — the same constraint that removed magic
+links. You approve with a click; you tell the person by hand. No copy
+anywhere may imply otherwise. (3) `is_admin` is granted by ONE manual SQL
+UPDATE and has no UI, deliberately — but grant it to an account that is
+ALREADY admitted. A fresh un-onboarded admin lands on the onboarding form
+and cannot reach their own queue (fails closed, self-recoverable, still
+ten confusing minutes). (4) Revoking is NOT just clearing `admitted_at`:
+`access_state_for` reads the request row first, so a revoke that clears the
+flag but leaves the row saying `admitted` yields an account every API gate
+refuses while `/me` reports `access: "admitted"`. Both must move in one
+transaction. (5) Editing a pending request resets `requested_at`, and the
+queue is ordered by it — a tester who fixes a typo moves to the back.
+
+Next: Task 14's manual walkthrough against a running stack (sign up, submit,
+approve, redeem an invite pre-approval, confirm the pool join materialises).
+Parking lot: revocation (needs its own route, audit trail, and a decision
+about pool memberships and running jobs); a real email provider, which
+would also give this deployment password reset; queue pagination.
+
+
 ### 2026-08-03 — Pools v1.1: device opt-in, trust badges, group link, connect panel (flashml-cloud)
 
 What/why: dogfooding v1 team pools surfaced four rough edges in the first

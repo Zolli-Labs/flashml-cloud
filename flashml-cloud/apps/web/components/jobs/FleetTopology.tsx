@@ -47,7 +47,7 @@ type MachineData = {
 function CoordinatorNode() {
   return (
     <div className="rounded-lg border border-primary/40 bg-primary/10 px-4 py-3 text-center">
-      <div className="font-mono text-[11px] text-primary">coordinator</div>
+      <div className="font-mono text-[11px] text-brand-foreground">coordinator</div>
       <div className="meta mt-0.5">holds the queue</div>
     </div>
   );
@@ -184,7 +184,7 @@ export function FleetTopology({
         target: m,
         animated: live && !reduce,
         style: {
-          stroke: live ? "var(--primary)" : "oklch(1 0 0 / 0.10)",
+          stroke: live ? "var(--primary)" : "var(--border)",
           strokeWidth: live ? 1.5 : 1,
         },
       };
@@ -211,7 +211,7 @@ export function FleetTopology({
           nodesConnectable={false}
           edgesFocusable={false}
         >
-          <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="oklch(1 0 0 / 0.06)" />
+          <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="var(--border)" />
           <Controls showInteractive={false} />
         </ReactFlow>
       </div>
@@ -224,7 +224,7 @@ export function FleetTopology({
             setPlaying((p) => !p);
           }}
           aria-label={playing ? "Pause replay" : "Replay"}
-          className="rounded-md border border-border p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+          className="rounded-md border border-border bg-surface p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
         >
           {playing ? <Pause size={14} weight="fill" /> : <Play size={14} weight="fill" />}
         </button>
@@ -237,7 +237,7 @@ export function FleetTopology({
             const prev = [...moments].reverse().find((m) => m < at);
             setPinned(prev ?? moments[0] ?? start);
           }}
-          className="rounded-md border border-border p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+          className="rounded-md border border-border bg-surface p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
         >
           <SkipBack size={14} weight="fill" />
         </button>
@@ -265,7 +265,7 @@ export function FleetTopology({
             const next = moments.find((m) => m > at);
             setPinned(next ?? null);
           }}
-          className="rounded-md border border-border p-2 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+          className="rounded-md border border-border bg-surface p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
         >
           <SkipForward size={14} weight="fill" />
         </button>
@@ -288,7 +288,7 @@ export function FleetTopology({
 
       <p className="meta mt-2">
         {snap.activeCount} task{snap.activeCount === 1 ? "" : "s"} in flight
-        across {machines.length} machine{machines.length === 1 ? "" : "s"}.
+        across {machines.length} Zolli{machines.length === 1 ? "" : "s"}.
         Replayed from the coordinator&apos;s lease and commit events.
       </p>
     </div>

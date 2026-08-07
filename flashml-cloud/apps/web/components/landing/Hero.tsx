@@ -3,18 +3,15 @@
 import Link from "next/link";
 import { motion, useReducedMotion } from "motion/react";
 import { ArrowRight } from "@phosphor-icons/react";
-import { NodeBackground } from "@/components/shared/NodeBackground";
-import { EventLedger } from "@/components/landing/EventLedger";
+import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { MagneticLink } from "@/components/motion/MagneticLink";
-import { SAMPLE_LEDGER } from "@/lib/landing/sample-ledger";
-import { BASE, SLOW, staggerParent, wipeLine } from "@/lib/motion";
+import { ZOLLI_ROLES, type ZolliRole } from "@/lib/zolli-brand";
+import { BASE, staggerParent, wipeLine } from "@/lib/motion";
 
-/** Each headline line rides up from behind its own clip box.
- *
- * The `pb`/`-mb` pair is not decoration. An overflow-hidden wipe crops the
- * line box, so descenders (the p in "disappears", the y in "anyway") get
- * sliced off along the bottom edge. The padding gives them room inside the
- * clip and the negative margin takes that space back out of the layout. */
+const HERO_ROLES = Object.keys(ZOLLI_ROLES) as ZolliRole[];
+
+/** Each headline line rides up from behind its own clip box. The padding
+ * protects descenders from that clipping without adding layout space. */
 function WipeLine({
   children,
   className = "",
@@ -35,94 +32,88 @@ export function Hero() {
   const reduce = useReducedMotion();
 
   return (
-    <section className="relative isolate min-h-[100dvh] overflow-hidden">
-      {/* The page's ONE atmospheric moment. Everything below the fold is
-          flat. Kept off-centre and low-opacity so it reads as a light
-          source rather than the centred purple bloom every AI-infra
-          landing page ships. */}
+    <section className="relative isolate overflow-hidden pt-24 sm:pt-28">
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 -z-10"
         style={{
           backgroundImage:
-            "radial-gradient(ellipse 70% 60% at 78% 8%, oklch(0.55 0.21 285 / 0.16), transparent 62%)",
+            "radial-gradient(ellipse 55% 45% at 80% 8%, rgb(239 104 40 / 0.11), transparent 68%)",
         }}
       />
-      <div aria-hidden className="absolute inset-0 -z-10 opacity-70">
-        <NodeBackground />
-      </div>
-
-      <div className="mx-auto flex min-h-[100dvh] max-w-7xl items-center px-4 pt-20 pb-16 sm:px-6 md:pt-24">
+      <div className="mx-auto max-w-7xl px-4 pb-18 sm:px-6 md:pb-24">
         <motion.div
-          className="grid w-full items-center gap-12 lg:grid-cols-12 lg:gap-10"
+          className="flex flex-col items-center text-center"
           variants={staggerParent(0.09)}
           initial={reduce ? false : "hidden"}
           animate="show"
         >
-          <div className="lg:col-span-7">
-            {/* 52px, not 60px, and a 7/5 split rather than 6/6. At 60px in
-                a half-width column "Cheap compute disappears." wraps, which
-                makes the headline three lines. Two is the limit. */}
-            {/* NOT `.display`. This headline shares the row with the ledger
-                panel, so it has ~715px, and `.display` would wrap "Cheap
-                compute disappears." into two lines and the headline into
-                three. The page's display moment is the full-bleed ledger
-                wall, which has the width to carry it. */}
-            <h1 className="text-4xl font-semibold leading-[1.06] tracking-[-0.038em] md:text-5xl lg:text-[3.4rem]">
-              <WipeLine>Cheap compute disappears.</WipeLine>
-              <WipeLine className="text-accent-text">
-                Run on it anyway.
-              </WipeLine>
-            </h1>
+          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-brand-foreground">
+            ZolliAI Cloud
+          </p>
+          <h1 className="mt-5 max-w-5xl font-display text-5xl font-semibold leading-[0.98] tracking-[-0.045em] sm:text-6xl md:text-7xl lg:text-[5.6rem]">
+            <WipeLine>Every machine has{" "}</WipeLine>
+            <WipeLine>a part to play.</WipeLine>
+          </h1>
 
-            <motion.p
-              variants={{
-                hidden: { opacity: 0, y: 16 },
-                show: { opacity: 1, y: 0, transition: BASE },
-              }}
-              className="mt-6 max-w-[46ch] text-base leading-relaxed text-muted-foreground md:text-lg"
-            >
-              FlashML spreads a training job across pods, rigs and spot
-              instances that vanish mid-run. Leases expire, work requeues,
-              jobs finish.
-            </motion.p>
+          <motion.p
+            variants={{
+              hidden: { opacity: 0, y: 16 },
+              show: { opacity: 1, y: 0, transition: BASE },
+            }}
+            className="mt-7 max-w-[58ch] text-base leading-relaxed text-muted-foreground md:text-lg"
+          >
+            Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew. When one Zolli drops out, verified progress helps the next one keep work moving.
+          </motion.p>
 
-            <motion.div
-              variants={{
-                hidden: { opacity: 0, y: 16 },
-                show: { opacity: 1, y: 0, transition: BASE },
-              }}
-              className="mt-9 flex flex-wrap items-center gap-3"
-            >
-              <MagneticLink
-                href="/submit"
-                className="interactive inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground hover:brightness-110"
-              >
-                Submit a job
-                <ArrowRight weight="bold" className="h-4 w-4" />
-              </MagneticLink>
-              <Link
-                href="#recover"
-                className="interactive inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.04] px-6 py-3 text-sm font-medium text-foreground transition-colors hover:bg-white/[0.08]"
-              >
-                See it recover
-              </Link>
-            </motion.div>
-          </div>
-
-          {/* The evidence sits beside the claim, not below it. Offset down
-              so the two columns do not read as a symmetric pair. */}
           <motion.div
             variants={{
-              hidden: { opacity: 0, y: 26 },
-              show: { opacity: 1, y: 0, transition: SLOW },
+              hidden: { opacity: 0, y: 16 },
+              show: { opacity: 1, y: 0, transition: BASE },
             }}
-            className="lg:col-span-5 lg:mt-12"
+            className="mt-9 flex flex-wrap items-center justify-center gap-3"
           >
-            <div className="glass overflow-hidden rounded-lg">
-              <EventLedger events={SAMPLE_LEDGER} label="sample run" stream />
-            </div>
+            <MagneticLink
+              href="/workspaces"
+              className="interactive inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-shadow hover:shadow-md"
+            >
+              Build your crew
+              <ArrowRight weight="bold" className="h-4 w-4" />
+            </MagneticLink>
+            <Link
+              href="#recover"
+              className="interactive inline-flex items-center gap-2 rounded-full border border-border bg-surface px-6 py-3 text-sm font-medium text-foreground transition-colors hover:bg-surface-2"
+            >
+              See how recovery works
+            </Link>
           </motion.div>
+
+          <div className="mt-14 grid w-full grid-cols-3 gap-2 sm:grid-cols-6 sm:gap-3 md:mt-18">
+            {HERO_ROLES.map((role, index) => {
+              const definition = ZOLLI_ROLES[role];
+              return (
+                <motion.div
+                  key={role}
+                  variants={{
+                    hidden: { opacity: 0, y: 24 },
+                    show: { opacity: 1, y: 0, transition: { ...BASE, delay: index * 0.035 } },
+                  }}
+                  className="flex min-w-0 flex-col items-center rounded-2xl border border-border bg-surface/80 px-1 py-3 shadow-sm sm:px-2 sm:py-4"
+                >
+                  <ZolliCharacter
+                    role={role}
+                    size={112}
+                    mood={role === "scout" ? "waving" : role === "worker" ? "focused" : "happy"}
+                    className="h-auto w-full max-w-[7rem]"
+                    label={`${definition.label}, ${definition.subtitle}`}
+                  />
+                  <span className="mt-1 text-xs font-semibold text-foreground sm:text-sm">
+                    {definition.label}
+                  </span>
+                </motion.div>
+              );
+            })}
+          </div>
         </motion.div>
       </div>
     </section>

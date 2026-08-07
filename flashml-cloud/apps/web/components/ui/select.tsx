@@ -63,6 +63,20 @@ function SelectContent({
   sideOffset = 4,
   align = "center",
   alignOffset = 0,
+  // Base UI's default. Leave it alone.
+  //
+  // It was briefly set to `false` here to "fix" a popup that appeared
+  // collapsed. That was a misdiagnosis: the popup had no BACKGROUND (the
+  // theme was missing `--color-popover`, so `bg-popover` generated nothing)
+  // and the page showing through it read as a broken menu. Base UI already
+  // handles the case this was meant to address — item alignment "is
+  // automatically disabled if there is not enough space", per its own docs.
+  //
+  // `false` also broke opening by click. `SelectTrigger` opens the popup
+  // UNDER the cursor on mousedown so the following mouseup can land on an
+  // item; positioned below the trigger instead, that mouseup lands back on
+  // the trigger and toggles the popup straight shut. The menu flashed open
+  // and vanished unless you held the button down.
   alignItemWithTrigger = true,
   ...props
 }: SelectPrimitive.Popup.Props &

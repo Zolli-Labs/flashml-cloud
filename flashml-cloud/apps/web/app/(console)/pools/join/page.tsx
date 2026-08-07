@@ -1,18 +1,35 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { InviteGate } from "@/components/shell/InviteGate";
-import { NotAuthenticated, acceptInvite } from "@/lib/cloud-api";
+import { Warning } from "@phosphor-icons/react";
+import { toast } from "sonner";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { ApiError, NotAuthenticated, NotFound, acceptInvite } from "@/lib/cloud-api";
+import { bankedJoinTail } from "@/lib/invite-outcome";
+import { tokenFromInput } from "@/lib/invite-token";
 
-// This route is `ConsoleShell`'s one deliberate bypass of the invite gate
-// (see `INVITE_GATE_BYPASS`): a signed-in-but-not-yet-admitted account has
-// to be able to reach it, since redeeming the token here IS how they become
-// admitted. `useSearchParams()` needs a Suspense boundary to avoid bailing
-// the whole route out of static rendering, hence the split below rather
-// than reading it straight in the default export — same shape as
-// `(auth)/sign-in`'s `page.tsx` + `SignInCard.tsx`, folded into one file
-// since console routes keep metadata in a sibling `layout.tsx` already.
+// This route is the one path every access state can reach (`INVITE_ROUTE`
+// in `lib/access-screen.ts`): a signed-in-but-not-yet-admitted account has
+// to be able to reach it, since this is where redeeming an invite happens.
+// Joining and admission are one signal, not two: `acceptInvite`'s `joined`
+// is `true` only for an already-admitted caller, who is added to the pool
+// outright. For the account this bypass exists for, nothing joins yet —
+// the membership is banked on the account's access request and
+// materializes only once an admin approves them. `useSearchParams()` needs
+// a Suspense boundary to avoid bailing the whole route out of static
+// rendering, hence the split below rather than reading it straight in the
+// default export — same shape as `(auth)/sign-in`'s `page.tsx` +
+// `SignInCard.tsx`, folded into one file since console routes keep metadata
+// in a sibling `layout.tsx` already.
 
 function Loading() {
   return (
@@ -22,11 +39,166 @@ function Loading() {
   );
 }
 
+/** Rendered once `acceptInvite` has succeeded but `joined` came back
+ * `false` — the join is banked, not applied. Shared by both ways to land
+ * here: a clicked link (the auto-redeem effect below) and a pasted code
+ * (`JoinByCode`), so the confirmation reads identically either way.
+ *
+ * For a brand-new invited user this is not the end of the road: they have
+ * banked a pool join but have not yet asked for access, and their row in
+ * the admin queue is an all-NULL stub until they do. The "Finish your
+ * request" link sends them to `/overview`, which is correct for either
+ * state they can be in — `needs_onboarding` renders the form there,
+ * `pending` renders the waiting screen. It cannot go directly to the form
+ * itself: `screenFor` short-circuits `INVITE_ROUTE` to `"console"` so this
+ * page stays reachable in every access state, which means the shell will
+ * never render onboarding here. */
+function InviteSaved({ name }: { name: string }) {
+  return (
+    <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+      <Card className="w-full max-w-sm border-border bg-surface shadow-sm">
+        <CardHeader>
+          <CardTitle className="font-display text-2xl">Crew invite saved</CardTitle>
+          <CardDescription>{bankedJoinTail(name)}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Link
+            href="/overview"
+            className="text-sm text-brand-foreground hover:underline"
+          >
+            Finish your request
+          </Link>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/** No-token / failed-token fallback — the paste-a-code affordance
+ * `InviteGate` used to own before it was deleted (Task 11). This route is
+ * the right home for it: `screenFor` (`lib/access-screen.ts`) returns
+ * `"console"` for `INVITE_ROUTE` in every access state, so it is the one
+ * page guaranteed reachable by the people who need to redeem a code they
+ * typed rather than clicked — including a `"pending"` account, for whom
+ * `/pools` itself renders the waiting screen instead. */
+function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
+  const [value, setValue] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [banked, setBanked] = useState<string | null>(null);
+
+  async function submit() {
+    const token = tokenFromInput(value);
+    if (!token) {
+      setError("Paste your invite link or code.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await acceptInvite(token);
+      if (!result.joined) {
+        // Say so honestly instead of claiming membership: nothing joined
+        // yet, the membership is banked on the access request.
+        toast.success(`Saved. ${bankedJoinTail(result.name)}`);
+        setBanked(result.name);
+        return;
+      }
+      toast.success(`Joined ${result.name}`);
+      // The workspace just joined, by id — NOT `/pools`. That route is a
+      // resolver, and `resolveWorkspace` prefers the last-workspace cookie,
+      // so someone who already belongs to another workspace would be told
+      // "Joined Alpha" and then dropped into Zebra.
+      //
+      // `window.location.href`, not `router.push`: a full navigation
+      // remounts `ConsoleShell`, so `WorkspaceSwitcher` re-fetches and the
+      // workspace they just joined actually appears in the rail. A client
+      // navigation leaves the switcher's mount-only list stale, with no
+      // in-app way back to the new workspace. Same line, same reasons, as
+      // the clicked-link path below.
+      window.location.href = `/pools/${result.pool_id}`;
+    } catch (err) {
+      // NotAuthenticated is not handled specially here: reaching this page
+      // already required a session, so a 401 mid-submit means the session
+      // just expired. The generic message below is honest about that
+      // without a special-cased redirect this one corner doesn't need.
+      if (err instanceof NotFound) {
+        setError("That invite link isn't valid, or it's already been used.");
+      } else {
+        setError(
+          err instanceof ApiError
+            ? err.detail
+            : "Couldn't redeem that invite. Try again."
+        );
+      }
+      setSubmitting(false);
+    }
+  }
+
+  if (banked) return <InviteSaved name={banked} />;
+
+  return (
+    <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+      <Card className="w-full max-w-sm border-border bg-surface shadow-sm">
+        <CardHeader>
+          <CardTitle className="font-display text-2xl">
+            {invalidLink ? "That Crew invite didn't work" : "Join a Crew"}
+          </CardTitle>
+          <CardDescription>
+            {invalidLink
+              ? "It may be mistyped, expired, or already used — the API folds all three into one answer, so we cannot say which. Paste a fresh invite link or code below."
+              : "Paste the invite link or code someone on ZolliAI sent you."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              submit();
+            }}
+            className="flex flex-col gap-3"
+          >
+            <Input
+              autoFocus
+              value={value}
+              onChange={(e) => {
+                setValue(e.target.value);
+                setError(null);
+              }}
+              placeholder="Invite link or code"
+              aria-label="Invite link or code"
+              aria-invalid={!!error || undefined}
+              className="font-mono"
+            />
+            {error && (
+              <p
+                role="alert"
+                className="flex items-start gap-1.5 text-xs text-destructive"
+              >
+                <Warning className="mt-0.5 h-3 w-3 shrink-0" weight="fill" />
+                <span>{error}</span>
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={submitting || value.trim().length === 0}
+              className="interactive rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {submitting ? "Joining…" : "Join Crew"}
+            </button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function JoinPoolInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
   const [failed, setFailed] = useState(false);
+  const [banked, setBanked] = useState<string | null>(null);
 
   useEffect(() => {
     // No token to redeem — handled by the render-time check below instead
@@ -38,10 +210,16 @@ function JoinPoolInner() {
       .then((result) => {
         if (cancelled) return;
         // A full navigation, not `router.replace`: `ConsoleShell` reads
-        // admission once per mount, and this account just became admitted
-        // — a client-side route change would land on the pool page with
-        // the shell still holding its stale "gated" state and showing the
-        // invite gate again instead of the pool it was just added to.
+        // admission once per mount, so a client-side route change would
+        // land here with the shell still holding its stale gate state.
+        // `result.joined` is `true` only when the caller was already
+        // admitted and is now a member of this pool; when it is `false`,
+        // nothing joined — the membership is queued behind admin approval
+        // and materializes only once someone decides this account.
+        if (!result.joined) {
+          setBanked(result.name);
+          return;
+        }
         window.location.href = `/pools/${result.pool_id}`;
       })
       .catch((err) => {
@@ -61,11 +239,13 @@ function JoinPoolInner() {
     };
   }, [token, router]);
 
-  // Fall back to the same paste-a-token card the console shows an
-  // un-admitted account, so a missing, stale, mistyped, or already-used
-  // link still leaves the visitor somewhere they can act instead of a dead
-  // end.
-  if (!token || failed) return <InviteGate />;
+  if (banked) return <InviteSaved name={banked} />;
+
+  // A missing, stale, mistyped, or already-used link must still leave the
+  // visitor somewhere they can act instead of a dead end: `JoinByCode`,
+  // the paste-a-code affordance `InviteGate` used to own before it was
+  // deleted (Task 11).
+  if (!token || failed) return <JoinByCode invalidLink={!!token && failed} />;
 
   return <Loading />;
 }

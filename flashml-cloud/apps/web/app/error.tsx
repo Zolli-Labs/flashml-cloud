@@ -28,8 +28,8 @@ export default function Error({
       <Warning className="h-7 w-7 text-destructive" weight="fill" />
       <h1 className="mt-4 text-lg font-semibold">Something broke on this page</h1>
       <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-        The rest of the app is fine. Retrying re-renders this page without
-        reloading the whole console.
+        This page could not render. Try it again; the rest of the console
+        will stay loaded.
       </p>
 
       {error.digest && (
@@ -49,7 +49,7 @@ export default function Error({
         </button>
         <Link
           href="/overview"
-          className="inline-flex items-center rounded-md border border-border px-4 py-2 text-sm hover:bg-white/[0.06]"
+          className="inline-flex items-center rounded-md border border-border bg-surface px-4 py-2 text-sm hover:bg-surface-2"
         >
           Back to overview
         </Link>

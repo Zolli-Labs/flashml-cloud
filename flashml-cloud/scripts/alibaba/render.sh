@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"          # flashml-cloud
 WORKSPACE="$(cd "$ROOT/.." && pwd)"
 ENV_FILE="$WORKSPACE/.env.alibaba"
 
-[ -f "$ENV_FILE" ] || { echo "missing $ENV_FILE (copy .env.alibaba.example)"; exit 1; }
+[ -f "$ENV_FILE" ] || { echo "missing $ENV_FILE (recover the template: git show 244277b:.env.alibaba.example)"; exit 1; }
 set -a; . "$ENV_FILE"; set +a
 
 : "${ACR_REGISTRY:?}"; : "${ACR_NAMESPACE:?}"; : "${OSS_BUCKET:?}"; : "${OSS_ENDPOINT:?}"

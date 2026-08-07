@@ -18,7 +18,10 @@ smoke test below actually ran against a cluster.
   - ACR: push/pull on the `${ACR_NAMESPACE}` namespace only;
   - OSS: read/write on `${OSS_BUCKET}` only (prefer STS / RRSA over
     long-lived keys).
-- `.env.alibaba` at the workspace root (copy `.env.alibaba.example`).
+- `.env.alibaba` at the workspace root. The `.env.alibaba.example` template
+  was removed on 2026-08-04 (Alibaba is deferred; the deployed POC runs on
+  Supabase + Render). Recover it with
+  `git show 244277b:.env.alibaba.example` before standing this profile up.
 
 ## Deploy
 

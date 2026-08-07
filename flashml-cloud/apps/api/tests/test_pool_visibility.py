@@ -508,3 +508,87 @@ def test_a_federated_job_with_no_pool_stays_owner_only_in_the_list(client, db):
     assert r.status_code == 200, r.text
     pool_mate_ids = [j.get("job_id") for j in r.json() if isinstance(j, dict)]
     assert job_id not in pool_mate_ids
+
+
+# ---------------------------------------------------------------------------
+# 5. job rows carry pool_id and submitter (Task 1, workspace console)
+# ---------------------------------------------------------------------------
+
+
+def _set_display_name(db, user_id: str, name: str) -> None:
+    """This file's ``_new_user`` creates a profile with no display name, and
+    the jobs list now renders one. No existing helper sets it, so set it
+    directly — the same shape as ``_seed_pool_job``'s own stamping update."""
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set display_name = %s where id = %s",
+            (name, user_id),
+        )
+
+
+def test_job_list_rows_carry_pool_id_and_submitter(client, db):
+    """The console scopes jobs by workspace, which it can only do if the row
+    says which workspace it is in. A pre-pools job reports None rather than
+    omitting the field — "no workspace" is a real answer, not a missing one."""
+    owner = _new_user(db)
+    _set_display_name(db, owner, "Ada")
+    pool_id = _pool(db, owner)
+
+    in_pool = _seed_pool_job(client, owner, pool_id, db, "in-pool")
+    orphan = _submit(client, _jwt(owner), "orphan")["job_id"]
+
+    rows = {j["job_id"]: j for j in
+            client.get("/v1alpha1/jobs", headers=_auth(owner)).json()}
+
+    assert rows[in_pool]["pool_id"] == str(pool_id)
+    assert rows[in_pool]["submitted_by"] == "Ada"
+    assert rows[orphan]["pool_id"] is None
+    assert rows[orphan]["submitted_by"] == "Ada"
+
+
+def test_teammates_job_row_names_its_submitter(client, db):
+    """The attribution that makes a workspace read as shared: a member seeing
+    a teammate's job must see whose it is, not merely that it exists."""
+    owner = _new_user(db)
+    member = _new_user(db)
+    _set_display_name(db, owner, "Ada")
+    pool_id = _pool(db, owner)
+    _add_member(db, pool_id, member)
+
+    job_id = _seed_pool_job(client, owner, pool_id, db, "shared")
+
+    rows = [j for j in client.get("/v1alpha1/jobs", headers=_auth(member)).json()
+            if j.get("job_id") == job_id]
+    assert len(rows) == 1
+    assert rows[0]["submitted_by"] == "Ada"
+    assert rows[0]["pool_id"] == str(pool_id)
+
+
+def test_federated_row_carries_pool_id_and_submitter(client, db):
+    """A federated parent never appears in the coordinator's list, so its
+    label comes from the other branch of the route entirely. Stamping only
+    the coordinator-sourced rows would leave every federated run unlabelled."""
+    owner = _new_user(db)
+    _set_display_name(db, owner, "Ada")
+    pool_id = _pool(db, owner)
+    job_id = _seed_federated_job(db, owner, "fed-run", pool_id=pool_id)
+
+    rows = [j for j in client.get("/v1alpha1/jobs", headers=_auth(owner)).json()
+            if j.get("job_id") == job_id]
+    assert len(rows) == 1
+    assert rows[0]["pool_id"] == str(pool_id)
+    assert rows[0]["submitted_by"] == "Ada"
+
+
+def test_job_detail_carries_pool_id_and_submitter(client, db):
+    """The job detail page renders its own breadcrumb and may have been
+    deep-linked, so it must name its workspace without consulting a list it
+    never loaded."""
+    owner = _new_user(db)
+    _set_display_name(db, owner, "Ada")
+    pool_id = _pool(db, owner)
+    job_id = _seed_pool_job(client, owner, pool_id, db, "detail")
+
+    body = client.get(f"/v1alpha1/jobs/{job_id}", headers=_auth(owner)).json()
+    assert body["pool_id"] == str(pool_id)
+    assert body["submitted_by"] == "Ada"

@@ -279,7 +279,15 @@ def test_revoke_refuses_when_user_does_not_own_the_machine(db, owner, other_owne
 
 
 def _console_routes() -> set[str]:
-    """Route paths the Next.js app actually serves, read from disk."""
+    """Route paths the Next.js app actually serves, read from disk.
+
+    Note the direction of the coupling: this is an API test that reads the
+    WEB app's route tree, so a web-only change — moving or renaming a page,
+    touching nothing under apps/api — can fail this file. That is the whole
+    point (a moved page is exactly the bug this catches), but it is also
+    why a stale sanity anchor below went unnoticed for a while: nobody
+    editing the console expects to break pytest.
+    """
     from pathlib import Path
 
     web = Path(__file__).resolve().parents[4] / "flashml-cloud" / "apps" / "web" / "app"
@@ -298,8 +306,13 @@ def test_verification_uri_points_at_a_page_that_exists():
 
     routes = _console_routes()
     # Sanity: the reader found real pages, so an empty set cannot make this
-    # pass vacuously.
-    assert "/machines" in routes, f"route reader looks broken: {sorted(routes)}"
+    # pass vacuously. Deliberately NOT `/activate` — that is the route this
+    # test is checking, and anchoring on it would make the assertion below
+    # circular. `/account/machines` is a different page that has to exist
+    # for the console to be usable at all.
+    assert "/account/machines" in routes, (
+        f"route reader looks broken: {sorted(routes)}"
+    )
 
     import re
     from pathlib import Path

@@ -40,8 +40,8 @@ const STATIC: Item[] = [
   { id: "nav-overview", label: "Overview", href: "/overview", icon: House, group: "Go to" },
   { id: "nav-jobs", label: "Jobs", href: "/jobs", icon: ListChecks, group: "Go to" },
   { id: "nav-submit", label: "Submit a job", href: "/submit", icon: Plus, group: "Go to" },
-  { id: "nav-machines", label: "Machines", href: "/machines", icon: Desktop, group: "Go to" },
-  { id: "nav-activate", label: "Activate a machine", href: "/activate", icon: DeviceMobile, group: "Go to" },
+  { id: "nav-machines", label: "Zollis", href: "/machines", icon: Desktop, group: "Go to" },
+  { id: "nav-activate", label: "Add a Zolli", href: "/activate", icon: DeviceMobile, group: "Go to" },
   { id: "nav-docs", label: "Documentation", href: "/docs", icon: BookOpen, group: "Go to" },
   { id: "nav-account", label: "Account", href: "/account", icon: UserCircle, group: "Go to" },
 ];
@@ -136,7 +136,7 @@ export function CommandPalette() {
         hint: m.status,
         href: "/machines",
         icon: Desktop,
-        group: "Machines",
+        group: "Zollis",
       })),
     ];
     return [...STATIC, ...dynamic].filter(
@@ -190,7 +190,7 @@ export function CommandPalette() {
                 go(items[active]);
               }
             }}
-            placeholder="Jump to a job, a machine, or a page"
+            placeholder="Jump to a job, a Zolli, or a page"
             aria-activedescendant={items[active]?.id}
             className="w-full bg-transparent py-3.5 text-sm outline-none placeholder:text-muted-foreground/70"
           />
@@ -221,7 +221,7 @@ export function CommandPalette() {
                   onMouseEnter={() => setCursor(i)}
                   onClick={() => go(it)}
                   className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm ${
-                    i === active ? "bg-white/[0.07]" : ""
+                    i === active ? "bg-primary/10 text-brand-foreground" : "hover:bg-surface-2"
                   }`}
                 >
                   <Icon size={15} className="shrink-0 text-muted-foreground" />

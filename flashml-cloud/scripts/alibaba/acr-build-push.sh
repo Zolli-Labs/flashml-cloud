@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 ENV_FILE="$ROOT/.env.alibaba"
 [ -f "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
 
-: "${ACR_REGISTRY:?set ACR_REGISTRY (see .env.alibaba.example)}"
+: "${ACR_REGISTRY:?set ACR_REGISTRY (see: git show 244277b:.env.alibaba.example)}"
 : "${ACR_NAMESPACE:?set ACR_NAMESPACE}"
 
 SHA=$(git -C "$ROOT/flashruntime" rev-parse --short HEAD 2>/dev/null || echo dev)

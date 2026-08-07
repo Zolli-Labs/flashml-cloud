@@ -1,11 +1,17 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Fraunces, Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const inter = Inter({
+  variable: "--font-inter",
+  subsets: ["latin"],
+  display: "swap",
+});
+
+const fraunces = Fraunces({
+  variable: "--font-fraunces",
   subsets: ["latin"],
   display: "swap",
 });
@@ -16,20 +22,16 @@ const geistMono = Geist_Mono({
   display: "swap",
 });
 
-// This is the browser tab title and the social card for every link anyone
-// shares. It has been wrong twice: first describing the July K-Means POC,
-// then describing donated laptops, which the 2026-08-02 supply-side note
-// rates as the least valuable tier and no longer the pitch. The positioning
-// here is that note's conclusion: aggregation for fault-tolerant, shardable
-// training across whatever compute is cheap, which is the same thing as
-// saying across whatever compute is unreliable.
 export const metadata: Metadata = {
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ?? "https://zolliai.com",
+  ),
   title: {
-    default: "FlashML",
-    template: "%s · FlashML",
+    default: "ZolliAI",
+    template: "%s · ZolliAI",
   },
   description:
-    "Cheap compute disappears. FlashML spreads a training job across pods, rigs and spot instances that vanish mid-run: leases expire, work requeues, jobs finish.",
+    "ZolliAI Cloud brings laptops, GPU rigs, and cloud instances together as a resilient distributed compute crew.",
   keywords: [
     "distributed training",
     "federated learning",
@@ -37,11 +39,48 @@ export const metadata: Metadata = {
     "spot instances",
     "gpu aggregation",
   ],
+  icons: {
+    icon: [
+      {
+        url: "/brand/icons/favicon-32.png",
+        sizes: "32x32",
+        type: "image/png",
+      },
+      {
+        url: "/brand/icons/favicon-64.png",
+        sizes: "64x64",
+        type: "image/png",
+      },
+    ],
+    apple: [
+      {
+        url: "/brand/icons/apple-touch-icon-180.png",
+        sizes: "180x180",
+        type: "image/png",
+      },
+    ],
+  },
+  manifest: "/manifest.webmanifest",
   openGraph: {
-    title: "FlashML",
+    title: "ZolliAI",
     description:
-      "Cheap compute disappears. Run on it anyway. Fault-tolerant distributed training across pods, rigs and spot instances.",
+      "Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew.",
     type: "website",
+    images: [
+      {
+        url: "/brand/social/og-image-1200x630.png",
+        width: 1200,
+        height: 630,
+        alt: "Zolli — distributed compute that survives failure",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ZolliAI",
+    description:
+      "Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew.",
+    images: ["/brand/social/og-image-1200x630.png"],
   },
 };
 
@@ -53,19 +92,16 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} dark`}
+      className={`${inter.variable} ${fraunces.variable} ${geistMono.variable}`}
     >
-      {/* `grain` paints a fixed noise layer over everything (globals.css).
-          Large flat dark surfaces band visibly on 8-bit panels, and the
-          grain both hides that and gives the glass panels something to
-          refract instead of a perfectly clean gradient. */}
+      {/* `grain` paints a fixed paper texture over the warm surfaces. */}
       <body className="grain min-h-dvh flex flex-col antialiased">
         {/* Keyboard and screen-reader users otherwise tab through the whole
             nav on every page before reaching content. Visible only when
             focused. */}
         <a
           href="#content"
-          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[100] focus:rounded-md focus:bg-surface-elevated focus:px-4 focus:py-2 focus:text-sm focus:font-medium"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[100] focus:rounded-md focus:bg-surface focus:px-4 focus:py-2 focus:text-sm focus:font-medium"
         >
           Skip to content
         </a>
@@ -85,12 +121,12 @@ export default function RootLayout({
             green and a second red alongside the semantic ones this app
             already defines. */}
         <Toaster
-          theme="dark"
+          theme="light"
           position="bottom-right"
           closeButton
           toastOptions={{
             className:
-              "!bg-surface !text-foreground !border !border-border !font-sans",
+              "!bg-surface !text-ink !border !border-border !font-sans !shadow-lg",
           }}
         />
       </body>

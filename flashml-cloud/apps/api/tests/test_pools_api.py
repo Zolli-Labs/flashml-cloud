@@ -6,9 +6,10 @@ routes built on top of Task 9's db layer.
 (404, never 403, for a pool that exists but is not yours — same doctrine as
 every other resource in this API); ``POST /v1alpha1/pools/{id}/invites``
 mints a one-time link only the pool's OWNER may create; ``POST
-/v1alpha1/invites/accept`` is the admission bootstrap itself, so it runs on
-``current_user`` rather than ``admitted_user`` — the whole point is that an
-un-admitted account can use it.
+/v1alpha1/invites/accept`` redeems one, and runs on ``current_user`` rather
+than ``admitted_user`` — a not-yet-admitted account is exactly who calls it.
+Since 0009 it joins a WORKSPACE and nothing more: an un-admitted caller's
+join is banked on their access request until an admin approves them.
 
 Runs against the same migrated Postgres as the rest of the suite, reusing
 ``test_jobs_from_repo``'s fixtures exactly as ``test_profile.py`` does.
@@ -82,6 +83,17 @@ def _add_member(db, pool_id: str, user_id: str) -> None:
         cur.execute(
             "insert into public.pool_members (pool_id, user_id) values (%s, %s)",
             (pool_id, user_id),
+        )
+
+
+def _set_display_name(db, user_id: str, name: str) -> None:
+    """``_new_user`` creates a profile with no display name, and the pool
+    machines route renders one. No existing helper sets it, so set it
+    directly."""
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set display_name = %s where id = %s",
+            (name, user_id),
         )
 
 
@@ -788,13 +800,23 @@ def test_regenerate_after_revoke_mints_a_working_link(make_client, db):
 
 
 # ---------------------------------------------------------------------------
-# accept: the admission bootstrap
+# accept: joining a workspace (which is no longer being admitted)
 # ---------------------------------------------------------------------------
 
 
-def test_accepting_a_valid_invite_admits_and_joins_and_me_reflects_it(
+def test_accepting_a_valid_invite_banks_the_join_and_does_not_admit(
     make_client, db
 ):
+    """INVERTED BY 0009, deliberately. This was
+    ``test_accepting_a_valid_invite_admits_and_joins_and_me_reflects_it``
+    and asserted that accepting flipped ``/me``'s ``admitted`` to True and
+    seated the caller in the pool immediately. Accepting an invite is now
+    joining a WORKSPACE, not being let into the product: an un-admitted
+    caller's join is banked on their access request and materialises when
+    an admin approves them, so ``joined`` comes back False and ``/me``
+    still says not admitted. See docs/superpowers/specs/
+    2026-08-04-signup-profile-and-access-requests-design.md.
+    """
     client = make_client()
     owner = _new_user(db)
     pool = _create_pool(client, owner).json()
@@ -813,9 +835,41 @@ def test_accepting_a_valid_invite_admits_and_joins_and_me_reflects_it(
     body = accepted.json()
     assert body["pool_id"] == pool["id"]
     assert body["name"] == pool["name"]
+    assert body["joined"] is False
 
     after = client.get("/v1alpha1/me", headers=_auth(joiner))
-    assert after.json()["admitted"] is True
+    assert after.json()["admitted"] is False
+
+    # Not a member yet — and the pool read is member-scoped, so it 404s the
+    # same as any pool that is not yours.
+    got = client.get(f"/v1alpha1/pools/{pool['id']}", headers=_auth(joiner))
+    assert got.status_code == 404
+
+    # The join is banked, waiting on an approval.
+    with db.cursor() as cur:
+        cur.execute(
+            "select pending_pool_id from public.access_requests where user_id = %s",
+            (joiner,),
+        )
+        assert str(cur.fetchone()["pending_pool_id"]) == pool["id"]
+
+
+def test_accepting_a_valid_invite_seats_an_already_admitted_account(
+    make_client, db
+):
+    """The other half of the split: admission is not this route's business,
+    but an account that already has it joins outright, exactly as before."""
+    client = make_client()
+    owner = _new_user(db)
+    pool = _create_pool(client, owner).json()
+    token = _invite(client, owner, pool["id"]).json()["token"]
+
+    joiner = _new_user(db)  # admitted by default
+    accepted = client.post(
+        "/v1alpha1/invites/accept", json={"token": token}, headers=_auth(joiner)
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["joined"] is True
 
     got = client.get(f"/v1alpha1/pools/{pool['id']}", headers=_auth(joiner))
     assert got.status_code == 200
@@ -914,10 +968,10 @@ def test_unadmitted_account_is_blocked_from_pool_create_but_not_reads(
 
     r = client.post("/v1alpha1/pools", json={"name": "Nope"}, headers=_auth(user))
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
-    # Reads stay open: the console needs GET /me to know to show the
-    # enter-invite screen, and job listing must not itself be gated.
+    # Reads stay open: the console needs GET /me to know which screen to
+    # show, and job listing must not itself be gated.
     me = client.get("/v1alpha1/me", headers=_auth(user))
     assert me.status_code == 200
     assert me.json()["admitted"] is False
@@ -936,7 +990,7 @@ def test_unadmitted_account_is_blocked_from_job_submission(make_client, db):
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
 
 def test_unadmitted_account_is_blocked_from_job_submission_from_repo(
@@ -951,7 +1005,7 @@ def test_unadmitted_account_is_blocked_from_job_submission_from_repo(
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
     assert client.fetch.calls == []
 
 
@@ -965,7 +1019,7 @@ def test_unadmitted_account_is_blocked_from_device_approve(make_client, db):
         headers=_auth(user),
     )
     assert r.status_code == 403
-    assert r.json() == {"detail": "invite required"}
+    assert r.json() == {"detail": "access not yet approved"}
 
 
 def test_admitted_account_is_not_blocked_from_pool_create(make_client, db):
@@ -1017,3 +1071,205 @@ def test_raw_token_appears_exactly_once_and_token_hash_never_appears(
     # that consumed it.
     total = sum(r.text.count(raw_token) for r in responses)
     assert total == 1
+
+
+# ---------------------------------------------------------------------------
+# pool machines: the workspace's fleet across all members (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_pool_machines_lists_every_members_bound_machine(make_client, db):
+    """The point of the tab: you see the workspace's compute, not just your
+    own. `list_machines_for_owner` structurally cannot answer this."""
+    owner = _new_user(db)
+    _set_display_name(db, owner, "Ada")
+    member = _new_user(db)
+    _set_display_name(db, member, "Grace")
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+    _add_member(db, pool["id"], member)
+
+    mine = _enrol(db, owner, "mine")
+    theirs = _enrol(db, member, "theirs")
+    unbound = _enrol(db, owner, "unbound")
+    dbmod.bind_machine_pool(db, machine_id=mine, pool_id=pool["id"])
+    dbmod.bind_machine_pool(db, machine_id=theirs, pool_id=pool["id"])
+
+    rows = client.get(
+        f"/v1alpha1/pools/{pool['id']}/machines", headers=_auth(owner)
+    ).json()
+
+    by_id = {r["id"]: r for r in rows}
+    assert set(by_id) == {mine, theirs}, "unbound machines must not appear"
+    assert unbound not in by_id
+    assert by_id[theirs]["owner_display_name"] == "Grace"
+    assert "token_hash" not in by_id[mine]
+    # This route crosses an account boundary — `theirs` belongs to Grace and
+    # is being read by Ada. `MACHINE_PUBLIC_COLUMNS` means "everything bar
+    # the hash, to the machine's OWNER"; the columns below are owner-only
+    # detail and must not ride along here (`_POOL_MACHINE_COLUMNS`, db.py).
+    for owner_only in (
+        "token_prefix", "capabilities", "platform", "created_at", "revoked_at"
+    ):
+        assert owner_only not in by_id[theirs], (
+            f"{owner_only!r} leaked a teammate's machine detail across "
+            "accounts"
+        )
+    # And the fleet view still carries everything the console renders.
+    assert set(by_id[theirs]) == {
+        "id", "node_id", "name", "owner_id", "owner_display_name", "status",
+        "last_seen_at", "sandbox_capable", "argv_capable",
+        "unsandboxed_argv_capable", "module_capable",
+    }
+
+
+def test_pool_machines_omits_a_machine_whose_owner_left(make_client, db):
+    """A binding left behind by someone who has left the pool is inert for
+    placement (`pool_ids_for_machine`'s join). This view must agree, or the
+    tab overstates the workspace's capacity."""
+    owner = _new_user(db)
+    leaver = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+    _add_member(db, pool["id"], leaver)
+
+    abandoned = _enrol(db, leaver, "abandoned")
+    dbmod.bind_machine_pool(db, machine_id=abandoned, pool_id=pool["id"])
+    with db.cursor() as cur:
+        cur.execute(
+            "delete from public.pool_members where pool_id = %s and user_id = %s",
+            (pool["id"], leaver),
+        )
+
+    rows = client.get(
+        f"/v1alpha1/pools/{pool['id']}/machines", headers=_auth(owner)
+    ).json()
+
+    assert rows == []
+
+
+def test_pool_machines_404s_for_non_member_and_for_a_malformed_id(make_client, db):
+    """404 doctrine: a stranger and a garbage id get the same answer, so the
+    route cannot be used to learn which pool ids are real."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}/machines", headers=_auth(stranger)
+    ).status_code == 404
+    assert client.get(
+        "/v1alpha1/pools/not-a-uuid/machines", headers=_auth(owner)
+    ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# rename: owner-only, 404 doctrine, shared validation with create
+# ---------------------------------------------------------------------------
+
+
+def test_owner_can_rename_their_pool(make_client, db):
+    owner = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner, name="Untitled").json()
+
+    r = client.patch(
+        f"/v1alpha1/pools/{pool['id']}",
+        json={"name": "  Vision Lab  "},
+        headers=_auth(owner),
+    )
+
+    assert r.status_code == 200
+    assert r.json()["name"] == "Vision Lab", "the name is stored trimmed"
+    # get_pool_route returns pool fields flat (see
+    # test_create_list_get_round_trip), not nested under a "pool" key.
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}", headers=_auth(owner)
+    ).json()["name"] == "Vision Lab"
+
+
+def test_a_member_who_is_not_the_owner_cannot_rename(make_client, db):
+    """404, not 403 — the same answer a stranger gets. A 403 here would
+    confirm the pool is real to someone outside it."""
+    owner = _new_user(db)
+    member = _new_user(db)
+    stranger = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner, name="Vision Lab").json()
+    _add_member(db, pool["id"], member)
+
+    for who in (member, stranger):
+        r = client.patch(
+            f"/v1alpha1/pools/{pool['id']}",
+            json={"name": "Hijacked"},
+            headers=_auth(who),
+        )
+        assert r.status_code == 404
+        assert r.json()["detail"] == "unknown pool"
+
+    assert client.get(
+        f"/v1alpha1/pools/{pool['id']}", headers=_auth(owner)
+    ).json()["name"] == "Vision Lab"
+
+
+def test_rename_checks_ownership_before_it_validates_the_name(make_client, db):
+    """A non-owner gets 404 for an INVALID name too, not 400.
+
+    The invariant is the ordering inside `rename_pool_route`: ownership is
+    established before `_validated_pool_name` ever runs. Swap those two and
+    the route still 404s every non-owner who sends a legal name — every
+    other test here does — while quietly answering 400 for an illegal one.
+    That split is an existence oracle: a stranger who sends `{"name": ""}`
+    to a hundred guessed uuids learns which ones are real pools purely from
+    the status code, without a single 200.
+    """
+    owner = _new_user(db)
+    member = _new_user(db)
+    stranger = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner, name="Vision Lab").json()
+    _add_member(db, pool["id"], member)
+
+    for who in (member, stranger):
+        r = client.patch(
+            f"/v1alpha1/pools/{pool['id']}",
+            json={"name": ""},  # 400 for the owner (see the test below)
+            headers=_auth(who),
+        )
+        assert r.status_code == 404, (
+            "a malformed name must not turn a non-owner's 404 into a 400 — "
+            "that difference tells them the pool exists"
+        )
+        assert r.json()["detail"] == "unknown pool"
+
+
+def test_rename_rejects_empty_and_overlong_names(make_client, db):
+    """Same validation as create — the two routes must agree on what a
+    legal pool name is."""
+    owner = _new_user(db)
+    client = make_client()
+    pool = _create_pool(client, owner).json()
+
+    for bad in ("", "   ", 42, None):
+        r = client.patch(
+            f"/v1alpha1/pools/{pool['id']}", json={"name": bad},
+            headers=_auth(owner),
+        )
+        assert r.status_code == 400, f"{bad!r} should be rejected"
+
+    r = client.patch(
+        f"/v1alpha1/pools/{pool['id']}", json={"name": "x" * 201},
+        headers=_auth(owner),
+    )
+    assert r.status_code == 400
+    assert "200 characters" in r.json()["detail"]
+
+
+def test_rename_404s_on_a_malformed_pool_id(make_client, db):
+    owner = _new_user(db)
+    client = make_client()
+    r = client.patch(
+        "/v1alpha1/pools/not-a-uuid", json={"name": "x"}, headers=_auth(owner)
+    )
+    assert r.status_code == 404

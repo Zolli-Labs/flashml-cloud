@@ -166,7 +166,7 @@ export function RoundProgress({
         <div className="flex items-baseline justify-between gap-3">
           <h3 className="text-sm font-semibold">Mean loss per round</h3>
           {reported.length < pts.length && (
-            <span className="font-mono text-[10px] text-[var(--warning)]">
+            <span className="font-mono text-[10px] text-warning-foreground">
               {pts.length - reported.length} round
               {pts.length - reported.length === 1 ? "" : "s"} reported no loss
             </span>
@@ -194,7 +194,7 @@ export function RoundProgress({
                     x2={W - PAD.right}
                     y1={yy}
                     y2={yy}
-                    stroke="oklch(1 0 0 / 0.07)"
+                    stroke="var(--border)"
                     strokeWidth="1"
                   />
                   <text
@@ -318,7 +318,7 @@ export function RoundProgress({
                             className={
                               delta < 0
                                 ? "text-[var(--node-green)]"
-                                : "text-[var(--warning)]"
+                                : "text-warning-foreground"
                             }
                           >
                             {delta > 0 ? "+" : ""}
@@ -363,7 +363,7 @@ export function RoundProgress({
 
       {contributors.length > 0 && (
         <section className="rounded-lg border border-border bg-surface p-4">
-          <h3 className="text-sm font-semibold">Machines that contributed</h3>
+          <h3 className="text-sm font-semibold">Zollis that contributed</h3>
           <div className="mt-3 space-y-2">
             {contributors.map(([node, count]) => (
               <div key={node} className="flex items-center gap-3">

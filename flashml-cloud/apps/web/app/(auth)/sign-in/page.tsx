@@ -8,10 +8,16 @@ export const metadata: Metadata = {
 
 export default function SignInPage() {
   return (
-    <div className="min-h-[calc(100dvh-4rem)] flex items-center justify-center px-4 py-12">
-      <Suspense fallback={null}>
-        <SignInCard />
-      </Suspense>
-    </div>
+    <Suspense
+      fallback={
+        <main
+          id="content"
+          className="min-h-dvh bg-cream"
+          aria-label="Loading authentication"
+        />
+      }
+    >
+      <SignInCard />
+    </Suspense>
   );
 }
