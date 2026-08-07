@@ -28,7 +28,7 @@ import {
   updateProfile,
   type Profile,
 } from "@/lib/cloud-api";
-import { ROLE_OPTIONS, TEAM_SIZE_OPTIONS } from "@/lib/onboarding-options";
+import { ROLE_OPTIONS, TEAM_SIZE_OPTIONS, labelFor } from "@/lib/onboarding-options";
 import {
   TEXT_FIELD_CAPS,
   changedDetails,
@@ -366,7 +366,9 @@ export default function AccountPage() {
               disabled={detailsSaving}
             >
               <SelectTrigger id="role" className="w-full">
-                <SelectValue placeholder="Choose one" />
+                <SelectValue placeholder="Choose one">
+                  {(v) => labelFor(ROLE_OPTIONS, v) ?? "Choose one"}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {ROLE_OPTIONS.map((opt) => (
@@ -389,7 +391,9 @@ export default function AccountPage() {
               disabled={detailsSaving}
             >
               <SelectTrigger id="team-size" className="w-full">
-                <SelectValue placeholder="Choose one" />
+                <SelectValue placeholder="Choose one">
+                  {(v) => labelFor(TEAM_SIZE_OPTIONS, v) ?? "Choose one"}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {TEAM_SIZE_OPTIONS.map((opt) => (

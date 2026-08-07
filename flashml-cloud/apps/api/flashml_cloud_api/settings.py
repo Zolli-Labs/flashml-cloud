@@ -11,6 +11,7 @@ the public keys are fetched from it (see ``auth.jwks_url``).
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 
@@ -51,11 +52,18 @@ class Settings:
     database_url: str = ""
     #: Public base URL of the browser console, used to build the
     #: `verification_uri` a machine prints during device-code enrolment.
-    #: Deliberately NOT in the require_auth missing-secret check: an empty
-    #: value degrades to a relative path (a human can still find the page
-    #: from whatever host they are on), which is a cosmetic problem, not a
-    #: security one, and refusing to boot over it would take the whole API
-    #: down for a display string.
+    #: Deliberately NOT in the require_auth missing-secret check: refusing to
+    #: boot over a display string would take the whole API down for it.
+    #:
+    #: It is not, however, merely cosmetic when unset, which is what this
+    #: comment used to claim. The old reasoning was that a relative
+    #: "/activate" still lets "a human find the page from whatever host they
+    #: are on" — but the consumer of this string is `flashnode login`,
+    #: printing into a TERMINAL on a volunteer's own laptop. There is no
+    #: current host there. Hands-on QA on 2026-08-04 hit exactly that: the
+    #: agent printed "Approve at: /activate" and the operator had no way to
+    #: know which host to put in front of it. Unset is a real, if
+    #: non-fatal, defect — hence the startup warning in `from_env`.
     console_url: str = ""
 
     @classmethod
@@ -132,6 +140,17 @@ class Settings:
                     "Missing required settings while FLASHML_REQUIRE_AUTH is on: "
                     + ", ".join(missing)
                     + ". Refusing to start with auth silently disabled."
+                )
+
+            # Warn, do not refuse: enrolment still works, but every machine
+            # that runs `flashnode login` against this deploy is told to
+            # "Approve at: /activate" — a path with no host, printed into a
+            # terminal. See the field comment above.
+            if not console_url:
+                logging.getLogger("flashml-cloud-api").warning(
+                    "FLASHML_CONSOLE_URL is unset: device-code enrolment will "
+                    "print a relative /activate path that a volunteer cannot "
+                    "resolve. Set it to the console's public base URL."
                 )
 
         return settings

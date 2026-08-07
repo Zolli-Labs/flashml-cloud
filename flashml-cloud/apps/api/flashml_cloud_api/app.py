@@ -292,6 +292,19 @@ def looks_like_machine_token(token: str | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Backoff between retries of an idempotent coordinator call that answered
+# with a gateway error. Sized for a cold start, not for a network blip: the
+# dev coordinator runs on a Render free plan and takes ~21s to wake, and a
+# submission that fails while it boots is indistinguishable to the user from
+# a broken repo. The sum outlasts a measured cold start with room to spare.
+GATEWAY_RETRY_DELAYS: tuple[float, ...] = (2.0, 5.0, 12.0)
+
+# Gateway-shaped statuses: the hop in front of the coordinator answered, the
+# coordinator itself did not. Anything else — a 4xx especially — is a real
+# answer and repeating it just multiplies a request that cannot succeed.
+GATEWAY_STATUSES = frozenset({502, 503, 504})
+
+
 class CoordinatorClient:
     """The only holder of the operator credential.
 
@@ -373,6 +386,33 @@ class CoordinatorClient:
                 raise HTTPException(
                     status_code=502, detail="coordinator unavailable"
                 ) from None
+
+
+async def forward_idempotent(
+    coordinator: CoordinatorClient,
+    method: str,
+    path: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """``forward`` plus a retry while the coordinator is still coming up.
+
+    ONLY for calls that are safe to repeat. The artifact PUT qualifies
+    because its key is a freshly minted uuid: a retry writes the same bytes
+    to the same never-before-used key, so repeating it cannot overwrite
+    another user's staged code, nor an earlier attempt of this same request.
+    Do not reach for this on job submission — a repeated POST there is a
+    duplicate job.
+    """
+    last = await coordinator.forward(method, path, **kwargs)
+    if last.status_code not in GATEWAY_STATUSES:
+        return last
+
+    for delay in GATEWAY_RETRY_DELAYS:
+        await asyncio.sleep(delay)
+        last = await coordinator.forward(method, path, **kwargs)
+        if last.status_code not in GATEWAY_STATUSES:
+            return last
+    return last
 
 
 def _passthrough(r: httpx.Response) -> Response:
@@ -1718,7 +1758,8 @@ def create_cloud_app(
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
 
-        upload = await coordinator.forward(
+        upload = await forward_idempotent(
+            coordinator,
             "PUT",
             f"/v1alpha1/artifacts/{code_key}",
             content=tar_bytes,
@@ -1729,6 +1770,19 @@ def create_cloud_app(
                 json.dumps({"text": "staging the repo artifact failed",
                             "status": upload.status_code})
             )
+            # Two different failures, two different things for the user to do.
+            # A gateway status means the coordinator is still booting and
+            # waiting is the whole fix; the old copy ("could not stage the
+            # repo") sent people off to debug a repo that was never the
+            # problem.
+            if upload.status_code in GATEWAY_STATUSES:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "the coordinator is starting up and did not accept the "
+                        "upload in time — try again in about a minute"
+                    ),
+                )
             raise HTTPException(status_code=502, detail="could not stage the repo")
 
         if config.is_federated:

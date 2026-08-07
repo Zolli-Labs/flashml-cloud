@@ -1,6 +1,7 @@
 "use client";
 
 import { relativeTime } from "@/lib/machine-status";
+import { memberName, memberSubtitle } from "@/lib/member-identity";
 import { type PoolMember } from "@/lib/cloud-api";
 
 export function MemberTable({
@@ -48,12 +49,14 @@ function MemberRow({
       <td className="px-3 py-3">
         <span className="min-w-0">
           <span className="block truncate text-sm">
-            {member.display_name || "unnamed"}
+            {memberName(member)}
             {isOwner && (
               <span className="label-caps ml-2 align-middle">owner</span>
             )}
           </span>
-          <span className="meta block truncate">{member.user_id}</span>
+          {memberSubtitle(member) && (
+            <span className="meta block truncate">{memberSubtitle(member)}</span>
+          )}
         </span>
       </td>
       <td className="meta px-3 py-3">{member.machine_count}</td>

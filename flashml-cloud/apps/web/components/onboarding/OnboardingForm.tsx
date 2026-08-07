@@ -27,6 +27,7 @@ import {
   ROLE_OPTIONS,
   TEAM_SIZE_OPTIONS,
   isComplete,
+  labelFor,
   type OnboardingDraft,
 } from "@/lib/onboarding-options";
 
@@ -227,7 +228,9 @@ export function OnboardingForm({
               disabled={submitting}
             >
               <SelectTrigger id="role" className="w-full">
-                <SelectValue placeholder="Choose one" />
+                <SelectValue placeholder="Choose one">
+                  {(v) => labelFor(ROLE_OPTIONS, v) ?? "Choose one"}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {ROLE_OPTIONS.map((opt) => (
@@ -252,7 +255,9 @@ export function OnboardingForm({
               disabled={submitting}
             >
               <SelectTrigger id="team-size" className="w-full">
-                <SelectValue placeholder="Choose one" />
+                <SelectValue placeholder="Choose one">
+                  {(v) => labelFor(TEAM_SIZE_OPTIONS, v) ?? "Choose one"}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {TEAM_SIZE_OPTIONS.map((opt) => (
@@ -336,7 +341,9 @@ export function OnboardingForm({
             disabled={submitting}
           >
             <SelectTrigger id="heard-from" className="w-full">
-              <SelectValue placeholder="Choose one" />
+              <SelectValue placeholder="Choose one">
+                {(v) => labelFor(HEARD_FROM_OPTIONS, v) ?? "Choose one"}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {HEARD_FROM_OPTIONS.map((opt) => (

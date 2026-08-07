@@ -201,6 +201,17 @@ services:
       # `#` -> %23, `/` -> %2F, `:` -> %3A) or the URI parses wrong.
       - key: DATABASE_URL
         sync: false
+      # See the dev API service below for the full reasoning: `flashnode
+      # login` prints this into a terminal on a volunteer's own machine, and
+      # the relative "/activate" fallback is not something they can act on
+      # there — there is no current host to resolve it against.
+      #
+      # The Render-assigned host, because that is what this blueprint
+      # actually declares. If a custom domain (zolliai.com) is attached to
+      # flashml-web in the dashboard, change this to match it: whatever a
+      # volunteer is told to open has to be a host that answers.
+      - key: FLASHML_CONSOLE_URL
+        value: https://flashml-web.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
 
@@ -375,6 +386,14 @@ services:
       # Connection string (SESSION pooler, :5432, user postgres.<ref>).
       - key: DATABASE_URL
         sync: false
+      # Where a machine is told to go to approve its device code. Unset
+      # until 2026-08-04, and the fallback is a RELATIVE "/activate" — which
+      # is printed by `flashnode login` into a terminal on someone else's
+      # laptop, where there is no current host to make it relative to. The
+      # volunteer got "Approve at: /activate" and no way to guess the rest.
+      # An explicit URL, for the same reason COORDINATOR_URL above is one.
+      - key: FLASHML_CONSOLE_URL
+        value: https://flashml-dev-web.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
 

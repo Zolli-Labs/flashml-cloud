@@ -373,7 +373,15 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             // lets the container grow instead, so short cards centre and
             // tall ones simply make the page scroll.
             <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-12">
-              {screen === "onboarding" ? (
+              {screen === "loading" ? (
+                // Admin routes only — see ADMIN_ROUTE in lib/access-screen.
+                // Deliberately says nothing about the page behind it: the
+                // whole point is not to render the admin queue to somebody
+                // who may turn out not to be an admin.
+                <p className="meta" role="status">
+                  Checking your access…
+                </p>
+              ) : screen === "onboarding" ? (
                 // Not a route of its own: the form has to stand in for
                 // whatever page the user asked for, or a bookmarked `/jobs`
                 // would render the product to an account that has not asked

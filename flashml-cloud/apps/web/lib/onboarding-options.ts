@@ -40,6 +40,24 @@ export const HEARD_FROM_OPTIONS: Option[] = [
   { value: "other", label: "Somewhere else" },
 ];
 
+/** Resolve a stored value to the label a person should read.
+ *
+ * Base UI's `Select.Value` renders the raw VALUE when it has no way to look
+ * up a label, so a trigger showed "ml_engineer" and "2_5" while the open list
+ * beside it showed "ML engineer" and "2–5 people". Pass this as the Value's
+ * child at every call site.
+ *
+ * Returns `null` for an unset value so the caller can fall back to its
+ * placeholder — Base UI's own `placeholder` prop is overridden as soon as a
+ * child is supplied. */
+export function labelFor(
+  options: readonly Option[],
+  value: string | null | undefined
+): string | null {
+  if (!value) return null;
+  return options.find((o) => o.value === value)?.label ?? value;
+}
+
 export interface OnboardingDraft {
   first_name: string;
   last_name: string;

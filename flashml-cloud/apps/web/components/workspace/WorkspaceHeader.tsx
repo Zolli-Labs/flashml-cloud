@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Plus } from "@phosphor-icons/react";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import { isMachineOnline } from "@/lib/machine-scope";
+import { countOf } from "@/lib/plural";
 import { workspacePath } from "@/lib/workspace-scope";
 
 /**
@@ -30,7 +31,8 @@ export function WorkspaceHeader() {
       <div>
         <h1 className="title">{pool.name}</h1>
         <p className="meta mt-1.5">
-          {members.length} people · {online} machines online
+          {countOf(members.length, "person", "people")} ·{" "}
+          {countOf(online, "machine")} online
         </p>
       </div>
       <Link

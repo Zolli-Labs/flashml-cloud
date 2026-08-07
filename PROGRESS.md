@@ -196,6 +196,69 @@ for browser QA so the Next.js HMR websocket and client motion hydrate normally.
 Next: validate authenticated Crew flows against the dev stack, then plan the
 separate underlying FlashML runtime/API/package rebrand if ZolliAI is adopted.
 
+### 2026-08-04 — Hands-on QA of the dev console: 65 cases, 11 bugs, 6 fixed (flashml-cloud)
+
+What/why: first end-to-end manual pass over the deployed dev environment —
+signup, admission, workspaces, invites, submit, device enrolment, admin
+queue — driven through a real browser plus a real `flashnode` agent. 65
+cases, 54 passed, 11 defects. Six fixed here; the rest are logged below with
+the reason they were left.
+
+How verified: api `pytest -q` 770 passed/1 skipped/1 deselected/1 xfailed
+(was 767 — three new retry tests); web `vitest` 22 files/240 passed (was
+20/223 — `plural`, `member-identity`, plus cases in `onboarding-options` and
+`access-screen`); `make e2e` 70 passed; `npx next build` clean with `.env.dev`
+loaded. Each fix re-checked in the browser against the dev stack: dropdowns
+now read "ML engineer"/"2–5 people", header reads "1 person", the People row
+no longer prints a UUID, `/admin/requests` shows "Checking your access…" for
+a non-admin while a real admin still reaches the queue.
+
+Root causes, not symptoms:
+- **Repo submit failed on the first try of every session (was the worst
+  one).** The API packs the repo, then PUTs the tarball to the coordinator;
+  `flashml-dev-coordinator` is a Render FREE web service and spins down, so
+  that PUT got a 502 while it cold-started (measured: 21.3s to answer
+  `/healthz`). The user was told "could not stage the repo", which sends
+  people to debug a repo that was fine. Fixed with `forward_idempotent` —
+  retry only on 502/503/504, only for calls safe to repeat (the artifact key
+  is a fresh uuid), delays (2, 5, 12)s — plus a message that names the real
+  cause. Prod's coordinator is a starter-plan pserv and does not spin down
+  the same way.
+- **Base UI's `Select.Value` renders the VALUE, not the item's label.** This
+  is not Radix. Every trigger showed `ml_engineer` / `2_5` / `friend` while
+  the open list beside it showed the right words. `labelFor()` + a child
+  function at all five call sites.
+- **`FLASHML_CONSOLE_URL` was set on no service, ever.** The fallback is a
+  relative `/activate`, and `settings.py` justified that as cosmetic because
+  "a human can still find the page from whatever host they are on". They
+  cannot: the string is printed by `flashnode login` into a TERMINAL on a
+  volunteer's own laptop. Set on both API services in `render.yaml`, comment
+  corrected, and `from_env` now warns when it is unset.
+- **The optimistic access gate was right everywhere except `/admin`.**
+  Rendering the console while `GET /me` is in flight avoids a spinner for the
+  admitted majority — but on the admin queue it painted the whole page to an
+  account that was neither admitted nor admin. Nothing leaked (no request
+  fires, the API refuses independently); the cost/benefit simply inverts on a
+  route only admins open. `ADMIN_ROUTE` + a `loading` screen.
+
+Gotchas: **`render.yaml` is not the deployed truth** — per the 2026-08-02
+entry, autoDeploy never re-reads the blueprint, so `FLASHML_CONSOLE_URL` must
+also be set in the Render dashboard (or the blueprint re-synced) or the fix
+ships as a no-op. Also: `./scripts/dev.sh --all` starts an API and
+coordinator the console never calls — `.env.dev(.example)` points
+`NEXT_PUBLIC_CLOUD_API` at `flashml-dev-api.onrender.com`, so local API edits
+do not reach the local console, and `AGENTS.md`'s stated reason for running
+`dev.sh` no longer describes what happens.
+
+Next: `flashnode work` ignores the coordinator `login` enrolled against and
+dies on a bare 401 — the CLI prints that exact command as the next step, so a
+volunteer's first move fails. It lives in the PUBLIC repo, so it needs a
+flashnode release plus the four pins moved together. Parking lot, all
+deliberately not done: the `/pools/join` nav rail showing "My machines" to a
+pending user; "Cancel job" offering a confirm for a federated cancel the API
+answers 501 to; the account display name going stale in the header until
+reload; decline having no confirmation step where job-cancel has one.
+
 ### 2026-08-04 — Workspace console: /w/[poolId] tabs over one WorkspaceProvider, plus dead-code sweep (flashml-cloud)
 
 What/why: 18-task plan lands the console as workspace-scoped: `/w/[poolId]/`

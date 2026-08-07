@@ -33,6 +33,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
+from flashml_cloud_api import app as app_module
 from flashml_cloud_api.app import create_cloud_app
 from flashml_cloud_api.settings import Settings
 
@@ -115,6 +116,11 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
         self._prefix = uuid.uuid4().hex[:10]
         self._next_id = 1
         self.submit_status = 201
+        # How many artifact PUTs answer 502 before one is allowed through.
+        # A Render free-plan coordinator does exactly this while it cold
+        # starts; `None` means every attempt fails.
+        self.artifact_gateway_failures: int | None = 0
+        self.artifact_attempts = 0
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         await request.aread()
@@ -122,6 +128,10 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
         method, path = request.method, request.url.path
 
         if method == "PUT" and path.startswith("/v1alpha1/artifacts/"):
+            self.artifact_attempts += 1
+            failures = self.artifact_gateway_failures
+            if failures is None or self.artifact_attempts <= failures:
+                return httpx.Response(502, text="<html>Bad Gateway</html>")
             key = path[len("/v1alpha1/artifacts/"):]
             self.artifacts[key] = request.content
             return httpx.Response(200, json={"uri": f"artifact://{key}"})
@@ -826,3 +836,71 @@ def test_raw_job_submission_with_placement_pool_any_is_still_allowed(
         headers={"Authorization": f"Bearer {_jwt(alice)}"},
     )
     assert r.status_code == 201, r.text
+
+
+# ---------------------------------------------------------------------------
+# a coordinator that is still waking up
+#
+# Regression: ISSUE-006 — the dev coordinator runs on a Render free plan and
+# spins down when idle, so the FIRST submission of any session got a 502 on
+# the artifact PUT and the user was told "could not stage the repo". A cold
+# start measured 21.3s; the retry below outlasts it. The PUT is safe to
+# repeat: `code_key` is a freshly minted uuid, so a retry cannot overwrite
+# anyone's staged code, including an earlier attempt of this same request.
+# Found by hands-on QA on 2026-08-04.
+# Report: .gstack/qa-reports/qa-report-flashml-console-2026-08-04.md
+# ---------------------------------------------------------------------------
+
+
+def test_a_cold_coordinator_is_retried_and_the_job_still_lands(
+    make_client, db, transport, monkeypatch
+):
+    monkeypatch.setattr(app_module, "GATEWAY_RETRY_DELAYS", (0.0, 0.0, 0.0))
+    transport.artifact_gateway_failures = 2
+
+    r = _post(make_client(), _jwt(_new_user(db)))
+
+    assert r.status_code == 201, r.text
+    assert transport.artifact_attempts == 3
+    assert len(transport.job_submissions) == 1
+
+
+def test_a_coordinator_that_never_wakes_says_so(
+    make_client, db, transport, monkeypatch
+):
+    monkeypatch.setattr(app_module, "GATEWAY_RETRY_DELAYS", (0.0, 0.0, 0.0))
+    transport.artifact_gateway_failures = None
+
+    r = _post(make_client(), _jwt(_new_user(db)))
+
+    assert r.status_code == 502
+    # Every allowed attempt was actually made.
+    assert transport.artifact_attempts == 4
+    # The old copy was "could not stage the repo", which reads as "your repo
+    # is broken" for what is really "come back in thirty seconds".
+    detail = r.json()["detail"].lower()
+    assert "starting up" in detail or "try again" in detail
+    assert "repo" not in detail.replace("repository", "")
+
+
+def test_a_non_gateway_upload_failure_is_not_retried(
+    make_client, db, transport, monkeypatch
+):
+    """A 4xx from the artifact store is our bug, not a cold start. Retrying
+    it just multiplies a request that will never succeed."""
+    monkeypatch.setattr(app_module, "GATEWAY_RETRY_DELAYS", (0.0, 0.0, 0.0))
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        transport.requests.append(request)
+        if request.method == "PUT" and "/artifacts/" in request.url.path:
+            transport.artifact_attempts += 1
+            return httpx.Response(413, text="too large")
+        return httpx.Response(404)
+
+    monkeypatch.setattr(transport, "handle_async_request", handle)
+
+    r = _post(make_client(), _jwt(_new_user(db)))
+
+    assert r.status_code == 502
+    assert transport.artifact_attempts == 1
