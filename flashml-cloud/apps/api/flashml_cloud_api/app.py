@@ -49,18 +49,24 @@ import uuid
 
 import httpx
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from starlette.concurrency import run_in_threadpool
 
-from flashruntime.protocol.v1alpha1 import JobSpec, NodeHeartbeat, NodeRegistration
+from flashruntime.protocol.v1alpha1 import (
+    JobSpec,
+    JobState,
+    NodeHeartbeat,
+    NodeRegistration,
+)
 
 from flashml_cloud_api import access
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
+from flashml_cloud_api import metrics as metricsmod
 from flashml_cloud_api import repo as repomod
 from flashml_cloud_api import storage as storagemod
 from flashml_cloud_api import verify as verifymod
@@ -439,6 +445,78 @@ def _storage_gate(db: psycopg.Connection, user_id: str) -> None:
     )
     if problem is not None:
         raise HTTPException(status_code=413, detail=problem)
+
+
+def is_terminal_state(state: Any) -> bool:
+    """Has this job stopped changing?
+
+    ``JobState.terminal`` from the protocol package rather than a tuple of
+    strings kept here: the set of terminal states is a wire fact, and a
+    private copy of it would drift the first time the runtime adds one.
+
+    An unrecognised state — a coordinator newer than the pinned protocol —
+    is NOT terminal. That is the safe direction for every caller below: the
+    worst case is a footprint measured late or not at all, whereas guessing
+    "terminal" for a state we do not understand would record a number for a
+    job still writing to the disk and then never look again.
+    """
+    if not isinstance(state, str):
+        return False
+    try:
+        return JobState(state).terminal
+    except ValueError:
+        return False
+
+
+async def _record_artifact_footprint(
+    coordinator: CoordinatorClient,
+    db: psycopg.Connection,
+    job_id: str,
+) -> None:
+    """Measure a finished job's disk footprint, once, and write it down.
+
+    WHY HERE AND NOT ON EVERY POLL. The measurement is an HTTP call to the
+    coordinator's artifact listing, and its answer is fixed from the moment
+    the job is terminal — so it must happen exactly at the transition, not
+    on the two-second poll that follows it for as long as the tab stays
+    open. The caller's guard is ``jobs.artifact_bytes_recorded_at``
+    (migration 0011), read off the row it already fetched for the
+    visibility check: no extra query to decide, and no coordinator call at
+    all on a repeat.
+
+    Non-federated jobs only. A federated run is N coordinator jobs under
+    one local id and is measured by its driver instead — see
+    ``fedavg.record_run_footprint``.
+
+    NEVER FATAL, and NOTHING RECORDED ON FAILURE. Usage accounting is
+    best-effort by design: a job page that 500s because the artifact
+    listing was slow is strictly worse than usage that lags by one poll.
+    Every failure path here returns quietly *without* stamping the marker,
+    so the next poll retries — a failed listing remembered as a measurement
+    would make that job free for ever.
+    """
+    try:
+        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts")
+    except Exception:  # noqa: BLE001 - accounting must not fail the request
+        return
+    if r.status_code >= 300:
+        return
+    try:
+        listing = r.json()
+    except ValueError:
+        return
+    if not isinstance(listing, list):
+        return
+
+    try:
+        dbmod.record_job_artifact_bytes(
+            db, job_id, storagemod.sum_artifact_sizes(listing)
+        )
+    except Exception:  # noqa: BLE001 - same rule: never fail the user's read
+        log.warning(
+            json.dumps({"text": "could not record artifact footprint",
+                        "job_id": job_id})
+        )
 
 
 def _passthrough(r: httpx.Response) -> Response:
@@ -1966,11 +2044,26 @@ def create_cloud_app(
         # through a shared pool) is the only place that filter can be
         # applied — and now also the only place the workspace label comes
         # from, since the coordinator has never heard of pools.
-        return [
+        visible = [
             {**j, **scopes[j["job_id"]]}
             for j in jobs
             if isinstance(j, dict) and j.get("job_id") in seen
-        ] + federated
+        ]
+        # Write down every terminal state this page just learned. No extra
+        # network call — the coordinator's list already carries the states —
+        # and one batched, self-guarding UPDATE for the whole page, so the
+        # marginal cost of an open jobs list is a statement that matches no
+        # rows. It is here as well as on the detail route because a job's
+        # outcome must not depend on somebody having opened its own page:
+        # `GET /me/metrics` counts succeeded/partial/failed out of this
+        # column, and outcomes only recorded for jobs that were being
+        # watched would make that page a survey of browsing habits.
+        dbmod.sync_observed_job_states(
+            db,
+            [(j["job_id"], str(j["state"])) for j in visible
+             if is_terminal_state(j.get("state"))],
+        )
+        return visible + federated
 
     @app.get("/v1alpha1/jobs/{job_id}", tags=["browser"])
     async def get_job_route(
@@ -1999,6 +2092,14 @@ def create_cloud_app(
             # authorization check; this is a data query for a job already
             # confirmed visible, so it must use the id that query actually
             # requires to return anything.
+            #
+            # No storage-accounting hook here, deliberately. A federated run
+            # is measured by the driver that runs it, at the moment it
+            # finishes (`fedavg.record_run_footprint`) — not from this route.
+            # Two reasons: this route answers a federated job entirely from
+            # local rows and must keep costing zero coordinator round trips,
+            # and the driver observes the run ending whether or not anybody
+            # has a page open, which a poll-driven hook cannot.
             rounds = dbmod.list_job_rounds_for_owner(db, job_id, row["owner_id"])
             source = row.get("source") or {}
             return {
@@ -2035,6 +2136,25 @@ def create_cloud_app(
             None if row.get("pool_id") is None else str(row["pool_id"])
         )
         job["submitted_by"] = dbmod.display_name_for(db, row["owner_id"])
+
+        # THE RECORDING HOOK, Mode A half — and the only place in this API
+        # where a non-federated job is ever observed to have stopped. The
+        # coordinator's answer is already in hand, so noticing costs
+        # nothing; both writes below are guarded on a column of the row
+        # fetched for the visibility check above, so a page left polling a
+        # finished job re-runs neither.
+        #
+        # The two are separate on purpose. Recording the STATE is a cheap
+        # local write and is what `GET /me/metrics` counts outcomes from,
+        # so it happens on every terminal observation and does not care
+        # whether the measurement succeeded. Recording the FOOTPRINT costs a
+        # coordinator round trip and is guarded by its own marker, so a
+        # listing that failed is retried on the next poll instead of being
+        # remembered as a measurement.
+        if is_terminal_state(job.get("state")):
+            dbmod.sync_observed_job_states(db, [(job_id, str(job["state"]))])
+            if row.get("artifact_bytes_recorded_at") is None:
+                await _record_artifact_footprint(coordinator, db, job_id)
         return job
 
     @app.get("/v1alpha1/jobs/{job_id}/rounds", tags=["browser"])
@@ -2237,6 +2357,45 @@ def create_cloud_app(
             "limit_bytes": limit,
             "percent_used": storagemod.percent_used(used, limit),
         }
+
+    @app.get("/v1alpha1/me/metrics", tags=["browser"])
+    async def get_my_metrics(
+        window_days: int = Query(
+            default=metricsmod.DEFAULT_WINDOW_DAYS,
+            ge=1,
+            le=metricsmod.MAX_WINDOW_DAYS,
+        ),
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """This account's reliability report, computed from the ledger.
+
+        Owner-scoped from the verified JWT ``sub``, exactly like
+        ``/v1alpha1/me/storage`` beside it: there is no id in the path and
+        no account in the body, so there is nothing to scope wrongly.
+
+        The coordinator is not contacted, and cannot be. Every number here
+        is a count over ``jobs``, ``attempts`` and ``job_rounds``, which is
+        what makes a page covering a month of work one query rather than one
+        HTTP call per job — hard rule 3, durable state lives in Postgres.
+
+        ``window_days`` is bounded rather than clamped: a request for 0 days
+        or 10 000 is a caller bug, and silently answering a different
+        question than the one asked produces a page whose label and contents
+        disagree. 422 says which.
+
+        **Three of the fields are always null**, and that is the most
+        important thing about this route. ``lost_task_seconds``,
+        ``mttd_seconds`` and ``mttr_seconds`` need events nothing in this
+        deployment records; ``metrics.report`` documents exactly which event
+        each one is waiting for. They are null rather than 0 because this
+        page's entire purpose is to prove a claim about reliability, and a
+        fabricated MTTR is indistinguishable from a measured one.
+        """
+        return metricsmod.report(
+            window_days=window_days,
+            counts=dbmod.metrics_counts_for_owner(db, user_id, window_days),
+        )
 
     @app.get("/v1alpha1/jobs/{job_id}/result", tags=["browser"])
     async def get_job_result(

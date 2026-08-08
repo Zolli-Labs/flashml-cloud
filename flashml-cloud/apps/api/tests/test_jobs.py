@@ -32,6 +32,7 @@ from psycopg.rows import dict_row
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
+from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api.app import create_cloud_app
 from flashml_cloud_api.settings import Settings
 
@@ -69,9 +70,18 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
         self._prefix = uuid.uuid4().hex[:10]
         self._next_id = 1
         self.artifacts: dict[str, bytes] = {}
+        #: When true, the artifact LISTING (not the artifact reads) answers
+        #: 503. Models the one failure the storage-accounting path has to
+        #: absorb without taking the job page down with it.
+        self.artifact_listing_broken = False
 
     def seed_artifact(self, key: str, content: bytes) -> None:
         self.artifacts[key] = content
+
+    def finish(self, job_id: str, state: str = "SUCCEEDED") -> None:
+        """Move a job to a terminal state, as the coordinator's own sweeper
+        does once every task has settled."""
+        self._jobs[job_id] = dict(self._jobs[job_id], state=state)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         await request.aread()
@@ -119,6 +129,21 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
             record = dict(record, state="CANCELLED")
             self._jobs[job_id] = record
             return httpx.Response(200, json=record)
+
+        if method == "GET" and path.endswith("/artifacts") and path.count("/") == 4:
+            # The real coordinator's job artifact listing: every file under
+            # `jobs/{job_id}/`, with its size. Derived from the same seeded
+            # dict the artifact READS are served from, so a test cannot
+            # accidentally describe a footprint that does not exist.
+            job_id = path.split("/")[-2]
+            if self.artifact_listing_broken:
+                return httpx.Response(503, json={"detail": "listing unavailable"})
+            prefix = f"jobs/{job_id}/"
+            return httpx.Response(200, json=[
+                {"uri": f"artifact://{key}", "key": key, "size_bytes": len(body)}
+                for key, body in sorted(self.artifacts.items())
+                if key.startswith(prefix)
+            ])
 
         if method == "GET" and path.startswith("/v1alpha1/artifacts/"):
             key = path[len("/v1alpha1/artifacts/"):]
@@ -564,3 +589,227 @@ def test_the_console_can_read_this_accounts_storage(client, transport, db):
 
 def test_storage_needs_a_jwt(client):
     assert client.get("/v1alpha1/me/storage").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# storage accounting: the half that was missing
+#
+# The rule (storage.py), the measurement (db), the submit gate and
+# GET /me/storage all shipped — and nothing in production ever called
+# `record_job_artifact_bytes`, so every account read 0 bytes used for ever
+# and the budget could not refuse anything. These tests are the closing
+# half: a job that finishes has its footprint measured, once, from the
+# place a job is actually observed to be over.
+# ---------------------------------------------------------------------------
+
+
+def _artifacts_listed(transport) -> list[str]:
+    """Every artifact-LISTING request the coordinator received, by job id.
+
+    The listing is the expensive call this feature must not make on every
+    poll, so counting it is the whole point rather than an implementation
+    detail: a job page polls every two seconds and the answer to "how big
+    is this job" stops changing the moment the job is terminal.
+    """
+    return [
+        r.url.path.split("/")[-2]
+        for r in transport.requests
+        if r.method == "GET" and r.url.path.endswith("/artifacts")
+    ]
+
+
+def test_a_finished_jobs_footprint_is_recorded_when_it_is_seen_finished(
+    client, db, transport
+):
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job = _submit(client, token, "job-that-writes-output")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/model.bin", b"x" * 700)
+    transport.seed_artifact(f"jobs/{job_id}/metrics.json", b"y" * 300)
+    transport.finish(job_id)
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert dbmod.storage_usage_for_owner(db, alice) == 1000
+
+
+def test_a_running_job_is_never_asked_what_it_has_written(client, db, transport):
+    """A running job's footprint is still changing, so measuring it would
+    record a number that is wrong by the time it is stored — and would
+    spend an HTTP call per poll to do it."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job = _submit(client, token, "still-running")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/partial.bin", b"z" * 500)
+
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    assert _artifacts_listed(transport) == []
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_polling_a_finished_job_lists_its_artifacts_exactly_once(
+    client, db, transport
+):
+    """The console polls a job page every two seconds and keeps polling
+    after it finishes. A footprint that stopped changing must not cost an
+    HTTP call per poll for ever."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job = _submit(client, token, "finished-and-still-open")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"q" * 64)
+    transport.finish(job_id)
+
+    for _ in range(4):
+        client.get(f"/v1alpha1/jobs/{job_id}",
+                   headers={"Authorization": f"Bearer {token}"})
+
+    assert _artifacts_listed(transport) == [job_id]
+    assert dbmod.storage_usage_for_owner(db, alice) == 64
+
+
+def test_a_job_that_wrote_nothing_is_recorded_as_zero_and_not_re_measured(
+    client, db, transport
+):
+    """"Measured, and it was empty" and "never measured" are different
+    facts. Without a recorded-at marker they are the same 0, and the empty
+    job gets re-listed on every poll for ever."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job = _submit(client, token, "wrote-nothing")
+    job_id = job["job_id"]
+    transport.finish(job_id)
+
+    for _ in range(3):
+        client.get(f"/v1alpha1/jobs/{job_id}",
+                   headers={"Authorization": f"Bearer {token}"})
+
+    assert _artifacts_listed(transport) == [job_id]
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_an_unreachable_listing_does_not_break_the_job_page(client, db, transport):
+    """Usage accounting is best-effort. A job page that 500s because the
+    artifact listing was slow is strictly worse than usage that lags."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job = _submit(client, token, "listing-is-down")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"w" * 128)
+    transport.finish(job_id)
+    transport.artifact_listing_broken = True
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}",
+                   headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert r.json()["job_id"] == job_id
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_a_failed_measurement_is_retried_on_the_next_poll(client, db, transport):
+    """The failure above must not be recorded as an answer. If a failed
+    listing marked the job measured, one unlucky second would make that
+    job free for ever."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job = _submit(client, token, "listing-recovers")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"w" * 128)
+    transport.finish(job_id)
+
+    transport.artifact_listing_broken = True
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    transport.artifact_listing_broken = False
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+
+    assert dbmod.storage_usage_for_owner(db, alice) == 128
+
+
+def test_a_cancelled_job_still_has_its_footprint_counted(client, db, transport):
+    """Cancelled is terminal and the bytes a cancelled job already wrote are
+    still on the disk. Counting only SUCCEEDED would let someone submit,
+    write, cancel, repeat, and never pay for any of it."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job = _submit(client, token, "cancelled-but-not-empty")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/half.bin", b"c" * 256)
+    transport.finish(job_id, state="CANCELLED")
+
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    assert dbmod.storage_usage_for_owner(db, alice) == 256
+
+
+def test_a_federated_run_is_not_measured_from_this_route(client, db, transport):
+    """A federated run is N coordinator jobs under one local id, and this
+    route answers it entirely from local rows — no coordinator call at all,
+    which is the property that makes it correct (the parent id names no
+    coordinator job). Its footprint is measured by the driver that runs it,
+    at the moment it finishes; see tests/test_federated.py."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = fedavgmod.new_federated_job_id()
+    dbmod.insert_job(
+        db, job_id=job_id, owner_id=alice, name="fed-run",
+        source={"mode": "federated", "rounds": 1}, spec={}, status="RUNNING",
+    )
+    dbmod.insert_job_round(
+        db, job_id=job_id, round_index=0, participants=2, mean_loss=1.0,
+        contributors=["node-a"], coordinator_job_id=f"r0-{job_id}",
+    )
+    transport.seed_artifact(f"jobs/r0-{job_id}/weights.bin", b"f" * 400)
+    dbmod.set_job_status(db, job_id, "SUCCEEDED", finished=True)
+    before = len(transport.requests)
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}",
+                   headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert len(transport.requests) == before
+
+
+def test_a_finished_job_can_push_an_account_over_its_budget(client, db, transport):
+    """The whole point. Before this, `record_job_artifact_bytes` had no
+    caller in production, every account read 0 bytes used, and the budget
+    could not refuse anything no matter what was on the disk."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set storage_limit_bytes = 1000 where id = %s",
+            (alice,),
+        )
+    job = _submit(client, token, "fills-the-budget")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/big.bin", b"b" * 1024)
+    transport.finish(job_id)
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={"apiVersion": "flashml.dev/v1alpha1", "kind": "Job",
+              "metadata": {"name": "should-be-refused"}, "spec": {}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 413, r.text
+
+
+def test_another_account_cannot_trigger_a_measurement_it_cannot_see(
+    client, db, transport
+):
+    """The recording hook hangs off a route whose first act is a visibility
+    check. A stranger must not be able to make this API spend a coordinator
+    call on a job they cannot see."""
+    alice = _new_user(db)
+    bob = _new_user(db)
+    job = _submit(client, _browser_jwt(alice), "not-bobs-job")
+    job_id = job["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"s" * 32)
+    transport.finish(job_id)
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}",
+                   headers={"Authorization": f"Bearer {_browser_jwt(bob)}"})
+    assert r.status_code == 404
+    assert _artifacts_listed(transport) == []
+    assert dbmod.storage_usage_for_owner(db, alice) == 0

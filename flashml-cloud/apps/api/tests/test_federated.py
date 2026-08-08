@@ -479,6 +479,101 @@ def test_a_restarted_driver_resumes_instead_of_retraining(db, settings, postgres
     assert [r["round"] for r in rounds] == [0, 1]
 
 
+class SizedStubCoordinator(StubCoordinator):
+    """StubCoordinator whose artifact listing reports sizes, as the real
+    coordinator's ``GET /v1alpha1/jobs/{id}/artifacts`` does."""
+
+    size_bytes = 100
+
+    def artifacts(self, job_id):
+        return [
+            {**entry, "size_bytes": self.size_bytes}
+            for entry in super().artifacts(job_id)
+        ]
+
+
+def test_a_finished_run_records_the_footprint_of_every_round(
+    db, settings, postgres_dsn
+):
+    """A federated run is N coordinator jobs, and every round's outputs stay
+    on the same shared disk. Measuring only the last round — or only the
+    parent id, which names no coordinator job at all — would under-report an
+    N-round run by roughly a factor of N, and that is precisely the account
+    most able to fill the disk."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    # 2 shards x 2 files x 100 bytes per round, over 2 rounds.
+    _run(job_id, settings, postgres_dsn, SizedStubCoordinator(), rounds=2)
+
+    assert dbmod.storage_usage_for_owner(db, owner) == 800
+    row = dbmod.fetch_job_for_owner(db, job_id, owner)
+    assert row["artifact_bytes_recorded_at"] is not None
+
+
+def test_a_run_that_failed_is_still_measured(db, settings, postgres_dsn):
+    """A run that died after writing three rounds of weights still occupies
+    that disk. Measuring only successful runs would make "submit, write,
+    fail" a free way to fill it."""
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    coordinator = SizedStubCoordinator()
+    _run(job_id, settings, postgres_dsn, coordinator, rounds=1)
+    # A second run of the same job that blows up before recording anything
+    # new: the footprint of what is already there must survive.
+    coordinator.fail_on_submit = True
+    with pytest.raises(Exception):
+        _run(job_id, settings, postgres_dsn, coordinator, rounds=2)
+
+    assert dbmod.fetch_job_for_owner(db, job_id, owner)["status"] == "FAILED"
+    assert dbmod.storage_usage_for_owner(db, owner) == 400
+
+
+def test_a_coordinator_that_cannot_list_artifacts_does_not_fail_the_run(
+    db, settings, postgres_dsn
+):
+    """The run has already aggregated every round and written its weights.
+    Losing all of that because a listing was momentarily unavailable would
+    be the accounting tail wagging the dog — same rule as the round's own
+    contributor and credit writes."""
+    class Broken:
+        def artifacts(self, job_id):
+            raise RuntimeError("listing unavailable")
+
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    dbmod.insert_job_round(
+        db, job_id=job_id, round_index=0, participants=2, mean_loss=1.0,
+        contributors=[], coordinator_job_id="cjob-000",
+    )
+    fedavgmod.record_run_footprint(
+        Broken(), _connect_factory(postgres_dsn), job_id
+    )
+
+    row = dbmod.fetch_job_for_owner(db, job_id, owner)
+    # Nothing recorded, and NOT stamped as measured: a failed listing is not
+    # an answer, and the next finish of this job may still measure it.
+    assert row["artifact_bytes_recorded_at"] is None
+    assert dbmod.storage_usage_for_owner(db, owner) == 0
+
+
+def test_a_run_with_no_rounds_costs_no_listing_call(db, settings, postgres_dsn):
+    """A run that failed before its first round has nothing to measure, and
+    must not spend a coordinator call finding that out."""
+    calls: list[str] = []
+
+    class Counting:
+        def artifacts(self, job_id):
+            calls.append(job_id)
+            return []
+
+    owner = _new_user(db)
+    job_id = _seed_job(db, owner)
+    fedavgmod.record_run_footprint(
+        Counting(), _connect_factory(postgres_dsn), job_id
+    )
+    assert calls == []
+
+
 def test_re_running_a_finished_job_is_idempotent(db, settings, postgres_dsn):
     owner = _new_user(db)
     job_id = _seed_job(db, owner)

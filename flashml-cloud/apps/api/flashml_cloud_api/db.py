@@ -2045,18 +2045,181 @@ def storage_usage_for_owner(db: psycopg.Connection, owner_id: str) -> int:
 def record_job_artifact_bytes(
     db: psycopg.Connection, job_id: str, total_bytes: int
 ) -> None:
-    """Set — never add — a job's measured footprint.
+    """Set — never add — a job's measured footprint, and mark it measured.
 
     A job's state is polled every two seconds while its page is open, and
     the recording hook runs on each poll. Accumulating would let one idle
     browser tab inflate an account's usage without bound until it could no
     longer submit anything. `total_bytes` is always the whole current
     footprint, so assignment is both correct and idempotent.
+
+    `artifact_bytes_recorded_at` (migration 0011) is stamped in the SAME
+    statement, never a second one: it is what the hook reads to decide
+    whether it still owes the coordinator an artifact-listing call, and a
+    bytes column written without its marker — or a marker written without
+    its bytes — would either re-list a measured job on every poll for ever
+    or record a measurement that never happened. This function is the only
+    writer of either column, which is what makes that pairing enforceable.
     """
     db.execute(
-        "update public.jobs set artifact_bytes = %s where id = %s",
+        "update public.jobs "
+        "   set artifact_bytes = %s, artifact_bytes_recorded_at = now() "
+        " where id = %s",
         (int(total_bytes), job_id),
     )
+
+
+# ---------------------------------------------------------------------------
+# reliability metrics (Stage 8)
+#
+# What this account's ledger actually says, over a window. The rule about
+# what those numbers MEAN — and which fields cannot be derived at all — is
+# `flashml_cloud_api.metrics`, kept apart for the same reason the storage
+# budget is: a policy that lives inside a SQL string cannot be read or
+# argued with.
+# ---------------------------------------------------------------------------
+
+
+def metrics_counts_for_owner(
+    db: psycopg.Connection, owner_id: str, window_days: int
+) -> dict[str, int]:
+    """Job outcomes, attempt counts and contributing machines for one account.
+
+    **ONE WINDOW, DEFINED ON THE JOB.** Everything counted here belongs to a
+    job this account submitted within ``window_days``; the attempt counts are
+    not separately windowed on when the attempt happened. That is deliberate
+    and it is what makes the page coherent: ``goodput_ratio`` and
+    ``jobs_total`` then describe the same set of jobs, so "4 jobs, 60%
+    goodput" is one statement rather than two about different periods. The
+    cost is that a long-running job submitted before the window contributes
+    nothing even if it ran yesterday — which is right, because its jobs row
+    is excluded too, and a task count with no job to belong to would be
+    unexplainable on the page.
+
+    **ATTEMPTS, NOT DISTINCT TASKS.** ``tasks_attempted`` counts rows in
+    ``attempts``, one per lease claimed. A task retried three times after two
+    machines died contributes three. Collapsing to distinct tasks would drive
+    goodput toward 1.0 for every job that eventually finished and erase the
+    wasted work the whole page exists to show.
+
+    **THE FEDERATED JOIN IS NOT OPTIONAL.** A federated run is one
+    coordinator job PER ROUND, and both ``attempts.job_id`` and
+    ``contributions.job_id`` carry the ROUND's coordinator job id — an id
+    that is not a row in ``public.jobs`` at all (only the parent ``fed-…`` id
+    is). Joining attempts to ``jobs.id`` alone would report zero tasks and
+    zero machines for every federated run ever submitted, which is the mode
+    this product most wants to show off. ``job_rounds`` is the mapping back.
+
+    **ACCEPTED, NOT MERELY ATTEMPTED, DECIDES WHO CONTRIBUTED.** A machine
+    that claimed leases and never committed anything appears in
+    ``tasks_attempted`` and NOT in ``machines_contributing`` — hard rule 4,
+    the same distinction the credit ledger draws.
+
+    Statuses are compared upper-cased. Every writer today stores the
+    protocol's own spelling (``SUCCEEDED``/``PARTIAL``/``FAILED``), and this
+    makes a lower-cased row from some future writer count rather than
+    silently drop out of the outcome columns while still counting in
+    ``jobs_total``.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            with owned as (
+                select id
+                  from public.jobs
+                 where owner_id = %s
+                   and created_at >= now() - make_interval(days => %s)
+            ),
+            -- Every coordinator job whose work belongs to one of those jobs:
+            -- the job itself for a Mode A run, and one per round for a
+            -- federated one.
+            coordinator_jobs as (
+                select id as job_id from owned
+                 union
+                select r.coordinator_job_id
+                  from public.job_rounds r
+                  join owned o on o.id = r.job_id
+                 where r.coordinator_job_id is not null
+            )
+            select
+                (select count(*) from owned) as jobs_total,
+                (select count(*) from public.jobs j
+                  where j.owner_id = %s
+                    and j.created_at >= now() - make_interval(days => %s)
+                    and upper(j.status) = 'SUCCEEDED') as jobs_succeeded,
+                (select count(*) from public.jobs j
+                  where j.owner_id = %s
+                    and j.created_at >= now() - make_interval(days => %s)
+                    and upper(j.status) = 'PARTIAL') as jobs_partial,
+                (select count(*) from public.jobs j
+                  where j.owner_id = %s
+                    and j.created_at >= now() - make_interval(days => %s)
+                    and upper(j.status) = 'FAILED') as jobs_failed,
+                (select count(*) from public.attempts a
+                   join coordinator_jobs c on c.job_id = a.job_id)
+                    as tasks_attempted,
+                (select count(*) from public.attempts a
+                   join coordinator_jobs c on c.job_id = a.job_id
+                  where a.accepted_at is not null) as tasks_accepted,
+                (select count(distinct a.machine_id) from public.attempts a
+                   join coordinator_jobs c on c.job_id = a.job_id
+                  where a.accepted_at is not null) as machines_contributing
+            """,
+            (owner_id, window_days) + (owner_id, window_days) * 3,
+        )
+        row = cur.fetchone()
+    return {key: int(value) for key, value in (row or {}).items()}
+
+
+def sync_observed_job_states(
+    db: psycopg.Connection, observed: Sequence[tuple[str, str]]
+) -> None:
+    """Write down terminal job states this API has just seen the coordinator
+    report, for the jobs that do not already say so.
+
+    WHY THIS EXISTS AT ALL. ``jobs.status`` is written once, at submission,
+    from whatever the coordinator answered then — ``PENDING`` or
+    ``RUNNING``. For a Mode A job nothing ever updated it again: the console
+    reads live state by forwarding to the coordinator, so the stale column
+    was never visible and never mattered. It matters now, because
+    ``GET /me/metrics`` counts outcomes out of this table and cannot make N
+    HTTP calls to do it — and a metrics page reporting "0 succeeded" for an
+    account whose jobs all succeeded is worse than no page. The federated
+    driver has always written its own terminal status here (``set_job_status``);
+    this is the same fact arriving for the other mode, from the only place
+    that observes it.
+
+    ``status is distinct from`` is the guard, and it is the statement's own
+    rather than a read the caller has to perform first: after the first
+    observation every later poll matches no row, so an open jobs list costs
+    one no-op UPDATE rather than one write per job per two seconds.
+
+    One statement for the whole page, not one per job: the list route sees
+    every visible job at once, and a per-row loop would turn a single
+    coordinator round trip into N database round trips at exactly the
+    polling frequency that makes N expensive.
+
+    ``coalesce(finished_at, now())`` rather than ``now()``: a job whose
+    finish time was already recorded (the federated path stamps it) must
+    keep the time it actually finished, not the time somebody happened to
+    open a page.
+    """
+    rows = [(job_id, state) for job_id, state in observed if job_id and state]
+    if not rows:
+        return
+    values = ", ".join(["(%s, %s)"] * len(rows))
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            update public.jobs j
+               set status = v.state,
+                   finished_at = coalesce(j.finished_at, now())
+              from (values {values}) as v(id, state)
+             where j.id = v.id
+               and j.status is distinct from v.state
+            """,
+            [field for row in rows for field in row],
+        )
 
 
 def storage_limit_override_for(

@@ -20,6 +20,7 @@ from flashml_cloud_api.storage import (
     budget_problem,
     limit_for,
     percent_used,
+    sum_artifact_sizes,
 )
 
 GB = 1024**3
@@ -113,6 +114,48 @@ def test_percent_used_never_exceeds_one_hundred():
 
 def test_percent_used_of_a_zero_limit_is_full_not_a_crash():
     assert percent_used(used=1, limit=0) == 100.0
+
+
+# -- reading a coordinator artifact listing ----------------------------------
+#
+# The listing is the one thing standing between "there is a budget" and "the
+# budget can trip", and it arrives over the wire from another service. What
+# it must never do is turn a malformed entry into a plausible-looking
+# number.
+
+
+def test_a_jobs_footprint_is_the_sum_of_its_artifacts():
+    assert sum_artifact_sizes([
+        {"uri": "artifact://jobs/j/a.bin", "key": "jobs/j/a.bin", "size_bytes": 700},
+        {"uri": "artifact://jobs/j/b.bin", "key": "jobs/j/b.bin", "size_bytes": 300},
+    ]) == 1000
+
+
+def test_a_job_that_wrote_nothing_has_a_footprint_of_zero():
+    assert sum_artifact_sizes([]) == 0
+
+
+def test_an_entry_with_no_size_contributes_nothing_rather_than_guessing():
+    """A coordinator older than the size field, or an entry it could not
+    stat, reports no size. Counting it as anything but 0 would be inventing
+    bytes; refusing the whole listing would throw away the sizes it did
+    report."""
+    assert sum_artifact_sizes([
+        {"key": "jobs/j/a.bin"},
+        {"key": "jobs/j/b.bin", "size_bytes": 42},
+    ]) == 42
+
+
+def test_a_boolean_size_is_not_counted_as_one_byte():
+    """`True` is an `int` in Python and would sum as 1 under a naive
+    isinstance check — a silent, tiny, permanent overcount."""
+    assert sum_artifact_sizes([{"key": "k", "size_bytes": True}]) == 0
+
+
+def test_nonsense_entries_are_skipped_not_raised_on():
+    assert sum_artifact_sizes(
+        ["not-a-dict", {"size_bytes": "big"}, {"size_bytes": -5}, {"size_bytes": 8}]
+    ) == 8
 
 
 # -- accounting, against a real database -------------------------------------

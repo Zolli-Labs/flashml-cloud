@@ -67,6 +67,7 @@ from flashml_cloud_api.compile import compile_federated_round, federated_task_id
 from flashml_cloud_api.flashml_yaml import FlashmlConfig
 from flashml_cloud_api.images import CuratedImage
 from flashml_cloud_api.settings import Settings
+from flashml_cloud_api import storage as storagemod
 
 log = logging.getLogger("flashml-cloud-api")
 
@@ -77,6 +78,7 @@ __all__ = [
     "default_coordinator",
     "is_federated_job_id",
     "new_federated_job_id",
+    "record_run_footprint",
     "run_federated_job",
     "start_federated_job",
 ]
@@ -407,7 +409,7 @@ def run_federated_job(
             # Every requested round is already recorded. Finishing rather
             # than running a negative-length loop keeps a re-triggered
             # driver idempotent.
-            _finish(connect, run.job_id, STATUS_SUCCEEDED)
+            _finish(connect, run.job_id, STATUS_SUCCEEDED, coord)
             return
 
         run_fedavg(
@@ -447,15 +449,80 @@ def run_federated_job(
             "job_id": run.job_id,
             "error": type(exc).__name__,
         }))
-        _finish(connect, run.job_id, STATUS_FAILED)
+        _finish(connect, run.job_id, STATUS_FAILED, coord)
         raise
     else:
-        _finish(connect, run.job_id, STATUS_SUCCEEDED)
+        _finish(connect, run.job_id, STATUS_SUCCEEDED, coord)
+
+
+def record_run_footprint(
+    coord: Coordinator,
+    connect: Callable[[], psycopg.Connection],
+    job_id: str,
+) -> None:
+    """Measure how much disk this run leaves behind, and write it down.
+
+    **Why the driver and not a route.** A federated run is N coordinator
+    jobs, one per round, under a single local id — the parent id names no
+    coordinator job at all, so there is nothing for the job page to ask
+    about, and ``GET /v1alpha1/jobs/{id}`` answers a federated run entirely
+    from local rows precisely so that it costs no round trip. The driver, by
+    contrast, is the thing that observes a run ending, and it observes it
+    whether or not anyone has a page open. Measuring here also means a run
+    that nobody ever looks at still counts against its owner's budget, which
+    is exactly the run most likely to have been left to fill the disk.
+
+    **The footprint is the SUM OVER ROUNDS, not the last round's.** Every
+    round writes its shards' outputs and its aggregated weights, and none of
+    it is deleted when the next round starts. Charging for one round would
+    under-report an N-round run by roughly a factor of N.
+
+    **Best-effort, exactly like ``_accepted_tasks`` and
+    ``_record_contributions``, and for the same reason**: by the time this
+    runs the rounds have been aggregated and their weights committed. An
+    accounting number is never worth throwing that away, so every failure
+    path here logs and returns. Nothing is recorded on a partial read
+    either — ``record_job_artifact_bytes`` stamps the row as measured, and a
+    partial sum remembered as the whole footprint would be permanently wrong
+    in the direction that lets an account keep submitting.
+    """
+    try:
+        db = connect()
+        try:
+            rounds = dbmod.list_round_job_ids(db, job_id)
+            if not rounds:
+                # A run that failed before its first round has nothing to
+                # measure. Returning here is also what keeps that case from
+                # spending a coordinator call to learn it.
+                return
+            total = 0
+            for _round_index, coordinator_job_id in rounds:
+                total += storagemod.sum_artifact_sizes(
+                    coord.artifacts(coordinator_job_id)
+                )
+            dbmod.record_job_artifact_bytes(db, job_id, total)
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - accounting never fails a finished run
+        log.warning(json.dumps(
+            {"text": "could not record run artifact footprint", "job_id": job_id}
+        ))
 
 
 def _finish(
-    connect: Callable[[], psycopg.Connection], job_id: str, status: str
+    connect: Callable[[], psycopg.Connection],
+    job_id: str,
+    status: str,
+    coord: Coordinator | None = None,
 ) -> None:
+    """Record a run's terminal status, and — while we are here — its size.
+
+    The two are together because this is the one moment a federated run is
+    known to have stopped, which is the moment both facts become true and
+    stop changing. The status write comes first: it is what the console and
+    ``GET /me/metrics`` read, it cannot fail for a reason the measurement
+    could cause, and the measurement's own failure must not cost it.
+    """
     try:
         db = connect()
         try:
@@ -467,6 +534,8 @@ def _finish(
             {"text": "could not record final job status",
              "job_id": job_id, "status": status}
         ))
+    if coord is not None:
+        record_run_footprint(coord, connect, job_id)
 
 
 def start_federated_job(

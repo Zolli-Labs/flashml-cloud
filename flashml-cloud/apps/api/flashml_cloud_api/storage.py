@@ -27,6 +27,8 @@ split: the rule is a policy decision, the measurement is a fact.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
+from typing import Any
 
 GB = 1024**3
 
@@ -102,6 +104,41 @@ def percent_used(used: int, limit: int | None) -> float | None:
     if limit <= 0:
         return 100.0
     return min(100.0, round(used / limit * 100, 1))
+
+
+def sum_artifact_sizes(listing: Iterable[Any]) -> int:
+    """A job's footprint, from the coordinator's artifact listing.
+
+    The listing is ``[{uri, key, size_bytes}, …]`` — one entry per file the
+    job left under ``jobs/{job_id}/`` — and the sum of its sizes is what the
+    job costs the shared disk. Pure, and here rather than at either call
+    site, because both the Mode A route and the federated driver reduce a
+    listing to one number and two copies of that arithmetic would eventually
+    disagree about the awkward entries below.
+
+    **Every judgement here is "skip the entry, keep the rest".** This is
+    data from another service, and the two failure modes it can produce are
+    asymmetric: dropping one unreadable entry under-reports by that file,
+    while refusing the whole listing under-reports by the entire job and
+    would do so silently and for ever, since the caller records what it is
+    given exactly once.
+
+    - No ``size_bytes`` (a coordinator older than the field, or a file it
+      could not stat) contributes 0. Anything else would be inventing bytes.
+    - ``bool`` is excluded explicitly: ``True`` is an ``int`` in Python and
+      would otherwise sum as one byte — a silent, permanent overcount that
+      no test looking at plausible numbers would catch.
+    - Negative sizes are impossible and are ignored rather than allowed to
+      subtract from a real file's bytes.
+    """
+    total = 0
+    for entry in listing:
+        if not isinstance(entry, dict):
+            continue
+        size = entry.get("size_bytes")
+        if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+            total += size
+    return total
 
 
 def _human(n: int) -> str:
