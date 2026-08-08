@@ -2013,3 +2013,66 @@ def list_job_ids_for_owner(db: psycopg.Connection, owner_id: str) -> set[str]:
     with db.cursor() as cur:
         cur.execute("select id from public.jobs where owner_id = %s", (owner_id,))
         return {row["id"] for row in cur.fetchall()}
+
+
+# ---------------------------------------------------------------------------
+# storage accounting (migration 0010)
+#
+# The policy — whether a given usage is over budget — lives in
+# `flashml_cloud_api.storage` as pure arithmetic. These are the measurements
+# it reasons about, kept separate so the rule stays testable without a
+# database and so neither half can quietly start making the other's
+# decisions.
+# ---------------------------------------------------------------------------
+
+
+def storage_usage_for_owner(db: psycopg.Connection, owner_id: str) -> int:
+    """Total recorded artifact bytes across every job this account owns.
+
+    Summed from `jobs.artifact_bytes` rather than asked of the coordinator:
+    the live answer would cost one HTTP call per job to satisfy a question
+    that is asked on every submit. Jobs predating migration 0010 contribute
+    0 — honest, because nobody measured them.
+    """
+    row = db.execute(
+        "select coalesce(sum(artifact_bytes), 0) as used "
+        "from public.jobs where owner_id = %s",
+        (owner_id,),
+    ).fetchone()
+    return int(row["used"]) if row else 0
+
+
+def record_job_artifact_bytes(
+    db: psycopg.Connection, job_id: str, total_bytes: int
+) -> None:
+    """Set — never add — a job's measured footprint.
+
+    A job's state is polled every two seconds while its page is open, and
+    the recording hook runs on each poll. Accumulating would let one idle
+    browser tab inflate an account's usage without bound until it could no
+    longer submit anything. `total_bytes` is always the whole current
+    footprint, so assignment is both correct and idempotent.
+    """
+    db.execute(
+        "update public.jobs set artifact_bytes = %s where id = %s",
+        (int(total_bytes), job_id),
+    )
+
+
+def storage_limit_override_for(
+    db: psycopg.Connection, owner_id: str
+) -> int | None:
+    """This account's own limit, or None to mean "use the deployment default".
+
+    None and 0 are different answers and must stay that way: 0 is an admin
+    freezing an account, None is an account that simply never had an
+    override. Collapsing them freezes everybody.
+    """
+    row = db.execute(
+        "select storage_limit_bytes from public.profiles where id = %s",
+        (owner_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    value = row["storage_limit_bytes"]
+    return None if value is None else int(value)

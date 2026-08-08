@@ -30,6 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
+from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api.app import create_cloud_app
 from flashml_cloud_api.settings import Settings
@@ -495,3 +496,71 @@ def test_an_unknown_job_result_is_404(client, transport, db):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# storage budget: the gate that stops one account filling a shared disk
+# ---------------------------------------------------------------------------
+
+
+def test_an_account_over_its_storage_budget_cannot_submit(client, transport, db):
+    """Artifacts share one 5 GB disk across every workspace, so a full disk
+    is not one person's problem — it takes the coordinator down and with it
+    everyone's running jobs. The refusal has to land BEFORE the coordinator
+    is asked to expand anything."""
+    user_id = _new_user(db)
+    token = _browser_jwt(user_id)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set storage_limit_bytes = 100 where id = %s",
+            (user_id,),
+        )
+    job = _submit(client, token, "first")
+    dbmod.record_job_artifact_bytes(db, job["job_id"], 500)
+
+    r = client.post(
+        "/v1alpha1/jobs",
+        json={"apiVersion": "flashml.dev/v1alpha1", "kind": "Job",
+              "metadata": {"name": "over-budget"}, "spec": {}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 413
+    assert "storage" in r.json()["detail"].lower()
+
+
+def test_an_account_inside_its_budget_still_submits(client, transport, db):
+    user_id = _new_user(db)
+    token = _browser_jwt(user_id)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set storage_limit_bytes = 100000 where id = %s",
+            (user_id,),
+        )
+    job = _submit(client, token, "first")
+    dbmod.record_job_artifact_bytes(db, job["job_id"], 500)
+    assert _submit(client, token, "second")["job_id"]
+
+
+def test_the_console_can_read_this_accounts_storage(client, transport, db):
+    """A quota nobody can see is a quota that surprises people. The console
+    needs used/limit/percent before the refusal, not after it."""
+    user_id = _new_user(db)
+    token = _browser_jwt(user_id)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set storage_limit_bytes = 1000 where id = %s",
+            (user_id,),
+        )
+    job = _submit(client, token, "first")
+    dbmod.record_job_artifact_bytes(db, job["job_id"], 250)
+
+    body = client.get(
+        "/v1alpha1/me/storage", headers={"Authorization": f"Bearer {token}"}
+    ).json()
+    assert body["used_bytes"] == 250
+    assert body["limit_bytes"] == 1000
+    assert body["percent_used"] == 25.0
+
+
+def test_storage_needs_a_jwt(client):
+    assert client.get("/v1alpha1/me/storage").status_code == 401

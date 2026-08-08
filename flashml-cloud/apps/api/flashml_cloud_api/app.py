@@ -62,6 +62,7 @@ from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api import repo as repomod
+from flashml_cloud_api import storage as storagemod
 from flashml_cloud_api import verify as verifymod
 from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
@@ -413,6 +414,31 @@ async def forward_idempotent(
         if last.status_code not in GATEWAY_STATUSES:
             return last
     return last
+
+
+def _storage_gate(db: psycopg.Connection, user_id: str) -> None:
+    """Refuse a submission from an account that is out of storage.
+
+    Placed BEFORE the coordinator is asked to expand anything: artifacts
+    share one disk across every workspace, so a full disk is not one
+    person's problem — it stops the coordinator and with it every other
+    workspace's running jobs. The last safe moment to say no is before the
+    job starts, because a task's output size is not known until after it
+    has run.
+
+    413 rather than 403: this is not a permissions decision. The account is
+    allowed to do this and has run out of room, which is what 413 means and
+    what distinguishes it from every other refusal on this route.
+    """
+    problem = storagemod.budget_problem(
+        used=dbmod.storage_usage_for_owner(db, user_id),
+        limit=storagemod.limit_for(
+            override=dbmod.storage_limit_override_for(db, user_id),
+            default=storagemod.deployment_default(),
+        ),
+    )
+    if problem is not None:
+        raise HTTPException(status_code=413, detail=problem)
 
 
 def _passthrough(r: httpx.Response) -> Response:
@@ -1584,6 +1610,7 @@ def create_cloud_app(
         if len(raw) > MAX_JSON_BODY_BYTES:
             raise HTTPException(status_code=413, detail="request body too large")
         payload = await _json_object(request)
+        _storage_gate(db, user_id)
         # owner_id is never accepted from the body — whatever the caller
         # put there (if anything) is simply not forwarded or looked at.
         payload.pop("owner_id", None)
@@ -2186,6 +2213,30 @@ def create_cloud_app(
 
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks")
         return _passthrough(r)
+
+    @app.get("/v1alpha1/me/storage", tags=["browser"])
+    async def get_my_storage(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """What this account is using, and against what ceiling.
+
+        A quota nobody can see is a quota that surprises people at exactly
+        the wrong moment. `limit_bytes` is null for an unlimited account
+        and `percent_used` is null with it — the console has to be able to
+        tell "no limit" from "0% of a limit", which look identical if
+        either is coerced to a number.
+        """
+        used = dbmod.storage_usage_for_owner(db, user_id)
+        limit = storagemod.limit_for(
+            override=dbmod.storage_limit_override_for(db, user_id),
+            default=storagemod.deployment_default(),
+        )
+        return {
+            "used_bytes": used,
+            "limit_bytes": limit,
+            "percent_used": storagemod.percent_used(used, limit),
+        }
 
     @app.get("/v1alpha1/jobs/{job_id}/result", tags=["browser"])
     async def get_job_result(
