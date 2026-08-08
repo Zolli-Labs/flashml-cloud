@@ -285,3 +285,76 @@ def test_local_inputs_works_under_federated_mode():
             'local_inputs: ["patients"]\n')
     config = parse_flashml_yaml(text)
     assert config.is_federated and config.local_inputs == ["patients"]
+
+
+# -- partition / validators / reduce -----------------------------------------
+#
+# The three keys that carry the §4–§6 surface. Validation here is deliberately
+# STRUCTURAL only — is it the right shape — because the authoritative semantic
+# rules (which reducers exist, which need a metric, how many shards a range
+# may produce) live in flashruntime and must not be restated here where the
+# two copies would drift. A wrong-but-well-formed declaration is answered by
+# the coordinator's 422.
+
+
+def test_partition_is_accepted_and_carried():
+    text = MINIMAL + "\npartition:\n  range: [0, 1000]\n  shards: 8\n"
+    config = parse_flashml_yaml(text)
+    assert config.partition == {"range": [0, 1000], "shards": 8}
+
+
+def test_partition_must_be_a_mapping():
+    with pytest.raises(ConfigError, match="partition"):
+        parse_flashml_yaml(MINIMAL + "\npartition: 8\n")
+
+
+def test_partition_and_sweep_are_two_generators_for_one_job():
+    """Same refusal `task_params` + `partition` gets upstream: silently
+    preferring one would run a job the author did not describe."""
+    text = MINIMAL + "\nsweep:\n  lr: [0.1]\npartition:\n  range: [0, 10]\n  shards: 2\n"
+    with pytest.raises(ConfigError, match="sweep.*partition|partition.*sweep"):
+        parse_flashml_yaml(text)
+
+
+def test_partition_cannot_be_combined_with_federated_mode():
+    """A federated round's shards are the round's participants, decided by
+    `shards:`. A partition would be a second, conflicting fan-out."""
+    text = (MINIMAL + "\nmode: federated\nrounds: 2\nmin_participants: 2\n"
+            "shards: 2\npartition:\n  range: [0, 10]\n  shards: 2\n")
+    with pytest.raises(ConfigError, match="federated"):
+        parse_flashml_yaml(text)
+
+
+def test_validators_are_accepted_and_carried():
+    text = MINIMAL + "\nvalidators:\n  keys: [accuracy]\n"
+    assert parse_flashml_yaml(text).validators == {"keys": ["accuracy"]}
+
+
+def test_validators_must_be_a_mapping():
+    with pytest.raises(ConfigError, match="validators"):
+        parse_flashml_yaml(MINIMAL + "\nvalidators: [keys]\n")
+
+
+def test_reduce_is_accepted_and_carried():
+    text = MINIMAL + "\nreduce:\n  kind: rank\n  metric: accuracy\n"
+    assert parse_flashml_yaml(text).reduce == {"kind": "rank", "metric": "accuracy"}
+
+
+def test_reduce_must_be_a_mapping():
+    with pytest.raises(ConfigError, match="reduce"):
+        parse_flashml_yaml(MINIMAL + "\nreduce: rank\n")
+
+
+def test_reduce_needs_a_kind():
+    """The one semantic check worth restating here: without `kind` there is
+    nothing for the coordinator to look up, and 'reduce: {metric: acc}' is a
+    plausible typo that would otherwise silently mean no reduction at all."""
+    with pytest.raises(ConfigError, match="kind"):
+        parse_flashml_yaml(MINIMAL + "\nreduce:\n  metric: accuracy\n")
+
+
+def test_the_three_new_keys_default_to_empty():
+    config = parse_flashml_yaml(MINIMAL)
+    assert config.partition == {}
+    assert config.validators == {}
+    assert config.reduce == {}

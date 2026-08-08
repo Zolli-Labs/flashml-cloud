@@ -100,6 +100,16 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
                 return httpx.Response(404, json={"detail": "no such job"})
             return httpx.Response(200, json=record)
 
+        if method == "GET" and path.endswith("/result"):
+            job_id = path.split("/")[-2]
+            if job_id not in self._jobs:
+                return httpx.Response(404, json={"detail": "no such job"})
+            return httpx.Response(200, json={
+                "job_id": job_id, "reducer": "rank",
+                "accepted": 2, "total": 3, "complete": False,
+                "result": {"best": {"task_id": "task-001", "value": 0.93}},
+            })
+
         if method == "POST" and path.endswith("/cancel"):
             job_id = path.split("/")[-2]
             record = self._jobs.get(job_id)
@@ -435,3 +445,53 @@ def test_a_machine_token_cannot_read_job_artifacts_via_the_browser_route(
     r = client.get(f"/v1alpha1/jobs/{job['job_id']}/artifacts/output.txt",
                    headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# the job-level result (§6): the answer the whole job exists to produce
+# ---------------------------------------------------------------------------
+
+
+def test_the_job_result_is_proxied_to_its_owner(client, transport, db):
+    """Without this route the reduction the coordinator performs is
+    unreachable: a finished sweep hands the console a directory of task
+    outputs and no answer."""
+    user_id = _new_user(db)
+    token = _browser_jwt(user_id)
+    job = _submit(client, token, "sweep")
+
+    r = client.get(
+        f"/v1alpha1/jobs/{job['job_id']}/result",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["best"]["task_id"] == "task-001"
+    assert r.json()["accepted"] == 2
+
+
+def test_the_job_result_needs_a_jwt(client, transport, db):
+    job = _submit(client, _browser_jwt(_new_user(db)), "sweep")
+    assert client.get(f"/v1alpha1/jobs/{job['job_id']}/result").status_code == 401
+
+
+def test_another_users_job_result_is_404_not_403(client, transport, db):
+    """Same disposition as every other job route here: a stranger learns
+    nothing about whether the id exists."""
+    owner_token = _browser_jwt(_new_user(db))
+    job = _submit(client, owner_token, "sweep")
+    stranger = _browser_jwt(_new_user(db))
+
+    r = client.get(
+        f"/v1alpha1/jobs/{job['job_id']}/result",
+        headers={"Authorization": f"Bearer {stranger}"},
+    )
+    assert r.status_code == 404
+
+
+def test_an_unknown_job_result_is_404(client, transport, db):
+    token = _browser_jwt(_new_user(db))
+    r = client.get(
+        "/v1alpha1/jobs/does-not-exist/result",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 404

@@ -9,6 +9,7 @@ import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { FleetTopology } from "@/components/jobs/FleetTopology";
 import { RoundProgress } from "@/components/jobs/RoundProgress";
 import { MemberCredits } from "@/components/jobs/MemberCredits";
+import { JobResultCard } from "@/components/jobs/JobResultCard";
 import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
 import { formatBytes } from "@/lib/utils";
 import {
@@ -24,6 +25,7 @@ import {
   cancelJob,
   fetchJobArtifact,
   getJob,
+  getJobResult,
   jobArtifactKey,
   listJobContributions,
   listJobEvents,
@@ -32,6 +34,7 @@ import {
   type JobContribution,
   type JobEvent,
   type JobRecord,
+  type JobResult,
   type JobRound,
   type JobTask,
 } from "@/lib/cloud-api";
@@ -65,6 +68,7 @@ export default function JobDetailPage({
   const [tasks, setTasks] = useState<JobTask[]>([]);
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [contributions, setContributions] = useState<JobContribution[]>([]);
+  const [result, setResult] = useState<JobResult | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [view, setView] = useState<View | null>(null);
@@ -106,6 +110,10 @@ export default function JobDetailPage({
     listJobTasks(jobId).then(setTasks).catch(soft);
     listJobEvents(jobId).then(setEvents).catch(soft);
     listJobContributions(jobId).then(setContributions).catch(soft);
+    // Best-effort like its neighbours: a coordinator older than the
+    // reduction surface 404s here, and that must leave the panel absent,
+    // not take the page down.
+    getJobResult(jobId).then(setResult).catch(soft);
   }, [jobId, router]);
 
   useEffect(() => {
@@ -257,7 +265,12 @@ export default function JobDetailPage({
 
       <div className="mt-6">
         {activeView === "progress" && (
-          <ProgressView job={job} rounds={rounds} contributions={contributions} />
+          <ProgressView
+            job={job}
+            rounds={rounds}
+            contributions={contributions}
+            result={result}
+          />
         )}
         {activeView === "placement" && (
           <PlacementView job={job} tasks={tasks} attempts={attempts} now={now} />
@@ -342,10 +355,12 @@ function ProgressView({
   job,
   rounds,
   contributions,
+  result,
 }: {
   job: JobRecord;
   rounds: JobRound[];
   contributions: JobContribution[];
+  result: JobResult | null;
 }) {
   return (
     <div className="space-y-6">
@@ -357,6 +372,10 @@ function ProgressView({
           </p>
         </div>
       )}
+
+      {/* Above the metrics: this is the answer the job was submitted for.
+          Renders nothing for a federated job or one with no reducer. */}
+      <JobResultCard result={result} />
 
       {rounds.length > 0 ? (
         <RoundProgress rounds={rounds} jobStartedAt={job.created_at} />

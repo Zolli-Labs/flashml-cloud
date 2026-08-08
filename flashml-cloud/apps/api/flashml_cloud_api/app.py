@@ -2187,6 +2187,42 @@ def create_cloud_app(
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks")
         return _passthrough(r)
 
+    @app.get("/v1alpha1/jobs/{job_id}/result", tags=["browser"])
+    async def get_job_result(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The job-level answer: the declared reducer run over accepted work.
+
+        This is what the whole job exists to produce — the winning trial of
+        a sweep, the mean across folds, the concatenated shards of a batch
+        run. Without it the console can show every task's output and still
+        not answer the question the submitter actually asked.
+
+        Answers while the job is still running, because a sweep's leader is
+        useful early; the coordinator reports ``accepted``/``total`` beside
+        the result so a partial answer always says it is partial.
+
+        A federated job has no Mode A reduction: its aggregation IS the
+        round loop, and the driver already performed it. Saying so is
+        better than reducing one arbitrary round's tasks and presenting
+        that as the job's answer.
+        """
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        if fedavgmod.is_federated_job_id(job_id):
+            raise HTTPException(
+                status_code=409,
+                detail="a federated job's aggregation is its round history, "
+                       "not a Mode A reduction — see this job's rounds",
+            )
+
+        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/result")
+        return _passthrough(r)
+
     @app.get("/v1alpha1/jobs/{job_id}/contributions", tags=["browser"])
     async def get_job_contributions(
         job_id: str,

@@ -352,6 +352,17 @@ def compile_to_jobspec(
         parameters["task_params"] = task_params
     if config.timeout_seconds is not None:
         parameters["timeout_seconds"] = config.timeout_seconds
+    # Forwarded VERBATIM. The coordinator owns their semantics — which
+    # reducers exist, how a range splits into shards, what a schema means —
+    # and expanding or re-validating them here would be a second copy of
+    # rules that already have an owner. Absent stays absent, never an empty
+    # dict, so the no-declaration path keeps being the one exercised.
+    if config.partition:
+        parameters["partition"] = dict(config.partition)
+    if config.validators:
+        parameters["validators"] = dict(config.validators)
+    if config.reduce:
+        parameters["reduce"] = dict(config.reduce)
     _local_inputs(config, parameters)
 
     repository, tag = _split_reference(image.reference)

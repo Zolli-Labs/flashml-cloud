@@ -29,6 +29,7 @@ import {
   getPoolInviteState,
   listAccessRequests,
   listJobContributions,
+  getJobResult,
   listJobRounds,
   listMachines,
   listPoolMachines,
@@ -165,6 +166,50 @@ describe("cloud-api", () => {
 
     const err: unknown = await listJobRounds("not-mine").catch((e) => e);
     expect(err).toBeInstanceOf(NotFound);
+  });
+
+  describe("getJobResult", () => {
+    it("returns the reduced job-level answer with its accepted/total context", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      const payload = {
+        job_id: "job-abc",
+        reducer: "rank",
+        accepted: 2,
+        total: 3,
+        complete: false,
+        result: { best: { task_id: "task-001", value: 0.93 }, ranking: [] },
+      };
+      fetchMock.mockResolvedValue(jsonResponse(200, payload));
+
+      const result = await getJobResult("job-abc");
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/job-abc/result`);
+      expect(result).toEqual(payload);
+      // A partial answer must round-trip as partial. Dropping `complete`
+      // would let the console present two of three tasks as the whole job.
+      expect(result?.complete).toBe(false);
+    });
+
+    it("returns null for a federated job rather than throwing", async () => {
+      // The API answers 409: a federated job's aggregation is its rounds.
+      // That is an expected shape of job, not an error the page should
+      // render as a failure banner.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(409, { detail: "a federated job's aggregation is its round history" })
+      );
+
+      await expect(getJobResult("fed-abc")).resolves.toBeNull();
+    });
+
+    it("raises NotFound for another user's job", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "unknown job" }));
+
+      const err: unknown = await getJobResult("not-mine").catch((e) => e);
+      expect(err).toBeInstanceOf(NotFound);
+    });
   });
 
   describe("submitFromRepo", () => {

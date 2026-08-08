@@ -691,3 +691,64 @@ def test_a_local_inputs_spec_is_accepted_by_the_real_recipe():
     assert len(tasks) == 1
     # Whatever else is true, no artifact was invented for the local dataset.
     assert tasks[0].payload["inputs"] == {"code": CODE_URI}
+
+
+# ---------------------------------------------------------------------------
+# partition / validators / reduce — the §4–§6 surface
+#
+# All three are forwarded VERBATIM into workload parameters. The coordinator
+# owns their semantics (which reducers exist, how a range splits, what a
+# schema means); this module's job is to carry them there without editing.
+# ---------------------------------------------------------------------------
+
+
+def test_a_partition_is_forwarded_for_the_coordinator_to_expand():
+    """Not expanded here. `expand_partition` lives upstream, and computing
+    the shard list in two places is how the console and the coordinator come
+    to disagree about how many tasks a job has."""
+    spec = compile_to_jobspec(
+        _config(partition={"range": "[0, 1000]", "shards": 8}),
+        PYTORCH, CODE_URI, "j",
+    )
+    assert _params(spec)["partition"] == {"range": [0, 1000], "shards": 8}
+    assert "task_params" not in _params(spec)
+
+
+def test_a_partitioned_job_keeps_its_placeholders_unescaped():
+    """`--out shard-{shard_index}.jsonl` must survive as a placeholder. The
+    brace-escaping that protects a plain job's argv would turn it into the
+    literal text `{{shard_index}}` and every shard would write one filename."""
+    spec = compile_to_jobspec(
+        _config(
+            partition={"range": "[0, 10]", "shards": 2},
+            args=["--out", "shard-{shard_index}.jsonl"],
+        ),
+        PYTORCH, CODE_URI, "j",
+    )
+    assert "--out" in _params(spec)["command"]
+    assert "shard-{shard_index}.jsonl" in _params(spec)["command"]
+
+
+def test_validators_are_forwarded():
+    spec = compile_to_jobspec(
+        _config(validators={"keys": '["accuracy"]'}), PYTORCH, CODE_URI, "j"
+    )
+    assert _params(spec)["validators"] == {"keys": ["accuracy"]}
+
+
+def test_reduce_is_forwarded():
+    spec = compile_to_jobspec(
+        _config(reduce={"kind": "rank", "metric": "accuracy"}),
+        PYTORCH, CODE_URI, "j",
+    )
+    assert _params(spec)["reduce"] == {"kind": "rank", "metric": "accuracy"}
+
+
+def test_a_job_declaring_none_of_them_carries_none_of_them():
+    """Absent stays absent, never an empty dict — the same rule the payload
+    forwards upstream follow, so the no-declaration path keeps being the one
+    that is exercised."""
+    params = _params(compile_to_jobspec(_config(), PYTORCH, CODE_URI, "j"))
+    assert "partition" not in params
+    assert "validators" not in params
+    assert "reduce" not in params

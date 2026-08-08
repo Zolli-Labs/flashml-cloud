@@ -317,6 +317,23 @@ export interface JobRound {
   recorded_at: string;
 }
 
+/** `GET /v1alpha1/jobs/{id}/result` — the job-level answer.
+ *
+ * `accepted`/`total` travel WITH the result rather than being derivable
+ * from it: the coordinator answers while a job is still running, and a
+ * partial answer that does not say it is partial misrepresents how much
+ * work went into it. `result` is null when the job declared no reducer,
+ * which is a real answer (the task artifacts are the deliverable), not an
+ * absence. */
+export interface JobResult {
+  job_id: string;
+  reducer: string;
+  accepted: number;
+  total: number;
+  complete: boolean;
+  result: Record<string, unknown> | null;
+}
+
 export interface SubmitFromRepoResult extends JobRecord {
   findings: PreflightFinding[];
 }
@@ -768,6 +785,23 @@ export function listJobRounds(jobId: string): Promise<JobRound[]> {
   return request<JobRound[]>(
     `/v1alpha1/jobs/${encodeURIComponent(jobId)}/rounds`
   );
+}
+
+/** `GET /v1alpha1/jobs/{id}/result` — owner-scoped exactly like `getJob`.
+ *
+ * Resolves to `null` for a federated job, which the API answers 409 to: its
+ * aggregation IS its round history and the driver already performed it.
+ * That is a shape of job, not a failure, so the page must be able to omit
+ * the panel without rendering an error. Every other non-2xx still throws. */
+export async function getJobResult(jobId: string): Promise<JobResult | null> {
+  try {
+    return await request<JobResult>(
+      `/v1alpha1/jobs/${encodeURIComponent(jobId)}/result`
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) return null;
+    throw err;
+  }
 }
 
 /** `GET /v1alpha1/jobs/{id}/events` — owner-scoped exactly like `getJob`.

@@ -37,7 +37,7 @@ MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "rounds", "min_participants", "shards",
-                 "local_inputs"}
+                 "local_inputs", "partition", "validators", "reduce"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: Today's behaviour, and the default: one round of independent tasks (a
@@ -111,6 +111,14 @@ class FlashmlConfig:
     rounds: int | None = None
     min_participants: int | None = None
     shards: int | None = None
+    #: The `partition` generator — one task per shard of an enumerated range
+    #: (§4). Mutually exclusive with ``sweep``: both are generators, and a
+    #: job has exactly one.
+    partition: dict = field(default_factory=dict)
+    #: Declared output validators (§5), e.g. ``{"keys": ["accuracy"]}``.
+    validators: dict = field(default_factory=dict)
+    #: The job-level reducer (§6), e.g. ``{"kind": "rank", "metric": "acc"}``.
+    reduce: dict = field(default_factory=dict)
 
     @property
     def is_federated(self) -> bool:
@@ -163,6 +171,9 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     resources = _validate_resources(raw.get("resources", {}))
     timeout_seconds = _validate_timeout_seconds(raw.get("timeout_seconds"))
     local_inputs = _validate_local_inputs(raw.get("local_inputs", []))
+    partition = _validate_partition(raw)
+    validators = _validate_mapping(raw.get("validators"), "validators")
+    reduce_spec = _validate_reduce(raw.get("reduce"))
     mode, rounds, min_participants, shards = _validate_mode(raw)
 
     return FlashmlConfig(
@@ -179,6 +190,9 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         rounds=rounds,
         min_participants=min_participants,
         shards=shards,
+        partition=partition,
+        validators=validators,
+        reduce=reduce_spec,
     )
 
 
@@ -249,6 +263,16 @@ def _validate_mode(raw: dict) -> tuple[str, int | None, int | None, int | None]:
             f"it dispatches tasks, so quorum could never be reached"
         )
 
+    if raw.get("partition"):
+        # Same collision as `sweep` below, for the same reason: a federated
+        # round's fan-out is `shards`, and a partition would be a second,
+        # conflicting one.
+        raise ConfigError(
+            f"flashml.yaml cannot combine 'partition' with 'mode: {MODE_FEDERATED}': "
+            f"a federated round's fan-out is 'shards', and a partition would be "
+            f"a second, conflicting one"
+        )
+
     if raw.get("sweep"):
         # A sweep expands to one task per hyperparameter combination; a
         # federated round expands to one task per shard. Both cannot be the
@@ -261,6 +285,49 @@ def _validate_mode(raw: dict) -> tuple[str, int | None, int | None, int | None]:
         )
 
     return MODE_FEDERATED, rounds, min_participants, shards
+
+
+def _validate_mapping(value: object, key: str) -> dict:
+    """A key that carries a nested object, or nothing.
+
+    Validation here is STRUCTURAL only. The authoritative semantic rules —
+    which reducers exist, which need a metric, how many shards a range may
+    produce — live in flashruntime and are enforced at expansion. Restating
+    them here would create two copies that drift, and the copy the user
+    hits first would be the one that is wrong.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"flashml.yaml {key!r} must be a mapping, got {value!r}"
+        )
+    return dict(value)
+
+
+def _validate_partition(raw: dict) -> dict:
+    partition = _validate_mapping(raw.get("partition"), "partition")
+    if partition and raw.get("sweep"):
+        raise ConfigError(
+            "flashml.yaml cannot combine 'sweep' with 'partition': both are "
+            "generators, and a job has exactly one — a sweep fans out over "
+            "hyperparameter combinations, a partition over shards of a range"
+        )
+    return partition
+
+
+def _validate_reduce(value: object) -> dict:
+    reduce_spec = _validate_mapping(value, "reduce")
+    if reduce_spec and not reduce_spec.get("kind"):
+        # The one semantic rule restated here on purpose: without `kind`
+        # there is nothing for the coordinator to look up, and
+        # `reduce: {metric: acc}` is a plausible typo that would otherwise
+        # mean no reduction at all — silently, after the job ran.
+        raise ConfigError(
+            "flashml.yaml 'reduce' needs a 'kind' naming the reducer "
+            "(none, collect, rank, aggregate, concat)"
+        )
+    return reduce_spec
 
 
 def _validate_args(args: object) -> list[str]:
