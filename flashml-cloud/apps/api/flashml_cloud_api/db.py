@@ -1823,6 +1823,103 @@ def list_job_contributions(
         ]
 
 
+def contributions_for_owner(
+    db: psycopg.Connection, owner_id: str
+) -> dict[str, Any]:
+    """Everything this account's machines have ever been credited for.
+
+    Returns ``{"machines": [...], "jobs_contributed_to": int}`` — the facts.
+    What they MEAN, and the ordering, summing and null-handling the console
+    is served, is ``flashml_cloud_api.contributions``, kept apart for the same
+    reason the storage budget and the goodput rule are.
+
+    **``contributions``, never ``attempts``.** This is the credit ledger for
+    ACCEPTED work — hard rule 4 — and it is also the only one of the two that
+    both credit paths write. ``fedavg.on_round`` credits a federated round
+    straight into this table and records no attempt at all, so a count over
+    ``attempts`` would drop that work entirely (production read 26 credits
+    against 16 attempts on one machine on 2026-08-03, and the ten-row gap was
+    real federated contributions) while also counting leases that were
+    claimed and never accepted. The unique index from migration 0003 is what
+    makes ``count(*)`` here safe where the two paths overlap: both compute the
+    same ``(machine_id, job_id, task_id)`` for a federated round's task and
+    the second insert is absorbed, so no row is ever counted twice.
+
+    **Scoped on ``machines.owner_id``, not on ``jobs.owner_id``.** The whole
+    barter premise is that a person's machines mostly run OTHER people's jobs;
+    scoping on the job — the way ``metrics_counts_for_owner`` correctly does
+    for a page about one's own submissions — would report zero for every
+    volunteer in the product.
+
+    **A revoked machine still counts, and that is a decision.** Revoking
+    invalidates a token, which stops a machine claiming new leases; it says
+    nothing about work already done and already accepted. Excluding it would
+    make somebody's total FALL when they retire a laptop or rotate a token
+    they suspect was leaked — for a counter that nothing ever debits that is
+    indistinguishable from a bug, and it would penalise exactly the hygiene we
+    want. (There is no delete-machine route, only revoke. If one is ever
+    added, note that ``contributions.machine_id`` cascades: deleting a machine
+    erases its history from this total, which is a second reason revoke must
+    stay the only exit.) ``machines.owner_id`` is likewise never reassigned
+    anywhere in this codebase — the day a transfer route exists, this query
+    would silently hand the previous owner's history to the new one, and the
+    join would have to start reading a recorded owner at credit time instead.
+
+    Two statements rather than one. The job count needs the ``job_rounds``
+    hop, and a ``LEFT JOIN`` for it in the per-machine query could fan a
+    contribution row out and inflate ``accepted_tasks`` — ``coordinator_job_id``
+    carries no uniqueness constraint, so nothing but convention says one
+    coordinator job maps to one round. Keeping the count of credits away from
+    that join makes the inflation unrepresentable rather than merely unlikely,
+    and it also means an account with no contributions still gets an answer to
+    the second question instead of losing it with the empty row set.
+    """
+    with db.cursor() as cur:
+        # Deliberately unordered: "most-contributed first" is a presentation
+        # rule and lives in `contributions.report`, the one place it can be
+        # tested without a database. A second ORDER BY here would be a copy of
+        # that rule, free to drift from it.
+        cur.execute(
+            """
+            select m.id as machine_id,
+                   m.name as hostname,
+                   m.last_seen_at,
+                   count(*) as accepted_tasks
+              from public.contributions c
+              join public.machines m on m.id = c.machine_id
+             where m.owner_id = %s
+             group by m.id, m.name, m.last_seen_at
+            """,
+            (owner_id,),
+        )
+        machines = list(cur.fetchall())
+
+        # `contributions.job_id` is a COORDINATOR job id. For a Mode A run
+        # that is also the id in `public.jobs`; for a federated run it is the
+        # ROUND's job, and a five-round run would otherwise tell a volunteer
+        # they helped with five jobs when they helped with one. `job_rounds`
+        # is the mapping back — the same join `metrics_counts_for_owner` calls
+        # not optional, for the same reason. `coalesce` keeps a credit whose
+        # job this API never recorded (a job submitted straight to the
+        # coordinator) counting as the one job it was.
+        cur.execute(
+            """
+            select count(distinct coalesce(r.job_id, c.job_id)) as jobs
+              from public.contributions c
+              join public.machines m on m.id = c.machine_id
+              left join public.job_rounds r on r.coordinator_job_id = c.job_id
+             where m.owner_id = %s
+            """,
+            (owner_id,),
+        )
+        row = cur.fetchone()
+
+    return {
+        "machines": machines,
+        "jobs_contributed_to": int(row["jobs"]) if row else 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # verifications
 # ---------------------------------------------------------------------------

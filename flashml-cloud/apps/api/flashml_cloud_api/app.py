@@ -63,6 +63,7 @@ from flashruntime.protocol.v1alpha1 import (
 )
 
 from flashml_cloud_api import access
+from flashml_cloud_api import contributions as contribmod
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
@@ -2395,6 +2396,43 @@ def create_cloud_app(
         return metricsmod.report(
             window_days=window_days,
             counts=dbmod.metrics_counts_for_owner(db, user_id, window_days),
+        )
+
+    @app.get("/v1alpha1/me/contributions", tags=["browser"])
+    async def get_my_contributions(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """What this account has contributed, across everything it worked on.
+
+        Owner-scoped from the verified JWT ``sub``, exactly like
+        ``/v1alpha1/me/storage`` and ``/v1alpha1/me/metrics`` beside it: no id
+        in the path, no account in the body, nothing to scope wrongly.
+
+        **This is the barter side of the product, and it was invisible.**
+        ``public.contributions`` has recorded every machine's accepted work
+        since the first migration, but credit surfaced only inside one job's
+        panel — "which machine did the work on THIS job" — so somebody who had
+        donated forty hours across five jobs had nowhere to learn it.
+
+        Scoped on the MACHINE's owner, not the job's, which is the opposite of
+        the metrics page next door and deliberately so: those are the jobs you
+        submitted, these are the jobs you helped run, and they are mostly
+        other people's. Both are ``/me`` and they answer different questions.
+
+        **A counter, not a currency.** Nothing debits these numbers — there is
+        no spend path anywhere in this system — so the body counts tasks and
+        jobs and never names a balance. Any copy or field that implies a
+        drawdown promises an exchange rate this product has not designed.
+
+        The coordinator is not contacted, and must not be: a person's whole
+        contribution history is two indexed queries here, against one HTTP
+        call per job it would otherwise take.
+        """
+        measured = dbmod.contributions_for_owner(db, user_id)
+        return contribmod.report(
+            machines=measured["machines"],
+            jobs_contributed_to=measured["jobs_contributed_to"],
         )
 
     @app.get("/v1alpha1/jobs/{job_id}/result", tags=["browser"])
