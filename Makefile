@@ -39,7 +39,7 @@ JOB                   ?= $$(cat /tmp/flashml-last-job-id 2>/dev/null)
 # deployed path uses it. `make check-flashml` explains what to do if missing.
 # ---------------------------------------------------------------------------
 FLASHML_REPO    := https://github.com/Zolli-Labs/flashml
-RUNTIME_VERSION := 0.4.3
+RUNTIME_VERSION := 0.4.4
 # 0.3.0 advertises local_datasets, which needs flashruntime 0.4. Keep these two
 # in step: on an older runtime pydantic silently drops the field, the host
 # advertises nothing, and local-data work is never placed on it — fail-closed,

@@ -80,7 +80,7 @@ services:
     # longer exists were both out of date.) The API and the coordinator
     # speaking different protocol versions is the exact failure this
     # consolidation exists to prevent.
-    buildCommand: pip install "flashruntime[service]==0.4.3"
+    buildCommand: pip install "flashruntime[service]==0.4.4"
     # --workers 1 is REQUIRED, not a default. See HANDOFF.md risk #5.
     startCommand: >-
       FLASHML_OPERATOR_TOKENS="flashml-api:$OPERATOR_TOKEN"
@@ -312,7 +312,7 @@ services:
     # One of the four pin sites — see the prod coordinator's buildCommand.
     # Dev running a different runtime than prod would make dev worthless as a
     # rehearsal, which is the only reason it exists.
-    buildCommand: pip install "flashruntime[service]==0.4.3"
+    buildCommand: pip install "flashruntime[service]==0.4.4"
     startCommand: >-
       FLASHML_OPERATOR_TOKENS="flashml-dev-api:$OPERATOR_TOKEN"
       uvicorn flashruntime.service.app:app
