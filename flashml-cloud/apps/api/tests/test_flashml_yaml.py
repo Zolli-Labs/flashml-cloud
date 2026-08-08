@@ -358,3 +358,16 @@ def test_the_three_new_keys_default_to_empty():
     assert config.partition == {}
     assert config.validators == {}
     assert config.reduce == {}
+
+
+def test_allow_partial_is_accepted_and_defaults_off():
+    """Fail-closed, matching the runtime field it sets: a job that never
+    mentions it keeps all-or-nothing semantics, where one exhausted task
+    fails the whole run."""
+    assert parse_flashml_yaml(MINIMAL).allow_partial is False
+    assert parse_flashml_yaml(MINIMAL + "\nallow_partial: true\n").allow_partial is True
+
+
+def test_allow_partial_must_be_a_boolean():
+    with pytest.raises(ConfigError, match="allow_partial"):
+        parse_flashml_yaml(MINIMAL + "\nallow_partial: yes-please\n")

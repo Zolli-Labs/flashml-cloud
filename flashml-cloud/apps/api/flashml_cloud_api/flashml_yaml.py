@@ -37,7 +37,8 @@ MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "rounds", "min_participants", "shards",
-                 "local_inputs", "partition", "validators", "reduce"}
+                 "local_inputs", "partition", "validators", "reduce",
+                 "allow_partial"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: Today's behaviour, and the default: one round of independent tasks (a
@@ -119,6 +120,11 @@ class FlashmlConfig:
     validators: dict = field(default_factory=dict)
     #: The job-level reducer (§6), e.g. ``{"kind": "rank", "metric": "acc"}``.
     reduce: dict = field(default_factory=dict)
+    #: Accept a run whose tasks did not all succeed (§8). Fail-closed, like
+    #: the ``retryPolicy.allowPartial`` field it sets: without it one task
+    #: exhausting its attempts fails the whole job, which on a fleet of
+    #: volunteer machines discards every other machine's accepted work.
+    allow_partial: bool = False
 
     @property
     def is_federated(self) -> bool:
@@ -174,6 +180,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     partition = _validate_partition(raw)
     validators = _validate_mapping(raw.get("validators"), "validators")
     reduce_spec = _validate_reduce(raw.get("reduce"))
+    allow_partial = _validate_bool(raw.get("allow_partial"), "allow_partial")
     mode, rounds, min_participants, shards = _validate_mode(raw)
 
     return FlashmlConfig(
@@ -193,6 +200,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         partition=partition,
         validators=validators,
         reduce=reduce_spec,
+        allow_partial=allow_partial,
     )
 
 
@@ -285,6 +293,19 @@ def _validate_mode(raw: dict) -> tuple[str, int | None, int | None, int | None]:
         )
 
     return MODE_FEDERATED, rounds, min_participants, shards
+
+
+def _validate_bool(value: object, key: str) -> bool:
+    # Not `bool(value)`: YAML turns an unquoted `yes-please` into the STRING
+    # "yes-please", which is truthy, so coercing would silently turn a typo
+    # into an opt-in to changed failure semantics.
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"flashml.yaml {key!r} must be true or false, got {value!r}"
+        )
+    return value
 
 
 def _validate_mapping(value: object, key: str) -> dict:

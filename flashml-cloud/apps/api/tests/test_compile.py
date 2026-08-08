@@ -752,3 +752,15 @@ def test_a_job_declaring_none_of_them_carries_none_of_them():
     assert "partition" not in params
     assert "validators" not in params
     assert "reduce" not in params
+
+
+def test_allow_partial_reaches_the_retry_policy():
+    """It is a `retryPolicy` field upstream, not a workload parameter —
+    forwarding it into `parameters` would put it where nothing reads it."""
+    spec = compile_to_jobspec(_config(allow_partial=True), PYTORCH, CODE_URI, "j")
+    assert spec["spec"]["retryPolicy"]["allowPartial"] is True
+
+
+def test_a_job_that_did_not_ask_for_partial_does_not_say_so():
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "j")
+    assert spec["spec"].get("retryPolicy", {}).get("allowPartial") in (None, False)

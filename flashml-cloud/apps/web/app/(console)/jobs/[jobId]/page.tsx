@@ -49,7 +49,9 @@ import {
 // stay visible from every view, so nobody watches a flat metric panel for
 // twenty minutes while the run has been wedged for nineteen.
 
-const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
+// PARTIAL belongs here or the page polls a job that is finished and is
+// never going to change again.
+const TERMINAL = new Set(["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"]);
 const POLL_MS = 2500;
 
 type View = "progress" | "placement" | "ledger";

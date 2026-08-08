@@ -228,6 +228,11 @@ export type JobState =
   | "RUNNING"
   | "RECOVERING"
   | "SUCCEEDED"
+  /** Some tasks succeeded, some exhausted their attempts, and the job set
+   *  `allow_partial`. Terminal, and deliberately not SUCCEEDED: a badge
+   *  reading "succeeded" over a run that lost six of twenty-four shards
+   *  misrepresents what came back. */
+  | "PARTIAL"
   | "FAILED"
   | "CANCELLED";
 

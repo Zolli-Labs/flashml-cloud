@@ -379,6 +379,12 @@ def compile_to_jobspec(
             "image": {"repository": repository, "tag": tag},
             "workload": {"type": "command", "parameters": parameters},
             "resources": _resources(config),
+            # A `retryPolicy` field, not a workload parameter: the
+            # coordinator derives job state from `retryPolicy.allowPartial`,
+            # and putting it in `parameters` would file it where nothing
+            # reads it. Emitted only when asked for, so the default stays
+            # whatever the protocol's own default is.
+            **({"retryPolicy": {"allowPartial": True}} if config.allow_partial else {}),
             # The one exception to "fixed and not configurable": a POOL job
             # carries the waiver, because the seventh placement gate confines
             # it to machines whose owners joined the submitter's team. The

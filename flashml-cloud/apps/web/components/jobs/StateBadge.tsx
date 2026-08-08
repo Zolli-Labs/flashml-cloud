@@ -28,6 +28,8 @@ const stateStyles: Record<JobState, string> = {
   RUNNING: "text-brand-foreground border-brand/40",
   RECOVERING: "text-warning-foreground border-warning/50",
   SUCCEEDED: "text-evergreen border-evergreen/40",
+  // Warning, not success: the run finished and did not finish whole.
+  PARTIAL: "text-warning-foreground border-warning/50",
   FAILED: "text-destructive border-destructive/40",
   CANCELLED: "text-muted-foreground border-muted",
 };
