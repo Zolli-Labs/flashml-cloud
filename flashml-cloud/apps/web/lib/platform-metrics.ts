@@ -117,6 +117,28 @@ export function summariseMetrics(payload: PlatformMetrics): MetricsSummary {
       { label: "Succeeded", value: payload.jobs_succeeded },
       { label: "Partial", value: payload.jobs_partial },
       { label: "Failed", value: payload.jobs_failed },
+      // The remainder, shown explicitly so the outcomes add up to Total.
+      //
+      // `jobs_total` is always >= succeeded + partial + failed: the rest
+      // are jobs still running, plus jobs that finished while nobody had
+      // the console open, since the API only records a terminal state it
+      // has actually observed. Four tiles that visibly fail to sum invite
+      // the reader to conclude the page is broken — the one conclusion a
+      // page whose entire purpose is to be believed cannot afford.
+      //
+      // Clamped at 0: the counts come from separate queries and could in
+      // principle disagree, and "-3 in flight" is a bug report rather than
+      // information.
+      {
+        label: "In flight",
+        value: Math.max(
+          0,
+          payload.jobs_total -
+            payload.jobs_succeeded -
+            payload.jobs_partial -
+            payload.jobs_failed
+        ),
+      },
     ],
     taskCounts: [
       { label: "Attempted", value: payload.tasks_attempted },

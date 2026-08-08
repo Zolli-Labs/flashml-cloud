@@ -33,6 +33,7 @@ describe("summariseMetrics", () => {
       { label: "Succeeded", value: 0 },
       { label: "Partial", value: 0 },
       { label: "Failed", value: 0 },
+      { label: "In flight", value: 0 },
     ]);
     expect(summary.taskCounts).toEqual([
       { label: "Attempted", value: 0 },
@@ -58,6 +59,7 @@ describe("summariseMetrics", () => {
       { label: "Succeeded", value: 9 },
       { label: "Partial", value: 1 },
       { label: "Failed", value: 2 },
+      { label: "In flight", value: 0 },
     ]);
     expect(summary.taskCounts).toEqual([
       { label: "Attempted", value: 140 },
@@ -149,5 +151,58 @@ describe("summariseMetrics", () => {
     const summary = summariseMetrics(metrics({ lost_task_seconds: 0 }));
     expect(summary.lostTaskTime.measured).toBe(true);
     expect(summary.lostTaskTime.display).toBe("0s");
+  });
+});
+
+describe("job outcome counts", () => {
+  it("accounts for every job, so the outcomes sum to the total", () => {
+    // Total >= succeeded + partial + failed, always: the remainder is jobs
+    // still running plus jobs that finished while nobody had the console
+    // open (the API only records a terminal state it has observed). Showing
+    // four tiles that visibly do not add up invites the reader to conclude
+    // the page is broken — which is the one conclusion this page cannot
+    // afford, since its whole purpose is to be believed.
+    const summary = summariseMetrics({
+      window_days: 30,
+      jobs_total: 10,
+      jobs_succeeded: 5,
+      jobs_partial: 1,
+      jobs_failed: 2,
+      tasks_attempted: 0,
+      tasks_accepted: 0,
+      goodput_ratio: null,
+      lost_task_seconds: null,
+      mttr_seconds: null,
+      mttd_seconds: null,
+      machines_contributing: 0,
+    });
+
+    const inFlight = summary.jobCounts.find((c) => c.label === "In flight");
+    expect(inFlight?.value).toBe(2);
+
+    const outcomes = summary.jobCounts
+      .filter((c) => c.label !== "Total")
+      .reduce((n, c) => n + c.value, 0);
+    expect(outcomes).toBe(10);
+  });
+
+  it("never shows a negative remainder", () => {
+    // Counts come from separate queries and could in principle disagree.
+    // A tile reading "-3 in flight" is a bug report, not information.
+    const summary = summariseMetrics({
+      window_days: 30,
+      jobs_total: 1,
+      jobs_succeeded: 5,
+      jobs_partial: 0,
+      jobs_failed: 0,
+      tasks_attempted: 0,
+      tasks_accepted: 0,
+      goodput_ratio: null,
+      lost_task_seconds: null,
+      mttr_seconds: null,
+      mttd_seconds: null,
+      machines_contributing: 0,
+    });
+    expect(summary.jobCounts.find((c) => c.label === "In flight")?.value).toBe(0);
   });
 });
