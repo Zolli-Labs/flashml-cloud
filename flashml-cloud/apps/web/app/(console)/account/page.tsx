@@ -24,10 +24,13 @@ import {
   ApiError,
   NotAuthenticated,
   getMe,
+  getMyStorage,
   updateMe,
   updateProfile,
+  type AccountStorage,
   type Profile,
 } from "@/lib/cloud-api";
+import { summariseStorage } from "@/lib/account-storage";
 import { ROLE_OPTIONS, TEAM_SIZE_OPTIONS, labelFor } from "@/lib/onboarding-options";
 import {
   TEXT_FIELD_CAPS,
@@ -64,6 +67,12 @@ export default function AccountPage() {
   const [detailsSaved, setDetailsSaved] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
 
+  // Kept separate from `profile`'s own load/error state: a storage-service
+  // hiccup should not take down the rest of the account page, and vice
+  // versa — the two calls have nothing to do with each other.
+  const [storage, setStorage] = useState<AccountStorage | null>(null);
+  const [storageError, setStorageError] = useState<string | null>(null);
+
   const load = useCallback(() => {
     getMe()
       .then((p) => {
@@ -86,6 +95,29 @@ export default function AccountPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getMyStorage()
+      .then((s) => {
+        if (cancelled) return;
+        setStorage(s);
+        setStorageError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // A 401 here is handled by `load()`'s own redirect above, which
+        // fires from the same page on the same signed-out session — no
+        // need for a second redirect from this call too.
+        if (err instanceof NotAuthenticated) return;
+        setStorageError(
+          err instanceof Error ? err.message : "Couldn't load your storage usage."
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const current = profile?.display_name ?? "";
   const trimmed = name.trim();
@@ -515,6 +547,25 @@ export default function AccountPage() {
         </dl>
       </section>
 
+      <section className="panel mt-4 p-5">
+        <h2 className="text-sm font-semibold">Storage</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Artifacts and checkpoints kept for jobs this account submitted.
+        </p>
+        <div className="mt-4">
+          {storageError ? (
+            <div className="flex items-start gap-2 text-sm text-destructive">
+              <Warning className="mt-0.5 h-4 w-4 shrink-0" weight="fill" />
+              <span>{storageError}</span>
+            </div>
+          ) : storage ? (
+            <StorageUsage storage={storage} />
+          ) : (
+            <p className="meta">…</p>
+          )}
+        </div>
+      </section>
+
       <section className="mt-4 rounded-lg border border-destructive/25 bg-destructive/[0.04] p-5">
         <h2 className="text-sm font-semibold text-destructive">Sign out</h2>
         <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
@@ -536,6 +587,47 @@ export default function AccountPage() {
           Sign out
         </button>
       </section>
+    </div>
+  );
+}
+
+/** The used/limit bar, or the unlimited state — two genuinely different
+ * layouts, not one bar with a hidden edge case. An unlimited account gets
+ * no percentage and no fill at all: a bar drawn to any width would claim a
+ * ceiling this account does not have. See `lib/account-storage.ts` for why
+ * `unlimited` has to be checked before `percent` is ever read. */
+function StorageUsage({ storage }: { storage: AccountStorage }) {
+  const display = summariseStorage(storage);
+
+  if (display.unlimited) {
+    return (
+      <div className="flex items-center justify-between gap-3">
+        <span className="metric-value text-lg">{display.usedLabel}</span>
+        <span className="rounded-full border border-border bg-surface-2 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+          No storage limit
+        </span>
+      </div>
+    );
+  }
+
+  const pct = display.percent ?? 0;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-sm">
+          <span className="metric-value">{display.usedLabel}</span>{" "}
+          <span className="text-muted-foreground">of {display.limitLabel}</span>
+        </span>
+        <span className="font-mono text-xs text-muted-foreground">
+          {Math.round(pct)}%
+        </span>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-[var(--node-green)] transition-[width] duration-500"
+          style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+        />
+      </div>
     </div>
   );
 }

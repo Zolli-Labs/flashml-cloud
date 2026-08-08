@@ -25,6 +25,7 @@ import {
   declineAccessRequest,
   getJob,
   getMe,
+  getMyMetrics,
   getPool,
   getPoolInviteState,
   listAccessRequests,
@@ -194,6 +195,88 @@ describe("cloud-api", () => {
       const storage = await getMyStorage();
       expect(storage.limit_bytes).toBeNull();
       expect(storage.percent_used).toBeNull();
+    });
+  });
+
+  describe("getMyMetrics", () => {
+    it("defaults to a 30-day window and passes it through as a query param", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      const payload = {
+        window_days: 30,
+        jobs_total: 12,
+        jobs_succeeded: 9,
+        jobs_partial: 1,
+        jobs_failed: 2,
+        tasks_attempted: 140,
+        tasks_accepted: 128,
+        goodput_ratio: 0.914,
+        lost_task_seconds: 610,
+        mttr_seconds: 42,
+        mttd_seconds: 8,
+        machines_contributing: 5,
+      };
+      fetchMock.mockResolvedValue(jsonResponse(200, payload));
+
+      const metrics = await getMyMetrics();
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/me/metrics?window_days=30`);
+      expect(metrics).toEqual(payload);
+    });
+
+    it("passes a caller-chosen window through unchanged", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          window_days: 7,
+          jobs_total: 0,
+          jobs_succeeded: 0,
+          jobs_partial: 0,
+          jobs_failed: 0,
+          tasks_attempted: 0,
+          tasks_accepted: 0,
+          goodput_ratio: null,
+          lost_task_seconds: null,
+          mttr_seconds: null,
+          mttd_seconds: null,
+          machines_contributing: 0,
+        })
+      );
+
+      await getMyMetrics(7);
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/me/metrics?window_days=7`);
+    });
+
+    it("keeps every nullable reliability field null, never coerced to 0", async () => {
+      // These will genuinely all be null in production for now — the
+      // events needed to derive them may not exist yet. A client-side
+      // coercion to 0 here would turn "not measured" into a fabricated
+      // perfect (or zero) score before the UI ever sees it.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          window_days: 30,
+          jobs_total: 0,
+          jobs_succeeded: 0,
+          jobs_partial: 0,
+          jobs_failed: 0,
+          tasks_attempted: 0,
+          tasks_accepted: 0,
+          goodput_ratio: null,
+          lost_task_seconds: null,
+          mttr_seconds: null,
+          mttd_seconds: null,
+          machines_contributing: 0,
+        })
+      );
+
+      const metrics = await getMyMetrics();
+      expect(metrics.goodput_ratio).toBeNull();
+      expect(metrics.lost_task_seconds).toBeNull();
+      expect(metrics.mttr_seconds).toBeNull();
+      expect(metrics.mttd_seconds).toBeNull();
     });
   });
 

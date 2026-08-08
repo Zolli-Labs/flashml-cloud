@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import {
   BookOpen,
   Compass,
+  Gauge,
   Gear,
   GithubLogo,
   House,
@@ -289,6 +290,12 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           label="How it works"
           icon={Compass}
           active={isActive("/how-it-works")}
+        />
+        <NavItem
+          href="/metrics"
+          label="Reliability"
+          icon={Gauge}
+          active={isActive("/metrics")}
         />
         <NavItem
           href="/docs"

@@ -353,6 +353,43 @@ export interface AccountStorage {
   percent_used: number | null;
 }
 
+/** `GET /v1alpha1/me/metrics?window_days=N` — the platform's reliability
+ *  numbers over the trailing window, for the reliability page.
+ *
+ * Two different kinds of field, and they must not be handled the same way:
+ *
+ * - The counts (`jobs_*`, `tasks_*`, `machines_contributing`) are plain
+ *   tallies. `0` is a real, honest answer for them — "nothing happened in
+ *   this window" — and renders as the number 0.
+ * - `goodput_ratio`, `lost_task_seconds`, `mttr_seconds`, `mttd_seconds`
+ *   are DERIVED and every one of them is independently nullable. Every one
+ *   of them really will be null in production for now — the events needed
+ *   to derive them may not exist yet. Null here means "not measured", and
+ *   must never be coerced to 0 or rendered as an empty chart: on a page
+ *   whose whole point is proving a reliability claim, a fabricated zero is
+ *   worse than an honest blank. `goodput_ratio` additionally reads null
+ *   whenever `tasks_attempted` is 0 (nothing to divide), which is a
+ *   different reason than "not instrumented yet" but the same correct
+ *   rendering — see `lib/platform-metrics.ts` for how the two are told
+ *   apart in copy.
+ *
+ * `goodput_ratio` is a 0..1 fraction, not a percentage — multiply by 100
+ * before display. */
+export interface PlatformMetrics {
+  window_days: number;
+  jobs_total: number;
+  jobs_succeeded: number;
+  jobs_partial: number;
+  jobs_failed: number;
+  tasks_attempted: number;
+  tasks_accepted: number;
+  goodput_ratio: number | null;
+  lost_task_seconds: number | null;
+  mttr_seconds: number | null;
+  mttd_seconds: number | null;
+  machines_contributing: number;
+}
+
 export interface SubmitFromRepoResult extends JobRecord {
   findings: PreflightFinding[];
 }
@@ -816,6 +853,18 @@ export function listJobRounds(jobId: string): Promise<JobRound[]> {
  *  account's: the route reads the verified JWT sub and takes no id. */
 export function getMyStorage(): Promise<AccountStorage> {
   return request<AccountStorage>("/v1alpha1/me/storage");
+}
+
+/** `GET /v1alpha1/me/metrics` — the caller's own reliability numbers over
+ *  the trailing `windowDays`. Defaults to 30, matching the API's own
+ *  documented default and the contract example, but the query param is
+ *  always sent explicitly (never omitted) so the reliability page's window
+ *  selector round-trips to a URL a caller could bookmark or reason about
+ *  rather than depending on a default that lives only in the API. */
+export function getMyMetrics(windowDays = 30): Promise<PlatformMetrics> {
+  return request<PlatformMetrics>(
+    `/v1alpha1/me/metrics?window_days=${windowDays}`
+  );
 }
 
 export async function getJobResult(jobId: string): Promise<JobResult | null> {
