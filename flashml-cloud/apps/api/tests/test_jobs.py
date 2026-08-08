@@ -74,6 +74,17 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
         #: 503. Models the one failure the storage-accounting path has to
         #: absorb without taking the job page down with it.
         self.artifact_listing_broken = False
+        #: Coordinator job ids whose artifact DELETE answers 503. A set
+        #: rather than a flag because the case worth pinning is the
+        #: *partial* one: a federated run is N coordinator jobs, and one
+        #: round failing after the others were really deleted is the
+        #: partial-failure the accounting rule has to have an answer for.
+        self.artifact_delete_broken_for: set[str] = set()
+        #: Coordinator job ids whose job-by-id READ answers 503. Models the
+        #: coordinator being unreachable at the moment something needs to
+        #: know whether a job has stopped — which is not the same as
+        #: learning that it has.
+        self.job_reads_broken_for: set[str] = set()
 
     def seed_artifact(self, key: str, content: bytes) -> None:
         self.artifacts[key] = content
@@ -106,6 +117,8 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
 
         if method == "GET" and path.startswith("/v1alpha1/jobs/") and path.count("/") == 3:
             job_id = path.rsplit("/", 1)[-1]
+            if job_id in self.job_reads_broken_for:
+                return httpx.Response(503, json={"detail": "job read unavailable"})
             record = self._jobs.get(job_id)
             if record is None:
                 return httpx.Response(404, json={"detail": "no such job"})
@@ -144,6 +157,29 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
                 for key, body in sorted(self.artifacts.items())
                 if key.startswith(prefix)
             ])
+
+        if method == "DELETE" and path.endswith("/artifacts") and path.count("/") == 4:
+            # The coordinator half of the release valve, stubbed to its
+            # contract: it does not exist in the tree yet, so this is the
+            # only description of it the API is written against.
+            #
+            #   200 -> {"deleted_files": int, "freed_bytes": int}
+            #   404 -> the job has no artifacts (already gone). NOT an error.
+            #
+            # Backed by the same seeded dict the listing and the reads are
+            # served from, so a test cannot claim bytes were freed that a
+            # subsequent listing would still report.
+            job_id = path.split("/")[-2]
+            if job_id in self.artifact_delete_broken_for:
+                return httpx.Response(503, json={"detail": "delete unavailable"})
+            prefix = f"jobs/{job_id}/"
+            keys = [k for k in self.artifacts if k.startswith(prefix)]
+            if not keys:
+                return httpx.Response(404, json={"detail": "no artifacts"})
+            freed = sum(len(self.artifacts.pop(k)) for k in keys)
+            return httpx.Response(
+                200, json={"deleted_files": len(keys), "freed_bytes": freed}
+            )
 
         if method == "GET" and path.startswith("/v1alpha1/artifacts/"):
             key = path[len("/v1alpha1/artifacts/"):]
@@ -813,3 +849,416 @@ def test_another_account_cannot_trigger_a_measurement_it_cannot_see(
     assert r.status_code == 404
     assert _artifacts_listed(transport) == []
     assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+# ---------------------------------------------------------------------------
+# the release valve: DELETE /v1alpha1/jobs/{job_id}/artifacts
+#
+# The budget above shipped with a refusal that says "delete a finished job's
+# artifacts to free space" and no way to delete anything. An account that
+# reached its limit could not submit again until an operator ran SQL, which
+# makes the quota worse than no quota: it fails permanently closed. These
+# tests are the valve, and most of them are about the three ways it could be
+# built wrong — destroying data under a job that is still writing, letting
+# someone destroy work that is not theirs, and leaving the recorded usage
+# saying something the disk does not.
+# ---------------------------------------------------------------------------
+
+
+def _pool(db, owner_id: str, name: str = "Team") -> str:
+    return dbmod.create_pool(db, name=name, owner_id=owner_id)["id"]
+
+
+def _add_member(db, pool_id: str, user_id: str) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.pool_members (pool_id, user_id) values (%s, %s)",
+            (pool_id, user_id),
+        )
+
+
+def _artifact_deletes(transport) -> list[str]:
+    """Every artifact-DELETE the coordinator received, by job id. Several
+    tests below assert this is EMPTY — a refusal that still reached the
+    coordinator has already done the damage it was refusing."""
+    return [
+        r.url.path.split("/")[-2]
+        for r in transport.requests
+        if r.method == "DELETE" and r.url.path.endswith("/artifacts")
+    ]
+
+
+def _measured(db, job_id: str) -> dict:
+    with db.cursor() as cur:
+        cur.execute(
+            "select artifact_bytes, artifact_bytes_recorded_at "
+            "  from public.jobs where id = %s",
+            (job_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return row
+
+
+def test_deleting_a_finished_jobs_artifacts_frees_its_recorded_usage(
+    client, db, transport
+):
+    """The whole point: an account that filled its budget has to be able to
+    get out of it without an operator."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "finished-and-fat")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/model.bin", b"m" * 700)
+    transport.seed_artifact(f"jobs/{job_id}/metrics.json", b"j" * 300)
+    transport.finish(job_id)
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    assert dbmod.storage_usage_for_owner(db, alice) == 1000
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted_files": 2, "freed_bytes": 1000}
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_deleting_artifacts_frees_the_budget_so_the_account_can_submit_again(
+    client, db, transport
+):
+    """The refusal message promises exactly this. Before this route it was
+    a promise the API could not keep."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set storage_limit_bytes = 1000 where id = %s",
+            (alice,),
+        )
+    job_id = _submit(client, token, "fills-the-budget")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/big.bin", b"b" * 1024)
+    transport.finish(job_id)
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    blocked = client.post(
+        "/v1alpha1/jobs",
+        json={"apiVersion": "flashml.dev/v1alpha1", "kind": "Job",
+              "metadata": {"name": "refused"}, "spec": {}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert blocked.status_code == 413
+
+    freed = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                          headers={"Authorization": f"Bearer {token}"})
+    assert freed.status_code == 200, freed.text
+    assert _submit(client, token, "after-the-cleanup")["job_id"]
+
+
+def test_a_running_jobs_artifacts_are_never_deleted(client, db, transport):
+    """A task that has not committed yet may still write. Deleting under it
+    produces a job that fails for a reason nobody can reconstruct, so the
+    refusal has to land BEFORE the coordinator is asked to delete anything."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "still-running")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/partial.bin", b"p" * 500)
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 409, r.text
+    assert _artifact_deletes(transport) == []
+    assert f"jobs/{job_id}/partial.bin" in transport.artifacts
+
+
+def test_a_stale_local_status_does_not_block_the_valve(client, db, transport):
+    """``jobs.status`` is a cache written only when somebody looks at a job,
+    so a finished job nobody opened still reads RUNNING locally. Trusting
+    that column would refuse to free a job that has been finished for a
+    week — the exact deadlock this route exists to break."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "finished-but-never-opened")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"o" * 64)
+    transport.finish(job_id)
+    with db.cursor() as cur:
+        cur.execute("select status from public.jobs where id = %s", (job_id,))
+        assert cur.fetchone()["status"] != "SUCCEEDED"
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert r.json()["freed_bytes"] == 64
+
+
+def test_a_cancelled_jobs_artifacts_can_be_deleted(client, db, transport):
+    """Cancelled is terminal and its bytes are on the disk like anyone
+    else's. Accepting only SUCCEEDED would leave the most likely way to
+    produce junk as the one thing nobody can clean up."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "cancelled-with-output")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/half.bin", b"c" * 256)
+    transport.finish(job_id, state="CANCELLED")
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert r.json()["freed_bytes"] == 256
+
+
+def test_deleting_another_users_job_artifacts_is_404_and_touches_nothing(
+    client, db, transport
+):
+    alice = _new_user(db)
+    bob = _new_user(db)
+    job_id = _submit(client, _browser_jwt(alice), "alices-output")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/model.bin", b"a" * 128)
+    transport.finish(job_id)
+    client.get(f"/v1alpha1/jobs/{job_id}",
+               headers={"Authorization": f"Bearer {_browser_jwt(alice)}"})
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {_browser_jwt(bob)}"})
+    assert r.status_code == 404
+    assert "alices-output" not in r.text
+    assert _artifact_deletes(transport) == []
+    assert dbmod.storage_usage_for_owner(db, alice) == 128
+
+
+def test_a_pool_member_who_can_read_a_job_still_cannot_delete_its_artifacts(
+    client, db, transport
+):
+    """Seeing is not owning. A teammate can read a pool job — that is what
+    a workspace is for — but the bytes are charged to the OWNER's budget and
+    the deletion is unrecoverable, so this route is owner-scoped like
+    ``cancel``. 404, not 403, so it stays indistinguishable from the
+    stranger's answer above."""
+    alice = _new_user(db)
+    bob = _new_user(db)
+    pool_id = _pool(db, alice, "Shared")
+    _add_member(db, pool_id, bob)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "pool-job")["job_id"]
+    with db.cursor() as cur:
+        cur.execute("update public.jobs set pool_id = %s where id = %s",
+                    (pool_id, job_id))
+    transport.seed_artifact(f"jobs/{job_id}/shared.bin", b"s" * 64)
+    transport.finish(job_id)
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+
+    bob_headers = {"Authorization": f"Bearer {_browser_jwt(bob)}"}
+    readable = client.get(f"/v1alpha1/jobs/{job_id}", headers=bob_headers)
+    assert readable.status_code == 200, readable.text
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts", headers=bob_headers)
+    assert r.status_code == 404
+    assert _artifact_deletes(transport) == []
+    assert dbmod.storage_usage_for_owner(db, alice) == 64
+
+
+def test_deleting_artifacts_needs_a_jwt(client, transport):
+    r = client.delete("/v1alpha1/jobs/whatever/artifacts")
+    assert r.status_code == 401
+    assert transport.requests == []
+
+
+def test_deleting_twice_is_not_an_error(client, db, transport):
+    """Browsers double-submit and people re-click. The second call has
+    nothing to free, which is a fact, not a failure."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "delete-me-twice")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"d" * 42)
+    transport.finish(job_id)
+
+    first = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                          headers={"Authorization": f"Bearer {token}"})
+    second = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                           headers={"Authorization": f"Bearer {token}"})
+    assert first.status_code == 200, first.text
+    assert first.json() == {"deleted_files": 1, "freed_bytes": 42}
+    assert second.status_code == 200, second.text
+    assert second.json() == {"deleted_files": 0, "freed_bytes": 0}
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_deleting_marks_the_job_measured_so_a_later_poll_cannot_resurrect_it(
+    client, db, transport
+):
+    """A job deleted before anybody ever opened its page has a null
+    ``artifact_bytes_recorded_at``, and the Mode A recording hook keys off
+    exactly that null. Leaving it null would send the next poll back to the
+    coordinator to re-measure a job we have just emptied — and would leave
+    the door open for the freed bytes to come back."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "never-opened-before-deleting")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"n" * 99)
+    transport.finish(job_id)
+    assert _measured(db, job_id)["artifact_bytes_recorded_at"] is None
+
+    deleted = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                            headers={"Authorization": f"Bearer {token}"})
+    assert deleted.status_code == 200, deleted.text
+    row = _measured(db, job_id)
+    assert row["artifact_bytes"] == 0
+    assert row["artifact_bytes_recorded_at"] is not None
+
+    before = _artifacts_listed(transport)
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    assert _artifacts_listed(transport) == before
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_a_coordinator_that_cannot_delete_does_not_zero_the_usage(
+    client, db, transport
+):
+    """Recorded usage and the disk must not disagree in the direction that
+    lets an account keep filling a disk everyone shares. Nothing deleted,
+    nothing credited — and the call is safe to retry."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "coordinator-is-down")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"u" * 512)
+    transport.finish(job_id)
+    client.get(f"/v1alpha1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+    transport.artifact_delete_broken_for.add(job_id)
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 502, r.text
+    assert dbmod.storage_usage_for_owner(db, alice) == 512
+
+    transport.artifact_delete_broken_for.clear()
+    retry = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                          headers={"Authorization": f"Bearer {token}"})
+    assert retry.status_code == 200, retry.text
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_a_job_the_coordinator_cannot_describe_is_not_emptied_on_a_guess(
+    client, db, transport
+):
+    """"I could not find out whether this job has stopped" is not "it has
+    stopped". Failing closed costs a retry; failing open deletes under a
+    running task."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = _submit(client, token, "state-unknown")["job_id"]
+    transport.seed_artifact(f"jobs/{job_id}/out.bin", b"k" * 32)
+    transport.finish(job_id)
+    transport.job_reads_broken_for.add(job_id)
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 502, r.text
+    assert _artifact_deletes(transport) == []
+    assert f"jobs/{job_id}/out.bin" in transport.artifacts
+
+
+def test_a_federated_run_frees_every_round_not_just_one(client, db, transport):
+    """A federated run is N coordinator jobs under one local id. Deleting
+    the parent id would ask the coordinator about a job it has never heard
+    of; deleting only the last round would free one round out of twenty and
+    report the whole run as empty."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = fedavgmod.new_federated_job_id()
+    dbmod.insert_job(db, job_id=job_id, owner_id=alice, name="fed-run",
+                     source={"mode": "federated", "rounds": 2}, spec={},
+                     status="RUNNING")
+    for index in range(2):
+        coordinator_job = f"r{index}-{job_id}"
+        dbmod.insert_job_round(
+            db, job_id=job_id, round_index=index, participants=2, mean_loss=1.0,
+            contributors=["node-a"], coordinator_job_id=coordinator_job,
+        )
+        transport.seed_artifact(f"jobs/{coordinator_job}/weights.bin", b"w" * 100)
+    dbmod.set_job_status(db, job_id, "SUCCEEDED", finished=True)
+    dbmod.record_job_artifact_bytes(db, job_id, 200)
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted_files": 2, "freed_bytes": 200}
+    assert sorted(_artifact_deletes(transport)) == [f"r0-{job_id}", f"r1-{job_id}"]
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_a_running_federated_run_is_refused_like_any_other(client, db, transport):
+    """The parent row's status is the only statement anyone has about a
+    federated run — the coordinator has never heard of the parent id — and
+    a driver mid-round is exactly the writer this refusal protects."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = fedavgmod.new_federated_job_id()
+    dbmod.insert_job(db, job_id=job_id, owner_id=alice, name="fed-running",
+                     source={"mode": "federated", "rounds": 5}, spec={},
+                     status="RUNNING")
+    dbmod.insert_job_round(
+        db, job_id=job_id, round_index=0, participants=2, mean_loss=1.0,
+        contributors=["node-a"], coordinator_job_id=f"r0-{job_id}",
+    )
+    transport.seed_artifact(f"jobs/r0-{job_id}/weights.bin", b"w" * 100)
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 409, r.text
+    assert _artifact_deletes(transport) == []
+    assert f"jobs/r0-{job_id}/weights.bin" in transport.artifacts
+
+
+def test_a_partly_deleted_federated_run_keeps_its_whole_recorded_footprint(
+    client, db, transport
+):
+    """Round 0 really is gone and round 1 really is not. Crediting the bytes
+    we know we freed would set a number nobody measured, and it would be
+    wrong in the direction that lets this account keep writing to a disk
+    every workspace shares. Over-reporting only inconveniences its owner,
+    who can retry — and the retry is what finally corrects the number."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = fedavgmod.new_federated_job_id()
+    dbmod.insert_job(db, job_id=job_id, owner_id=alice, name="fed-partial",
+                     source={"mode": "federated", "rounds": 2}, spec={},
+                     status="SUCCEEDED")
+    for index in range(2):
+        coordinator_job = f"r{index}-{job_id}"
+        dbmod.insert_job_round(
+            db, job_id=job_id, round_index=index, participants=2, mean_loss=1.0,
+            contributors=["node-a"], coordinator_job_id=coordinator_job,
+        )
+        transport.seed_artifact(f"jobs/{coordinator_job}/weights.bin", b"w" * 100)
+    dbmod.record_job_artifact_bytes(db, job_id, 200)
+    transport.artifact_delete_broken_for.add(f"r1-{job_id}")
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 502, r.text
+    assert dbmod.storage_usage_for_owner(db, alice) == 200
+    assert f"jobs/r0-{job_id}/weights.bin" not in transport.artifacts
+
+    transport.artifact_delete_broken_for.clear()
+    retry = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                          headers={"Authorization": f"Bearer {token}"})
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == {"deleted_files": 1, "freed_bytes": 100}
+    assert dbmod.storage_usage_for_owner(db, alice) == 0
+
+
+def test_a_federated_run_with_no_rounds_costs_no_coordinator_call(
+    client, db, transport
+):
+    """A run that failed before its first round has nothing to delete, and
+    learning that from the local rows is what keeps this from being a round
+    trip that can only answer 404."""
+    alice = _new_user(db)
+    token = _browser_jwt(alice)
+    job_id = fedavgmod.new_federated_job_id()
+    dbmod.insert_job(db, job_id=job_id, owner_id=alice, name="fed-empty",
+                     source={"mode": "federated", "rounds": 3}, spec={},
+                     status="FAILED")
+    before = len(transport.requests)
+
+    r = client.delete(f"/v1alpha1/jobs/{job_id}/artifacts",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted_files": 0, "freed_bytes": 0}
+    assert len(transport.requests) == before
+    assert _measured(db, job_id)["artifact_bytes_recorded_at"] is not None

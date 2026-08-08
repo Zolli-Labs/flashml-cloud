@@ -141,6 +141,35 @@ def sum_artifact_sizes(listing: Iterable[Any]) -> int:
     return total
 
 
+def deletion_counts(payload: Any) -> tuple[int, int]:
+    """``(deleted_files, freed_bytes)`` from the coordinator's delete answer.
+
+    **Reported, never accounted with.** These two numbers go into the
+    response body so the console can say "freed 1.4 GB" and nowhere else.
+    The recorded usage after a deletion is not `old - freed_bytes`; it is a
+    fresh measurement of what is left, which is zero because the whole job's
+    artifacts are what was deleted. That is the difference between a number
+    the coordinator asserts and a fact this API is willing to store — and it
+    is why a coordinator that lied about `freed_bytes`, or one older than
+    the field, can make this response optimistic but can never make an
+    account's budget wrong.
+
+    Defensive in the same shape as ``sum_artifact_sizes`` and for the same
+    reason — it parses another service's payload — with ``bool`` excluded
+    explicitly (``True`` is an ``int`` and would report one file freed) and
+    negatives dropped rather than allowed to subtract.
+    """
+    if not isinstance(payload, dict):
+        return (0, 0)
+    return (_count(payload.get("deleted_files")), _count(payload.get("freed_bytes")))
+
+
+def _count(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 0
+
+
 def _human(n: int) -> str:
     for unit, size in (("GB", GB), ("MB", 1024**2), ("KB", 1024)):
         if n >= size:

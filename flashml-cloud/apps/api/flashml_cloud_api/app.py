@@ -2501,6 +2501,191 @@ def create_cloud_app(
         r = await coordinator.forward("GET", f"/v1alpha1/artifacts/{coordinator_key}")
         return _passthrough(r)
 
+    async def _require_stopped(job_id: str, db: psycopg.Connection) -> None:
+        """Refuse unless the coordinator says this job has stopped writing.
+
+        THE COORDINATOR, NOT ``jobs.status``. That column is a cache written
+        only when somebody looks (``sync_observed_job_states``), so a job
+        that finished last week and whose page nobody opened still reads
+        ``RUNNING`` locally. Trusting it would refuse to free exactly the
+        forgotten jobs this route exists to free — the deadlock, rebuilt
+        one layer down. One extra round trip is affordable here in a way it
+        is not on the two-second poll: this is a deliberate, rare,
+        irreversible action, not a page refresh.
+
+        404 from the coordinator is a pass, not a failure. It means the
+        coordinator has no such job, so nothing can be writing to it, and
+        the delete below will answer 404 too — which is how deleting twice
+        stays a no-op instead of an error.
+
+        Every other non-2xx, and any unparseable body, is a 502: "I could
+        not find out whether this job has stopped" is not "it has stopped",
+        and the cost of being wrong is asymmetric. Refusing costs a retry;
+        proceeding deletes files out from under a task that has not
+        committed yet and produces a job that fails for a reason nobody can
+        reconstruct afterwards.
+        """
+        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}")
+        if r.status_code == 404:
+            return
+        if r.status_code >= 300:
+            raise HTTPException(
+                status_code=502,
+                detail="could not confirm this job has finished, so nothing "
+                       "was deleted — try again",
+            )
+        try:
+            job = r.json()
+        except ValueError:
+            job = None
+        if not isinstance(job, dict):
+            raise HTTPException(
+                status_code=502,
+                detail="could not confirm this job has finished, so nothing "
+                       "was deleted — try again",
+            )
+        state = job.get("state")
+        if not is_terminal_state(state):
+            raise HTTPException(
+                status_code=409,
+                detail="this job is still running, and deleting the files a "
+                       "task is writing would fail it for a reason nobody "
+                       "could reconstruct — cancel it first, then delete",
+            )
+        # Free: the state is already in hand and this is the same fact the
+        # poll-driven hook writes. `GET /me/metrics` counts outcomes out of
+        # this column, so recording it here as well means a job whose only
+        # visit was its deletion still counts.
+        dbmod.sync_observed_job_states(db, [(job_id, str(state))])
+
+    @app.delete("/v1alpha1/jobs/{job_id}/artifacts", tags=["browser"])
+    async def delete_job_artifacts(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Free a finished job's artifacts and correct the recorded usage.
+
+        THE RELEASE VALVE. The storage budget (0010) refuses a submission
+        with "delete a finished job's artifacts to free space", and until
+        this route there was no way to delete either. An account that
+        reached its limit could not submit again until an operator ran SQL,
+        which makes the quota worse than no quota: it fails permanently
+        closed, and the failure lands on the person least able to fix it.
+
+        **OWNER ONLY, not viewer.** ``fetch_job_for_owner``, deliberately,
+        where every read route beside it uses ``fetch_job_for_viewer``.
+        Seeing is wider than owning — a pool member can read a teammate's
+        job, which is what a workspace is for — but this is irreversible
+        destruction of somebody else's outputs, and the bytes are charged
+        to the OWNER's budget, so a member deleting them would be silently
+        editing another account's usage row. ``cancel`` drew the same line
+        for the same reason: everyone in the workspace may watch, only the
+        owner may act. 404 rather than 403, like every other job route
+        here, so a caller still cannot learn which ids are real — including
+        the pool member, who gets the stranger's answer.
+
+        **REFUSED FOR A JOB THAT HAS NOT STOPPED** — see ``_require_stopped``
+        for what "stopped" means and why the coordinator, not the local
+        status column, is asked.
+
+        **A FEDERATED RUN IS N COORDINATOR JOBS**, one per round, under a
+        parent id the coordinator has never heard of. Forwarding the parent
+        id would delete nothing and report success; deleting only the last
+        round would free one round out of twenty while recording the whole
+        run as empty. So every round's coordinator job is deleted, and the
+        run's terminal state comes from the parent row, which is the only
+        statement about it that exists (the driver writes it; there is no
+        coordinator job to ask).
+
+        **PARTIAL FAILURE: over-report, never under-report.** If some
+        deletes succeed and one fails, this route records NOTHING and
+        answers 502. The recorded usage then over-states what is on the
+        disk — the owner is charged for bytes that are already gone, and
+        can retry. The alternative, crediting the bytes we did manage to
+        free, sets a number nobody measured and is wrong in the direction
+        that lets an account keep writing to a disk every workspace shares,
+        which is the outage the budget exists to prevent. It is also the
+        judgement ``fedavg.record_run_footprint`` already made about a
+        partial read, for the same reason, and the two must not disagree.
+        The retry is what corrects the number: a round already deleted
+        answers 404 (not an error), so only the round that failed has to
+        succeed once.
+
+        **IDEMPOTENT.** Deleting twice answers 200 with zeros. Browsers
+        double-submit, people re-click, and an error on the second click
+        would send someone hunting for a problem that does not exist.
+        """
+        row = dbmod.fetch_job_for_owner(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        if fedavgmod.is_federated_job_id(job_id):
+            if not is_terminal_state(row.get("status")):
+                # The parent row is the only account of a federated run's
+                # state. A driver mid-round is writing weights this would
+                # delete under it, and unlike Mode A there is no second
+                # opinion to ask — so an in-flight run is refused on the
+                # local status, and a run whose driver died with the API
+                # process stays refused. That is the fail-closed direction:
+                # the cost is an operator UPDATE on one row, against
+                # deleting the checkpoints of a run that is still going.
+                raise HTTPException(
+                    status_code=409,
+                    detail="this federated run has not finished, and deleting "
+                           "a round's weights while the driver is still "
+                           "averaging would corrupt the run",
+                )
+            targets = [cid for _round, cid in dbmod.list_round_job_ids(db, job_id)]
+        else:
+            await _require_stopped(job_id, db)
+            targets = [job_id]
+
+        deleted_files = 0
+        freed_bytes = 0
+        for coordinator_job_id in targets:
+            r = await coordinator.forward(
+                "DELETE", f"/v1alpha1/jobs/{_seg(coordinator_job_id)}/artifacts"
+            )
+            if r.status_code == 404:
+                # Nothing there to delete. The contract's own words: not an
+                # error. This is the second click, and the round that was
+                # already freed by the retry's predecessor.
+                continue
+            if r.status_code >= 300:
+                # Nothing recorded — see the docstring on which way to be
+                # wrong. Whatever earlier targets freed really is freed and
+                # this account is still charged for it until a retry gets
+                # all the way through.
+                raise HTTPException(
+                    status_code=502,
+                    detail="some of this job's artifacts could not be deleted, "
+                           "so its recorded usage is unchanged — try again",
+                )
+            try:
+                payload = r.json()
+            except ValueError:
+                payload = None
+            files, bytes_ = storagemod.deletion_counts(payload)
+            deleted_files += files
+            freed_bytes += bytes_
+
+        # THE MEASUREMENT, not a decrement. `record_job_artifact_bytes` SETS
+        # (its docstring says why), and what it is set to here is 0 because
+        # every artifact of this job is what was just deleted — a fact, not
+        # `old - freed_bytes`, which would trust the coordinator's arithmetic
+        # and would go negative for a job whose footprint was never measured
+        # in the first place (`artifact_bytes` defaults to 0).
+        #
+        # It also STAMPS `artifact_bytes_recorded_at`, in the same statement,
+        # and that stamp is the half that stops the freed bytes coming back:
+        # the Mode A recording hook re-lists exactly the jobs whose marker is
+        # null, so a job deleted before anyone ever opened its page would
+        # otherwise be re-measured on the next poll. Reached only when every
+        # target answered — see the loop above.
+        dbmod.record_job_artifact_bytes(db, job_id, 0)
+        return {"deleted_files": deleted_files, "freed_bytes": freed_bytes}
+
     # -- agent-facing: machine token, forwarded with delegation ------------
     #
     # Every route below is tagged "agent", and test_agent_proxy enumerates

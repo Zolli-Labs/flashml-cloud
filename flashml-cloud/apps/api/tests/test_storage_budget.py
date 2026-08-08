@@ -18,6 +18,7 @@ import pytest
 from flashml_cloud_api.storage import (
     DEFAULT_LIMIT_BYTES,
     budget_problem,
+    deletion_counts,
     limit_for,
     percent_used,
     sum_artifact_sizes,
@@ -156,6 +157,37 @@ def test_nonsense_entries_are_skipped_not_raised_on():
     assert sum_artifact_sizes(
         ["not-a-dict", {"size_bytes": "big"}, {"size_bytes": -5}, {"size_bytes": 8}]
     ) == 8
+
+
+# -- what a deletion reports ------------------------------------------------
+#
+# `DELETE /v1alpha1/jobs/{id}/artifacts` answers with the coordinator's own
+# count of what it removed. These two numbers are shown to the person who
+# asked and are never used to compute the recorded usage — that is set to a
+# measured 0, not to `old - freed_bytes` — so a coordinator that miscounts
+# can make this response optimistic and can never make a budget wrong.
+
+
+def test_a_deletion_reports_the_coordinators_counts():
+    assert deletion_counts({"deleted_files": 3, "freed_bytes": 1400}) == (3, 1400)
+
+
+def test_a_coordinator_that_reports_no_counts_reads_as_zero():
+    """A coordinator older than these fields, or a 404 body with nothing in
+    it, must not make this route fail — it deleted what it deleted."""
+    assert deletion_counts({}) == (0, 0)
+
+
+def test_a_boolean_count_is_not_read_as_one_file():
+    """`True` is an `int`; a naive isinstance check would report one file
+    freed and one byte freed out of a payload that said neither."""
+    assert deletion_counts({"deleted_files": True, "freed_bytes": True}) == (0, 0)
+
+
+def test_nonsense_counts_are_dropped_rather_than_raised_on():
+    assert deletion_counts({"deleted_files": "many", "freed_bytes": -5}) == (0, 0)
+    assert deletion_counts(["not", "a", "dict"]) == (0, 0)
+    assert deletion_counts(None) == (0, 0)
 
 
 # -- accounting, against a real database -------------------------------------
