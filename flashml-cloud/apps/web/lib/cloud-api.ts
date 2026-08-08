@@ -483,6 +483,35 @@ export interface PoolMember {
   machines_online: number;
 }
 
+/** One row of `GET /v1alpha1/me/contributions`'s `machines` array — one of
+ * this account's own machines, and how much of it has been credited across
+ * every job it has ever run, not just the one job page a credit used to be
+ * visible from.
+ *
+ * `hostname` and `last_seen_at` are genuinely nullable: an agent that has
+ * never reported a hostname, or a machine that has never been leased a task
+ * at all, is a real and different state from "we know and it's blank" — see
+ * `lib/contributions.ts` for how each renders as its own explicit label
+ * rather than an empty string or a fabricated date. */
+export interface ContributionMachine {
+  machine_id: string;
+  hostname: string | null;
+  accepted_tasks: number;
+  last_seen_at: string | null;
+}
+
+/** `GET /v1alpha1/me/contributions` — the caller's own running total of
+ * accepted work, across every machine and every job, independent of which
+ * job page happens to be open. These are COUNTERS, not a currency: nothing
+ * here is ever spent, redeemed, or drawn down, only added to as more work is
+ * accepted — see `lib/contributions.ts`'s module doc for why the copy built
+ * from this must never imply a balance. */
+export interface MyContributions {
+  accepted_tasks: number;
+  jobs_contributed_to: number;
+  machines: ContributionMachine[];
+}
+
 /** `GET /v1alpha1/jobs/{id}/contributions`'s row shape — the per-machine
  * credit view for a job: which machine did the work, whose it is, and how
  * much. Mirrors `list_job_contributions`'s query in `db.py` exactly (join
@@ -865,6 +894,16 @@ export function getMyMetrics(windowDays = 30): Promise<PlatformMetrics> {
   return request<PlatformMetrics>(
     `/v1alpha1/me/metrics?window_days=${windowDays}`
   );
+}
+
+/** `GET /v1alpha1/me/contributions` — the caller's own contribution totals.
+ * Never another account's: same doctrine as `getMyStorage`, the route reads
+ * the verified JWT sub and takes no id. FlashML's premise is that people
+ * contribute machines and get credited for it, and until this route existed
+ * that credit was visible only inside one job's own page — this is the
+ * account-wide total. */
+export function getMyContributions(): Promise<MyContributions> {
+  return request<MyContributions>("/v1alpha1/me/contributions");
 }
 
 export async function getJobResult(jobId: string): Promise<JobResult | null> {

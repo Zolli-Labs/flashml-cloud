@@ -25,15 +25,18 @@ import {
   ApiError,
   NotAuthenticated,
   getMe,
+  getMyContributions,
   getMyStorage,
   listJobs,
   updateMe,
   updateProfile,
   type AccountStorage,
   type JobRecord,
+  type MyContributions,
   type Profile,
 } from "@/lib/cloud-api";
 import { summariseStorage } from "@/lib/account-storage";
+import { summariseContributions } from "@/lib/contributions";
 import { clearableJobs } from "@/lib/job-artifact-cleanup";
 import { ROLE_OPTIONS, TEAM_SIZE_OPTIONS, labelFor } from "@/lib/onboarding-options";
 import {
@@ -76,6 +79,17 @@ export default function AccountPage() {
   // versa — the two calls have nothing to do with each other.
   const [storage, setStorage] = useState<AccountStorage | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
+
+  // Independent of `storage` and everything else on this page for the same
+  // reason those are independent of each other: a contributions-service
+  // hiccup should not blank out the storage panel two inches above it, and
+  // vice versa.
+  const [contributions, setContributions] = useState<MyContributions | null>(
+    null
+  );
+  const [contributionsError, setContributionsError] = useState<string | null>(
+    null
+  );
 
   // Backs the "free up space" shortcut below the usage bar — this is why
   // someone lands on this page after a storage refusal, so the shortcut has
@@ -128,6 +142,30 @@ export default function AccountPage() {
   useEffect(() => {
     loadStorage();
   }, [loadStorage]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getMyContributions()
+      .then((c) => {
+        if (cancelled) return;
+        setContributions(c);
+        setContributionsError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // Same doctrine as `loadStorage` above: a 401 is `load()`'s redirect
+        // to handle, not a second one from here.
+        if (err instanceof NotAuthenticated) return;
+        setContributionsError(
+          err instanceof Error
+            ? err.message
+            : "Couldn't load what you've contributed."
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Independent of `storage`'s own load — a job list failing to arrive
   // should not blank out the usage figures already on screen, and vice
@@ -611,6 +649,27 @@ export default function AccountPage() {
         <FreeUpSpace jobs={jobs} onCleared={handleArtifactsCleared} />
       </section>
 
+      <section className="panel mt-4 p-5">
+        <h2 className="text-sm font-semibold">Contributed</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Work your Zollis have accepted, across every job you have ever run
+          &mdash; not just the one job page a credit used to be visible from.
+          A running tally, not a balance: nothing here is ever spent.
+        </p>
+        <div className="mt-4">
+          {contributionsError ? (
+            <div className="flex items-start gap-2 text-sm text-destructive">
+              <Warning className="mt-0.5 h-4 w-4 shrink-0" weight="fill" />
+              <span>{contributionsError}</span>
+            </div>
+          ) : contributions ? (
+            <ContributionsSummaryView contributions={contributions} />
+          ) : (
+            <p className="meta">…</p>
+          )}
+        </div>
+      </section>
+
       <section className="mt-4 rounded-lg border border-destructive/25 bg-destructive/[0.04] p-5">
         <h2 className="text-sm font-semibold text-destructive">Sign out</h2>
         <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
@@ -655,7 +714,23 @@ function StorageUsage({ storage }: { storage: AccountStorage }) {
     );
   }
 
-  const pct = display.percent ?? 0;
+  const pct = display.percent;
+  // Green at "ok", the same warning/destructive tones the rest of this app
+  // already uses (see the submit page's preflight findings) once there is
+  // something to act on — a bar that stays green at 96% used would say
+  // "fine" right up to the refusal this page exists to warn about.
+  const barColor =
+    display.severity === "full"
+      ? "bg-destructive"
+      : display.severity === "approaching"
+        ? "bg-warning"
+        : "bg-[var(--node-green)]";
+  const pctColor =
+    display.severity === "full"
+      ? "text-destructive"
+      : display.severity === "approaching"
+        ? "text-warning-foreground"
+        : "text-muted-foreground";
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
@@ -663,16 +738,78 @@ function StorageUsage({ storage }: { storage: AccountStorage }) {
           <span className="metric-value">{display.usedLabel}</span>{" "}
           <span className="text-muted-foreground">of {display.limitLabel}</span>
         </span>
-        <span className="font-mono text-xs text-muted-foreground">
+        <span className={`font-mono text-xs ${pctColor}`}>
           {Math.round(pct)}%
         </span>
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
         <div
-          className="h-full rounded-full bg-[var(--node-green)] transition-[width] duration-500"
+          className={`h-full rounded-full transition-[width] duration-500 ${barColor}`}
           style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
         />
       </div>
+      {display.message && (
+        <p
+          className={`mt-2 flex items-start gap-1.5 text-xs leading-relaxed ${
+            display.severity === "full" ? "text-destructive" : "text-warning-foreground"
+          }`}
+        >
+          <Warning className="mt-0.5 h-3.5 w-3.5 shrink-0" weight="fill" />
+          <span>{display.message}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The account-wide contribution totals plus, when there is more than one
+ * machine, the per-machine breakdown behind them. `lib/contributions.ts`
+ * already decided the exact label for a machine with no reported hostname
+ * or no recorded last-seen time; this only lays the rows out. */
+function ContributionsSummaryView({
+  contributions,
+}: {
+  contributions: MyContributions;
+}) {
+  const summary = summariseContributions(contributions);
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-6">
+        <div>
+          <div className="metric-value text-2xl">{summary.acceptedTasks}</div>
+          <div className="label-caps mt-1">Tasks accepted</div>
+        </div>
+        <div>
+          <div className="metric-value text-2xl">{summary.jobsContributedTo}</div>
+          <div className="label-caps mt-1">Jobs contributed to</div>
+        </div>
+      </div>
+
+      {summary.machines.length > 0 && (
+        <div className="mt-4 space-y-1.5">
+          {summary.machines.map((m) => (
+            <div
+              key={m.machineId}
+              className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-xs"
+            >
+              <span className="min-w-0 truncate font-mono">
+                {m.hostnameLabel}
+              </span>
+              <span className="flex shrink-0 items-center gap-3 text-muted-foreground">
+                <span className="font-mono tabular-nums text-foreground">
+                  {m.acceptedTasks}
+                </span>
+                <span>accepted</span>
+                <span aria-hidden className="text-muted-foreground/40">
+                  ·
+                </span>
+                <span>{m.lastSeenLabel}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

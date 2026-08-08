@@ -21,6 +21,7 @@ import {
 import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { Shortcuts } from "@/components/shell/Shortcuts";
+import { StorageWarningBanner } from "@/components/shell/StorageWarningBanner";
 import { WorkspaceHintProvider } from "@/components/shell/WorkspaceHint";
 import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { Wordmark } from "@/components/brand/Mark";
@@ -416,6 +417,11 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             </div>
           ) : (
             <WorkspaceHintProvider onHint={setWorkspaceHint}>
+              {/* Ahead of every workspace page's own content, not inside
+                  it — a job's own submit tab is exactly where this matters
+                  most, but nothing about that tab loads before this banner
+                  has had its chance to. */}
+              <StorageWarningBanner />
               {children}
             </WorkspaceHintProvider>
           )}

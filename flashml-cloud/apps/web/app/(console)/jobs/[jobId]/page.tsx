@@ -5,6 +5,7 @@ import { use, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, DownloadSimple, Terminal, Warning } from "@phosphor-icons/react";
 import { ClearArtifactsButton } from "@/components/jobs/ClearArtifactsButton";
+import { DownloadAllButton } from "@/components/jobs/DownloadAllButton";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { FleetTopology } from "@/components/jobs/FleetTopology";
@@ -658,9 +659,14 @@ function ArtifactsCard({
     <section className="rounded-lg border border-border bg-surface p-4">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold">Artifacts</h2>
-        {canClear && (
-          <ClearArtifactsButton jobId={job.job_id} onCleared={onCleared} />
-        )}
+        <div className="flex items-start gap-2">
+          {artifacts.length > 0 && (
+            <DownloadAllButton jobId={job.job_id} artifacts={artifacts} />
+          )}
+          {canClear && (
+            <ClearArtifactsButton jobId={job.job_id} onCleared={onCleared} />
+          )}
+        </div>
       </div>
 
       {artifacts.length === 0 ? (

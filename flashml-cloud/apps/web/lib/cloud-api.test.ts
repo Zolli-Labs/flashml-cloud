@@ -26,6 +26,7 @@ import {
   deleteJobArtifacts,
   getJob,
   getMe,
+  getMyContributions,
   getMyMetrics,
   getPool,
   getPoolInviteState,
@@ -196,6 +197,58 @@ describe("cloud-api", () => {
       const storage = await getMyStorage();
       expect(storage.limit_bytes).toBeNull();
       expect(storage.percent_used).toBeNull();
+    });
+  });
+
+  describe("getMyContributions", () => {
+    it("attaches the bearer token and returns the caller's contribution totals", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      const payload = {
+        accepted_tasks: 41,
+        jobs_contributed_to: 6,
+        machines: [
+          {
+            machine_id: "m-1",
+            hostname: "gpu-box",
+            accepted_tasks: 30,
+            last_seen_at: "2026-08-07T00:00:00Z",
+          },
+          {
+            machine_id: "m-2",
+            hostname: null,
+            accepted_tasks: 0,
+            last_seen_at: null,
+          },
+        ],
+      };
+      fetchMock.mockResolvedValue(jsonResponse(200, payload));
+
+      const contributions = await getMyContributions();
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/me/contributions`);
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(contributions).toEqual(payload);
+    });
+
+    it("keeps a machine's null hostname and null last_seen_at as nulls, not empty strings", async () => {
+      // A volunteer's agent that has never reported a hostname, or has
+      // never been seen at all, is a real and different state from "we know
+      // and it's blank" — this client must not paper over the difference.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          accepted_tasks: 0,
+          jobs_contributed_to: 0,
+          machines: [
+            { machine_id: "m-9", hostname: null, accepted_tasks: 0, last_seen_at: null },
+          ],
+        })
+      );
+
+      const contributions = await getMyContributions();
+      expect(contributions.machines[0].hostname).toBeNull();
+      expect(contributions.machines[0].last_seen_at).toBeNull();
     });
   });
 

@@ -57,4 +57,83 @@ describe("summariseStorage", () => {
     expect(display.percent).toBe(0);
     expect(display.usedLabel).toBe("0 B");
   });
+
+  describe("severity", () => {
+    it("is ok well below the warning threshold", () => {
+      const storage: AccountStorage = {
+        used_bytes: 100,
+        limit_bytes: 1000,
+        percent_used: 50,
+      };
+      const display = summariseStorage(storage);
+      expect(display.severity).toBe("ok");
+      expect(display.message).toBeNull();
+    });
+
+    it("is ok exactly one point below the approaching threshold", () => {
+      const storage: AccountStorage = {
+        used_bytes: 799,
+        limit_bytes: 1000,
+        percent_used: 79,
+      };
+      const display = summariseStorage(storage);
+      expect(display.severity).toBe("ok");
+    });
+
+    it("becomes approaching at the threshold, with an actionable message", () => {
+      // The threshold itself, not "well past it" — a warning that only
+      // fires once someone is already deep into the red zone is not early
+      // enough to be worth having. See the threshold's own doc comment in
+      // lib/account-storage.ts for why 80 was chosen.
+      const storage: AccountStorage = {
+        used_bytes: 800,
+        limit_bytes: 1000,
+        percent_used: 80,
+      };
+      const display = summariseStorage(storage);
+      expect(display.severity).toBe("approaching");
+      // Must say what to DO, not just that a number is high.
+      expect(display.message).toMatch(/free|clear|delete/i);
+    });
+
+    it("stays approaching, not full, at 99%", () => {
+      const storage: AccountStorage = {
+        used_bytes: 990,
+        limit_bytes: 1000,
+        percent_used: 99,
+      };
+      const display = summariseStorage(storage);
+      expect(display.severity).toBe("approaching");
+    });
+
+    it("becomes full at 100%, with a distinct actionable message", () => {
+      const storage: AccountStorage = {
+        used_bytes: 1000,
+        limit_bytes: 1000,
+        percent_used: 100,
+      };
+      const display = summariseStorage(storage);
+      expect(display.severity).toBe("full");
+      expect(display.message).toMatch(/free|clear|delete/i);
+      expect(display.message).not.toBe(
+        summariseStorage({ used_bytes: 800, limit_bytes: 1000, percent_used: 80 })
+          .message
+      );
+    });
+
+    it("an unlimited account is always ok — never approaching or full", () => {
+      // Not merely "unlikely" — `percent` on the unlimited branch is typed
+      // `null`, so there is no number here for a threshold to ever compare
+      // against. This test is the runtime half of that guarantee; the type
+      // itself is the compile-time half (see lib/account-storage.ts).
+      const storage: AccountStorage = {
+        used_bytes: Number.MAX_SAFE_INTEGER,
+        limit_bytes: null,
+        percent_used: null,
+      };
+      const display = summariseStorage(storage);
+      expect(display.severity).toBe("ok");
+      expect(display.message).toBeNull();
+    });
+  });
 });
