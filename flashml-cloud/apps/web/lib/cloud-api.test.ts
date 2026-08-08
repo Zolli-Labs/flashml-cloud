@@ -30,6 +30,7 @@ import {
   listAccessRequests,
   listJobContributions,
   getJobResult,
+  getMyStorage,
   listJobRounds,
   listMachines,
   listPoolMachines,
@@ -166,6 +167,34 @@ describe("cloud-api", () => {
 
     const err: unknown = await listJobRounds("not-mine").catch((e) => e);
     expect(err).toBeInstanceOf(NotFound);
+  });
+
+  describe("getMyStorage", () => {
+    it("reports usage against the account's limit", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      const payload = { used_bytes: 268435456, limit_bytes: 2147483648, percent_used: 12.5 };
+      fetchMock.mockResolvedValue(jsonResponse(200, payload));
+
+      const storage = await getMyStorage();
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/me/storage`);
+      expect(storage).toEqual(payload);
+    });
+
+    it("keeps an unlimited account's nulls as nulls", async () => {
+      // `limit_bytes: null` means no limit. Coercing either field to 0
+      // would draw an empty progress bar and imply a limit that does not
+      // exist — the UI has to be able to tell those apart.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { used_bytes: 999, limit_bytes: null, percent_used: null })
+      );
+
+      const storage = await getMyStorage();
+      expect(storage.limit_bytes).toBeNull();
+      expect(storage.percent_used).toBeNull();
+    });
   });
 
   describe("getJobResult", () => {

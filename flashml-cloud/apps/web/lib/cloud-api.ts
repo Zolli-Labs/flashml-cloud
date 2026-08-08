@@ -339,6 +339,20 @@ export interface JobResult {
   result: Record<string, unknown> | null;
 }
 
+/** `GET /v1alpha1/me/storage` — what this account is using, and against
+ *  what ceiling.
+ *
+ * `limit_bytes` and `percent_used` are BOTH null for an unlimited account,
+ * and must stay null through the client. Coercing either to 0 draws an
+ * empty progress bar and implies a limit that does not exist — "no limit"
+ * and "0% of a limit" look identical the moment one of them becomes a
+ * number. */
+export interface AccountStorage {
+  used_bytes: number;
+  limit_bytes: number | null;
+  percent_used: number | null;
+}
+
 export interface SubmitFromRepoResult extends JobRecord {
   findings: PreflightFinding[];
 }
@@ -798,6 +812,12 @@ export function listJobRounds(jobId: string): Promise<JobRound[]> {
  * aggregation IS its round history and the driver already performed it.
  * That is a shape of job, not a failure, so the page must be able to omit
  * the panel without rendering an error. Every other non-2xx still throws. */
+/** `GET /v1alpha1/me/storage` — the caller's own usage. Never another
+ *  account's: the route reads the verified JWT sub and takes no id. */
+export function getMyStorage(): Promise<AccountStorage> {
+  return request<AccountStorage>("/v1alpha1/me/storage");
+}
+
 export async function getJobResult(jobId: string): Promise<JobResult | null> {
   try {
     return await request<JobResult>(

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   BookOpen,
+  Compass,
   Gear,
   GithubLogo,
   House,
@@ -283,6 +284,12 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
       )}
 
       <div className="mt-auto space-y-0.5 border-t border-border px-3 py-3">
+        <NavItem
+          href="/how-it-works"
+          label="How it works"
+          icon={Compass}
+          active={isActive("/how-it-works")}
+        />
         <NavItem
           href="/docs"
           label="Docs"
