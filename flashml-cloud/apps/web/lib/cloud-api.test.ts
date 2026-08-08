@@ -23,6 +23,7 @@ import {
   createPool,
   createPoolInvite,
   declineAccessRequest,
+  deleteJobArtifacts,
   getJob,
   getMe,
   getMyMetrics,
@@ -321,6 +322,54 @@ describe("cloud-api", () => {
 
       const err: unknown = await getJobResult("not-mine").catch((e) => e);
       expect(err).toBeInstanceOf(NotFound);
+    });
+  });
+
+  describe("deleteJobArtifacts", () => {
+    it("DELETEs the job's artifacts route with the bearer token and returns the freed counts", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { deleted_files: 12, freed_bytes: 134217728 })
+      );
+
+      const result = await deleteJobArtifacts("job-1");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/job-1/artifacts`);
+      expect(init.method).toBe("DELETE");
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(result).toEqual({ deleted_files: 12, freed_bytes: 134217728 });
+    });
+
+    it("raises a plain ApiError on 409 when the job is still running, carrying the API's detail", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(409, { detail: "job is still running" })
+      );
+
+      const err: unknown = await deleteJobArtifacts("job-1").catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).status).toBe(409);
+      expect((err as ApiError).detail).toBe("job is still running");
+    });
+
+    it("raises NotFound on 404 — not yours, or nothing to delete — never a 403-style message", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "no artifacts" }));
+
+      const err: unknown = await deleteJobArtifacts("job-1").catch((e) => e);
+      expect(err).toBeInstanceOf(NotFound);
+    });
+
+    it("escapes a job id that would otherwise break the path", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, { deleted_files: 0, freed_bytes: 0 }));
+
+      await deleteJobArtifacts("a/b");
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/a%2Fb/artifacts`);
     });
   });
 

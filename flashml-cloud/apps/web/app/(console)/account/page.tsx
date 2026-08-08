@@ -11,6 +11,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Avatar } from "@/components/shell/Avatar";
+import { ClearArtifactsButton } from "@/components/jobs/ClearArtifactsButton";
 import {
   Select,
   SelectContent,
@@ -25,12 +26,15 @@ import {
   NotAuthenticated,
   getMe,
   getMyStorage,
+  listJobs,
   updateMe,
   updateProfile,
   type AccountStorage,
+  type JobRecord,
   type Profile,
 } from "@/lib/cloud-api";
 import { summariseStorage } from "@/lib/account-storage";
+import { clearableJobs } from "@/lib/job-artifact-cleanup";
 import { ROLE_OPTIONS, TEAM_SIZE_OPTIONS, labelFor } from "@/lib/onboarding-options";
 import {
   TEXT_FIELD_CAPS,
@@ -73,6 +77,14 @@ export default function AccountPage() {
   const [storage, setStorage] = useState<AccountStorage | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
 
+  // Backs the "free up space" shortcut below the usage bar — this is why
+  // someone lands on this page after a storage refusal, so the shortcut has
+  // to be reachable from here, not just from a job page they'd have to find
+  // first. Best-effort like `storage` above and for the same reason: this
+  // list is a convenience on top of the real content of this page, not
+  // something worth a banner of its own if it fails to load.
+  const [jobs, setJobs] = useState<JobRecord[]>([]);
+
   const load = useCallback(() => {
     getMe()
       .then((p) => {
@@ -96,16 +108,13 @@ export default function AccountPage() {
     load();
   }, [load]);
 
-  useEffect(() => {
-    let cancelled = false;
-    getMyStorage()
+  const loadStorage = useCallback(() => {
+    return getMyStorage()
       .then((s) => {
-        if (cancelled) return;
         setStorage(s);
         setStorageError(null);
       })
       .catch((err) => {
-        if (cancelled) return;
         // A 401 here is handled by `load()`'s own redirect above, which
         // fires from the same page on the same signed-out session — no
         // need for a second redirect from this call too.
@@ -114,10 +123,44 @@ export default function AccountPage() {
           err instanceof Error ? err.message : "Couldn't load your storage usage."
         );
       });
+  }, []);
+
+  useEffect(() => {
+    loadStorage();
+  }, [loadStorage]);
+
+  // Independent of `storage`'s own load — a job list failing to arrive
+  // should not blank out the usage figures already on screen, and vice
+  // versa.
+  useEffect(() => {
+    let cancelled = false;
+    listJobs()
+      .then((j) => {
+        if (cancelled) return;
+        setJobs(j);
+      })
+      .catch(() => {
+        // Same doctrine as `storage`'s own fetch above: best-effort, no
+        // banner. Worst case the "free up space" shortcut just does not
+        // appear, and the rest of the page is unaffected.
+      });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // After a successful clear, both lists on screen are stale: the usage
+  // bar still shows the bytes that were just freed, and the "free up
+  // space" list still offers a job whose artifacts are gone. Re-fetching
+  // both from the API is simpler and more honest than reconstructing the
+  // new numbers on the client — `freed_bytes` is a delta and `used_bytes`
+  // is a total, and subtracting one from a value we already know can drift
+  // from the account's real usage the instant something else in this
+  // account writes an artifact in parallel.
+  const handleArtifactsCleared = useCallback(() => {
+    loadStorage();
+    listJobs().then(setJobs).catch(() => {});
+  }, [loadStorage]);
 
   const current = profile?.display_name ?? "";
   const trimmed = name.trim();
@@ -564,6 +607,8 @@ export default function AccountPage() {
             <p className="meta">…</p>
           )}
         </div>
+
+        <FreeUpSpace jobs={jobs} onCleared={handleArtifactsCleared} />
       </section>
 
       <section className="mt-4 rounded-lg border border-destructive/25 bg-destructive/[0.04] p-5">
@@ -628,6 +673,68 @@ function StorageUsage({ storage }: { storage: AccountStorage }) {
           style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+/** How many at once — enough to be useful without turning the Storage panel
+ * into a second jobs list. Whoever has more than this already knows where
+ * `/jobs` is; the point of putting this here at all is reaching someone who
+ * doesn't, right where the refusal message told them to come. */
+const MAX_SHOWN = 5;
+
+/** The shortcut this account's refusal message promises but the product
+ * did not build until now: "delete a finished job's artifacts to free
+ * space", with an actual place to do it. `jobs` is this account's own list
+ * — `listJobs()` needs no scoping of its own — narrowed to the ones
+ * `DELETE /v1alpha1/jobs/{id}/artifacts` will accept without a 409.
+ *
+ * Renders nothing when there is nothing clearable, the same "absence is
+ * not an error" rule every empty state on this page already follows: a
+ * brand-new account with no finished jobs should not see an empty shelf
+ * where this shortcut would go. */
+function FreeUpSpace({
+  jobs,
+  onCleared,
+}: {
+  jobs: JobRecord[];
+  onCleared: () => void;
+}) {
+  const all = clearableJobs(jobs);
+  if (all.length === 0) return null;
+  const shown = all.slice(0, MAX_SHOWN);
+
+  return (
+    <div className="mt-5 border-t border-border pt-4">
+      <h3 className="text-sm font-medium">Free up space</h3>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Clearing a job&apos;s artifacts permanently deletes what it wrote —
+        results, checkpoints, logs — and cannot be undone.
+      </p>
+      <ul className="mt-3 space-y-2">
+        {shown.map((j) => (
+          <li
+            key={j.jobId}
+            className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+          >
+            <Link
+              href={`/jobs/${j.jobId}`}
+              className="min-w-0 truncate font-mono text-xs text-brand-foreground hover:underline"
+            >
+              {j.label}
+            </Link>
+            <ClearArtifactsButton jobId={j.jobId} onCleared={onCleared} />
+          </li>
+        ))}
+      </ul>
+      {all.length > shown.length && (
+        <Link
+          href="/jobs"
+          className="mt-2 inline-block text-xs text-brand-foreground hover:underline"
+        >
+          See all jobs
+        </Link>
+      )}
     </div>
   );
 }

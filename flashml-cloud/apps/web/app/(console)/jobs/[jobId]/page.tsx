@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, DownloadSimple, Warning } from "@phosphor-icons/react";
+import { ArrowLeft, DownloadSimple, Terminal, Warning } from "@phosphor-icons/react";
+import { ClearArtifactsButton } from "@/components/jobs/ClearArtifactsButton";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { FleetTopology } from "@/components/jobs/FleetTopology";
@@ -17,6 +18,7 @@ import {
   deriveProgress,
   deriveStallReason,
 } from "@/lib/job-activity";
+import { groupArtifactsByTask, type ArtifactGroup } from "@/lib/task-artifacts";
 import { workspacePath } from "@/lib/workspace-scope";
 import {
   ApiError,
@@ -272,6 +274,10 @@ export default function JobDetailPage({
             rounds={rounds}
             contributions={contributions}
             result={result}
+            tasks={tasks}
+            onArtifactsCleared={() =>
+              setJob((j) => (j ? { ...j, artifacts: [] } : j))
+            }
           />
         )}
         {activeView === "placement" && (
@@ -358,11 +364,15 @@ function ProgressView({
   rounds,
   contributions,
   result,
+  tasks,
+  onArtifactsCleared,
 }: {
   job: JobRecord;
   rounds: JobRound[];
   contributions: JobContribution[];
   result: JobResult | null;
+  tasks: JobTask[];
+  onArtifactsCleared: () => void;
 }) {
   return (
     <div className="space-y-6">
@@ -389,7 +399,7 @@ function ProgressView({
           jobs, since this data only exists for a pool job. */}
       <MemberCredits contributions={contributions} />
 
-      <ArtifactsCard job={job} />
+      <ArtifactsCard job={job} tasks={tasks} onCleared={onArtifactsCleared} />
       {job.spec && <SpecCard job={job} />}
     </div>
   );
@@ -600,26 +610,141 @@ function LedgerView({ events }: { events: JobEvent[] }) {
   );
 }
 
-function ArtifactsCard({ job }: { job: JobRecord }) {
+/** Human label for a group whose id names no task — currently only a
+ * reducer's own output bucket (`reduced/…`, see `lib/job-result.ts`'s
+ * `concat` case). Falls back to the raw id for a bucket this page does not
+ * yet know the name of, same "name it rather than hide it" rule
+ * `summariseJobResult` follows for an unrecognised reducer. */
+function groupLabel(groupId: string): string {
+  if (groupId === "reduced") return "Reduced output";
+  return groupId;
+}
+
+const TASK_STATE_TONE: Record<string, string> = {
+  FAILED: "text-destructive border-destructive/40",
+  CANCELLED: "text-muted-foreground border-muted",
+  COMPLETED: "text-evergreen border-evergreen/40",
+  LEASED: "text-brand-foreground border-brand/40",
+  PENDING: "text-muted-foreground border-muted",
+};
+
+function ArtifactsCard({
+  job,
+  tasks,
+  onCleared,
+}: {
+  job: JobRecord;
+  tasks: JobTask[];
+  onCleared: () => void;
+}) {
   const artifacts = job.artifacts ?? [];
+  // Recomputed on every render rather than memoised: the job list a real
+  // job carries is small (tens of files, not thousands), and memoising
+  // against `artifacts` — a fresh array reference every 2.5s poll tick
+  // whether or not its contents actually changed — would buy nothing.
+  const { groups, unresolved } = groupArtifactsByTask(
+    job.job_id,
+    artifacts,
+    tasks
+  );
+  // Offering the button on a job that could still be writing into its own
+  // output directory would just relay the API's 409 back with extra steps
+  // — see `lib/job-artifact-cleanup.ts`'s `CLEARABLE_STATES` for the same
+  // rule applied across a whole job list; this page already has `TERMINAL`
+  // for its own polling cutoff and it means the same thing here.
+  const canClear = TERMINAL.has(job.state) && artifacts.length > 0;
+
   return (
     <section className="rounded-lg border border-border bg-surface p-4">
-      <h2 className="text-sm font-semibold">Artifacts</h2>
-      <div className="mt-3 space-y-2">
-        {artifacts.map((a) => (
-          <ArtifactRow key={a.uri} jobId={job.job_id} artifact={a} />
-        ))}
-        {artifacts.length === 0 && (
-          <p className="font-mono text-xs text-muted-foreground">
-            {TERMINAL.has(job.state)
-              ? "no artifacts were produced"
-              : "artifacts appear once the job produces output"}
-          </p>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">Artifacts</h2>
+        {canClear && (
+          <ClearArtifactsButton jobId={job.job_id} onCleared={onCleared} />
         )}
       </div>
+
+      {artifacts.length === 0 ? (
+        <p className="mt-3 font-mono text-xs text-muted-foreground">
+          {TERMINAL.has(job.state)
+            ? "no artifacts were produced"
+            : "artifacts appear once the job produces output"}
+        </p>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {groups.map((g) => (
+            <ArtifactGroupSection key={g.groupId} jobId={job.job_id} group={g} />
+          ))}
+          {unresolved.length > 0 && (
+            <div>
+              <div className="label-caps">Other</div>
+              <div className="mt-1.5 space-y-2">
+                {unresolved.map((a) => (
+                  <ArtifactRow key={a.uri} jobId={job.job_id} artifact={a} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 }
+
+/** One task's (or reducer bucket's) artifacts, grouped. A FAILED task with
+ * at least one recognised log gets a visible callout — `hasFailureLog` is
+ * exactly that check, computed once in `lib/task-artifacts.ts` rather than
+ * re-derived here, and `groupArtifactsByTask` already sorts these groups to
+ * the front so the callout is the first thing on the card, not something
+ * to scroll past a healthy task's output to find. */
+function ArtifactGroupSection({
+  jobId,
+  group,
+}: {
+  jobId: string;
+  group: ArtifactGroup;
+}) {
+  return (
+    <div
+      className={`rounded-md border p-3 ${
+        group.hasFailureLog
+          ? "border-destructive/30 bg-destructive/[0.03]"
+          : "border-border"
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-mono text-xs font-medium">
+          {group.taskState === null ? groupLabel(group.groupId) : group.groupId}
+        </span>
+        {group.taskState !== null && (
+          <span
+            className={`rounded-full border px-1.5 py-0.5 font-mono text-[10px] ${
+              TASK_STATE_TONE[group.taskState] ?? "text-muted-foreground border-muted"
+            }`}
+          >
+            {group.taskState}
+          </span>
+        )}
+      </div>
+      {group.hasFailureLog && (
+        <p className="mt-1.5 flex items-start gap-1.5 text-xs text-destructive">
+          <Terminal className="mt-0.5 h-3.5 w-3.5 shrink-0" weight="fill" />
+          <span>This task failed. Its stdout and stderr are below.</span>
+        </p>
+      )}
+      <div className="mt-2 space-y-1.5">
+        {group.artifacts.map((entry) => (
+          <ArtifactRow
+            key={entry.key}
+            jobId={jobId}
+            artifact={entry.artifact}
+            logKind={entry.logKind}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 
 function SpecCard({ job }: { job: JobRecord }) {
   const s = job.spec;
@@ -651,9 +776,17 @@ function SpecCard({ job }: { job: JobRecord }) {
 function ArtifactRow({
   jobId,
   artifact,
+  logKind,
 }: {
   jobId: string;
   artifact: NonNullable<JobRecord["artifacts"]>[number];
+  /** Set only for a recognised stdout/stderr file — see
+   * `lib/task-artifacts.ts`. Draws a small terminal marker ahead of the raw
+   * uri rather than replacing it, so the row stays identifiable by the same
+   * uri every other artifact row shows, with the one extra fact ("this is a
+   * log, and which one") called out instead of hidden behind a filename a
+   * reader has to already know to look for. */
+  logKind?: "stdout" | "stderr" | null;
 }) {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -681,7 +814,15 @@ function ArtifactRow({
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center justify-between gap-3 font-mono text-xs">
-        <span className="truncate text-brand-foreground">{artifact.uri}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          {logKind && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <Terminal className="h-2.5 w-2.5" />
+              {logKind}
+            </span>
+          )}
+          <span className="truncate text-brand-foreground">{artifact.uri}</span>
+        </span>
         <span className="flex shrink-0 items-center gap-2">
           <span className="text-muted-foreground">
             {artifact.backend} · {formatBytes(artifact.size_bytes)}

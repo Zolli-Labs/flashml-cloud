@@ -947,6 +947,37 @@ export async function fetchJobArtifact(
   return res.blob();
 }
 
+/** `DELETE /v1alpha1/jobs/{id}/artifacts`'s success body — how much this
+ * call actually freed, so the caller can say something more useful than
+ * "done". */
+export interface DeleteJobArtifactsResult {
+  deleted_files: number;
+  freed_bytes: number;
+}
+
+/** `DELETE /v1alpha1/jobs/{id}/artifacts` — permanently removes every
+ * artifact this job wrote, freeing the account's storage quota. THIS
+ * DESTROYS DATA AND CANNOT BE UNDONE; this function performs no
+ * confirmation of its own — that decision belongs to the UI, which must
+ * make it hard to reach by accident.
+ *
+ * Owner-scoped exactly like every other job route: a job that is not the
+ * caller's own answers 404, same as one with nothing to delete — the two
+ * causes share a status deliberately (see `NotFound`'s class doc) so a
+ * guesser cannot learn which id is real from the difference. A 409
+ * (surfaced as a plain `ApiError`, not a special class — this client has no
+ * other route that reacts to a still-running job this way) means the job
+ * has not reached a terminal state: something could still be writing into
+ * its own output directory, and the API's own detail explains that. */
+export function deleteJobArtifacts(
+  jobId: string
+): Promise<DeleteJobArtifactsResult> {
+  return request<DeleteJobArtifactsResult>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/artifacts`,
+    { method: "DELETE" }
+  );
+}
+
 /** `POST /v1alpha1/jobs` — the plain path, no repo/preflight involved. */
 export function submitJob(spec: unknown): Promise<JobRecord> {
   return request<JobRecord>("/v1alpha1/jobs", {
