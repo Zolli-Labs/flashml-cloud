@@ -371,3 +371,31 @@ def test_allow_partial_is_accepted_and_defaults_off():
 def test_allow_partial_must_be_a_boolean():
     with pytest.raises(ConfigError, match="allow_partial"):
         parse_flashml_yaml(MINIMAL + "\nallow_partial: yes-please\n")
+
+
+# ---------------------------------------------------------------------------
+# dependencies — extras on top of the curated image's own manifest,
+# resolved by the compiler (Task 4 of the dependency-declaration plan)
+# ---------------------------------------------------------------------------
+
+
+def test_dependencies_defaults_to_empty():
+    assert parse_flashml_yaml(MINIMAL).dependencies == []
+
+
+def test_dependencies_parses_to_a_list_of_requirement_strings():
+    text = MINIMAL + '\ndependencies: ["transformers==4.44.0", "datasets==2.19.0"]\n'
+    config = parse_flashml_yaml(text)
+    assert config.dependencies == ["transformers==4.44.0", "datasets==2.19.0"]
+
+
+def test_dependencies_must_be_a_list_not_a_string():
+    # 'dependencies: torch==2.3.1' is a plausible typo that would otherwise
+    # silently parse as a list of characters.
+    with pytest.raises(ConfigError, match="dependencies"):
+        parse_flashml_yaml(MINIMAL + "\ndependencies: torch==2.3.1\n")
+
+
+def test_dependencies_must_be_a_list_of_strings():
+    with pytest.raises(ConfigError, match="dependencies"):
+        parse_flashml_yaml(MINIMAL + "\ndependencies: [1, 2]\n")

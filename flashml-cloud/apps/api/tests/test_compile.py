@@ -28,10 +28,11 @@ from flashml_cloud_api.compile import (
     sanitize_job_name,
 )
 from flashml_cloud_api.flashml_yaml import parse_flashml_yaml
-from flashml_cloud_api.images import resolve_image
+from flashml_cloud_api.images import CuratedImage, resolve_image
 
 CODE_URI = "artifact://uploads/deadbeef/code.tar.gz"
 PYTORCH = resolve_image("pytorch-cpu")
+CUDA = resolve_image("pytorch-cuda")
 SLIM = resolve_image("python-slim")
 
 
@@ -383,7 +384,15 @@ def test_a_registry_port_is_not_mistaken_for_a_tag():
         alias="test", reference="registry.local:5000/team/img:1.2.3",
         packages=SLIM.packages, description="",
     )
-    spec = compile_to_jobspec(_config(image="python-slim"), image, CODE_URI, "demo")
+    # This reference is not a curated GHCR image, so `manifest_for` returns
+    # None; a `dependencies:` declaration is required to avoid the refusal
+    # that exists for exactly that case (see the "dependencies" tests below)
+    # — orthogonal to what this test actually checks, which is the
+    # repository/tag split.
+    spec = compile_to_jobspec(
+        _config(image="python-slim", dependencies=["numpy==1.26.4"]),
+        image, CODE_URI, "demo",
+    )
     assert spec["spec"]["image"]["repository"] == "registry.local:5000/team/img"
     assert spec["spec"]["image"]["tag"] == "1.2.3"
 
@@ -752,6 +761,91 @@ def test_a_job_declaring_none_of_them_carries_none_of_them():
     assert "partition" not in params
     assert "validators" not in params
     assert "reduce" not in params
+
+
+# ---------------------------------------------------------------------------
+# dependencies — the curated image's own manifest as the base, the job's
+# declared `dependencies:` appended as extras (Task 4 of the
+# dependency-declaration plan). See flashml_cloud_api.compile._dependencies.
+# ---------------------------------------------------------------------------
+
+
+def _custom_image(reference: str = "docker.io/someone/theirs:v1") -> CuratedImage:
+    """A CuratedImage naming a reference `manifest_for` does not recognise —
+    the unit-test stand-in for "a non-curated image", built the same way
+    `test_a_registry_port_is_not_mistaken_for_a_tag` builds one above."""
+    return CuratedImage(alias="custom", reference=reference, packages=frozenset(), description="")
+
+
+def test_a_curated_image_supplies_the_base():
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    deps = _params(spec)["dependencies"]
+    assert "torch==2.3.1" in deps
+    assert "--index-url https://download.pytorch.org/whl/cpu" in deps
+
+
+def test_extras_are_appended_after_the_base():
+    """Order matters: the base's --index-url applies to what follows, and an
+    extra must not be resolved before the base pins land."""
+    spec = compile_to_jobspec(
+        _config(dependencies=["transformers==4.44.0"]), PYTORCH, CODE_URI, "demo"
+    )
+    deps = _params(spec)["dependencies"]
+    assert deps[-1] == "transformers==4.44.0"
+    assert deps.index("torch==2.3.1") < deps.index("transformers==4.44.0")
+
+
+def test_the_cuda_image_supplies_a_different_base():
+    """Choosing the image IS choosing the accelerator — the compiler does
+    not know what a GPU is and must not need to."""
+    spec = compile_to_jobspec(_config(), CUDA, CODE_URI, "demo")
+    deps = _params(spec)["dependencies"]
+    assert "--index-url https://download.pytorch.org/whl/cu124" in deps
+    assert "torch==2.4.1" in deps
+
+
+def test_a_curated_image_with_no_dependencies_is_not_refused():
+    """The case `base is None` (vs `base == []`) exists to protect:
+    python-slim genuinely installs nothing beyond its base, and that must
+    never be refused as though it were an unrecognised image."""
+    spec = compile_to_jobspec(_config(image="python-slim"), SLIM, CODE_URI, "demo")
+    assert "dependencies" not in _params(spec)
+
+
+def test_a_custom_image_with_no_extras_is_refused():
+    """An unsandboxed host cannot reproduce an environment nobody described."""
+    with pytest.raises(CompileError, match="dependencies"):
+        compile_to_jobspec(_config(), _custom_image(), CODE_URI, "demo")
+
+
+def test_a_custom_image_with_extras_carries_only_the_extras():
+    spec = compile_to_jobspec(
+        _config(dependencies=["numpy==1.26.4"]), _custom_image(), CODE_URI, "demo"
+    )
+    assert _params(spec)["dependencies"] == ["numpy==1.26.4"]
+
+
+def test_a_curated_image_with_no_declared_extras_still_carries_its_base():
+    # Every job deployed today declares no `dependencies:`; a curated image
+    # must still resolve to its own manifest without the submitter asking.
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    assert "dependencies" in _params(spec)
+
+
+def test_federated_rounds_also_resolve_dependencies():
+    """A federated round is an ordinary command job (see compile_federated_
+    round's docstring), so the same resolution applies to it."""
+    config = parse_flashml_yaml(
+        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        'dependencies: ["transformers==4.44.0"]\n'
+    )
+    spec = compile_federated_round(
+        config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+    )
+    deps = _params(spec)["dependencies"]
+    assert deps[-1] == "transformers==4.44.0"
+    assert "torch==2.3.1" in deps
 
 
 def test_allow_partial_reaches_the_retry_policy():

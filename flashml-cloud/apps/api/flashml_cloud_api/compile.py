@@ -42,6 +42,7 @@ import json
 import re
 from typing import Any
 
+from flashruntime.images import manifest_for
 from flashruntime.protocol.v1alpha1 import JobSpec
 
 from flashml_cloud_api.flashml_yaml import FlashmlConfig
@@ -87,6 +88,12 @@ DELTA_FILE = "delta.json"
 #: flashnode's runner reads when building the mount. One string, three
 #: readers — see the caveat in ``_local_inputs`` about the middle step.
 LOCAL_INPUTS_PARAM = "local_inputs"
+
+#: The workload parameter carrying the job's fully resolved pip requirement
+#: lines — the image's own base manifest followed by the job's declared
+#: extras. See ``_dependencies`` for the resolution rule and why the two
+#: pieces must never be reordered.
+DEPENDENCIES_PARAM = "dependencies"
 
 #: A federated round's lease has to outlive local training, not a single
 #: HTTP call — ``CommandRecipe``'s 60 s default would expire mid-epoch and
@@ -213,6 +220,51 @@ def _local_inputs(config: FlashmlConfig, parameters: dict[str, Any]) -> None:
     """
     if config.local_inputs:
         parameters[LOCAL_INPUTS_PARAM] = list(config.local_inputs)
+
+
+def _dependencies(
+    config: FlashmlConfig, image: CuratedImage, parameters: dict[str, Any]
+) -> None:
+    """Resolve the job's dependency list: the image's own base manifest,
+    then the job's declared extras.
+
+    The base comes from ``image.reference`` — the resolved, fully pinned
+    reference, not ``config.image`` (the alias or string a submitter wrote in
+    flashml.yaml) — because it is ``manifest_for``'s key: "the requirement
+    lines for a curated image, shipped in flashruntime as package data next
+    to the Dockerfile that installs the same file. An unsandboxed host then
+    installs what the container would have contained, rather than a second
+    list someone maintained by hand. Extras are appended AFTER the base:
+    a base manifest's ``--index-url`` line governs the lines that follow it
+    (a CPU torch build versus a several-GB CUDA one), so putting an extra
+    first would put it outside that index's effect.
+
+    A custom (non-curated) image with no declared extras is refused HERE, at
+    submit time, naming the image and why. The alternative is a trusted host
+    claiming the task, failing to reproduce anything, and reporting it three
+    hops later — an opaque node-side failure for something the submitter
+    could have been told immediately.
+    """
+    base = manifest_for(image.reference)
+    extras = list(config.dependencies)
+    # `is None`, NEVER truthiness. `manifest_for` returns `[]` for a CURATED
+    # image that genuinely installs nothing beyond its base (python-slim)
+    # and `None` for a reference it does not recognise at all. `if not base`
+    # would conflate the two and refuse every python-slim job at submit time.
+    if base is None and not extras:
+        raise CompileError(
+            f"image {config.image!r} is not a curated FlashML image and the "
+            f"job declares no 'dependencies:' — an unsandboxed host cannot "
+            f"reproduce its environment. Either use a curated image or list "
+            f"what the job needs."
+        )
+    resolved = (base or []) + extras
+    # Absent, never `[]` — the same judgement `_local_inputs` already
+    # records: every job deployed today (no `dependencies:`, a curated image
+    # with an empty manifest) resolves to an empty list, and that path must
+    # stay byte-identical rather than gain a payload key nothing reads.
+    if resolved:
+        parameters[DEPENDENCIES_PARAM] = resolved
 
 
 def _resources(config: FlashmlConfig) -> dict[str, Any]:
@@ -364,6 +416,7 @@ def compile_to_jobspec(
     if config.reduce:
         parameters["reduce"] = dict(config.reduce)
     _local_inputs(config, parameters)
+    _dependencies(config, image, parameters)
 
     repository, tag = _split_reference(image.reference)
 
@@ -512,6 +565,9 @@ def compile_federated_round(
     # Federated averaging over data that cannot be pooled is the use case this
     # feature exists for, so every round carries the requirement too.
     _local_inputs(config, parameters)
+    # A federated round is an ordinary command job (see this function's
+    # docstring); the same base-plus-extras resolution applies to it.
+    _dependencies(config, image, parameters)
 
     repository, tag = _split_reference(image.reference)
 
