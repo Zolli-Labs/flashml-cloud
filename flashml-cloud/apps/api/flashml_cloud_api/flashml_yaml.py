@@ -38,7 +38,7 @@ REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "rounds", "min_participants", "shards",
                  "local_inputs", "partition", "validators", "reduce",
-                 "allow_partial"}
+                 "allow_partial", "dependencies"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: Today's behaviour, and the default: one round of independent tasks (a
@@ -125,6 +125,13 @@ class FlashmlConfig:
     #: exhausting its attempts fails the whole job, which on a fleet of
     #: volunteer machines discards every other machine's accepted work.
     allow_partial: bool = False
+    #: Extra pip requirement lines the job needs beyond its image's own
+    #: manifest — e.g. ``["transformers==4.44.0"]``. The compiler (not this
+    #: module) resolves the image to its base manifest and appends these; see
+    #: ``flashml_cloud_api.compile._dependencies``. Empty is the default and
+    #: the overwhelmingly common case: a curated image is a head start, not a
+    #: whitelist a job must restate to use.
+    dependencies: list[str] = field(default_factory=list)
 
     @property
     def is_federated(self) -> bool:
@@ -181,6 +188,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     validators = _validate_mapping(raw.get("validators"), "validators")
     reduce_spec = _validate_reduce(raw.get("reduce"))
     allow_partial = _validate_bool(raw.get("allow_partial"), "allow_partial")
+    dependencies = _validate_dependencies(raw.get("dependencies", []))
     mode, rounds, min_participants, shards = _validate_mode(raw)
 
     return FlashmlConfig(
@@ -201,6 +209,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         validators=validators,
         reduce=reduce_spec,
         allow_partial=allow_partial,
+        dependencies=dependencies,
     )
 
 
@@ -364,6 +373,23 @@ def _validate_args(args: object) -> list[str]:
     if not all(isinstance(a, str) for a in args):
         raise ConfigError(f"flashml.yaml 'args' must be a list of strings, got {args!r}")
     return list(args)
+
+
+def _validate_dependencies(value: object) -> list[str]:
+    # A list of pip requirement lines, not a single string — the same shape
+    # judgement as `args` above, for the same reason: `dependencies:
+    # torch==2.3.1` is a plausible typo that would otherwise silently parse
+    # as a list of characters rather than fail loudly.
+    if not isinstance(value, list) or isinstance(value, (str, bytes)):
+        raise ConfigError(
+            f"flashml.yaml 'dependencies' must be a list of pip requirement "
+            f"strings (not a single string), got {value!r}"
+        )
+    if not all(isinstance(d, str) for d in value):
+        raise ConfigError(
+            f"flashml.yaml 'dependencies' must be a list of strings, got {value!r}"
+        )
+    return list(value)
 
 
 def _validate_local_inputs(value: object) -> list[str]:

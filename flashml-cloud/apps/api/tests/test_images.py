@@ -183,6 +183,29 @@ def test_every_curated_image_is_anonymously_pullable():
     )
 
 
+def test_every_image_this_api_can_emit_has_a_manifest():
+    """The compiler (Task 4) resolves every ``image:`` to its dependency
+    manifest via ``flashruntime.images.manifest_for``, keyed on the full
+    reference including tag. ``IMAGE_TAG`` here is a wheel-frozen constant:
+    bumping the images without cutting a new ``flashruntime`` release and
+    re-pinning would make every curated reference resolve to ``None`` —
+    no base, hosts install nothing — while every other test in this suite
+    stays green, because nothing else notices version skew between the
+    images release and the pinned protocol package.
+    """
+    from flashruntime.images import manifest_for
+
+    unresolved = []
+    for alias, image in CURATED.items():
+        if manifest_for(image.reference) is None:
+            unresolved.append(f"{alias}: {image.reference}")
+
+    assert not unresolved, (
+        "these curated references have no manifest in the pinned "
+        "flashruntime — bump the pin:\n  " + "\n  ".join(unresolved)
+    )
+
+
 # --- the tag lives in THREE files, in two repos -----------------------------
 #
 # `.github/workflows/images.yml` IMAGE_TAG   (public flashml)

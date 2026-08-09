@@ -14,6 +14,13 @@ this API (design spec §5.4.5 — round aggregation must stay on trusted
 infrastructure while a node's reported results are still believed) and the
 driver itself belongs upstream, where a self-hosted user gets it too.
 
+Dependency declaration (2026-08-09) added a second. ``compile.py`` imports
+``flashruntime.images.manifest_for`` because the curated images' dependency
+manifests ship as package data inside ``flashruntime`` (one file, two
+readers: the image's own Dockerfile and this compiler), and the compiler is
+what resolves ``image:`` to that manifest at submit time — see
+``docs/superpowers/specs/2026-08-09-dependency-provisioning-design.md`` §4.
+
 The exception is a **single module, listed by name**. A grep-based rule
 ("don't import flashml_workloads") would have been satisfied by a lazy
 import inside a function; enumerating the allowed importers instead means a
@@ -35,6 +42,7 @@ PROTOCOL_ROOT = "flashruntime.protocol"
 #: of the repo boundary and belongs in a commit that says so.
 SANCTIONED_EXCEPTIONS = {
     "fedavg.py": {"flashml_workloads.fedavg_driver"},
+    "compile.py": {"flashruntime.images"},
 }
 
 #: Top-level packages that live in the sibling public repo.
