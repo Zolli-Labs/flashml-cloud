@@ -848,6 +848,77 @@ def test_federated_rounds_also_resolve_dependencies():
     assert "torch==2.3.1" in deps
 
 
+# ---------------------------------------------------------------------------
+# extra_dependencies — the extras ALONE, keyed separately from `dependencies`
+# so the coordinator's placement gate can tell "the job's own extras" apart
+# from "the whole install list". A container host already has the base
+# baked into its image; only the extras can ever be missing. See
+# flashruntime's `IsolationAwarePlacement` (eighth gate, keys on
+# `extra_dependencies`, not `dependencies`) and `_dependencies` above.
+# ---------------------------------------------------------------------------
+
+
+def test_a_curated_image_with_no_extras_emits_no_extra_dependencies_key():
+    """Table row 1: curated image, nothing declared. `dependencies` carries
+    the base so a no-container host can still materialise it, but there are
+    no extras — and this is the case that MUST keep a container host
+    eligible, so `extra_dependencies` must be absent, not `[]`."""
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    params = _params(spec)
+    assert "dependencies" in params
+    assert "extra_dependencies" not in params
+
+
+def test_a_curated_image_with_an_extra_emits_only_the_extra():
+    """Table row 2: curated image + `transformers==4.44.0`. `dependencies`
+    is base+extras (unchanged); `extra_dependencies` is the extra ALONE —
+    the base (torch and its --index-url line) must not leak into it, or a
+    container host that already has the base would be wrongly refused."""
+    spec = compile_to_jobspec(
+        _config(dependencies=["transformers==4.44.0"]), PYTORCH, CODE_URI, "demo"
+    )
+    params = _params(spec)
+    assert params["dependencies"][-1] == "transformers==4.44.0"
+    assert "torch==2.3.1" in params["dependencies"]
+    assert params["extra_dependencies"] == ["transformers==4.44.0"]
+
+
+def test_a_custom_image_with_extras_has_matching_dependencies_and_extras():
+    """Table row 3: custom image + extras (base is None). The whole install
+    list IS the extras here, so both keys carry the same thing."""
+    spec = compile_to_jobspec(
+        _config(dependencies=["numpy==1.26.4"]), _custom_image(), CODE_URI, "demo"
+    )
+    params = _params(spec)
+    assert params["dependencies"] == ["numpy==1.26.4"]
+    assert params["extra_dependencies"] == ["numpy==1.26.4"]
+
+
+def test_a_curated_image_with_empty_base_and_no_extras_emits_neither_key():
+    """Table row 4: curated image with an empty base (python-slim), no
+    extras. The resolved list is empty, so `dependencies` stays absent
+    (existing rule) and `extra_dependencies` — also empty — stays absent
+    too, never `[]`."""
+    spec = compile_to_jobspec(_config(image="python-slim"), SLIM, CODE_URI, "demo")
+    params = _params(spec)
+    assert "dependencies" not in params
+    assert "extra_dependencies" not in params
+
+
+def test_federated_rounds_also_emit_extra_dependencies():
+    """A federated round is an ordinary command job, so the same
+    extra_dependencies resolution applies to it too."""
+    config = parse_flashml_yaml(
+        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        'dependencies: ["transformers==4.44.0"]\n'
+    )
+    spec = compile_federated_round(
+        config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+    )
+    assert _params(spec)["extra_dependencies"] == ["transformers==4.44.0"]
+
+
 def test_allow_partial_reaches_the_retry_policy():
     """It is a `retryPolicy` field upstream, not a workload parameter —
     forwarding it into `parameters` would put it where nothing reads it."""

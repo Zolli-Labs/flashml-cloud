@@ -95,6 +95,17 @@ LOCAL_INPUTS_PARAM = "local_inputs"
 #: pieces must never be reordered.
 DEPENDENCIES_PARAM = "dependencies"
 
+#: The workload parameter carrying the job's declared extras ALONE, with the
+#: base manifest excluded. This is what the coordinator's placement gate
+#: (``IsolationAwarePlacement``, the eighth gate) keys on: a container host
+#: already has the image's base manifest baked in — that is what "container
+#: host" means — so it can never be missing the base, only ever the extras.
+#: Keying the gate on ``DEPENDENCIES_PARAM`` instead would refuse ordinary
+#: pytorch/sklearn jobs on the container hosts that run them correctly today,
+#: because the base (`torch==2.3.1` and friends) would read as a requirement
+#: the host cannot satisfy. See ``_dependencies``.
+EXTRA_DEPENDENCIES_PARAM = "extra_dependencies"
+
 #: A federated round's lease has to outlive local training, not a single
 #: HTTP call — ``CommandRecipe``'s 60 s default would expire mid-epoch and
 #: hand the shard to a second machine while the first was still working.
@@ -244,6 +255,16 @@ def _dependencies(
     claiming the task, failing to reproduce anything, and reporting it three
     hops later — an opaque node-side failure for something the submitter
     could have been told immediately.
+
+    Emits TWO keys. ``DEPENDENCIES_PARAM`` is base + extras, unchanged — the
+    full install list a no-container host materialises. ``EXTRA_DEPENDENCIES_
+    PARAM`` is the extras ALONE — what the coordinator's placement gate
+    reads, because a container host already has the base baked into its
+    image and can never be missing it, only ever the extras. Both follow the
+    same absent-stays-absent rule; conflating "empty" with "absent" for
+    either key would either refuse python-slim jobs (see the ``is None``
+    check below) or, for ``extra_dependencies`` specifically, wrongly lock
+    ordinary curated-image jobs with no extras out of container hosts.
     """
     base = manifest_for(image.reference)
     extras = list(config.dependencies)
@@ -265,6 +286,14 @@ def _dependencies(
     # stay byte-identical rather than gain a payload key nothing reads.
     if resolved:
         parameters[DEPENDENCIES_PARAM] = resolved
+    # The extras ALONE — never `resolved`, or a container host with the
+    # base already baked in would be refused for a requirement it already
+    # satisfies. Absent when empty, same rule as above: a curated image with
+    # no declared extras (the overwhelming common case) must not gain a
+    # payload key that would route it away from container hosts it runs on
+    # correctly today.
+    if extras:
+        parameters[EXTRA_DEPENDENCIES_PARAM] = extras
 
 
 def _resources(config: FlashmlConfig) -> dict[str, Any]:
