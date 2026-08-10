@@ -197,7 +197,11 @@ def db(postgres_dsn):
 def make_client(settings, postgres_dsn, transport):
     clients = []
 
-    def build(files: dict[str, str] | None = None, tar_bytes: bytes | None = None):
+    def build(
+        files: dict[str, str] | None = None,
+        tar_bytes: bytes | None = None,
+        mailer=None,
+    ):
         fetch = RecordingFetch(
             tar_bytes if tar_bytes is not None else make_tarball(files or CLEAN_REPO)
         )
@@ -208,7 +212,8 @@ def make_client(settings, postgres_dsn, transport):
             return conn
 
         app = create_cloud_app(
-            settings, connect=connect, transport=transport, fetch_repo=fetch
+            settings, connect=connect, transport=transport, fetch_repo=fetch,
+            mailer=mailer,
         )
         client = TestClient(app)
         client.__enter__()

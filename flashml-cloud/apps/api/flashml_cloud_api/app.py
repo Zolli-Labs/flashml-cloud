@@ -87,6 +87,8 @@ from flashml_cloud_api.db import Machine
 from flashml_cloud_api.emails import derive_email_facts
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import UnknownImage, resolve_image
+from .mail_templates import admitted_email, declined_email
+from .mailer import Mailer
 from flashml_cloud_api.preflight import preflight, safe_text
 from flashml_cloud_api.settings import Settings
 from flashml_cloud_api.store import NodeStore
@@ -727,6 +729,35 @@ def _jsonable(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+async def _send_decision_email(
+    db: psycopg.Connection,
+    mailer: Mailer,
+    settings: Settings,
+    user_id: str,
+    *,
+    admitted: bool,
+) -> bool:
+    """Tell the account what was decided. Returns whether mail went out.
+
+    The database write has already committed by the time this runs, and
+    nothing here may undo it — an account that is admitted stays admitted
+    whether or not the provider answered. The boolean travels back to the
+    console so the admin's toast can say which of the two actually
+    happened instead of assuming.
+    """
+    address = dbmod.email_for_user(db, user_id)
+    if address is None:
+        return False
+    message = admitted_email(settings.console_url) if admitted else declined_email()
+    return await mailer.send(
+        to=address,
+        subject=message.subject,
+        html=message.html,
+        text=message.text,
+        user_id=user_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # the cloud app
 # ---------------------------------------------------------------------------
@@ -738,6 +769,7 @@ def create_cloud_app(
     transport: httpx.AsyncBaseTransport | None = None,
     fetch_repo: Callable[[str, str, str], bytes] | None = None,
     start_federated_job: Callable[..., Any] | None = None,
+    mailer: Mailer | None = None,
 ) -> FastAPI:
     """The public door. Agents and browsers both arrive here; nothing else
     is exposed to the internet.
@@ -761,6 +793,9 @@ def create_cloud_app(
     """
     connect = connect or (lambda: dbmod.connect(settings))
     coordinator = CoordinatorClient(settings, transport=transport)
+    # Its own transport, not the coordinator's: these are two unrelated
+    # hosts, and a test fake for one must not have to answer for the other.
+    mailer = mailer or Mailer(settings)
     fetch_repo = fetch_repo or (
         lambda owner, name, ref: repomod.fetch_repo_tarball(owner, name, ref)
     )
@@ -1224,9 +1259,14 @@ def create_cloud_app(
         _uuid_or_400(user_id)
         # 404, not 200, when nothing was pending: reporting success for a
         # call that changed nothing is how a queue silently stops working.
+        #
+        # It is also what makes the email exactly-once. The guard below
+        # matches only a row still in 'pending', so a second approve returns
+        # here and never reaches the mailer — no sent-log table needed.
         if not dbmod.approve_access_request(db, user_id, decided_by=admin_id):
             raise HTTPException(status_code=404, detail="no pending request")
-        return {"user_id": user_id, "status": "admitted"}
+        emailed = await _send_decision_email(db, mailer, settings, user_id, admitted=True)
+        return {"user_id": user_id, "status": "admitted", "emailed": emailed}
 
     @app.post("/v1alpha1/admin/access-requests/{user_id}/decline", tags=["admin"])
     async def decline_request(
@@ -1237,7 +1277,8 @@ def create_cloud_app(
         _uuid_or_400(user_id)
         if not dbmod.decline_access_request(db, user_id, decided_by=admin_id):
             raise HTTPException(status_code=404, detail="no pending request")
-        return {"user_id": user_id, "status": "declined"}
+        emailed = await _send_decision_email(db, mailer, settings, user_id, admitted=False)
+        return {"user_id": user_id, "status": "declined", "emailed": emailed}
 
     @app.get("/v1alpha1/machines", tags=["browser"])
     async def list_machines(
