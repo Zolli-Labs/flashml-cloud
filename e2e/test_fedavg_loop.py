@@ -86,8 +86,9 @@ def test_fedavg_rounds_reduce_loss_with_two_real_agents(coordinator):
 
     try:
         result = run_fedavg(
-            HttpCoordinator(coordinator.base_url), rounds=3, num_shards=2,
-            min_participants=2, worker_params=WORKER_PARAMS,
+            HttpCoordinator(coordinator.base_url), epochs=3, sync_every=1.0,
+            total_chunks=2, slots=2, expected_machines=2,
+            worker_params=WORKER_PARAMS,
             initial_weights=_initial_weights(),
             round_timeout_s=120.0, poll_seconds=0.25,
         )
@@ -99,34 +100,50 @@ def test_fedavg_rounds_reduce_loss_with_two_real_agents(coordinator):
 
     losses = [h["mean_loss"] for h in result["history"]]
     assert len(losses) == 3
-    assert all(h["participants"] == 2 for h in result["history"])
+    # Coverage, not participant count. `min_participants` is gone: flashruntime
+    # 0.5.0 closes a round when the chunks its contributors report cover
+    # `sync_every` of a pass, and the design states outright that nothing sets
+    # a floor on how many machines supply them. Asserting `participants == 2`
+    # would re-impose the requirement the coverage model exists to remove, and
+    # it was never the property under test — what matters is that a full pass
+    # over the data was trained and combined, whoever did it.
+    assert all(h["covered"] == pytest.approx(1.0) for h in result["history"]), (
+        f"every round should cover a full pass at sync_every=1.0: {result['history']}"
+    )
     assert losses[-1] < losses[0], f"loss did not decrease across rounds: {losses}"
 
 
 def test_fedavg_survives_a_closed_laptop(coordinator):
-    """One agent stops after round 0 (closed laptop); with
-    `min_participants=1` the remaining rounds still complete, solo.
+    """One agent stops after round 0 (closed laptop); the remaining rounds
+    still complete on the machine that is left.
 
-    Driven as TWO `run_fedavg` calls rather than one with an `on_round`
-    hook, because the single-call version was flaky on CI (PROGRESS
-    2026-08-03): it ran every round at `min_participants=1` and then
-    asserted round 0 had two participants. Quorum of 1 is reached by
-    whichever agent commits first, so on a contended runner round 0
-    aggregated before the second agent had claimed anything, and the
-    assertion — which is correct and must not be weakened — lost the race.
+    Still driven as TWO `run_fedavg` calls, but for a simpler reason than
+    before: the laptop closes *between* them, where it is an ordinary
+    sequential step rather than something raced against a running round.
 
-    Splitting the run puts the requirement where it can be enforced instead
-    of hoped for: round 0 runs at `min_participants=2`, so the driver
-    *cannot* aggregate until two shards have committed. It waits for the
-    second agent, or it raises `QuorumNotMet`. The closed laptop then
-    happens between the two calls, where it is an ordinary sequential step.
+    Rewritten for flashruntime 0.5.0, which removed `min_participants`.
+    The old staging ran round 0 at `min_participants=2` so the driver could
+    not aggregate until two shards had committed, and the rest at
+    `min_participants=1` so they could finish solo. Neither knob exists: a
+    round now closes when the chunks its contributors report cover
+    `sync_every` of a pass, and the design says plainly that nothing sets a
+    floor on contributor count.
 
-    What round 0 pins is "two contributions were aggregated", not "two
-    distinct machines contributed" — a single agent that claimed both
-    shards in sequence would also satisfy it. That is deliberate: asserting
-    distinct node ids would re-introduce exactly the race this removes,
-    since a badly enough stalled agent B is indistinguishable from one that
-    never started.
+    That makes the old assertions unavailable AND unwanted. `participants`
+    is an outcome now, not a requirement — one machine fast enough to cover
+    the target closes a round by itself, which is precisely the elasticity
+    being tested, so pinning `participants == 2` would fail the design
+    rather than the code. What survives the rewrite is the property the
+    test was really for: **the fleet losing a machine mid-run does not stop
+    the run, and the remaining rounds still train a full pass.** Coverage
+    states that directly, and unlike a quorum it cannot be satisfied by a
+    fast committer racing ahead — the data has to actually be trained.
+
+    `expected_machines` drops from 2 to 1 for the solo half: it is what
+    sizes each slot's chunk budget, so telling the driver to expect one
+    machine is how the survivor is handed enough work to cover the pass
+    alone. Getting that wrong does not fail loudly — the round would simply
+    poll to its backstop with partial coverage.
     """
     reg_a = _register(coordinator, "fn-e2e-solo-a")
     reg_b = _register(coordinator, "fn-e2e-solo-b")
@@ -148,8 +165,9 @@ def test_fedavg_survives_a_closed_laptop(coordinator):
     coord = HttpCoordinator(coordinator.base_url)
     try:
         first = run_fedavg(
-            coord, rounds=1, num_shards=2,
-            min_participants=2, worker_params=WORKER_PARAMS,
+            coord, epochs=1, sync_every=1.0,
+            total_chunks=2, slots=2, expected_machines=2,
+            worker_params=WORKER_PARAMS,
             initial_weights=_initial_weights(),
             round_timeout_s=120.0, poll_seconds=0.25,
         )
@@ -170,8 +188,9 @@ def test_fedavg_survives_a_closed_laptop(coordinator):
         assert start_round == 1, f"round 0 should be the last completed round, got {start_round}"
 
         rest = run_fedavg(
-            coord, rounds=3, num_shards=2,
-            min_participants=1, worker_params=WORKER_PARAMS,
+            coord, epochs=3, sync_every=1.0,
+            total_chunks=2, slots=2, expected_machines=1,
+            worker_params=WORKER_PARAMS,
             initial_weights=weights, weights_uri=weights_uri,
             start_round=start_round, prior_job_ids=first["job_ids"],
             round_timeout_s=120.0, poll_seconds=0.25,
@@ -185,7 +204,13 @@ def test_fedavg_survives_a_closed_laptop(coordinator):
     history = first["history"] + rest["history"]
     losses = [h["mean_loss"] for h in history]
     assert len(losses) == 3
-    assert history[0]["participants"] == 2, "round 0 ran with both agents up"
-    assert all(h["participants"] == 1 for h in history[1:]), (
-        f"rounds after the closed laptop should complete solo: {history}"
+    # The point of the test, stated in the terms 0.5.0 actually closes on:
+    # every round trained a full pass, including the ones that ran after a
+    # machine vanished. `participants` is reported for observability and is
+    # deliberately NOT asserted — see the docstring.
+    assert all(h["covered"] == pytest.approx(1.0) for h in history), (
+        f"a lost machine must not cost the run its coverage: {history}"
+    )
+    assert losses[-1] < losses[0], (
+        f"training did not progress across the closed laptop: {losses}"
     )
