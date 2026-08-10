@@ -11,9 +11,41 @@ the public keys are fetched from it (see ``auth.jwks_url``).
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 from dataclasses import dataclass
+
+
+def _decode_pem(value: str) -> str:
+    """Return an RSA private key PEM from either of the two forms it
+    legitimately arrives in.
+
+    The GitHub App private key is multi-line. Render's dashboard accepts
+    newlines in an env var; a `.env` file does not, and the three-place
+    map in `.env.dev.example` exists precisely because values drift when
+    one place cannot hold what another can. Base64 is the one encoding
+    that survives every place this has to live, so both are accepted and
+    normalised here — the single point the value enters the process.
+
+    A value that is neither is returned UNCHANGED rather than mangled.
+    `github_app.py` then fails with "not a valid private key", which
+    names the actual problem; a forced base64 decode of a typo produces
+    binary noise and an error about padding.
+
+    A PEM is returned byte-for-byte, trailing newline included. Stripping
+    a credential to tidy it is how a valid value becomes an invalid one —
+    the whitespace is only removed for the base64 *attempt*, where
+    `validate=True` would reject it.
+    """
+    if "-----BEGIN" in value:
+        return value
+    try:
+        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return value
+    return decoded if "-----BEGIN" in decoded else value
 
 
 def _with_default_scheme(url: str, scheme: str) -> str:
@@ -78,6 +110,33 @@ class Settings:
     #: reply (re-applying is refused by design — POST /access-request 409s
     #: once decided), so this should be a monitored mailbox.
     email_reply_to: str = ""
+    #: GitHub App credentials, for reading a submitter's PRIVATE repos. All
+    #: three or none — see `github_app_configured`. Optional for the same
+    #: reason as `resend_api_key` above: an unconfigured deploy must still
+    #: boot and serve, because public-repo submission is the whole product
+    #: for everyone who has not connected GitHub.
+    github_app_id: str = ""
+    #: The App's URL slug, used only to build the install redirect
+    #: (`https://github.com/apps/<slug>/installations/new`).
+    github_app_slug: str = ""
+    #: The App's RSA private key, PEM. Accepted base64-encoded as well —
+    #: see `_decode_pem`.
+    github_app_private_key: str = ""
+
+    @property
+    def github_app_configured(self) -> bool:
+        """All three present. Deliberately all-or-nothing.
+
+        A half-configured App can mint no token, so reporting it as
+        configured would have the console render a Connect button that
+        leads a person through granting us access to their code and then
+        fails. Off is the safe direction to round to.
+        """
+        return bool(
+            self.github_app_id
+            and self.github_app_slug
+            and self.github_app_private_key
+        )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -111,6 +170,13 @@ class Settings:
         resend_api_key = os.environ.get("RESEND_API_KEY", "")
         email_from = os.environ.get("EMAIL_FROM", "")
         email_reply_to = os.environ.get("EMAIL_REPLY_TO", "")
+        github_app_id = os.environ.get("GITHUB_APP_ID", "").strip()
+        github_app_slug = os.environ.get("GITHUB_APP_SLUG", "").strip()
+        # NOT stripped before the call: a PEM's trailing newline is part of
+        # the credential, and `_decode_pem` strips only for its base64 probe.
+        github_app_private_key = _decode_pem(
+            os.environ.get("GITHUB_APP_PRIVATE_KEY", "")
+        )
 
         settings = cls(
             supabase_url=supabase_url,
@@ -124,6 +190,9 @@ class Settings:
             resend_api_key=resend_api_key,
             email_from=email_from,
             email_reply_to=email_reply_to,
+            github_app_id=github_app_id,
+            github_app_slug=github_app_slug,
+            github_app_private_key=github_app_private_key,
         )
 
         if require_auth:
@@ -181,6 +250,22 @@ class Settings:
                     "Mail is half-configured: RESEND_API_KEY and EMAIL_FROM "
                     "must both be set. No approval or decline email will be "
                     "sent until they are."
+                )
+
+            # Same shape, same signal. A partly-set App reads as OFF (see
+            # `github_app_configured`), so without this it is off with no
+            # explanation — and the person who set two of three variables
+            # is precisely the one who believes it is on.
+            github_app_values = (
+                github_app_id,
+                github_app_slug,
+                github_app_private_key,
+            )
+            if any(github_app_values) and not all(github_app_values):
+                logging.getLogger("flashml-cloud-api").warning(
+                    "The GitHub App is half-configured: GITHUB_APP_ID, "
+                    "GITHUB_APP_SLUG and GITHUB_APP_PRIVATE_KEY must all be "
+                    "set. Private-repo submission stays off until they are."
                 )
 
         return settings
