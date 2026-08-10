@@ -55,10 +55,12 @@ timeout_seconds: 1800
     assert config.timeout_seconds == 1800
 
 
-def test_version_other_than_1_is_refused():
-    text = MINIMAL.replace("version: 1", "version: 2")
-    with pytest.raises(ConfigError, match="version"):
-        parse_flashml_yaml(text)
+def test_an_unsupported_version_is_refused():
+    """Both 1 and 2 are read — 2 exists because ``mode: federated`` changed
+    its authoring surface, and 1 is every sweep already in the wild."""
+    for version in (0, 3, "one"):
+        with pytest.raises(ConfigError, match="version"):
+            parse_flashml_yaml(MINIMAL.replace("version: 1", f"version: {version}"))
 
 
 def test_missing_entrypoint_is_refused():
@@ -281,7 +283,8 @@ def test_local_inputs_did_not_widen_the_allowed_keys():
 def test_local_inputs_works_under_federated_mode():
     # Federated learning over data that cannot be pooled is the use case this
     # exists for, so the two features have to compose.
-    text = (MINIMAL + "mode: federated\nrounds: 2\nmin_participants: 2\n"
+    text = (MINIMAL.replace("version: 1", "version: 2")
+            + "mode: federated\nepochs: 2\n"
             'local_inputs: ["patients"]\n')
     config = parse_flashml_yaml(text)
     assert config.is_federated and config.local_inputs == ["patients"]
@@ -317,10 +320,11 @@ def test_partition_and_sweep_are_two_generators_for_one_job():
 
 
 def test_partition_cannot_be_combined_with_federated_mode():
-    """A federated round's shards are the round's participants, decided by
-    `shards:`. A partition would be a second, conflicting fan-out."""
-    text = (MINIMAL + "\nmode: federated\nrounds: 2\nmin_participants: 2\n"
-            "shards: 2\npartition:\n  range: [0, 10]\n  shards: 2\n")
+    """A federated round already cuts one pass over the data into chunks. A
+    partition would be a second, conflicting split of the same data."""
+    text = (MINIMAL.replace("version: 1", "version: 2")
+            + "\nmode: federated\nepochs: 2\n"
+            "partition:\n  range: [0, 10]\n  shards: 2\n")
     with pytest.raises(ConfigError, match="federated"):
         parse_flashml_yaml(text)
 

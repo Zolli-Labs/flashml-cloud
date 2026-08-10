@@ -41,7 +41,16 @@ PROTOCOL_ROOT = "flashruntime.protocol"
 #: beyond ``PROTOCOL_ROOT``. Adding an entry here is a deliberate widening
 #: of the repo boundary and belongs in a commit that says so.
 SANCTIONED_EXCEPTIONS = {
-    "fedavg.py": {"flashml_workloads.fedavg_driver"},
+    # ``chunks`` joins the driver here, in the module that already invokes it,
+    # for the reason the rest of this file argues: ``run_fedavg`` verifies
+    # every chunk a machine reports against ``chunks.slot_start``, so the
+    # round this API compiles must be laid out by that exact function. The
+    # alternative is not a narrower boundary — it is a hand-copied ``(slot *
+    # total // slots + offset) % total`` in this repo that credits every
+    # volunteer zero the day either side changes. Importing the shared
+    # function is strictly the safer of the two, and it stays behind the same
+    # one door (``test_the_driver_import_lives_in_exactly_one_module``).
+    "fedavg.py": {"flashml_workloads.fedavg_driver", "flashml_workloads.chunks"},
     "compile.py": {"flashruntime.images"},
 }
 

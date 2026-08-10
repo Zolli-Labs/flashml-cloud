@@ -31,6 +31,12 @@ from flashml_cloud_api.flashml_yaml import parse_flashml_yaml
 from flashml_cloud_api.images import CuratedImage, resolve_image
 
 CODE_URI = "artifact://uploads/deadbeef/code.tar.gz"
+
+#: The smallest round that can exist: one slot training the whole pass. Every
+#: federated assertion in this file is about isolation, placement, inputs or
+#: dependencies — none is about how the data is split — so the split is held
+#: at its floor here and exercised in ``test_elastic_layout.py`` instead.
+ONE_SLOT = {"slot_chunks": [0], "total_chunks": 1}
 PYTORCH = resolve_image("pytorch-cpu")
 CUDA = resolve_image("pytorch-cuda")
 SLIM = resolve_image("python-slim")
@@ -219,12 +225,12 @@ def test_federated_round_pool_sets_placement_and_couples_the_waiver():
     ordinary command job, and the pool coupling is not special-cased away
     for it."""
     config = parse_flashml_yaml(
-        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
-        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        "version: 2\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
     )
     spec = compile_federated_round(
         config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
-        pool="p-1",
+        pool="p-1", **ONE_SLOT,
     )
     assert spec["spec"]["placement"]["pool"] == "p-1"
     assert spec["spec"]["isolation"] == {"tier": "sandboxed", "allowFallback": True}
@@ -232,11 +238,12 @@ def test_federated_round_pool_sets_placement_and_couples_the_waiver():
 
 def test_federated_round_without_pool_is_byte_identical_to_before():
     config = parse_flashml_yaml(
-        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
-        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        "version: 2\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
     )
     spec = compile_federated_round(
         config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+        **ONE_SLOT,
     )
     assert spec["spec"]["isolation"] == {"tier": "sandboxed", "allowFallback": False}
     assert spec["spec"]["placement"]["pool"] == "any"
@@ -654,13 +661,14 @@ def test_federated_rounds_carry_local_inputs_and_upload_nothing():
     # feature exists for, so the round compiler must carry it too — and must
     # still stage only the code tarball and the aggregated weights.
     config = parse_flashml_yaml(
-        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
-        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        "version: 2\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
         'local_inputs: ["patients"]\n'
     )
     spec = compile_federated_round(
         config, PYTORCH, CODE_URI, "fed", round_index=1,
         weights_uri="artifact://jobs/j/round-000/weights.json",
+        **ONE_SLOT,
     )
     params = _params(spec)
     assert params["local_inputs"] == ["patients"]
@@ -671,11 +679,12 @@ def test_federated_rounds_carry_local_inputs_and_upload_nothing():
 
 def test_federated_rounds_without_local_inputs_are_unchanged():
     config = parse_flashml_yaml(
-        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
-        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        "version: 2\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
     )
     spec = compile_federated_round(
         config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+        **ONE_SLOT,
     )
     assert "local_inputs" not in _params(spec)
 
@@ -836,12 +845,13 @@ def test_federated_rounds_also_resolve_dependencies():
     """A federated round is an ordinary command job (see compile_federated_
     round's docstring), so the same resolution applies to it."""
     config = parse_flashml_yaml(
-        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
-        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        "version: 2\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
         'dependencies: ["transformers==4.44.0"]\n'
     )
     spec = compile_federated_round(
         config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+        **ONE_SLOT,
     )
     deps = _params(spec)["dependencies"]
     assert deps[-1] == "transformers==4.44.0"
@@ -909,12 +919,13 @@ def test_federated_rounds_also_emit_extra_dependencies():
     """A federated round is an ordinary command job, so the same
     extra_dependencies resolution applies to it too."""
     config = parse_flashml_yaml(
-        "version: 1\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
-        "mode: federated\nrounds: 2\nmin_participants: 2\n"
+        "version: 2\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
         'dependencies: ["transformers==4.44.0"]\n'
     )
     spec = compile_federated_round(
         config, PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+        **ONE_SLOT,
     )
     assert _params(spec)["extra_dependencies"] == ["transformers==4.44.0"]
 

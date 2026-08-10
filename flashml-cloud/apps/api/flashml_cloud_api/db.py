@@ -1283,6 +1283,45 @@ def list_pool_members(
         return list(cur.fetchall())
 
 
+def count_online_machines(
+    db: psycopg.Connection, *, pool_id: str | None
+) -> int:
+    """Machines that could claim work for a job in ``pool_id`` right now.
+
+    ``pool_id=None`` means the public queue, where any online machine may
+    claim, so the count is fleet-wide. A pool id narrows it to machines opted
+    in to that pool — the same ``machine_pools`` intersection
+    ``list_pool_members`` applies, because owning a machine is not opting it
+    in.
+
+    This is the number a federated round's slot count and chunk allotment are
+    both derived from (``elastic.fleet_shape``), which is why it goes through
+    ``MACHINE_ONLINE_PREDICATE`` rather than its own freshness threshold: the
+    console shows a person "N machines online" from that same predicate, and a
+    round cut from a different N would be unexplainable to them.
+
+    A count, never a list: the caller needs capacity, and returning rows would
+    invite a second place that decides which machines are online.
+    """
+    with db.cursor() as cur:
+        if pool_id is None:
+            cur.execute(
+                f"select count(*) as n from public.machines m "
+                f"where {MACHINE_ONLINE_PREDICATE}"
+            )
+        else:
+            cur.execute(
+                f"""
+                select count(distinct m.id) as n
+                  from public.machines m
+                  join public.machine_pools mp on mp.machine_id = m.id
+                 where mp.pool_id = %s and {MACHINE_ONLINE_PREDICATE}
+                """,
+                (pool_id,),
+            )
+        return int(cur.fetchone()["n"])
+
+
 def is_pool_member(db: psycopg.Connection, pool_id: str, user_id: str) -> bool:
     with db.cursor() as cur:
         cur.execute(

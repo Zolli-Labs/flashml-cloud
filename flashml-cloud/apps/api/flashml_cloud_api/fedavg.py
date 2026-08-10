@@ -44,7 +44,7 @@ import json
 import logging
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Callable
 
@@ -53,6 +53,7 @@ import psycopg
 # The one deliberate cross-repo import beyond `flashruntime.protocol`. See
 # the module docstring; do not add a second one anywhere in this repo
 # without moving the rule first.
+from flashml_workloads.chunks import slot_start
 from flashml_workloads.fedavg_driver import (
     Coordinator,
     HttpCoordinator,
@@ -64,6 +65,7 @@ from flashml_workloads.fedavg_driver import (
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api.compile import compile_federated_round, federated_task_ids
+from flashml_cloud_api.elastic import FleetShape, fleet_shape, round_chunk_offset
 from flashml_cloud_api.flashml_yaml import FlashmlConfig
 from flashml_cloud_api.images import CuratedImage
 from flashml_cloud_api.settings import Settings
@@ -80,6 +82,7 @@ __all__ = [
     "new_federated_job_id",
     "record_run_footprint",
     "run_federated_job",
+    "slot_chunks_for",
     "start_federated_job",
 ]
 
@@ -142,6 +145,39 @@ class FederatedRun:
     image: CuratedImage
     code_artifact_uri: str
     pool: str | None = None
+    #: How this run's rounds are cut — derived from the machines online when
+    #: the job was submitted, never from the config (``elastic.fleet_shape``).
+    #: Captured once at submit time on purpose: a driver thread must not hold
+    #: a database connection, and re-counting the Crew per round would make
+    #: the chunk layout move underneath a resumed run, invalidating every
+    #: allotment the earlier rounds were credited against.
+    #:
+    #: The default is the one-slot floor, which is a correct round and a slow
+    #: one. Every submit path passes a counted shape; this keeps a
+    #: hand-constructed run (a test, a REPL) working rather than raising.
+    fleet: FleetShape = field(default_factory=lambda: fleet_shape(0))
+
+
+def slot_chunks_for(fleet: FleetShape, round_index: int,
+                    sync_every: float) -> list[int]:
+    """The chunk each slot of round ``round_index`` is to train.
+
+    The single place this layout is decided, and the reason ``compile.py``
+    takes a list of chunk ids rather than computing them: ``slot_start`` is
+    the runtime's function and this module is the only door the runtime is
+    allowed through (``tests/test_import_boundary.py``). ``run_fedavg``
+    verifies every chunk a machine reports against the same call, so a second
+    implementation anywhere would be a silent way to credit nobody.
+
+    ``chunk_offset`` is derived here rather than received because
+    ``build_round`` is handed only a round index — see
+    ``elastic.round_chunk_offset``.
+    """
+    offset = round_chunk_offset(round_index,
+                               total_chunks=fleet.total_chunks,
+                               sync_every=sync_every)
+    return [slot_start(slot, fleet.total_chunks, fleet.slots, offset)
+            for slot in range(fleet.slots)]
 
 
 def build_round_for(run: FederatedRun) -> Callable[[int, str | None], RoundPlan]:
@@ -162,10 +198,15 @@ def build_round_for(run: FederatedRun) -> Callable[[int, str | None], RoundPlan]
             run.job_name,
             round_index=round_index,
             weights_uri=weights_uri,
+            slot_chunks=slot_chunks_for(
+                run.fleet, round_index,
+                float(run.config.sync_every or 1.0),
+            ),
+            total_chunks=run.fleet.total_chunks,
             pool=run.pool,
         )
         return {"body": body,
-                "task_ids": federated_task_ids(run.config.shards or 0)}
+                "task_ids": federated_task_ids(run.fleet.slots)}
 
     return build
 
@@ -405,7 +446,7 @@ def run_federated_job(
             db.close()
 
         start_round, weights, weights_uri = resume_state(coord, prior)
-        if start_round >= (run.config.rounds or 0):
+        if start_round >= (run.config.round_count or 0):
             # Every requested round is already recorded. Finishing rather
             # than running a negative-length loop keeps a re-triggered
             # driver idempotent.
@@ -414,9 +455,16 @@ def run_federated_job(
 
         run_fedavg(
             coord,
-            rounds=int(run.config.rounds or 0),
-            num_shards=int(run.config.shards or 0),
-            min_participants=int(run.config.min_participants or 0),
+            epochs=int(run.config.epochs or 0),
+            sync_every=float(run.config.sync_every or 1.0),
+            # The fleet's numbers, not the submitter's. `slots` is a ceiling
+            # on offers and `expected_machines` sizes each claimed slot's
+            # chunk allotment; the driver pulls them apart deliberately, so
+            # they are passed apart even where `fleet_shape` currently sets
+            # them equal.
+            total_chunks=run.fleet.total_chunks,
+            slots=run.fleet.slots,
+            expected_machines=run.fleet.expected_machines,
             # Inputs to the *default* round body, which `build_round`
             # replaces wholesale; passed empty so nothing here looks like it
             # is configuring the user's tasks.

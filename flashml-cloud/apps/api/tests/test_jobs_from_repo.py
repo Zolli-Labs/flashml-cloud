@@ -539,7 +539,9 @@ def test_a_repo_without_a_flashml_yaml_is_a_clean_400(make_client, db, transport
 
 def test_an_invalid_config_is_a_clean_400(make_client, db, transport):
     files = dict(CLEAN_REPO)
-    files["flashml.yaml"] = "version: 2\nname: x\nimage: python-slim\nentrypoint: t.py\n"
+    # A version this parser does not read. `2` was the example here until
+    # `mode: federated` took it (see flashml_yaml.SUPPORTED_VERSIONS).
+    files["flashml.yaml"] = "version: 9\nname: x\nimage: python-slim\nentrypoint: t.py\n"
     client = make_client(files)
     r = _post(client, _jwt(_new_user(db)))
     assert r.status_code == 400

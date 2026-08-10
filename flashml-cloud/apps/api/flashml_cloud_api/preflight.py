@@ -114,6 +114,16 @@ OUT_DIR = "/work/out"
 FEDERATED_WEIGHTS_PATH = "/work/inputs/weights.json"
 FEDERATED_DELTA_FILE = "delta.json"
 
+#: The metrics key naming the data chunks a machine actually finished.
+#:
+#: Load-bearing, and the quietest thing in the system if it is missing.
+#: ``run_fedavg`` credits a contribution only for chunk ids the coordinator
+#: can prove it handed that slot, so an entrypoint that omits this is credited
+#: for nothing: every round reduces zero contributions after every volunteer
+#: has trained and uploaded, and no error is raised anywhere, because a
+#: machine reporting no chunks looks exactly like a machine that did no work.
+FEDERATED_CHUNKS_KEY = "chunks_done"
+
 #: The full statement of the federated contract, quoted verbatim in the
 #: finding. It is long because it is the entire specification of what the
 #: user has to write — a finding that said "your entrypoint does not follow
@@ -129,8 +139,11 @@ FEDERATED_CONTRACT = (
     f'{{"<param>": {{"shape": [...], "data": [...]}}}} — on round 0, where '
     f"you were given no weights, that is your trained weights themselves; "
     f"(4) write {OUT_DIR}/metrics.json with at least a positive integer "
-    f"'samples' and a numeric 'loss', which is how the round weights your "
-    f"contribution in the average"
+    f"'samples', a numeric 'loss', and '{FEDERATED_CHUNKS_KEY}': the list of "
+    f"data chunk ids you finished, which is [the value of --shard] unless you "
+    f"were given more than one. That list is how the round knows your "
+    f"contribution covers real data — a contribution reporting no chunks is "
+    f"credited for nothing, however long it trained"
 )
 
 #: Largest entrypoint this module will read and parse. A single Python
@@ -706,6 +719,11 @@ def _federated_findings(
         missing.append(FEDERATED_WEIGHTS_PATH)
     if FEDERATED_DELTA_FILE not in source_text:
         missing.append(f"{OUT_DIR}/{FEDERATED_DELTA_FILE}")
+    # Named as a bare key rather than a path: it is a field inside
+    # metrics.json, and the text scan is looking for the author having thought
+    # about it at all.
+    if FEDERATED_CHUNKS_KEY not in source_text:
+        missing.append(f"'{FEDERATED_CHUNKS_KEY}' in {OUT_DIR}/metrics.json")
     if not missing:
         return []
     return [

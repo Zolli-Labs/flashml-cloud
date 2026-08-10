@@ -31,6 +31,7 @@ from flashml_cloud_api.compile import (
     compile_federated_round,
     federated_task_ids,
 )
+from flashml_cloud_api.elastic import fleet_shape
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import resolve_image
 from flashml_cloud_api.preflight import preflight
@@ -54,14 +55,12 @@ from test_jobs_from_repo import (  # reuse the proven from-repo harness
 # ---------------------------------------------------------------------------
 
 FEDERATED_YAML = """
-    version: 1
+    version: 2
     name: acme-fed
     image: python-slim
     entrypoint: train.py
     mode: federated
-    rounds: 3
-    min_participants: 2
-    shards: 2
+    epochs: 3
 """
 
 #: An entrypoint that speaks the delta protocol. It never has to *work* —
@@ -89,7 +88,8 @@ FEDERATED_TRAIN_PY = """
     with open("/work/out/delta.json", "w") as fh:
         json.dump(delta, fh)
     with open("/work/out/metrics.json", "w") as fh:
-        json.dump({"samples": 128, "loss": 0.5, "delta_file": "delta.json"}, fh)
+        json.dump({"samples": 128, "loss": 0.5, "delta_file": "delta.json",
+                   "chunks_done": [args.shard]}, fh)
 """
 
 FEDERATED_REPO = {"flashml.yaml": FEDERATED_YAML, "train.py": FEDERATED_TRAIN_PY}
@@ -113,7 +113,7 @@ def _config(text: str = FEDERATED_YAML):
 def test_a_federated_config_parses():
     config = _config()
     assert config.is_federated
-    assert (config.rounds, config.min_participants, config.shards) == (3, 2, 2)
+    assert (config.epochs, config.sync_every, config.round_count) == (3, 1.0, 3)
 
 
 def test_the_default_mode_is_independent_and_unchanged():
@@ -125,32 +125,7 @@ def test_the_default_mode_is_independent_and_unchanged():
     """)
     assert config.mode == "independent"
     assert not config.is_federated
-    assert (config.rounds, config.min_participants, config.shards) == (None, None, None)
-
-
-def test_shards_defaults_to_min_participants():
-    config = _config("""
-        version: 1
-        name: acme
-        image: python-slim
-        entrypoint: train.py
-        mode: federated
-        rounds: 2
-        min_participants: 3
-    """)
-    assert config.shards == 3
-
-
-@pytest.mark.parametrize("missing", ["rounds", "min_participants"])
-def test_federated_requires_rounds_and_min_participants(missing):
-    lines = [
-        "version: 1", "name: acme", "image: python-slim",
-        "entrypoint: train.py", "mode: federated",
-        "rounds: 2", "min_participants: 2",
-    ]
-    text = "\n".join(line for line in lines if not line.startswith(missing + ":"))
-    with pytest.raises(ConfigError, match=missing):
-        parse_flashml_yaml(text)
+    assert (config.epochs, config.sync_every) == (None, None)
 
 
 def test_federated_keys_are_refused_under_the_default_mode():
@@ -159,34 +134,19 @@ def test_federated_keys_are_refused_under_the_default_mode():
     parser exists to prevent."""
     with pytest.raises(ConfigError, match="only apply to 'mode: federated'"):
         parse_flashml_yaml(
-            "version: 1\nname: a\nimage: python-slim\nentrypoint: t.py\nrounds: 4\n"
+            "version: 2\nname: a\nimage: python-slim\nentrypoint: t.py\nepochs: 4\n"
         )
-
-
-def test_min_participants_above_shards_is_refused():
-    with pytest.raises(ConfigError, match="quorum could never be reached"):
-        _config("""
-            version: 1
-            name: acme
-            image: python-slim
-            entrypoint: train.py
-            mode: federated
-            rounds: 2
-            min_participants: 4
-            shards: 2
-        """)
 
 
 def test_a_sweep_cannot_be_federated():
     with pytest.raises(ConfigError, match="cannot combine 'sweep'"):
         _config("""
-            version: 1
+            version: 2
             name: acme
             image: python-slim
             entrypoint: train.py
             mode: federated
-            rounds: 2
-            min_participants: 1
+            epochs: 2
             sweep:
               lr: [0.1, 0.2]
         """)
@@ -197,6 +157,12 @@ def test_a_sweep_cannot_be_federated():
 # ---------------------------------------------------------------------------
 
 
+#: The fleet these compile tests assume: two machines online, so a pass is
+#: two chunks and a round has two slots — the shape every assertion below was
+#: written against when it was spelled ``shards: 2``.
+ROUND_FLEET = fleet_shape(2)
+
+
 def _round(round_index: int, weights_uri: str | None):
     return compile_federated_round(
         _config(),
@@ -205,6 +171,8 @@ def _round(round_index: int, weights_uri: str | None):
         "acme-fed",
         round_index=round_index,
         weights_uri=weights_uri,
+        slot_chunks=fedavgmod.slot_chunks_for(ROUND_FLEET, round_index, 1.0),
+        total_chunks=ROUND_FLEET.total_chunks,
     )
 
 
@@ -264,6 +232,7 @@ def test_an_independent_config_cannot_be_compiled_as_a_round():
         compile_federated_round(
             config, resolve_image("python-slim"), "artifact://a/b.tar.gz", "acme",
             round_index=0, weights_uri=None,
+            slot_chunks=[0], total_chunks=1,
         )
 
 
@@ -319,26 +288,51 @@ def test_the_contract_check_does_not_fire_for_independent_jobs(tmp_path):
 
 
 class StubCoordinator:
-    """A coordinator that accepts round jobs and reports both shards done.
+    """A coordinator that accepts round jobs and reports every slot done.
 
     Implements exactly the ``Coordinator`` protocol the driver uses. No
     HTTP, no live service: the round's committed artifacts are synthesised,
     which is enough because what is under test here is the API's invocation
     and persistence, not the averaging.
+
+    ``chunks_done`` is read back out of the submitted body rather than
+    invented, because the driver credits a slot only for chunks it can prove
+    it handed that slot. A stub that reported a chunk it was never given would
+    be credited zero, every round would sit until its duration backstop, and
+    this file would hang rather than fail. ``test_elastic_driver.py`` is where
+    that layout agreement is the point; here it is just the honest minimum.
     """
 
+    #: Slots per round. Every ``FederatedRun`` in this file is built with
+    #: ``fleet_shape(SLOTS)``, so the stub and the compiled round agree.
     shards = 2
 
     def __init__(self, fail_on_submit: bool = False):
         self.fail_on_submit = fail_on_submit
         self.submitted: list[dict] = []
         self.uploaded: dict[str, object] = {}
+        #: ``{job_id: {task_id: chunk_id}}`` — what each round handed out.
+        self.handed_out: dict[str, dict[str, int]] = {}
 
     def submit(self, body):
         if self.fail_on_submit:
             raise RuntimeError("coordinator unavailable")
         self.submitted.append(body)
-        return {"job_id": f"cjob-{len(self.submitted) - 1:03d}"}
+        return {"job_id": self._record(f"cjob-{len(self.submitted) - 1:03d}", body)}
+
+    def _record(self, job_id: str, body: dict) -> str:
+        """Remember which chunk each task of ``job_id`` was handed.
+
+        Separate from ``submit`` so a subclass that mints its own job ids —
+        ``test_contributions.NamedNodeCoordinator`` — cannot forget it and
+        leave ``get_artifact`` raising ``KeyError`` on its own round.
+        """
+        params = body["spec"]["workload"]["parameters"]
+        self.handed_out[job_id] = {
+            f"task-{i:03d}": int(p["shard"])
+            for i, p in enumerate(params.get("task_params", []))
+        }
+        return job_id
 
     def job_state(self, job_id):
         return "RUNNING"
@@ -360,7 +354,9 @@ class StubCoordinator:
         if key in self.uploaded:
             return self.uploaded[key]
         if key.endswith("metrics.json"):
-            return {"samples": 100, "loss": 0.25, "delta_file": "delta.json"}
+            _, job_id, task_id, _ = key.split("/")
+            return {"samples": 100, "loss": 0.25, "delta_file": "delta.json",
+                    "chunks_done": [self.handed_out[job_id][task_id]]}
         if key.endswith("delta.json"):
             return {"w": {"shape": [1], "data": [0.5]}}
         from flashml_workloads.fedavg_driver import ArtifactNotFound
@@ -397,7 +393,18 @@ def _run(
     job_id: str, settings, postgres_dsn, coordinator, rounds: int = 2,
     pool: str | None = None,
 ):
-    config = _config(FEDERATED_YAML.replace("rounds: 3", f"rounds: {rounds}"))
+    """Drive a run of ``rounds`` rounds.
+
+    ``rounds`` is still the parameter every test here reads, because that is
+    what these tests are about — but it is now expressed the way a submitter
+    expresses it: at the default ``sync_every`` of one combine per pass,
+    ``epochs`` and rounds are the same number.
+
+    The fleet is fixed at ``StubCoordinator.shards`` slots so the stub's
+    synthesised task set and the compiled round's task set agree; a mismatch
+    is refused by ``run_fedavg`` rather than silently half-credited.
+    """
+    config = _config(FEDERATED_YAML.replace("epochs: 3", f"epochs: {rounds}"))
     run = fedavgmod.FederatedRun(
         job_id=job_id,
         job_name="acme-fed",
@@ -405,6 +412,10 @@ def _run(
         image=resolve_image("python-slim"),
         code_artifact_uri="artifact://uploads/deadbeef/code.tar.gz",
         pool=pool,
+        # The stub decides how many machines report, so the round must be cut
+        # for exactly that many slots: `run_fedavg` refuses a builder whose
+        # task count disagrees with the slot count it sized allotments from.
+        fleet=fleet_shape(getattr(coordinator, "shards", StubCoordinator.shards)),
     )
     fedavgmod.run_federated_job(
         run,
@@ -723,12 +734,21 @@ def test_submitting_a_federated_repo_starts_the_driver(federated_client, db, tra
 
     body = r.json()
     assert body["mode"] == "federated"
-    assert body["rounds"] == 3 and body["shards"] == 2
+    # What the author asked for, and what the fleet turned it into. The slot
+    # count is whatever was online — asserted as "at least the floor" rather
+    # than a number, because the machines in this shared database belong to
+    # whichever tests ran first.
+    assert (body["epochs"], body["sync_every"]) == (3, 1.0)
+    assert body["rounds"] == 3
+    assert body["slots"] >= 1
     assert body["job_id"].startswith(fedavgmod.JOB_ID_PREFIX)
 
     # The driver was started, with everything it needs to rebuild any round.
     assert len(client.starter.runs) == 1
     run = client.starter.runs[0]
+    # Including the fleet shape, without which every round would be recut
+    # from a Crew that has moved on since the job was submitted.
+    assert run.fleet.slots == body["slots"]
     assert run.job_id == body["job_id"]
     assert run.code_artifact_uri.startswith("artifact://uploads/")
 

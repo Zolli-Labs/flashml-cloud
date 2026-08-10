@@ -76,10 +76,70 @@ the real ceiling on what FlashML can do today, and it is a known one.
 | `timeout_seconds` | int | Wall clock per task, capped at 24h |
 | `local_inputs` | list of strings | Labels for data a *host* lends, mounted read-only. Never uploaded |
 | `mode` | string | `independent` (default) or `federated` |
-| `rounds`, `min_participants`, `shards` | int | Federated only |
+| `epochs` | int | Federated only, required. Passes over your data |
+| `sync_every` | float | Federated only. Passes between combines. Only `1.0` today |
 
 Unknown keys are **refused**, not ignored — so `entrypint:` fails loudly
 instead of silently meaning nothing.
+
+### `rounds`, `min_participants` and `shards` are gone
+
+They asked you how many pieces to cut the work into and how many machines to
+wait for. Neither is answerable: you cannot see the Crew when you write the
+file, and the Crew changes while your job runs — eleven machines online with
+`shards: 3` left eight of them doing nothing, and a closed laptop left a hole
+in the round until its lease expired.
+
+Set `epochs` instead. The split and the machine count are now decided at
+submit time from whoever is actually online. A file that still names any of
+the three is refused with a message naming its replacement.
+
+Because the meaning of a federated file changed, `mode: federated` requires
+`version: 2`. Sweeps and independent jobs are untouched and stay `version: 1`.
+
+## Federated: training one model across machines
+
+```yaml
+version: 2
+name: acme-fed
+image: pytorch-cpu
+entrypoint: train.py
+mode: federated
+epochs: 5
+```
+
+Five passes over your data. Each pass is one **round**: the platform hands
+every online machine a chunk of the data, waits until the whole pass is
+covered, averages what came back, and starts the next round from the average.
+
+**Your entrypoint is the round worker**, so it has to speak four things:
+
+1. Read the round's weights from `/work/inputs/weights.json`. **The file is
+   absent on round 0** — that is where you start from your own initialisation.
+2. Train on the chunk you were given: `--shard` is its id and `--num-shards`
+   is how many chunks the pass has, so the slice is
+   `arange(shard, len(data), num_shards)`.
+3. Write your weight *change* to `/work/out/delta.json` as
+   `{"<param>": {"shape": [...], "data": [...]}}`. On round 0, where you were
+   given no weights, that is your trained weights themselves.
+4. Write `/work/out/metrics.json` with `samples` (a positive integer), `loss`
+   (a number), and **`chunks_done`** — the list of chunk ids you finished,
+   which is `[args.shard]`.
+
+`chunks_done` is the one people miss, and it fails silently: a round credits
+your machine only for chunks it can prove it was handed, so a contribution
+reporting none is averaged in with zero weight no matter how long it trained.
+Preflight refuses a federated entrypoint that never mentions it.
+
+### `sync_every`
+
+Passes of data between combines. `1.0` — one combine per pass — is the
+default and currently the only accepted value. Combining more often needs an
+entrypoint that trains a *sequence* of chunks and reports every id it
+finished; until that contract lands, a smaller value is refused rather than
+honoured, because honouring it would silently either discard the work of
+machines still training when a round closed or leave part of your data never
+trained at all.
 
 ## Fanning out: `sweep` or `partition`, never both
 

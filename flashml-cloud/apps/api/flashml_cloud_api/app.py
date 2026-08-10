@@ -84,6 +84,7 @@ from flashml_cloud_api.compile import (
     compile_to_jobspec,
 )
 from flashml_cloud_api.db import Machine
+from flashml_cloud_api.elastic import fleet_shape
 from flashml_cloud_api.emails import derive_email_facts
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import UnknownImage, resolve_image
@@ -1853,9 +1854,21 @@ def create_cloud_app(
             # cannot become a valid round fails here, in the response, and
             # not silently on a background thread nobody is watching.
             if config.is_federated:
+                # How this run's rounds are cut, decided once here from the
+                # machines online right now — never by the submitter, who
+                # cannot see the Crew, and never re-counted per round, which
+                # would move the chunk layout underneath a resumed run.
+                fleet = fleet_shape(
+                    dbmod.count_online_machines(db, pool_id=pool)
+                )
                 spec = compile_federated_round(
                     config, image, code_uri, config.name,
-                    round_index=0, weights_uri=None, pool=pool,
+                    round_index=0, weights_uri=None,
+                    slot_chunks=fedavgmod.slot_chunks_for(
+                        fleet, 0, float(config.sync_every or 1.0)
+                    ),
+                    total_chunks=fleet.total_chunks,
+                    pool=pool,
                 )
             else:
                 spec = compile_to_jobspec(
@@ -1909,9 +1922,14 @@ def create_cloud_app(
                 # row's `source` is byte-identical to what it has always
                 # been, so nothing reading it has to learn a new shape.
                 "mode": config.mode,
-                "rounds": config.rounds,
-                "shards": config.shards,
-                "min_participants": config.min_participants,
+                # `epochs`/`sync_every` are what the author asked for;
+                # `rounds` and `slots` are what the fleet turned that into,
+                # recorded because they are not recoverable later — the Crew's
+                # online count has moved on by the time anyone reads this row.
+                "epochs": config.epochs,
+                "sync_every": config.sync_every,
+                "rounds": config.round_count,
+                "slots": fleet.slots,
             }
             if pool is not None:
                 federated_source["pool"] = pool
@@ -1933,6 +1951,7 @@ def create_cloud_app(
                     image=image,
                     code_artifact_uri=code_uri,
                     pool=pool,
+                    fleet=fleet,
                 ),
                 settings=settings,
                 connect=request.app.state.connect,
@@ -1942,9 +1961,10 @@ def create_cloud_app(
                     "job_id": job_id,
                     "state": "PENDING",
                     "mode": config.mode,
-                    "rounds": config.rounds,
-                    "shards": config.shards,
-                    "min_participants": config.min_participants,
+                    "epochs": config.epochs,
+                    "sync_every": config.sync_every,
+                    "rounds": config.round_count,
+                    "slots": fleet.slots,
                     "findings": rendered,
                 }),
                 status_code=201,

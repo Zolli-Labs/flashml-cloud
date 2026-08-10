@@ -17,11 +17,52 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from math import prod
+from math import ceil, prod
 
 import yaml
 
-SUPPORTED_VERSION = 1
+#: Both schema versions this parser reads. Version 1 is every sweep and
+#: independent config already in the wild and is not deprecated — the bump
+#: exists only because ``mode: federated`` changed its authoring surface
+#: (``FEDERATED_VERSION`` below), and a breaking change to a shipped config
+#: needs a version the author can see rather than a field that silently
+#: means something else.
+SUPPORTED_VERSIONS = (1, 2)
+
+#: The version ``mode: federated`` requires. A version-1 federated config
+#: typed ``rounds``/``min_participants``/``shards``; there is no reading of
+#: those three that this API can still honour, because the runtime it drives
+#: no longer accepts a shard count or a machine quorum at all. So they are
+#: refused with the migration rather than reinterpreted.
+FEDERATED_VERSION = 2
+
+#: What each removed federated key was replaced by, in the words a person
+#: needs to fix their file. These are refused BEFORE the generic unknown-key
+#: check, because "unknown key 'shards'" sends someone hunting for a typo in
+#: a line they copied from our own documentation.
+REMOVED_FEDERATED_KEYS = {
+    "rounds": (
+        "use 'epochs' instead — the total number of passes over your data. "
+        "A round is no longer a fixed amount of training: 'sync_every' sets "
+        "how often the machines combine what they learned, so the round "
+        "count is derived (epochs / sync_every) and shown in the console "
+        "rather than typed"
+    ),
+    "min_participants": (
+        "removed with nothing in its place — a round now ends on data "
+        "coverage, not on a machine count. Machines contribute unequally "
+        "(a fast one completes more chunks than a slow one), so waiting for "
+        "N machines stopped describing anything. Set 'epochs', and "
+        "'sync_every' if you want more frequent combines"
+    ),
+    "shards": (
+        "removed with nothing in its place — the fleet decides the split "
+        "now. One pass over the data is cut into uniform chunks and each "
+        "machine takes as many as it can finish, so nothing has to guess "
+        "how many machines will be online. Set 'epochs' (and optionally "
+        "'sync_every') instead"
+    ),
+}
 
 # num_shards is bounded at 999 downstream (flashruntime's federated
 # averaging service); a sweep anywhere near that size is far more likely
@@ -36,7 +77,7 @@ MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
 REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
-                 "mode", "rounds", "min_participants", "shards",
+                 "mode", "epochs", "sync_every",
                  "local_inputs", "partition", "validators", "reduce",
                  "allow_partial", "dependencies"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
@@ -109,9 +150,14 @@ class FlashmlConfig:
     #: Federated only. ``None`` under ``independent``, so a caller that
     #: reads these without checking the mode gets a TypeError rather than a
     #: plausible-looking default.
-    rounds: int | None = None
-    min_participants: int | None = None
-    shards: int | None = None
+    #:
+    #: ``epochs`` is total passes over the data and ``sync_every`` is passes
+    #: between combines — the two training decisions, both independent of
+    #: who happens to be online. Neither says anything about the fleet: how
+    #: finely a pass is cut and how many machines may claim are derived at
+    #: submit time from the Crew (see ``fedavg.py``).
+    epochs: int | None = None
+    sync_every: float | None = None
     #: The `partition` generator — one task per shard of an enumerated range
     #: (§4). Mutually exclusive with ``sweep``: both are generators, and a
     #: job has exactly one.
@@ -137,6 +183,36 @@ class FlashmlConfig:
     def is_federated(self) -> bool:
         return self.mode == MODE_FEDERATED
 
+    @property
+    def round_count(self) -> int | None:
+        """How many rounds this config's training becomes, or ``None`` under
+        ``independent``.
+
+        Derived, never typed — see ``derived_round_count``.
+        """
+        if self.epochs is None or self.sync_every is None:
+            return None
+        return derived_round_count(self.epochs, self.sync_every)
+
+
+def derived_round_count(epochs: int, sync_every: float) -> int:
+    """Rounds for ``epochs`` passes combining every ``sync_every`` passes.
+
+    **This duplicates ``run_fedavg``'s own derivation**
+    (``flashml_workloads/fedavg_driver.py``: ``rounds = max(1,
+    ceil(epochs / sync_every))``), which the runtime computes inline and does
+    not export. Two copies of one formula across a repo boundary is exactly
+    the drift the 2026-08-01 consolidation exists to prevent, so the copy is
+    pinned by a test that drives the real driver and asserts it ran this many
+    rounds (``tests/test_elastic_driver.py``). Delete this function in favour
+    of the runtime's own the release it starts exporting one.
+
+    Why the API needs it at all: the driver is restartable, and its resume
+    check has to know whether every round is already recorded before it
+    decides a re-triggered job is finished rather than looping backwards.
+    """
+    return max(1, ceil(epochs / sync_every))
+
 
 def _require_string(raw: dict, key: str) -> str:
     if key not in raw:
@@ -160,6 +236,14 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     if not isinstance(raw, dict):
         raise ConfigError("flashml.yaml must be a mapping at the top level")
 
+    removed = sorted(set(raw) & set(REMOVED_FEDERATED_KEYS))
+    if removed:
+        raise ConfigError(
+            "flashml.yaml sets " + ", ".join(
+                f"{key!r} ({REMOVED_FEDERATED_KEYS[key]})" for key in removed
+            ) + "."
+        )
+
     unknown = set(raw) - ALLOWED_KEYS
     if unknown:
         raise ConfigError(
@@ -170,9 +254,10 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     if "version" not in raw:
         raise ConfigError("flashml.yaml is missing required key 'version'")
     version = raw["version"]
-    if version != SUPPORTED_VERSION:
+    if version not in SUPPORTED_VERSIONS:
         raise ConfigError(
-            f"flashml.yaml 'version' must be {SUPPORTED_VERSION}, got {version!r}"
+            f"flashml.yaml 'version' must be one of {list(SUPPORTED_VERSIONS)!r}, "
+            f"got {version!r}"
         )
 
     name = _require_string(raw, "name")
@@ -189,7 +274,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     reduce_spec = _validate_reduce(raw.get("reduce"))
     allow_partial = _validate_bool(raw.get("allow_partial"), "allow_partial")
     dependencies = _validate_dependencies(raw.get("dependencies", []))
-    mode, rounds, min_participants, shards = _validate_mode(raw)
+    mode, epochs, sync_every = _validate_mode(raw, version)
 
     return FlashmlConfig(
         version=version,
@@ -202,9 +287,8 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         timeout_seconds=timeout_seconds,
         local_inputs=local_inputs,
         mode=mode,
-        rounds=rounds,
-        min_participants=min_participants,
-        shards=shards,
+        epochs=epochs,
+        sync_every=sync_every,
         partition=partition,
         validators=validators,
         reduce=reduce_spec,
@@ -228,14 +312,24 @@ def _positive_int(raw: dict, key: str, maximum: int) -> int:
     return value
 
 
-def _validate_mode(raw: dict) -> tuple[str, int | None, int | None, int | None]:
-    """``(mode, rounds, min_participants, shards)``.
+#: The default: one combine per pass over the data. Chosen because it
+#: reproduces the behaviour every shipped federated job already has —
+#: ``rounds == epochs`` — so adding the knob changes nothing for anyone who
+#: does not set it.
+DEFAULT_SYNC_EVERY = 1.0
+
+#: The training fields, which apply only to ``mode: federated``.
+TRAINING_KEYS = ("epochs", "sync_every")
+
+
+def _validate_mode(raw: dict, version: int) -> tuple[str, int | None, float | None]:
+    """``(mode, epochs, sync_every)``.
 
     Federated-only keys are refused under ``independent`` rather than
     ignored, for the same reason unknown top-level keys are: a config that
-    names ``rounds`` has an author who believes rounds are happening, and
-    silently running a single round instead is the kind of "worked, but not
-    the thing you asked for" outcome this parser exists to prevent.
+    names ``epochs`` has an author who believes several passes are happening,
+    and silently running one instead is the kind of "worked, but not the
+    thing you asked for" outcome this parser exists to prevent.
     """
     mode = raw.get("mode", MODE_INDEPENDENT)
     if mode not in MODES:
@@ -243,51 +337,57 @@ def _validate_mode(raw: dict) -> tuple[str, int | None, int | None, int | None]:
             f"flashml.yaml 'mode' must be one of {list(MODES)!r}, got {mode!r}"
         )
 
-    federated_keys = ("rounds", "min_participants", "shards")
     if mode == MODE_INDEPENDENT:
-        present = [k for k in federated_keys if k in raw]
+        present = [k for k in TRAINING_KEYS if k in raw]
         if present:
             raise ConfigError(
                 f"flashml.yaml sets {sorted(present)!r}, which only apply to "
                 f"'mode: {MODE_FEDERATED}'; the default mode "
                 f"('{MODE_INDEPENDENT}') runs one round of independent tasks"
             )
-        return MODE_INDEPENDENT, None, None, None
+        return MODE_INDEPENDENT, None, None
 
-    missing = [k for k in ("rounds", "min_participants") if k not in raw]
-    if missing:
+    if version < FEDERATED_VERSION:
         raise ConfigError(
-            f"flashml.yaml 'mode: {MODE_FEDERATED}' also requires "
-            f"{sorted(missing)!r} — federated averaging has no sensible "
-            f"default for how many rounds to run or how many machines a "
-            f"round needs before it averages"
+            f"flashml.yaml 'mode: {MODE_FEDERATED}' requires "
+            f"'version: {FEDERATED_VERSION}'. Version {version} federated "
+            f"configs set 'rounds', 'min_participants' and 'shards'; version "
+            f"{FEDERATED_VERSION} replaces all three with 'epochs' (total "
+            f"passes over your data) and the optional 'sync_every' (passes "
+            f"between combines, default {DEFAULT_SYNC_EVERY}). How finely the "
+            f"work is cut and how many machines take part are no longer "
+            f"yours to state — they are derived from whoever is online"
         )
 
-    rounds = _positive_int(raw, "rounds", MAX_ROUNDS)
-    min_participants = _positive_int(raw, "min_participants", MAX_SWEEP_COMBINATIONS)
-    if "shards" in raw:
-        shards = _positive_int(raw, "shards", MAX_SWEEP_COMBINATIONS)
-    else:
-        # One shard per required participant. Deliberately not "some
-        # generous multiple": every extra shard is a task that has to find a
-        # volunteer, and a default that dispatched more work than the user
-        # asked for would make an idle pool look like a stuck job.
-        shards = min_participants
-    if min_participants > shards:
+    if "epochs" not in raw:
         raise ConfigError(
-            f"flashml.yaml 'min_participants' ({min_participants}) exceeds "
-            f"'shards' ({shards}): a round would need more contributions than "
-            f"it dispatches tasks, so quorum could never be reached"
+            f"flashml.yaml 'mode: {MODE_FEDERATED}' also requires 'epochs' — "
+            f"how many passes over your data to train for. There is no "
+            f"sensible default for how much training someone wants"
+        )
+
+    epochs = _positive_int(raw, "epochs", MAX_ROUNDS)
+    sync_every = _validate_sync_every(raw.get("sync_every", DEFAULT_SYNC_EVERY))
+
+    rounds = derived_round_count(epochs, sync_every)
+    if rounds > MAX_ROUNDS:
+        raise ConfigError(
+            f"flashml.yaml 'epochs' ({epochs}) combining every "
+            f"'sync_every' ({sync_every}) pass(es) is {rounds} rounds, above "
+            f"the cap of {MAX_ROUNDS}. Each round is a full "
+            f"submit/lease/commit cycle across volunteer machines, so a "
+            f"four-digit round count is a runaway rather than a plan — raise "
+            f"'sync_every' to combine less often, or lower 'epochs'"
         )
 
     if raw.get("partition"):
         # Same collision as `sweep` below, for the same reason: a federated
-        # round's fan-out is `shards`, and a partition would be a second,
-        # conflicting one.
+        # round already cuts one pass over the data into chunks, and a
+        # partition would be a second, conflicting split of the same data.
         raise ConfigError(
             f"flashml.yaml cannot combine 'partition' with 'mode: {MODE_FEDERATED}': "
-            f"a federated round's fan-out is 'shards', and a partition would be "
-            f"a second, conflicting one"
+            f"a federated round already cuts one pass over your data into "
+            f"chunks, and a partition would be a second, conflicting split"
         )
 
     if raw.get("sweep"):
@@ -298,10 +398,61 @@ def _validate_mode(raw: dict) -> tuple[str, int | None, int | None, int | None]:
         raise ConfigError(
             f"flashml.yaml cannot combine 'sweep' with 'mode: {MODE_FEDERATED}': "
             f"a sweep's tasks are independent trials, a federated round's tasks "
-            f"are shards of one model"
+            f"are chunks of one model's data"
         )
 
-    return MODE_FEDERATED, rounds, min_participants, shards
+    return MODE_FEDERATED, epochs, sync_every
+
+
+def _validate_sync_every(value: object) -> float:
+    """Passes of data between combines: ``0 < sync_every <= 1.0``.
+
+    The upper bound is the runtime's own (``run_fedavg`` refuses the same
+    range): a round's coverage target is ``sync_every`` of one pass, and a
+    round cannot cover more of a pass than the pass contains, so a value
+    above 1.0 would describe a round that can never close.
+
+    An integer ``1`` is accepted as ``1.0``. YAML gives an author no way to
+    know which of the two this parser wanted, and refusing the one they typed
+    would be a rule about notation rather than about their training.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(
+            f"flashml.yaml 'sync_every' must be a number of passes, got {value!r}"
+        )
+    number = float(value)
+    if not 0 < number <= 1.0:
+        raise ConfigError(
+            f"flashml.yaml 'sync_every' must be greater than 0 and at most "
+            f"1.0, got {number!r}: it is how much of one pass over your data a "
+            f"round covers before the machines combine, and a round cannot "
+            f"cover more of a pass than the pass contains"
+        )
+    if number != DEFAULT_SYNC_EVERY:
+        # Refused rather than honoured, and this is a capability limit rather
+        # than a rule about the value. A round below a full pass only works
+        # if a machine can train SEVERAL chunks and report every id it
+        # finished, because a pass then has more chunks than the round has
+        # slots. The built-in worker does that; a repo's own entrypoint is
+        # handed one chunk and reports none, so cutting the pass finer than
+        # the fleet would leave part of the data never trained (the rotation
+        # would stride straight past it), and cutting it no finer would close
+        # the round at `sync_every` of what it dispatched — throwing away the
+        # work of every machine still training.
+        #
+        # Both failures are silent and both spend volunteers' electricity for
+        # nothing, so the field is accepted by the schema, validated, and then
+        # refused with the reason until the worker contract catches up.
+        raise ConfigError(
+            f"flashml.yaml 'sync_every' is {number}, and only "
+            f"{DEFAULT_SYNC_EVERY} works today: combining more often than "
+            f"once per pass needs your entrypoint to train a sequence of data "
+            f"chunks and report which ones it finished ('chunks_done' in "
+            f"metrics.json). Until it does, each machine is handed one chunk "
+            f"per round, so a round is one full pass over your data. Set "
+            f"'epochs' for how much training you want"
+        )
+    return number
 
 
 def _validate_bool(value: object, key: str) -> bool:

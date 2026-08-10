@@ -276,7 +276,9 @@ class NamedNodeCoordinator(StubCoordinator):
         if self.fail_on_submit:
             raise RuntimeError("coordinator unavailable")
         self.submitted.append(body)
-        return {"job_id": self.round_job_id(len(self.submitted) - 1)}
+        return {"job_id": self._record(
+            self.round_job_id(len(self.submitted) - 1), body
+        )}
 
     def tasks(self, job_id):
         return [

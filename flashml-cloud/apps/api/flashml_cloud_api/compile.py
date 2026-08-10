@@ -40,6 +40,7 @@ from __future__ import annotations
 import itertools
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from flashruntime.images import manifest_for
@@ -511,6 +512,8 @@ def compile_federated_round(
     *,
     round_index: int,
     weights_uri: str | None,
+    slot_chunks: Sequence[int],
+    total_chunks: int,
     pool: str | None = None,
 ) -> dict[str, Any]:
     """Compile **one round** of a ``mode: federated`` config into a JobSpec.
@@ -530,8 +533,23 @@ def compile_federated_round(
       arrive at ``WEIGHTS_PATH``. ``None`` on round 0 — there is nothing to
       broadcast yet, and the input is omitted rather than pointed at an
       empty artifact, so the user's code can test for the file's absence.
-    - one task per shard, each told its ``--shard`` index, so the shards
-      partition the data rather than each training on all of it.
+    - one task per **slot**, each told the chunk of the data it is to train
+      on, so the slots partition the pass rather than each training on all
+      of it.
+
+    ``slot_chunks`` and ``total_chunks`` are handed in rather than read off
+    the config, because neither is the author's to state: the pass is cut
+    from the machines online when the round was submitted, and which chunk
+    each slot starts at depends on where the previous round's coverage ended.
+
+    **A slot's chunk id is not its index**, and this module does not compute
+    it. ``fedavg.slot_chunks_for`` does, using the runtime's own
+    ``chunks.slot_start`` — because ``run_fedavg`` verifies every chunk a
+    machine reports against exactly that call, and a round compiled with any
+    other layout has its contributions credited zero: the machines train, the
+    volunteers spend their electricity, and the round reduces nothing. This
+    module only serialises the list it is given, which is what keeps the
+    runtime import one door wide (``tests/test_import_boundary.py``).
 
     The user's side of the contract (``delta.json`` + a ``metrics.json``
     carrying ``samples`` and ``loss``) is not enforceable from here — it is
@@ -554,20 +572,36 @@ def compile_federated_round(
     if not isinstance(round_index, int) or isinstance(round_index, bool) or round_index < 0:
         raise CompileError(f"round_index must be a non-negative int, got {round_index!r}")
 
-    shards = config.shards or 0
-    if shards < 1:
-        raise CompileError("a federated config must resolve to at least one shard")
+    slot_chunks = list(slot_chunks)
+    if not slot_chunks:
+        raise CompileError("a federated round needs at least one slot")
+    if total_chunks < 1:
+        raise CompileError(
+            f"a federated round needs at least one chunk, got {total_chunks}"
+        )
+    outside = [c for c in slot_chunks if not 0 <= c < total_chunks]
+    if outside:
+        raise CompileError(
+            f"slot chunk id(s) {outside!r} are outside the pass, which has "
+            f"{total_chunks} chunk(s) — a task told to train a chunk that does "
+            f"not exist is a contribution nothing will credit"
+        )
 
     entry = _entrypoint_path(config.entrypoint)
 
     # `--shard` is the only per-task value, so it is the only placeholder;
     # every other token is escaped because CommandRecipe runs str.format over
     # all of them (see _escape_braces).
+    #
+    # `--num-shards` is the chunk count of a whole PASS, not the number of
+    # machines: the user's `shard_of(x, y, shard, num_shards)` strides the
+    # data by it, so it must be the number the chunk ids were minted from or
+    # a task trains a slice that overlaps its neighbours'.
     fixed = ["python", entry, *config.args,
              "--round", str(round_index),
-             "--num-shards", str(shards)]
+             "--num-shards", str(total_chunks)]
     command = [_escape_braces(token) for token in fixed] + ["--shard", "{shard}"]
-    task_params = [{"shard": str(i)} for i in range(shards)]
+    task_params = [{"shard": str(chunk)} for chunk in slot_chunks]
 
     inputs = {CODE_INPUT: code_artifact_uri}
     if weights_uri is not None:
