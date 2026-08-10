@@ -322,3 +322,44 @@ def test_hs256_token_forged_with_the_public_key_is_rejected(monkeypatch):
 
     with pytest.raises(AuthError):
         verify_supabase_jwt(forged, ASYM)
+
+
+def test_user_token_has_the_fmu_prefix_and_real_entropy():
+    from flashml_cloud_api.auth import new_user_token
+
+    token = new_user_token()
+    assert token.startswith("fmu_")
+    # token_urlsafe(32) is 43 base64url characters.
+    assert len(token) == len("fmu_") + 43
+    assert new_user_token() != token
+
+
+def test_user_token_hash_is_stable_sha256_hex():
+    import hashlib
+
+    from flashml_cloud_api.auth import hash_user_token
+
+    assert hash_user_token("fmu_abc") == hashlib.sha256(b"fmu_abc").hexdigest()
+    assert hash_user_token("fmu_abc") == hash_user_token("fmu_abc")
+
+
+def test_looks_like_user_token_does_not_confuse_the_credential_kinds():
+    # `looks_like_machine_token` lives in app.py, not auth.py, beside the
+    # header parsing it exists for. The plan's import list assumed auth.py;
+    # this reaches for it where it actually is rather than moving it, which
+    # would be an unrelated refactor of a function app.py calls twice.
+    from flashml_cloud_api.app import looks_like_machine_token
+    from flashml_cloud_api.auth import (
+        looks_like_invite_token,
+        looks_like_user_token,
+    )
+
+    user = "fmu_x"
+    assert looks_like_user_token(user)
+    assert not looks_like_machine_token(user)
+    assert not looks_like_invite_token(user)
+    assert not looks_like_user_token("fmk_x")
+    assert not looks_like_user_token("fmi_x")
+    assert not looks_like_user_token("eyJhbGciOi")
+    assert not looks_like_user_token(None)
+    assert not looks_like_user_token("")

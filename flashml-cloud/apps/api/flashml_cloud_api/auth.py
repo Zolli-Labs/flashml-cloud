@@ -214,3 +214,30 @@ def hash_invite_token(token: str) -> str:
 
 def looks_like_invite_token(token: str | None) -> bool:
     return bool(token) and token.startswith(INVITE_TOKEN_PREFIX)
+
+
+#: Same discipline as ``MACHINE_TOKEN_PREFIX`` and ``INVITE_TOKEN_PREFIX``: a
+#: leaked developer token is greppable in logs without revealing anything
+#: about its value. `fmu_` — u for user — because unlike a machine token it
+#: acts as its owner, with exactly their access and no more.
+USER_TOKEN_PREFIX = "fmu_"
+
+
+def new_user_token() -> str:
+    """Mint a new, unguessable developer (CLI) token. Mirrors
+    ``new_machine_token`` exactly — same entropy, same "prefix on the
+    outside, nothing recoverable from it" shape — because it is the same
+    kind of bearer secret: whoever holds the raw value acts as its owner
+    until it is revoked."""
+    return USER_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def hash_user_token(token: str) -> str:
+    """One-way, stable digest of a developer token for storage/comparison.
+    The raw token is never stored or logged — only this hash ever reaches
+    ``public.cli_credentials.token_hash``."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def looks_like_user_token(token: str | None) -> bool:
+    return bool(token) and token.startswith(USER_TOKEN_PREFIX)
