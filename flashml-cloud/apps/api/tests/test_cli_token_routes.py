@@ -245,3 +245,92 @@ def test_a_pool_id_on_a_cli_approval_is_refused(make_client, db):
         json={"user_code": start["user_code"], "pool_id": str(uuid.uuid4())},
     )
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# listing and revoking credentials from the console
+# ---------------------------------------------------------------------------
+
+
+def test_listing_shows_your_credentials_and_never_a_token_hash(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    _cli_token(db, owner)
+
+    r = client.get("/v1alpha1/cli-credentials", headers=_bearer(_jwt(owner)))
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["label"] == "test-laptop"
+    assert row["status"] == "active"
+    assert row["token_prefix"].startswith("fmu_")
+    assert "token_hash" not in row
+
+
+def test_listing_is_owner_scoped(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    _cli_token(db, owner)
+
+    mine = client.get("/v1alpha1/cli-credentials", headers=_bearer(_jwt(owner))).json()
+    theirs = client.get(
+        "/v1alpha1/cli-credentials", headers=_bearer(_jwt(stranger))
+    ).json()
+    assert len(mine) == 1
+    assert theirs == []
+
+
+def test_revoking_your_own_credential_kills_its_token(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    token = _cli_token(db, owner)
+    headers = _bearer(_jwt(owner))
+
+    rows = client.get("/v1alpha1/cli-credentials", headers=headers).json()
+    r = client.post(f"/v1alpha1/cli-credentials/{rows[0]['id']}/revoke", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["revoked"] is True
+    assert client.get("/v1alpha1/me", headers=_bearer(token)).status_code == 401
+
+
+def test_revoking_a_credential_you_do_not_own_is_404(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    _cli_token(db, owner)
+
+    rows = client.get(
+        "/v1alpha1/cli-credentials", headers=_bearer(_jwt(owner))
+    ).json()
+    r = client.post(
+        f"/v1alpha1/cli-credentials/{rows[0]['id']}/revoke",
+        headers=_bearer(_jwt(stranger)),
+    )
+    assert r.status_code == 404
+
+
+def test_revoking_a_nonsense_id_is_404_not_500(make_client, db):
+    client = make_client()
+    owner = _new_user(db)
+    r = client.post(
+        "/v1alpha1/cli-credentials/not-a-uuid/revoke", headers=_bearer(_jwt(owner))
+    )
+    assert r.status_code == 404
+
+
+def test_an_un_admitted_account_can_still_see_and_revoke_its_credential(
+    make_client, db
+):
+    """current_user, not admitted_user: someone waiting on approval must be
+    able to revoke a credential they already minted."""
+    client = make_client()
+    owner = _new_user(db, admitted=False)
+    _cli_token(db, owner)
+    headers = _bearer(_jwt(owner))
+
+    rows = client.get("/v1alpha1/cli-credentials", headers=headers).json()
+    assert len(rows) == 1
+    r = client.post(f"/v1alpha1/cli-credentials/{rows[0]['id']}/revoke", headers=headers)
+    assert r.status_code == 200

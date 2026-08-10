@@ -1482,6 +1482,31 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown machine")
         return {"machine_id": machine_id, "status": "revoked"}
 
+    @app.get("/v1alpha1/cli-credentials", tags=["browser"])
+    async def list_cli_credentials(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Every CLI credential this account holds. ``current_user``, not
+        ``admitted_user``: an account still waiting on approval must be
+        able to see and revoke a credential it has already minted."""
+        return [_jsonable(r) for r in dbmod.list_cli_credentials_for_owner(db, user_id)]
+
+    @app.post("/v1alpha1/cli-credentials/{credential_id}/revoke", tags=["browser"])
+    async def revoke_cli_credential(
+        credential_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Revoke a credential. 404 — not 403 — when it belongs to someone
+        else or does not exist, indistinguishably, so this cannot be used to
+        learn which credential ids are real. Takes effect on the revoked
+        token's very next request: ``authenticate_cli`` reads ``status`` on
+        every call and there is no cache in front of it."""
+        if not dbmod.revoke_cli_credential_row(db, credential_id, user_id):
+            raise HTTPException(status_code=404, detail="unknown credential")
+        return {"revoked": True}
+
     # -- browser-facing: pools and invites -----------------------------------
     #
     # A pool is a team; membership is what every read below scopes on, never
