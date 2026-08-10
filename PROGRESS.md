@@ -172,6 +172,62 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-10 — Developer identity: a program gets a credential of its own (flashml-cloud/api, flashml-cloud/web)
+What/why: Plan 1 of the developer surface, all nine tasks. The API knew two
+kinds of caller — a Supabase JWT (a browser) and an `fmk_` machine token — and
+every job-author route is tagged `browser`, so submitting a job meant being a
+person clicking in a console. `fmu_` is the third kind: minted by a `kind:"cli"`
+variant of the device-code flow, stored hashed in `public.cli_credentials`,
+revocable from `/account/cli`.
+How verified: api `pytest -q` **1029 passed**/1 skipped/1 deselected/1 xfailed
+(baseline before this work: 991). web `npx vitest run` **336 passed**,
+`npx tsc --noEmit` clean, `npx eslint` clean. New files:
+`tests/test_cli_auth.py` (10, real Postgres), `tests/test_cli_token_routes.py`
+(22), `lib/cli-credential-status.test.ts` (6), +3 in `test_auth.py`, +3 in
+`test_schema.py`. The plan's closing manual curl —
+`GET /v1alpha1/jobs -H "Authorization: Bearer fmu_…"`, a `browser` route read
+with no browser — is pinned as
+`test_a_program_reads_a_job_author_route_with_no_browser` rather than run once
+by hand.
+Root causes, not symptoms:
+- **The whole plan is one edit.** `current_user` learns to resolve `fmu_` to a
+  user id, so every `browser` route becomes CLI-reachable with no per-route
+  work and no second authorization implementation to keep aligned. The test
+  that matters most is the inverse: an **un-admitted** owner's token still gets
+  403 from `POST /pools`. The credential grants its owner's access, not one
+  step more.
+- **One `device_codes` table, not two.** `/activate` has only the typed
+  `user_code` to go on and Postgres will not enforce uniqueness across two
+  tables, so `kind` discriminates within one. It defaults to `'machine'`, and
+  relaxing `node_id` to NULL is put straight back by a check constraint for
+  `kind='machine'` — the volunteer enrolment path cannot be weakened by 0012.
+- **Kind is read off the stored row, never the request.** A caller holding a
+  machine's `device_code` cannot ask for an `fmu_` token with it; there is a
+  test for exactly that.
+Gotchas: (1) **Plan 1 was never executed before today** — commit `a174991`
+("Plan 1 of the developer surface") added only the 2089-line plan document,
+1 file changed. Its 51 checkboxes were all unchecked and no `cli_auth.py`,
+migration 0012 or `fmu_` string existed. A commit subject naming a plan is not
+evidence the plan ran; check the repo. (2) Three plan assumptions were wrong
+about this repo and are corrected in the commits: `looks_like_machine_token`
+lives in `app.py` not `auth.py`; `tests/` has no `__init__.py` so
+`_make_test_user` is copied not imported; and the fixtures Task 4 named
+(`client`, `admitted_owner`, `jwt_headers`, `machine_token`) do not exist —
+the convention is importing from `test_jobs_from_repo`, as `test_pools_api.py`
+does. (3) `test_migrate.py`'s baseline test needed a `device_codes` stand-in:
+it baselines through 0003 and 0012 is the first migration to reference a table
+0001 creates. That is the maintenance point its own comment describes.
+(4) Task 7 deliberately breaks `tsc` by widening `ApproveDeviceCodeResult`;
+Task 9 closes it. A page reading `machine_id` unguarded is the failure the
+type change exists to prevent.
+Next: **write Plan 2 — the client core and CLI** (`flashml` package,
+`POST /v1alpha1/preflight`, `POST /v1alpha1/jobs/from-upload`). That is the
+roadmap's §6.2 private-code path.
+Parking lot: the end-to-end manual loop against `./scripts/dev.sh --all` was
+NOT run — no `.env` on this machine and it needs real Supabase credentials.
+Everything above is automated evidence. Plan 3 (MCP) stays blocked on the
+live-logs question (P0.4).
+
 ### 2026-08-10 — Specs for the first-run quickstart and the vocabulary sweep (design only, flashml-cloud)
 What/why: The remaining two of the five closed owner decisions. §6.4 (BYO
 compute) → `specs/2026-08-10-first-run-quickstart-design.md`; §6.3 (vocabulary)

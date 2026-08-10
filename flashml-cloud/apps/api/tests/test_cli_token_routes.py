@@ -334,3 +334,21 @@ def test_an_un_admitted_account_can_still_see_and_revoke_its_credential(
     assert len(rows) == 1
     r = client.post(f"/v1alpha1/cli-credentials/{rows[0]['id']}/revoke", headers=headers)
     assert r.status_code == 200
+
+
+def test_a_program_reads_a_job_author_route_with_no_browser(make_client, db):
+    """The whole plan in one assertion.
+
+    `GET /v1alpha1/jobs` is tagged `browser` and until now only a signed-in
+    browser could reach it. This is the plan's closing manual check —
+    `curl -H "Authorization: Bearer fmu_..." /v1alpha1/jobs` — pinned as a
+    test instead of run once by hand, because "a program can read this"
+    is precisely the property that must not silently regress.
+    """
+    client = make_client()
+    owner = _new_user(db)
+    token = _cli_token(db, owner)
+
+    r = client.get("/v1alpha1/jobs", headers=_bearer(token))
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
