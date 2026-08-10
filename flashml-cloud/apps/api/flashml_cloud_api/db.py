@@ -2588,3 +2588,141 @@ def storage_limit_override_for(
         return None
     value = row["storage_limit_bytes"]
     return None if value is None else int(value)
+
+
+# ---------------------------------------------------------------------------
+# GitHub App installations
+#
+# Every read here is scoped by user_id, without exception. An installation is
+# a licence to read someone's private source; a query that forgets the owner
+# would hand it to whoever asked.
+# ---------------------------------------------------------------------------
+
+
+def insert_github_installation(
+    db: psycopg.Connection,
+    *,
+    installation_id: int,
+    user_id: str,
+    account_login: str,
+    account_type: str,
+    repository_selection: str,
+) -> None:
+    """Record a connection, idempotently.
+
+    Idempotent because clicking Connect twice — or GitHub replaying its
+    redirect — is ordinary behaviour, not an error worth a 500. The upsert
+    also refreshes `repository_selection`, which changes whenever someone
+    edits the App's repository access on GitHub without reinstalling.
+    """
+    db.execute(
+        """
+        insert into public.github_installations
+            (installation_id, user_id, account_login, account_type,
+             repository_selection)
+        values (%s, %s, %s, %s, %s)
+        on conflict (installation_id, user_id) do update
+            set account_login = excluded.account_login,
+                account_type = excluded.account_type,
+                repository_selection = excluded.repository_selection
+        """,
+        (installation_id, user_id, account_login, account_type,
+         repository_selection),
+    )
+
+
+def fetch_github_installation_for_owner(
+    db: psycopg.Connection, user_id: str, account_login: str
+) -> dict | None:
+    """This user's installation covering `account_login`, or None.
+
+    `lower()` on both sides, matching the index: GitHub logins preserve case
+    but compare without it, and a repo URL may be typed either way. A
+    case-sensitive lookup would miss, fall back to an anonymous fetch, and
+    404 — reported to the submitter as "repo not found", which sends them to
+    debug the wrong thing entirely.
+    """
+    return db.execute(
+        """
+        select installation_id, account_login, account_type,
+               repository_selection
+          from public.github_installations
+         where user_id = %s
+           and lower(account_login) = lower(%s)
+        """,
+        (user_id, account_login),
+    ).fetchone()
+
+
+def list_github_installations(db: psycopg.Connection, user_id: str) -> list[dict]:
+    return list(
+        db.execute(
+            """
+            select installation_id, account_login, account_type,
+                   repository_selection, created_at
+              from public.github_installations
+             where user_id = %s
+             order by account_login
+            """,
+            (user_id,),
+        ).fetchall()
+    )
+
+
+def delete_github_installation(
+    db: psycopg.Connection, user_id: str, installation_id: int
+) -> bool:
+    """True if a row was removed.
+
+    False lets the route answer 404 for an id this caller never connected,
+    rather than a cheerful 204 that implies something was undone.
+
+    Deliberately does NOT uninstall the App on GitHub. That is the account
+    admin's decision, it would affect every colleague sharing the
+    installation, and a job console is the wrong place to make it.
+    """
+    result = db.execute(
+        """
+        delete from public.github_installations
+         where user_id = %s and installation_id = %s
+        """,
+        (user_id, installation_id),
+    )
+    return result.rowcount > 0
+
+
+def insert_github_install_state(
+    db: psycopg.Connection, state: str, user_id: str, expires_at: datetime
+) -> None:
+    db.execute(
+        """
+        insert into public.github_install_states (state, user_id, expires_at)
+        values (%s, %s, %s)
+        """,
+        (state, user_id, expires_at),
+    )
+
+
+def claim_github_install_state(
+    db: psycopg.Connection, state: str, user_id: str
+) -> bool:
+    """Consume a state, returning whether it was this user's to consume.
+
+    One statement, so the check and the consumption cannot interleave: two
+    simultaneous callbacks with the same state produce exactly one True.
+
+    The `user_id` predicate is the security property (spec §3). An attacker
+    who mints a state as themselves and phishes a victim into installing with
+    it gets a callback posted by the VICTIM — different user, no row matched,
+    nothing bound. Note it also leaves the row intact for its rightful owner:
+    a failed attempt must not consume someone else's pending flow, or the
+    attack degrades from theft to denial of service.
+    """
+    result = db.execute(
+        """
+        delete from public.github_install_states
+         where state = %s and user_id = %s and expires_at > now()
+        """,
+        (state, user_id),
+    )
+    return result.rowcount > 0

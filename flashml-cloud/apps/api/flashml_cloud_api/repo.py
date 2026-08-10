@@ -64,17 +64,34 @@ def fetch_repo_tarball(
     endpoint ``git archive`` and GitHub's own "Download ZIP" ultimately
     front, no API rate limit tier required for public repos.
 
-    ``token`` is accepted but M1 ships public-repo-only (see the plan's
-    Self-Review): it is the seam a future private-repo flow hangs off of,
-    passed as a Bearer token when present.
+    **Two hosts, chosen by whether there is a token**, and the choice is not
+    cosmetic:
+
+    - *Anonymous* — codeload.github.com, as it always has. No API rate-limit
+      tier applies there for a public repo, which is why it was chosen.
+    - *Authenticated* — ``api.github.com/repos/{owner}/{repo}/tarball/{ref}``.
+      codeload is **not** the documented endpoint for a GitHub App
+      installation token and is reported to answer 404 with one. The API
+      endpoint answers 302 with a *pre-signed* codeload URL instead, valid
+      five minutes for a private repo.
+
+    The redirect is followed, and httpx drops ``Authorization`` when the host
+    changes — which is required here, not incidental: the signed URL carries
+    its own authorization in the query string and GitHub rejects a request
+    bearing both. ``test_the_bearer_token_does_not_survive_the_cross_host_redirect``
+    pins it.
 
     ``client`` lets tests inject an ``httpx.MockTransport`` instead of
     reaching the real network; production callers can leave it unset.
     """
-    url = f"https://codeload.github.com/{owner}/{name}/tar.gz/{ref}"
     headers = {}
     if token:
+        url = f"https://api.github.com/repos/{owner}/{name}/tarball/{ref}"
         headers["Authorization"] = f"Bearer {token}"
+        headers["Accept"] = "application/vnd.github+json"
+        headers["X-GitHub-Api-Version"] = "2022-11-28"
+    else:
+        url = f"https://codeload.github.com/{owner}/{name}/tar.gz/{ref}"
 
     owns_client = client is None
     http_client = client if client is not None else httpx.Client(timeout=_FETCH_TIMEOUT_SECONDS)

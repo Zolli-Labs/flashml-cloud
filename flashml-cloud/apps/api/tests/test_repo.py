@@ -295,3 +295,99 @@ def test_fetch_repo_tarball_passes_token_as_bearer_auth():
     client = httpx.Client(transport=httpx.MockTransport(handler))
     fetch_repo_tarball("acme", "widgets", "main", token="ghp_secret", client=client)
     assert seen["auth"] == "Bearer ghp_secret"
+
+
+# --- which host, and why it matters ----------------------------------------
+#
+# An ANONYMOUS fetch goes to codeload.github.com: no API rate-limit tier
+# applies there for a public repo, which is why it was chosen.
+#
+# An AUTHENTICATED fetch cannot use that host. codeload is not the documented
+# endpoint for a GitHub App installation token and is reported to 404 with
+# one. The documented path is api.github.com's tarball endpoint, which answers
+# 302 with a PRE-SIGNED codeload URL — five-minute expiry for a private repo.
+#
+# Both halves are pinned below, because the failure they prevent is silent:
+# a private repo that 404s looks exactly like a repo that does not exist.
+
+
+def test_an_anonymous_fetch_still_goes_to_codeload():
+    """Pinned so the authenticated branch cannot quietly move this one."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, content=b"tarball-bytes")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetch_repo_tarball("acme", "widgets", "main", client=client)
+
+    assert seen["url"] == "https://codeload.github.com/acme/widgets/tar.gz/main"
+
+
+def test_an_authenticated_fetch_goes_to_the_api_tarball_endpoint():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, content=b"tarball-bytes")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetch_repo_tarball("acme", "widgets", "main", token="ghs_x", client=client)
+
+    assert seen["url"] == "https://api.github.com/repos/acme/widgets/tarball/main"
+
+
+def test_the_redirect_to_signed_codeload_is_followed():
+    """The 302 is the normal case for this endpoint, not an error path."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        if request.url.host == "api.github.com":
+            return httpx.Response(
+                302,
+                headers={
+                    "location": "https://codeload.github.com/acme/widgets/"
+                    "legacy.tar.gz/main?token=SIGNED"
+                },
+            )
+        return httpx.Response(200, content=b"tarball-bytes")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = fetch_repo_tarball("acme", "widgets", "main", token="ghs_x", client=client)
+
+    assert result == b"tarball-bytes"
+    assert requested == ["api.github.com", "codeload.github.com"]
+
+
+def test_the_bearer_token_does_not_survive_the_cross_host_redirect():
+    """The signed codeload URL carries its own authorization in the query
+    string, and GitHub rejects a request that arrives with both.
+
+    httpx strips `Authorization` when the redirect changes host, which is
+    the behaviour this fetch depends on. Asserted rather than assumed: it is
+    a library default we would not notice changing, and the symptom would be
+    every private fetch failing at the second hop with an error naming
+    neither the header nor the redirect.
+    """
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.headers.get("authorization")))
+        if request.url.host == "api.github.com":
+            return httpx.Response(
+                302,
+                headers={
+                    "location": "https://codeload.github.com/acme/widgets/"
+                    "legacy.tar.gz/main?token=SIGNED"
+                },
+            )
+        return httpx.Response(200, content=b"tarball-bytes")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetch_repo_tarball("acme", "widgets", "main", token="ghs_x", client=client)
+
+    assert seen[0] == ("api.github.com", "Bearer ghs_x")
+    assert seen[1][0] == "codeload.github.com"
+    assert seen[1][1] is None
