@@ -983,6 +983,32 @@ describe("cloud-api", () => {
       expect(init.method).toBe("POST");
     });
 
+    it("returns emailed: true when the API reports the mail went out", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { user_id: "u1", status: "admitted", emailed: true })
+      );
+
+      const result = await approveAccessRequest("u1");
+
+      expect(result.emailed).toBe(true);
+    });
+
+    it("returns emailed: false when the API reports no mail went out", async () => {
+      // A future edit that hardcodes `emailed: true` (or drops the field
+      // from the parsed result) must fail this, not just the `true` case
+      // above — that is exactly the "unconditional we've emailed them"
+      // regression this coverage exists to catch.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { user_id: "u1", status: "admitted", emailed: false })
+      );
+
+      const result = await approveAccessRequest("u1");
+
+      expect(result.emailed).toBe(false);
+    });
+
     it("POSTs to the decline route", async () => {
       const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
       fetchMock.mockResolvedValue(jsonResponse(200, { status: "declined" }));
