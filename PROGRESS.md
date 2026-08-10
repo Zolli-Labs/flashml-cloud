@@ -172,6 +172,79 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-10 — Private repositories through a GitHub App (flashml-cloud/api, /web)
+
+What/why: roadmap P1.2, built after the owner **reversed** §6.2 the same day it
+was made (that decision said wait until a team asks; §6.2 now records both the
+decision and the reversal). `repo.py:58` has carried an unused `token`
+parameter since M1 whose docstring calls it "the seam a future private-repo
+flow hangs off of" — this is that flow. Spec:
+`specs/2026-08-10-github-app-private-repos-design.md`, plan beside it.
+
+How verified: api `pytest -q` **1087 passed**, 1 skipped, 1 deselected, 1
+xfailed (991 at the session's baseline, +96 over four commits). Web:
+`npm test` 341 across 31 files (330 before), `tsc --noEmit` clean, `eslint`
+clean, production build compiles with `/account/github` and
+`/account/github/callback` prerendering static. The App JWT is verified in
+tests against the **public** half of a keypair generated in-process, so a
+wrong algorithm, issuer or key fails the assertion rather than passing on a
+token nobody checked. db tests run against the real ephemeral Postgres.
+
+Root causes, not symptoms:
+- **The seam pointed at the wrong host.** `repo.py` built a codeload URL and
+  attached the token as a Bearer header. codeload is *not* the documented
+  endpoint for a GitHub App installation token and is reported to 404 with
+  one; `api.github.com/repos/{o}/{r}/tarball/{ref}` is, and it 302s to a
+  **pre-signed** codeload URL. Anonymous fetches still use codeload (no
+  rate-limit tier for public repos) and are now pinned so the authenticated
+  branch cannot move them. httpx drops `Authorization` on the cross-host
+  redirect, which is *required* — the signed URL carries its own
+  authorization and GitHub rejects a request bearing both. Asserted, not
+  assumed.
+- **`installation_id` is not a secret.** It is in GitHub's own URLs and in
+  the redirect back to us, so a route binding whatever id it was handed would
+  let anyone who learned one attach another organisation's installation to
+  their account and read its private source. Fixed with a single-use,
+  user-bound state claimed *before* GitHub is asked anything, so id-spraying
+  cannot probe which exist. `test_a_state_minted_by_someone_else_is_refused`
+  is the attack written down. A wrong-user attempt leaves the row intact for
+  its owner, or the attack degrades into denial of service.
+- **A single-column primary key would have shipped an org feature that breaks
+  for orgs.** GitHub installs on an *account*: colleagues share one
+  `installation_id`. Keyed on that alone the first to connect wins and every
+  teammate collides on insert — invisible until the second person tries.
+- **`.strip()` on a PEM is a bug, not tidying.** It removes the trailing
+  newline that is part of the credential; `_decode_pem` strips only for its
+  base64 probe. Base64 is offered because `scripts/dev.sh` sources `.env` as
+  shell, where a raw multi-line value breaks the *whole file*.
+- **Two console defaults are wrong in this codebase**, both caught by the
+  checks: `AlertDialogTrigger` is Base UI and takes `render=`, not `asChild`;
+  and `react-hooks/set-state-in-effect` forbids validate-then-setState, so a
+  malformed callback is derived during render.
+
+Gotchas: the App is **not registered on GitHub**, so none of this has run
+against real GitHub — the first install is an operator step (spec §9) and is
+the first true end-to-end evidence. Register **two** Apps: an App's Setup URL
+is a single value, so one cannot serve both dev and prod, and sharing one
+binds dev installs against the production database. `DELETE` forgets our row
+and deliberately does not uninstall on GitHub, since one installation is
+shared by every colleague who connected it. Nothing stored is a credential —
+installation ids are useless without the App private key, and there is no
+token column on purpose.
+
+**These four commits landed on `developer-identity`, not
+`mode-a-console-surface`** — the working tree was switched to that branch by
+concurrent work mid-session. The GitHub App feature is independent of Plan 1
+and can be moved onto its own branch off `ce93ff9` if the entanglement is
+unwanted.
+
+Next: register the App and run one real private-repo submit. Then P1.1 —
+`from-upload` and the `fmu_` CLI are unbuilt, so private code is
+**console-only** today. Parking lot, deliberately not done: webhooks (an
+uninstall shows up when a mint 404s, and a webhook endpoint is public attack
+surface for a state we can observe lazily), org-wide sharing of one
+connection, and any write scope ever.
+
 ### 2026-08-10 — Developer identity: a program gets a credential of its own (flashml-cloud/api, flashml-cloud/web)
 What/why: Plan 1 of the developer surface, all nine tasks. The API knew two
 kinds of caller — a Supabase JWT (a browser) and an `fmk_` machine token — and

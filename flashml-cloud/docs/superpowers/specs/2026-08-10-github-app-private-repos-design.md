@@ -227,12 +227,20 @@ Code cannot register a GitHub App. Before any of this works end to end:
 1. Create the App (Settings → Developer settings → GitHub Apps → New).
 2. Permissions: **Repository → Contents: Read-only** and **Metadata:
    Read-only**. Nothing else. No webhook needed for this slice.
-3. Setup URL: `<console>/settings/github/callback`, "Redirect on update" on.
+3. Setup URL: `<console>/account/github/callback`, "Redirect on update" on.
+   *(As built. This section first said `/settings/github/callback`; the
+   console's account area is `/account`, and the route follows it.)*
 4. Generate a private key; set `GITHUB_APP_ID`, `GITHUB_APP_SLUG` and
    `GITHUB_APP_PRIVATE_KEY` on both API services.
 5. The PEM is multi-line. Render env vars take newlines, but `.env` files do
-   not — store it base64-encoded and decode on read, so one format works
-   everywhere.
+   not — `scripts/dev.sh` reads `.env` with `set -a; source`, so a raw
+   multi-line value is executed as shell and breaks *the whole file*, not
+   just that variable. Store it base64-encoded; `_decode_pem` accepts either.
+6. **Register two Apps, one per environment.** An App's Setup URL is a single
+   value on the App itself, so one App cannot redirect to both the dev
+   console and production. Sharing one would send dev installs to the
+   production callback and bind them against the wrong database — which
+   would look like a working connection that reads nothing.
 
 ## 10. Non-goals
 

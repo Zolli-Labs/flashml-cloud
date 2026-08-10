@@ -247,6 +247,34 @@ services:
       - key: EMAIL_REPLY_TO
         value: "phongct1105@gmail.com"
 
+      # -- GitHub App: reading a submitter's PRIVATE repositories -----------
+      #
+      # All three or none. `Settings.github_app_configured` is all-or-nothing
+      # on purpose: a half-configured App can mint no token, and reporting it
+      # as configured would have the console render a Connect button that
+      # walks somebody through granting us access to their code and then
+      # fails. Absent, private repos are simply unavailable and public ones
+      # work exactly as before — so, like the mail vars above, these are NOT
+      # in settings.from_env's required list.
+      #
+      # This is a SECOND GitHub registration, unrelated to Supabase's GitHub
+      # sign-in provider. Supabase stays identity-only. An OAuth `repo` scope
+      # would be all-or-nothing, tied to one person's account, and would
+      # tangle sign-in with authorization — see the spec's §1.
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_SLUG
+        sync: false
+      # The App's RSA private key. Multi-line PEM: Render's dashboard accepts
+      # newlines, but a `.env` file does not, so `_decode_pem` also accepts
+      # base64 — store it base64-encoded and one format works everywhere.
+      #
+      # This is the credential the whole design hangs on. The database holds
+      # only installation ids, which are useless without this key; leak it and
+      # every connected organisation's private source is readable.
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
+
   # -------------------------------------------------------------------------
   # 3. The web app — public. Talks only to the API, never to Postgres.
   # -------------------------------------------------------------------------
@@ -460,6 +488,34 @@ services:
       # forwarder) lands on zolliai.com — one env var, no code change.
       - key: EMAIL_REPLY_TO
         value: "phongct1105@gmail.com"
+
+      # -- GitHub App: reading a submitter's PRIVATE repositories -----------
+      #
+      # All three or none. `Settings.github_app_configured` is all-or-nothing
+      # on purpose: a half-configured App can mint no token, and reporting it
+      # as configured would have the console render a Connect button that
+      # walks somebody through granting us access to their code and then
+      # fails. Absent, private repos are simply unavailable and public ones
+      # work exactly as before — so, like the mail vars above, these are NOT
+      # in settings.from_env's required list.
+      #
+      # This is a SECOND GitHub registration, unrelated to Supabase's GitHub
+      # sign-in provider. Supabase stays identity-only. An OAuth `repo` scope
+      # would be all-or-nothing, tied to one person's account, and would
+      # tangle sign-in with authorization — see the spec's §1.
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_SLUG
+        sync: false
+      # The App's RSA private key. Multi-line PEM: Render's dashboard accepts
+      # newlines, but a `.env` file does not, so `_decode_pem` also accepts
+      # base64 — store it base64-encoded and one format works everywhere.
+      #
+      # This is the credential the whole design hangs on. The database holds
+      # only installation ids, which are useless without this key; leak it and
+      # every connected organisation's private source is readable.
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
 
   - type: web
     name: flashml-dev-web

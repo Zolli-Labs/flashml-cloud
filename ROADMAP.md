@@ -264,6 +264,20 @@ not be the only line. **Blocks P0.3's auto-admit option.** Size M.
    path for now; the GitHub App (free to register/operate — see P1.2 shape
    note) is built when a team actually asks for org-level integration.
    P1.2 stays on the roadmap as a pulled-by-demand item, not scheduled.
+
+   **REVERSED the same day (owner, 2026-08-10): build the App first.** The
+   owner asked for it directly and it is now **implemented** —
+   `specs/2026-08-10-github-app-private-repos-design.md`, migration 0013,
+   `github_app.py`, four routes, and the `/account/github` console pages.
+   It is **not registered on GitHub**, so nothing has run against real
+   GitHub yet; that is an operator step (spec §9) and will be the first
+   true end-to-end evidence.
+
+   *Consequence, stated so it is not discovered later:* `from-upload` and
+   the `fmu_` CLI remain unbuilt, so the private-code story is
+   **console-only**. A developer with private code can submit it from a
+   browser and not from a terminal. P1.1 (developer surface) is unchanged
+   and still the next thing that closes that gap.
 3. **Vocabulary — DECIDED (owner, 2026-08-10), AMENDED same day.**
    The interface says **machine** and **workspace**. The invented nouns
    **"Zolli"/"Zollis" and "Crew"/"Crews" retire** from the interface in one

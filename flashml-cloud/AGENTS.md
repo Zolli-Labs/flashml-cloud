@@ -80,6 +80,42 @@ and telling the person is manual. Supabase's built-in SMTP (~2/hour
 project-wide) is still not usable for this; custom SMTP in the Supabase
 dashboard covers auth mail only.
 
+## Private repositories: a GitHub App, not Supabase's GitHub provider
+
+A submitter's private repo is read through a **GitHub App installation**
+(`github_app.py`, `migrations/0013`). Three env vars, all or none:
+`GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_PRIVATE_KEY`. Unset, private
+repos are unavailable and everything else behaves exactly as before.
+
+**This is a second, separate GitHub registration.** It is NOT Supabase's
+GitHub sign-in provider, and enabling that provider would not help: an OAuth
+`repo` scope is all-or-nothing, tied to one person's account, and tangles
+sign-in with authorization. Supabase stays identity-only. Reaching for the
+sign-in provider here is the anti-pattern this section exists to prevent.
+
+**Nothing stored is a credential.** `github_installations` holds installation
+ids, which are useless without the App private key from the environment. Do
+not add a token column — a one-hour installation token is minted at submit
+time and cached in memory, and persisting one would recreate exactly the
+liability the App design removes.
+
+**The state binding is not optional.** An `installation_id` is not a secret;
+GitHub puts it in its own URLs and in the redirect back to us. `POST
+/v1alpha1/github/installations` claims a single-use, user-bound state
+*before* it asks GitHub anything. Remove that and anyone who learns an id can
+attach another organisation's installation to their account and read its
+private source. Expired, replayed, unknown and someone-else's all answer the
+same 403 on purpose — distinguishing them tells a prober which states exist.
+
+**The composite primary key is load-bearing.** `(installation_id, user_id)`,
+because GitHub installs on an *account*: colleagues in one org share an
+installation id, and a single-column key locks out everyone after the first.
+
+**Authenticated fetches go to `api.github.com`, not codeload.** codeload is
+not the documented host for an App token and 404s with one. See `repo.py`.
+
+Design: `docs/superpowers/specs/2026-08-10-github-app-private-repos-design.md`.
+
 ## Current state (July 2026)
 
 - `apps/api/` — FastAPI control plane (:8000): node registry + heartbeats
