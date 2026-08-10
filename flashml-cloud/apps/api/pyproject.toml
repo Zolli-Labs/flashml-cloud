@@ -41,7 +41,7 @@ dependencies = [
     # coordinator, so team pools cannot resolve at all. `CommandRecipe.expand`
     # also gains the `allowFallback`-iff-`pool` rule this API's compile layer
     # depends on.
-    "flashruntime==0.4.4",
+    "flashruntime==0.5.0",
     "fastapi>=0.111",
     "uvicorn>=0.30",
     "httpx>=0.27",
