@@ -57,7 +57,7 @@ RUNTIME_VERSION := 0.5.0
 # 0.3.4 raises it again to >=0.4.3, for the same import-time reason: 0.4.3's
 # PlacementSpec.pool becomes an open str (team pools), and flashnode 0.3.4
 # imports against that shape.
-NODE_VERSION    := 0.3.4
+NODE_VERSION    := 0.3.5
 FLASHML         ?= ../flashml
 
 RUNTIME_PIN := "flashruntime[service,sklearn,dev]==$(RUNTIME_VERSION)"
