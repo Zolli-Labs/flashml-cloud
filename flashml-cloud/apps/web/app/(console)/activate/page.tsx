@@ -64,6 +64,10 @@ function ActivateInner() {
   const [machine, setMachine] = useState<Machine | null>(null);
   const [machineId, setMachineId] = useState<string | null>(null);
   const [poolName, setPoolName] = useState<string | null>(null);
+  // Which kind of access was just granted. One route, two flows — and the
+  // page cannot know which until the API answers, because all the person
+  // typed was eight characters.
+  const [kind, setKind] = useState<"machine" | "cli">("machine");
 
   const submit = useCallback(
     async (value: string) => {
@@ -72,8 +76,18 @@ function ActivateInner() {
       setErrorMessage(null);
       try {
         const result = await approveDeviceCode(value, poolId ?? undefined);
-        setMachineId(result.machine_id);
+        // An absent `kind` means machine: an API deployed before the CLI
+        // flow existed answers with machine_id and no kind at all.
+        const approvedKind = result.kind === "cli" ? "cli" : "machine";
+        setKind(approvedKind);
+        setMachineId(result.machine_id ?? null);
         setStatus("success");
+
+        // A CLI credential has no machine to name and is never placed on a
+        // pool, so neither lookup below applies to it — and `listMachines()`
+        // would quietly return the caller's unrelated fleet.
+        if (approvedKind === "cli") return;
+
         // The approve response carries only a machine_id, so name what was
         // just approved rather than saying a bare "OK". Best effort: the
         // approval already succeeded if this lookup fails.
@@ -131,6 +145,56 @@ function ActivateInner() {
     setMachine(null);
     setMachineId(null);
     setPoolName(null);
+    setKind("machine");
+  }
+
+  if (status === "success" && kind === "cli") {
+    // Deliberately a different screen, not the machine one with the nouns
+    // swapped. The two approvals grant different powers — a machine RUNS
+    // jobs for you, a credential ACTS AS you — and someone who just typed a
+    // code has no other way to find out which they granted.
+    return (
+      <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
+        <div className="w-full max-w-sm text-center">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-[var(--node-green)]/30 bg-[var(--node-green)]/10">
+            <CheckCircle
+              className="h-7 w-7 text-[var(--node-green)]"
+              weight="fill"
+            />
+          </div>
+          <h1 className="mt-5 font-display text-2xl font-semibold">
+            CLI access granted
+          </h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This program can now submit jobs as you. It has exactly your
+            access and no more, and it keeps working until you revoke it.
+          </p>
+
+          <div className="panel mt-6 p-4 text-left">
+            <p className="text-sm font-medium">What happens next</p>
+            <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+              The terminal you started this from now holds a credential.
+              Manage it under{" "}
+              <Link
+                href="/account/cli"
+                className="text-brand-foreground hover:underline"
+              >
+                Account → CLI access
+              </Link>
+              , where you can revoke it at any time.
+            </p>
+          </div>
+
+          <Link
+            href="/account/cli"
+            className="interactive mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:brightness-110"
+          >
+            Go to CLI access
+            <ArrowRight className="h-4 w-4" weight="bold" />
+          </Link>
+        </div>
+      </div>
+    );
   }
 
   if (status === "success") {
