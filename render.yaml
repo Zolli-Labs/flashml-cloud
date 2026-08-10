@@ -214,6 +214,20 @@ services:
         value: https://flashml-web.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
+      # Mail. The API sends two product emails — access approved and access
+      # declined. Absent, it boots and serves and sends nothing: a missing
+      # provider must not take the API down, so these are NOT in
+      # settings.from_env's required list.
+      #
+      # Supabase's own SMTP setting is separate and governs AUTH mail
+      # (password reset, confirmation) — it is configured in the Supabase
+      # dashboard, not here, and points at the same Resend account.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "FlashML <no-reply@mail.zolliai.com>"
+      - key: EMAIL_REPLY_TO
+        value: "hello@mail.zolliai.com"
 
   # -------------------------------------------------------------------------
   # 3. The web app — public. Talks only to the API, never to Postgres.
@@ -396,6 +410,20 @@ services:
         value: https://flashml-dev-web.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
+      # Mail. The API sends two product emails — access approved and access
+      # declined. Absent, it boots and serves and sends nothing: a missing
+      # provider must not take the API down, so these are NOT in
+      # settings.from_env's required list.
+      #
+      # Supabase's own SMTP setting is separate and governs AUTH mail
+      # (password reset, confirmation) — it is configured in the Supabase
+      # dashboard, not here, and points at the same Resend account.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "FlashML <no-reply@mail.zolliai.com>"
+      - key: EMAIL_REPLY_TO
+        value: "hello@mail.zolliai.com"
 
   - type: web
     name: flashml-dev-web

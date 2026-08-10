@@ -70,10 +70,15 @@ Row and flag must move together, in one transaction. There is no revoke route
 yet; it needs its own task, an audit trail, and a decision about what happens
 to the person's pool memberships and running jobs.
 
-**Approval is silent.** No email provider exists in this repo, and Supabase's
-built-in SMTP is ~2 messages/hour project-wide — the constraint that removed
-magic links. Approving flips the flag and the account works on next load;
-telling the person is manual. No copy anywhere may imply a message was sent.
+**Approval sends mail.** Approving or declining emails the account through
+Resend (`mailer.py`), configured by `RESEND_API_KEY` + `EMAIL_FROM`. Both
+routes return `emailed`, and copy must reflect that flag rather than assume
+either outcome — mail is skipped when no provider is configured, when the
+account has no address in `auth.users`, and when the provider refuses. With
+mail unconfigured the product behaves exactly as before: the flag is false
+and telling the person is manual. Supabase's built-in SMTP (~2/hour
+project-wide) is still not usable for this; custom SMTP in the Supabase
+dashboard covers auth mail only.
 
 ## Current state (July 2026)
 
