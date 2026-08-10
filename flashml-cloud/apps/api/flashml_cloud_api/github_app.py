@@ -134,12 +134,66 @@ class GitHubApp:
             if self._now() + _EXPIRY_MARGIN < expires_at:
                 return token
 
-        url = f"{GITHUB_API}/app/installations/{installation_id}/access_tokens"
+        body = await self._call(
+            "POST",
+            f"{GITHUB_API}/app/installations/{installation_id}/access_tokens",
+            installation_id,
+        )
+
+        try:
+            token = body["token"]
+            expires_at = _parse_expiry(body["expires_at"])
+        except Exception as exc:
+            raise GitHubAppError(
+                f"GitHub returned an unreadable token response: {exc}",
+                kind="unavailable",
+            ) from exc
+
+        self._cache[installation_id] = (token, expires_at)
+        return token
+
+    async def installation_details(self, installation_id: int) -> dict:
+        """Which account this installation belongs to.
+
+        GitHub's redirect hands back an ``installation_id`` and nothing more,
+        but the *login* is what a submit-time lookup matches a repo owner
+        against — so it has to be asked for once, at connect time, and stored.
+
+        A 404 here also covers an id belonging to somebody else's App, which
+        is what a fabricated callback would carry. Same answer, same
+        consequence: write no row.
+        """
+        if not self._configured:
+            raise GitHubAppError(
+                "the GitHub App is not configured on this deployment",
+                kind="misconfigured",
+            )
+
+        body = await self._call(
+            "GET", f"{GITHUB_API}/app/installations/{installation_id}",
+            installation_id,
+        )
+        account = body.get("account") or {}
+        return {
+            # `.get` throughout: GitHub has shipped installations whose
+            # account carries no `type`, and a KeyError here 500s the
+            # callback AFTER the person has already granted us access —
+            # the worst possible moment to fail.
+            "account_login": account.get("login", ""),
+            "account_type": account.get("type", ""),
+            "repository_selection": body.get("repository_selection", "selected"),
+        }
+
+    async def _call(self, method: str, url: str, installation_id: int) -> dict:
+        """One authenticated App request, with the error mapping both callers
+        need. Shared so the two entry points cannot drift into classifying
+        the same GitHub status differently."""
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                response = await client.post(
+                response = await client.request(
+                    method,
                     url,
                     headers={
                         "Authorization": f"Bearer {self.app_jwt()}",
@@ -165,9 +219,10 @@ class GitHubApp:
             # Logged, because this one is ours to fix and nobody else will
             # report it. The body is not logged: it can echo the request.
             log.error(
-                "GitHub refused our App credentials (HTTP %s) minting a token "
-                "for installation %s",
+                "GitHub refused our App credentials (HTTP %s) on %s for "
+                "installation %s",
                 response.status_code,
+                url,
                 installation_id,
             )
             raise GitHubAppError(
@@ -176,23 +231,18 @@ class GitHubApp:
             )
         if response.status_code >= 300:
             raise GitHubAppError(
-                f"GitHub returned HTTP {response.status_code} minting an "
-                f"installation token",
+                f"GitHub returned HTTP {response.status_code} for {method} "
+                f"{url}",
                 kind="unavailable",
             )
 
         try:
-            body = response.json()
-            token = body["token"]
-            expires_at = _parse_expiry(body["expires_at"])
+            return response.json()
         except Exception as exc:
             raise GitHubAppError(
-                f"GitHub returned an unreadable token response: {exc}",
+                f"GitHub returned an unreadable response: {exc}",
                 kind="unavailable",
             ) from exc
-
-        self._cache[installation_id] = (token, expires_at)
-        return token
 
 
 def _parse_expiry(value: str) -> dt.datetime:

@@ -303,6 +303,78 @@ async def test_an_unconfigured_app_refuses_to_mint_without_a_network_call():
     assert recorder.requests == []
 
 
+# ---------------------------------------------------------------------------
+# Reading an installation
+#
+# GitHub's redirect hands back an installation_id and nothing else. The
+# account it belongs to has to be asked for, because that login is what a
+# submit-time lookup matches the repo owner against.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_installation_details_reports_the_account_it_is_installed_on():
+    recorder = _Recorder(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "id": INSTALLATION_ID,
+                    "account": {"login": "AcmeCorp", "type": "Organization"},
+                    "repository_selection": "selected",
+                },
+            )
+        ]
+    )
+    app = GitHubApp(_settings(), transport=recorder.transport())
+
+    details = await app.installation_details(INSTALLATION_ID)
+
+    assert details == {
+        "account_login": "AcmeCorp",
+        "account_type": "Organization",
+        "repository_selection": "selected",
+    }
+    (request,) = recorder.requests
+    assert request.method == "GET"
+    assert str(request.url) == (
+        f"https://api.github.com/app/installations/{INSTALLATION_ID}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_details_for_an_installation_that_is_not_ours_is_uninstalled():
+    """A fabricated installation_id posted to the callback lands here.
+
+    GitHub answers 404 for an id belonging to a different App, which is the
+    same answer as one that was uninstalled — and both mean "do not write a
+    row", which is all the caller needs.
+    """
+    recorder = _Recorder([httpx.Response(404, json={"message": "Not Found"})])
+    app = GitHubApp(_settings(), transport=recorder.transport())
+
+    with pytest.raises(GitHubAppError) as caught:
+        await app.installation_details(INSTALLATION_ID)
+
+    assert caught.value.kind == "uninstalled"
+
+
+@pytest.mark.asyncio
+async def test_details_survives_an_account_with_no_type():
+    """GitHub has shipped installations whose account carries no `type`.
+    Storing an empty string beats a KeyError that 500s the callback after
+    the person already granted access."""
+    recorder = _Recorder(
+        [httpx.Response(200, json={"account": {"login": "acme"}})]
+    )
+    app = GitHubApp(_settings(), transport=recorder.transport())
+
+    details = await app.installation_details(INSTALLATION_ID)
+
+    assert details["account_login"] == "acme"
+    assert details["account_type"] == ""
+
+
 def test_install_url_carries_the_slug_and_the_state():
     app = GitHubApp(_settings())
     url = app.install_url("st_abc123")

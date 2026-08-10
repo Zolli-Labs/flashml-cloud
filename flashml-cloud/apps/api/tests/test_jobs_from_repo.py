@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import tarfile
 import textwrap
+from typing import NamedTuple
 import time
 import uuid
 
@@ -89,17 +90,34 @@ def make_tarball(files: dict[str, str], top: str = TOP) -> bytes:
 CLEAN_REPO = {"flashml.yaml": CLEAN_YAML, "train.py": CLEAN_TRAIN_PY}
 
 
+class FetchCall(NamedTuple):
+    """One recorded fetch.
+
+    `token` is named rather than positional because it is the interesting
+    one: whether an installation token reached the fetch is the whole
+    difference between reading a private repo and 404ing on it, and
+    `calls[0][3]` would say nothing about that to a reader.
+    """
+
+    owner: str
+    name: str
+    ref: str
+    token: str | None
+
+
 class RecordingFetch:
-    """Stands in for codeload.github.com. Records what was asked for so a
-    test can assert the ref actually travelled, and never touches the
-    network."""
+    """Stands in for the GitHub tarball fetch. Records what was asked for so
+    a test can assert the ref — and the token — actually travelled, and never
+    touches the network."""
 
     def __init__(self, tar_bytes: bytes):
         self.tar_bytes = tar_bytes
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[FetchCall] = []
 
-    def __call__(self, owner: str, name: str, ref: str) -> bytes:
-        self.calls.append((owner, name, ref))
+    def __call__(
+        self, owner: str, name: str, ref: str, token: str | None = None
+    ) -> bytes:
+        self.calls.append(FetchCall(owner, name, ref, token))
         return self.tar_bytes
 
 
@@ -376,7 +394,9 @@ def test_the_repo_tarball_is_staged_as_the_code_input(make_client, db, transport
 def test_the_ref_the_caller_asked_for_is_the_one_fetched(make_client, db):
     client = make_client()
     _post(client, _jwt(_new_user(db)), ref="v1.2.3")
-    assert client.fetch.calls == [("acme", "trainer", "v1.2.3")]
+    # Token is None: nobody in this file connects a GitHub App, so every
+    # fetch here is anonymous — the behaviour every existing user gets.
+    assert client.fetch.calls == [FetchCall("acme", "trainer", "v1.2.3", None)]
 
 
 def test_a_bare_owner_slash_name_is_accepted(make_client, db):

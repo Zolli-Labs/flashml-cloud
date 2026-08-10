@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
@@ -90,6 +91,7 @@ from flashml_cloud_api.elastic import fleet_shape
 from flashml_cloud_api.emails import derive_email_facts
 from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
 from flashml_cloud_api.images import UnknownImage, resolve_image
+from .github_app import GitHubApp, GitHubAppError
 from .mail_templates import admitted_email, declined_email
 from .mailer import Mailer
 from flashml_cloud_api.preflight import preflight, safe_text
@@ -227,17 +229,71 @@ def _parse_repo_ref(value: Any, ref: Any) -> tuple[str, str, str]:
     return owner, name, ref_value
 
 
+#: How long a GitHub install redirect stays valid. Long enough to read
+#: GitHub's permission screen and think about it; short enough that a state
+#: captured from a browser's history is dead by the time it is useful.
+GITHUB_STATE_TTL = timedelta(minutes=15)
+
+
+async def _installation_token_for(
+    db: psycopg.Connection,
+    github_app: GitHubApp,
+    user_id: str,
+    owner: str,
+) -> str | None:
+    """A token that can read `owner`'s private repos on this user's behalf,
+    or None — which is the ordinary case and means an anonymous fetch.
+
+    **Never raises.** A submit must not fail because GitHub had a bad
+    minute: without a token the fetch simply proceeds anonymously, which
+    succeeds for a public repo and produces the same 404 a private repo has
+    always produced. Turning a transient GitHub outage into a hard submit
+    failure would take the public path down with the private one.
+
+    The lookup is scoped by user_id AND owner together. Either half alone is
+    a real hole: without owner, connecting one organisation would
+    authenticate fetches of every other; without user_id, one person's
+    connection would authenticate everybody's.
+    """
+    if not github_app.configured:
+        return None
+
+    row = await run_in_threadpool(
+        dbmod.fetch_github_installation_for_owner, db, user_id, owner
+    )
+    if row is None:
+        return None
+
+    try:
+        return await github_app.installation_token(int(row["installation_id"]))
+    except GitHubAppError as exc:
+        log.warning(
+            "could not mint a GitHub token for installation %s (%s); "
+            "falling back to an anonymous fetch",
+            row["installation_id"],
+            exc.kind,
+        )
+        return None
+
+
 def _fetch_and_extract(
-    fetch_repo: Callable[[str, str, str], bytes],
+    fetch_repo: Callable[..., bytes],
     owner: str,
     name: str,
     ref: str,
     dest: Path,
+    token: str | None = None,
 ) -> tuple[bytes, Path]:
     """Fetch and unpack a repo. Blocking on purpose — the caller runs it in
     a worker thread so a 32 MB tarball does not stall the event loop for
-    every other request in the process."""
-    tar_bytes = fetch_repo(owner, name, ref)
+    every other request in the process.
+
+    ``token`` is a GitHub App installation token when the submitter has
+    connected one covering this owner, and None otherwise. None is the
+    ordinary case and means exactly what it always meant: an anonymous
+    fetch of a public repo.
+    """
+    tar_bytes = fetch_repo(owner, name, ref, token)
     if len(tar_bytes) > MAX_REPO_TARBALL_BYTES:
         raise repomod.RepoError(
             f"repo tarball is {len(tar_bytes)} bytes, over the "
@@ -770,9 +826,10 @@ def create_cloud_app(
     settings: Settings,
     connect: Callable[[], psycopg.Connection] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
-    fetch_repo: Callable[[str, str, str], bytes] | None = None,
+    fetch_repo: Callable[..., bytes] | None = None,
     start_federated_job: Callable[..., Any] | None = None,
     mailer: Mailer | None = None,
+    github_app: GitHubApp | None = None,
 ) -> FastAPI:
     """The public door. Agents and browsers both arrive here; nothing else
     is exposed to the internet.
@@ -799,8 +856,11 @@ def create_cloud_app(
     # Its own transport, not the coordinator's: these are two unrelated
     # hosts, and a test fake for one must not have to answer for the other.
     mailer = mailer or Mailer(settings)
+    github_app = github_app or GitHubApp(settings)
     fetch_repo = fetch_repo or (
-        lambda owner, name, ref: repomod.fetch_repo_tarball(owner, name, ref)
+        lambda owner, name, ref, token=None: repomod.fetch_repo_tarball(
+            owner, name, ref, token=token
+        )
     )
     start_federated_job = start_federated_job or fedavgmod.start_federated_job
     max_upload_bytes = int(
@@ -1901,6 +1961,164 @@ def create_cloud_app(
         )
         return _passthrough(r)
 
+    # -- GitHub App: connecting an installation ------------------------------
+    #
+    # The whole security argument sits in `POST /installations`. Read its
+    # docstring before changing anything here.
+
+    @app.post("/v1alpha1/github/install-url", tags=["browser"])
+    async def github_install_url(
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Where to send this user to install the App, with a state bound
+        to them."""
+        if not github_app.configured:
+            # 404, not 500: on a deployment with no App this route does not
+            # exist as a capability, and the console asks `configured` first
+            # precisely so it never gets here.
+            raise HTTPException(
+                status_code=404, detail="GitHub is not configured on this deployment"
+            )
+
+        state = f"st_{secrets.token_urlsafe(32)}"
+        expires_at = datetime.now(timezone.utc) + GITHUB_STATE_TTL
+        await run_in_threadpool(
+            dbmod.insert_github_install_state, db, state, user_id, expires_at
+        )
+        return {"url": github_app.install_url(state)}
+
+    @app.get("/v1alpha1/github/installations", tags=["browser"])
+    async def list_github_installations(
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """This user's connections, and whether connecting is possible here.
+
+        `configured` is what the console reads to decide whether to render a
+        Connect button at all — offering one on a deployment with no App
+        walks somebody to a dead end.
+        """
+        rows = await run_in_threadpool(
+            dbmod.list_github_installations, db, user_id
+        )
+        return {
+            "configured": github_app.configured,
+            "installations": [
+                {
+                    "installation_id": row["installation_id"],
+                    "account_login": row["account_login"],
+                    "account_type": row["account_type"],
+                    "repository_selection": row["repository_selection"],
+                    "created_at": row["created_at"].isoformat(),
+                }
+                for row in rows
+            ],
+        }
+
+    @app.post("/v1alpha1/github/installations", status_code=201, tags=["browser"])
+    async def connect_github_installation(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Bind an installation to this account.
+
+        **Why the state check comes first and is not optional.** An
+        `installation_id` is not a secret — GitHub puts it in its own URLs
+        and in the redirect that lands here. If this route bound whatever id
+        it was handed, anyone who learned an id could attach another
+        organisation's installation to their own account and read all of its
+        private source. The state is minted by `install-url` against this
+        user, is single-use, and expires; claiming it proves the person
+        finishing the flow is the person who started it, in this session.
+
+        GitHub only permits an install on an account the person administers.
+        State proves they started it. Together, the binding user administers
+        the account being bound.
+
+        The order matters too: the state is claimed BEFORE GitHub is asked
+        anything, so a caller spraying installation ids cannot use this route
+        to probe which ones exist.
+        """
+        payload = await _json_object(request)
+
+        raw_id = payload.get("installation_id")
+        try:
+            installation_id = int(raw_id)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="installation_id must be an integer"
+            ) from None
+
+        state = _opt_str(payload.get("state"))
+        if not state:
+            raise HTTPException(status_code=400, detail="state is required")
+
+        claimed = await run_in_threadpool(
+            dbmod.claim_github_install_state, db, state, user_id
+        )
+        if not claimed:
+            # One answer for expired, replayed, unknown, and belonging to
+            # somebody else. Distinguishing them would tell a prober which
+            # states exist.
+            raise HTTPException(
+                status_code=403,
+                detail="this GitHub install link is not valid for your "
+                       "account, or has already been used",
+            )
+
+        try:
+            details = await github_app.installation_details(installation_id)
+        except GitHubAppError as exc:
+            if exc.kind == "misconfigured":
+                raise HTTPException(
+                    status_code=502,
+                    detail="this deployment's GitHub App is misconfigured",
+                ) from None
+            raise HTTPException(
+                status_code=400,
+                detail="GitHub does not recognise that installation",
+            ) from None
+
+        await run_in_threadpool(
+            dbmod.insert_github_installation,
+            db,
+            installation_id=installation_id,
+            user_id=user_id,
+            account_login=details["account_login"],
+            account_type=details["account_type"],
+            repository_selection=details["repository_selection"],
+        )
+        return {
+            "installation_id": installation_id,
+            "account_login": details["account_login"],
+        }
+
+    @app.delete(
+        "/v1alpha1/github/installations/{installation_id}",
+        status_code=204,
+        tags=["browser"],
+    )
+    async def disconnect_github_installation(
+        installation_id: int,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Forget this user's connection.
+
+        Deliberately does NOT uninstall the App on GitHub: one installation
+        is shared by every colleague who connected it, so uninstalling would
+        disconnect people who never asked, and it is the account admin's
+        call rather than a job console's.
+        """
+        removed = await run_in_threadpool(
+            dbmod.delete_github_installation, db, user_id, installation_id
+        )
+        if not removed:
+            raise HTTPException(status_code=404, detail="unknown installation")
+        return Response(status_code=204)
+
     @app.post("/v1alpha1/jobs/from-repo", status_code=201, tags=["browser"])
     async def submit_job_from_repo(
         request: Request,
@@ -1945,12 +2163,25 @@ def create_cloud_app(
             # never match that gate, leaving the job PENDING forever.
             pool = str(pool_row["id"])
 
+        # A GitHub App installation token, but only for an owner THIS user
+        # has connected. Resolved before the fetch and scoped by both
+        # user_id and owner: connecting `acme` must not quietly authenticate
+        # a fetch of `someone-else/...`, and Alice connecting `acme` must not
+        # let Bob read `acme` through our App.
+        repo_token = await _installation_token_for(db, github_app, user_id, owner)
+
         with tempfile.TemporaryDirectory(prefix="flashml-repo-") as tmpdir:
             dest = Path(tmpdir) / "src"
             try:
                 # Blocking network + tar work, off the event loop.
                 tar_bytes, repo_root = await run_in_threadpool(
-                    _fetch_and_extract, fetch_repo, owner, name, ref, dest
+                    _fetch_and_extract,
+                    fetch_repo,
+                    owner,
+                    name,
+                    ref,
+                    dest,
+                    repo_token,
                 )
             except repomod.RepoError as exc:
                 # The message can quote a tar member's name, which is
