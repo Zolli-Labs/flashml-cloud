@@ -15,6 +15,7 @@ import {
   Desktop,
   ShieldCheck,
   SidebarSimple,
+  Terminal,
   UsersThree,
   UserCircle,
 } from "@phosphor-icons/react";
@@ -249,6 +250,12 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                 label="My Zollis"
                 icon={Desktop}
                 active={isActive("/account/machines")}
+              />
+              <NavItem
+                href="/account/cli"
+                label="CLI access"
+                icon={Terminal}
+                active={isActive("/account/cli")}
               />
             </div>
 
