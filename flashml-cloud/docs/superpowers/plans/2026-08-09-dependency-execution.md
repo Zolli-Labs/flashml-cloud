@@ -592,9 +592,14 @@ it at `loop.py:285`. This task adds bookkeeping only.
 In `execute_one`, catch `EnvironmentBuildError` **before** the existing
 `except TaskExecutionError` — Python matches the first fitting clause, so
 the ordering is the mechanism — and record
-`self._dep_cooldown[lease.job_id] = (deadline, reason)`, then fall through
-to the same counting the base clause does without duplicating the
+`self._dep_cooldown[lease.job_id] = (recorded_at, reason)`, then fall
+through to the same counting the base clause does without duplicating the
 increments.
+
+Store the *timestamp*, not a precomputed deadline. A deadline computed at
+record time freezes the interval as it was then, which contradicts reading
+`FLASHNODE_DEP_COOLDOWN_S` at check time — and makes the expiry behaviour
+untestable by shortening the interval after a failure.
 
 At the top of `execute_one`: if `lease.payload.get("dependencies")` and
 `lease.job_id` is in `_dep_cooldown` with a live deadline, fail the lease

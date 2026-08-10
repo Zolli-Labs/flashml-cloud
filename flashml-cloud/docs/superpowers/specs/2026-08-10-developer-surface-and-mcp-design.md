@@ -48,8 +48,12 @@ take.** The MCP server is the last of four things, and the thinnest.
    local bytes, runs the existing `parse_flashml_yaml` + `preflight` and
    creates nothing. One authority for the rules; the CLI never carries a copy.
 7. **`POST /v1alpha1/jobs/from-upload`** accepts a tarball of the working tree
-   so a developer can submit without a public GitHub repo. Deferrable — see
-   §7 for exactly what is lost if it is cut.
+   so a developer can submit without a public GitHub repo. ~~Deferrable~~ —
+   **NO LONGER DEFERRABLE, amended 2026-08-10.** The owner decided that day
+   (`ROADMAP.md` §6.2) to hold the GitHub App until a team asks for it, which
+   makes `from-upload` **the** private-code path for the entire product rather
+   than a convenience. §7's "if this is cut" analysis still describes the cost
+   accurately; it is now simply not an option. See §7.
 8. **The MCP surface is author / validate / submit / observe / cancel-own.**
    Pool administration, invites, machine revocation and artifact deletion are
    reachable from the CLI and the console and are **absent from the MCP tool

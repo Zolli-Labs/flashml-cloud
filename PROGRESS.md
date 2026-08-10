@@ -172,6 +172,154 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-10 — Specs for the first-run quickstart and the vocabulary sweep (design only, flashml-cloud)
+What/why: The remaining two of the five closed owner decisions. §6.4 (BYO
+compute) → `specs/2026-08-10-first-run-quickstart-design.md`; §6.3 (vocabulary)
+→ `specs/2026-08-10-vocabulary-sweep-design.md`. §6.2 and §6.5 need no spec —
+`from-upload` is already designed and the domain repoint is DNS ops.
+How verified: design only. Both built on full ground-truth sweeps; every
+claim carries file:line. Two scout claims were checked and **dismissed**:
+`/machines` is a permanent redirect (`next.config.ts:54`), and the
+`localhost:8000` fallback cannot reach prod because `next.config.ts` throws at
+build time without `NEXT_PUBLIC_CLOUD_API` — which makes the trusted-tier
+spec §7's worry about it stale.
+Gotchas: (1) **The BYO path cannot work today and no console change fixes it.**
+Colab/RunPod need `--runner trusted`; trusted-tier §3's `FLASHML_WORK_DIR`
+defect makes any workload that resolves its own output dir fail with "task
+produced no metrics.json" — which is exactly `flashml-examples/jobs/hello.py:33`,
+the sample we would ship. The trusted-tier plan is written and **entirely
+unexecuted** (every task `- [ ]`). Console work may be built in parallel but
+must not be announced before that flashnode release. (2) Vocabulary scale is
+far smaller than feared *because* the owner kept "workspace": 364 `workspace`
+hits are ~90% identifiers/routes, so decision "keep workspace" avoids the
+large diff entirely. Real scope ≈133 user-visible strings + 5 metadata titles;
+no API, no SQL, no routes, no identifier renames. (3) The API is clean — no
+`HTTPException(detail=…)` contains any retiring word, so no error toast leaks
+old vocabulary. (4) The published `flashml-examples` `federated` branch is now
+invalid against the v2 schema (`rounds`/`min_participants`/`shards` refused).
+Next: owner reviews all three specs; then plans + TDD, starting with email.
+Parking lot: house demo pool; a hosted Colab .ipynb; identifier renames.
+
+### 2026-08-10 — Design transactional email: admission stops being silent (design only, flashml-cloud)
+What/why: P0.1 of `ROADMAP.md`. The product admits users by hand and notifies
+nobody — `PendingScreen.tsx:14-22` and `admin/requests/page.tsx:95-99` both
+carry comments apologizing for it. Spec written to
+`docs/superpowers/specs/2026-08-10-transactional-email-design.md`. Scope per
+owner: **admitted + declined mail only**; job-completion and digests deferred.
+How verified: design only, no code. Every claim carries a file:line from a
+ground-truth sweep — status literals are `pending|admitted|declined` (0009:56-67,
+**not** `approved`), `email_for_user` already exists (`db.py:190-200`),
+outbound-mail code in the repo is **zero**, and there is no `supabase/` dir,
+Edge Function, CLI dep or service-role use anywhere.
+Gotchas: (1) The design **reverses** the Database-Webhook→Edge-Function shape
+floated earlier the same day — an Edge Function would be a brand-new deploy
+surface plus dashboard-only config, which `migrate.py:4-7` exists to prevent;
+sending from the existing approve/decline handlers reuses the tested funnel.
+(2) Exactly-once needs no bookkeeping: both db writes are guarded by
+`and status = 'pending'`, so the second call 404s before the mailer — hence
+**no migration**, and `0012` stays free for the dev-surface spec's
+`0012_cli_credentials.sql`. (3) Cost review: Supabase **Pro buys nothing here**
+— custom SMTP/OAuth/edge functions are Free-tier features; the built-in mailer's
+2/hour cap forces a third-party provider at any tier. Resend free (3k/mo)
+covers it at $0; Pro is now `ROADMAP.md` P2.5, a launch purchase for backups
+and no-pausing.
+Next: owner reviews the spec, then write `plans/2026-08-10-transactional-email.md`.
+Parking lot: queue position ("you're #N") — recommended against, a number
+promises a speed manual review can't keep; password reset + email confirm are
+unlocked by the same SMTP config but ship separately.
+
+### 2026-08-10 — Product roadmap to real users: audit + prioritized backlog (docs, workspace-wide)
+What/why: Audited the entire external-user surface (console routes, API auth,
+submission path, host agent, notifications, billing, docs) and wrote
+`ROADMAP.md` — personas, funnel, TTFJ/north-star metrics, P0–P2 backlog with
+per-item evidence, non-goals, and five owner decisions. Research note, no code.
+How verified: every claim carries a file path from the audit (e.g. silent
+approval in `PendingScreen.tsx`, `cancel` 501 for federated, no rate limiting
+in `app.py`, `join/status/leave` stubs at `agent/cli.py:648`). Cross-checked
+against approved specs so nothing already designed is re-proposed: the
+developer-surface spec (2026-08-10) covers CLI/tokens/MCP; dependency
+provisioning (2026-08-09) covers deps/images.
+Gotchas: `HANDBOOK.md` §9 doc map pointed at `SPRINT_PLAN.md`,
+`PLAN_2WEEKS.md`, `FLASHRUNTIME_EVALUATION.md` at repo root — all three live
+in `archive/`; rows fixed in the same edit. The dev-surface spec's open
+question #1 (stderr tail / live logs) is the same gap as roadmap P0.4 —
+one design should answer both.
+Next: security-audit blockers, then the P0.1 email spec. (Same day: owner
+reviewed and made all five §6 decisions — manual review stays; GitHub App
+pulled-by-demand, `from-upload` is the private-code path; vocabulary =
+machine + pool, Zolli branding deferred; no house-hosted compute, BYO via
+Colab/RunPod/own hardware, which puts the trusted-tier fixes on the P0
+path; domain repoint deferred as light DNS work. Recorded in `ROADMAP.md`.)
+Parking lot: billing, payouts, house demo pool — deliberately not now.
+
+### 2026-08-10 — The cloud half of elastic work distribution: the fleet decides the split (flashml-cloud/api)
+
+What/why: the runtime's elastic work distribution merged on `flashml`
+(chunk arithmetic, coverage-closed rounds, `run_fedavg(epochs=, sync_every=,
+total_chunks=, slots=)`) while the API still spoke the old signature —
+federated training was **broken against its own venv** before this
+(`TypeError: run_fedavg() got an unexpected keyword argument 'rounds'`).
+`flashml.yaml` v2 now takes `epochs` + `sync_every`; `rounds`,
+`min_participants` and `shards` are refused with messages naming their
+replacement; how finely a pass is cut and how many slots a round opens come
+from the machines online at submit time (`elastic.fleet_shape` over
+`db.count_online_machines`, through the same `MACHINE_ONLINE_PREDICATE` the
+console counts with, so the number a submitter reads is the number their round
+is cut from).
+
+How verified: api `pytest -q` **969 passed**/1 skipped/1 deselected/1 xfailed
+(57 were failing mid-change). Four new files: `test_elastic_config.py` (27),
+`test_elastic_layout.py` (12), `test_elastic_driver.py` (4),
+`test_online_machine_count.py` (6). The driver tests run the **real**
+`run_fedavg` against a coordinator that reports back exactly the chunks the
+compiled argv handed each task, so a layout disagreement credits nobody and
+goes red instead of passing quietly.
+
+Root causes, not symptoms:
+- **`chunks_done` is the silent killer.** `run_fedavg` credits a contribution
+  only for chunk ids it can prove it handed that slot
+  (`metrics.get("chunks_done", [])`). An entrypoint writing only
+  `samples`/`loss` is averaged in at zero weight — every volunteer trains,
+  uploads, and is credited nothing, with no error raised anywhere, because a
+  machine reporting no chunks looks exactly like one that did no work.
+  Preflight's `federated-contract` check now requires it and the guide leads
+  with it.
+- **`sync_every` below 1.0 is refused, not honoured.** With one chunk per slot
+  (this slice) a round already covers a whole pass, so a smaller value either
+  discards the work of machines still training when the round closes early, or
+  — if the pass is cut finer than the fleet — strides past data that is then
+  never trained (parity-dependent; checked by hand). Cutting finer needs a
+  worker that walks a chunk *sequence*: the built-in one does, a user's
+  entrypoint does not. So the field is accepted by the schema,
+  range-validated, then refused with the reason.
+- **Two derivations are copies.** `run_fedavg` computes its round count and
+  per-round chunk offset inline and exports neither, so
+  `flashml_yaml.derived_round_count` and `elastic.round_chunk_offset` restate
+  them. Pinned by driving the real driver, never by a second hand-written
+  expectation.
+- **The import boundary bit, correctly.** `compile.py` importing
+  `flashml_workloads.chunks` tripped `test_import_boundary.py`, whose own
+  docstring prescribes the fix: route through `fedavg.py`. So
+  `fedavg.slot_chunks_for` owns the layout and `compile.py` only serialises the
+  list it is handed — the boundary stays one door wide, and
+  `SANCTIONED_EXCEPTIONS` records `chunks` joining the driver there plus why
+  importing beats a hand-copied `(slot * total // slots + offset) % total`.
+- **The pins name a version that does not exist.** All four sites say
+  `flashruntime==0.4.4`; PyPI's latest is **0.4.3** (the repo has 0.5.0
+  staged; flashnode 0.3.5 vs 0.3.4 published). `a88a477` moved the pins with
+  no release behind them, so the next clean build of the API or either
+  coordinator fails at `pip install`. Untouched here — release and CI were
+  being handled separately — but it blocks deploying this work.
+
+Next: `e2e/test_fedavg_loop.py` still calls `run_fedavg(rounds=, num_shards=,
+min_participants=)` — the same break this entry fixed in the API, and
+unverifiable until a runtime install exists. Then the console's §7
+submit-screen figures, which now have `epochs`/`sync_every`/`rounds`/`slots`
+on the job payload to read. Parking lot, deliberately not done: the
+worker-contract slice that makes `sync_every` real (entrypoint walks a chunk
+sequence and reports every id it finished), and with it slot headroom — only
+free once a present machine can absorb an absent one's chunks.
+
 ### 2026-08-10 — Design the developer surface: client, CLI, MCP server (design only, flashml + flashml-cloud)
 
 What/why: FlashML has no developer client. Every job-author route in `app.py`

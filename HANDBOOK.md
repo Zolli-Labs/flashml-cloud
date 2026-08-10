@@ -351,9 +351,10 @@ the service (lease expiry is the only live path); SSE not implemented
 |---|---|
 | `HANDBOOK.md` (this) | Product + architecture bible; read once |
 | `PROGRESS.md` | **Authoritative status** + work log + logging protocol |
-| `SPRINT_PLAN.md` | The next two weeks, day by day |
-| `PLAN_2WEEKS.md` | Original staged plan (bannered complete-local); still the Alibaba runbook detail |
-| `FLASHRUNTIME_EVALUATION.md` | Deep architecture evaluation (planner scope, library stances, StrategyPlan) |
+| `ROADMAP.md` | Product roadmap to real users: personas, funnel, P0–P2 priorities, decisions needed |
+| `archive/SPRINT_PLAN.md` | The original two-week sprint (complete; archived) |
+| `archive/PLAN_2WEEKS.md` | Original staged plan (bannered complete-local); still the Alibaba runbook detail |
+| `archive/FLASHRUNTIME_EVALUATION.md` | Deep architecture evaluation (planner scope, library stances, StrategyPlan) |
 | `flashruntime/docs/SYSTEM_OVERVIEW.md` | Product overview **shared across repos** — edit only this copy, `make sync-docs` |
 | `flashruntime/docs/planner/README.md` | Planner code walkthrough |
 | `flashruntime/docs/adr/` | Decision records (ACK Edge, PAI-DLC, runtime-first/planner-second) |
