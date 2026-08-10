@@ -172,6 +172,73 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-10 — Transactional email: approval and decline stop being silent (flashml-cloud/api, flashml-cloud/web)
+
+What/why: the admission decision used to be silent — an admin's click flipped
+a flag and the applicant found out only by reloading the console, and the
+codebase said so in two places ("Approval is silent," `admin/requests/page.tsx`'s
+"let them know yourself" toast). `mailer.py` now sends through Resend's HTTP
+API from the existing approve/decline handlers; both routes return
+`emailed: bool` and the console toast and `PendingScreen` read it instead of
+assuming an outcome. This entry closes the plan's fix wave — nine review
+findings applied in one pass after all five tasks were individually approved
+and the whole-branch review came back "ready to merge with fixes." Plan:
+`docs/superpowers/plans/2026-08-10-transactional-email.md`. Spec:
+`docs/superpowers/specs/2026-08-10-transactional-email-design.md` (both now
+tracked — they shipped as `??` in the branch that implemented them).
+
+Fixes applied: `render.yaml`'s `EMAIL_REPLY_TO` comment (both API services)
+now says plainly that the value must be a mailbox that actually receives
+mail — `mail.zolliai.com` is a sending subdomain with no MX by default, and
+Resend verification proves only that it can send — and that this must be
+resolved before `RESEND_API_KEY` is set anywhere; the plan's "Operator
+setup" section gained the same as a blocking prerequisite ordered before
+"create a send-only API key." `.env.example` and `.env.dev.example` gained
+`RESEND_API_KEY` / `EMAIL_FROM` / `EMAIL_REPLY_TO` (blank), closing the gap
+against the three-place map both files already document. `mail_templates.py`
+now escapes `console_url` with `html.escape(..., quote=True)` before it
+lands in an `href`, and dropped an `f`-prefix with no placeholder (ruff
+F541). `mailer.py`'s docstring claimed "this waits 10" while
+`httpx.AsyncClient(timeout=10.0)` actually applies 10s to connect, read,
+write, and pool independently — worst case ~30s inside an admin's click;
+`httpx.Timeout(10.0, connect=5.0)` makes the claim true. `send()`'s
+"Never raises" caught only `httpx.HTTPError`, which misses
+`httpx.InvalidURL`, `httpx.CookieConflict`, and `httpx.StreamError`; widened
+to `except Exception` (still lets `CancelledError` propagate, correctly). A
+web test now covers `approveAccessRequest` returning `emailed: true` and
+`emailed: false`, so a regression to an unconditional "we've emailed them"
+fails a test instead of merging quietly.
+
+How verified: API `.venv/bin/pytest -q` — 927 passed / 19 failed / 1 skipped
+/ 1 deselected / 1 xfailed. The 19 failures are pre-existing and unrelated —
+every one is `TypeError: run_fedavg() got an unexpected keyword argument
+'rounds'` in `tests/test_contributions.py` (6) and `tests/test_federated.py`
+(13), diffed line-for-line against
+`.superpowers/sdd/2026-08-10-transactional-email/baseline-failures.txt` and
+found identical; nothing in this fix wave touches `fedavg.py`. Web:
+`npm run lint` clean, `npx tsc --noEmit` clean, `npm test` — 330 passed
+across 30 files (328 before this session's two new `emailed` tests).
+
+Gotchas: exactly-once delivery is structural, not bookkept — both
+`approve_access_request` and `decline_access_request` filter on
+`status = 'pending'`, so a second approve 404s before the mailer is ever
+reached, which is why there is no sent-log table and no migration (`0012`
+stays free). Mail is inert unless BOTH `RESEND_API_KEY` and `EMAIL_FROM` are
+set — a deploy with neither still boots and serves, silently, exactly as
+before. `EMAIL_REPLY_TO` must be a real, monitored, MX-backed mailbox
+resolved BEFORE `RESEND_API_KEY` is set anywhere: the declined email's only
+call to action is "reply to this message" (re-applying is refused by
+design), so an unresolved reply-to strands exactly the person who most
+needs a way back in — `mail.zolliai.com` verified for DKIM/SPF says nothing
+about whether it can receive.
+
+Next: owner resolves `EMAIL_REPLY_TO` to a real mailbox, then works through
+the plan's Operator setup (Resend account, domain verification, send-only
+key, Supabase custom SMTP) and runs the demo — approve a real pending
+account in the dev console, confirm the mail arrives, approve again and
+confirm no second mail and a 404. Parking lot: job-completion mail, queue
+position, notification preferences (all deferred per spec §9).
+
 ### 2026-08-10 — Design the developer surface: client, CLI, MCP server (design only, flashml + flashml-cloud)
 
 What/why: FlashML has no developer client. Every job-author route in `app.py`

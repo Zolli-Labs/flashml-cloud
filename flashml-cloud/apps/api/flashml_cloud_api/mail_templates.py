@@ -10,6 +10,7 @@ contradict each other about the same decision is worse than either alone.
 """
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 
 
@@ -35,10 +36,14 @@ def _wrap(body_html: str) -> str:
 
 def admitted_email(console_url: str) -> Email:
     link = console_url.strip()
+    # Operator-set, not user-controlled — this is robustness, not a live
+    # exploit — but escaping it before it lands in an href attribute is
+    # free.
+    safe_link = html.escape(link, quote=True)
     button = (
-        f'<p><a href="{link}" style="display:inline-block;padding:10px 16px;'
+        f'<p><a href="{safe_link}" style="display:inline-block;padding:10px 16px;'
         'background:#0e6b7a;color:#ffffff;text-decoration:none;'
-        f'border-radius:6px">Open the console</a></p>'
+        'border-radius:6px">Open the console</a></p>'
         if link
         else ""
     )

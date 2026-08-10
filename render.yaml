@@ -226,6 +226,16 @@ services:
         sync: false
       - key: EMAIL_FROM
         value: "FlashML <no-reply@mail.zolliai.com>"
+      # MUST be a mailbox that actually RECEIVES mail. Resend's domain
+      # verification adds DKIM/SPF records to prove `mail.zolliai.com` can
+      # SEND — it says nothing about receiving, and a sending subdomain has
+      # no MX record by default. The declined email's only call to action is
+      # "reply to this message" (re-applying is refused by design, see
+      # `access-request` 409), so an unresolved reply-to strands exactly the
+      # person who most needs a way back in. Resolve this to a real,
+      # monitored mailbox BEFORE `RESEND_API_KEY` is set anywhere — on this
+      # service, on flashml-dev-api, or in any operator's local .env. See
+      # the plan's "Operator setup" section for the ordering.
       - key: EMAIL_REPLY_TO
         value: "hello@mail.zolliai.com"
 
@@ -422,6 +432,16 @@ services:
         sync: false
       - key: EMAIL_FROM
         value: "FlashML <no-reply@mail.zolliai.com>"
+      # MUST be a mailbox that actually RECEIVES mail. Resend's domain
+      # verification adds DKIM/SPF records to prove `mail.zolliai.com` can
+      # SEND — it says nothing about receiving, and a sending subdomain has
+      # no MX record by default. The declined email's only call to action is
+      # "reply to this message" (re-applying is refused by design, see
+      # `access-request` 409), so an unresolved reply-to strands exactly the
+      # person who most needs a way back in. Resolve this to a real,
+      # monitored mailbox BEFORE `RESEND_API_KEY` is set anywhere — on this
+      # service, on flashml-api, or in any operator's local .env. See the
+      # plan's "Operator setup" section for the ordering.
       - key: EMAIL_REPLY_TO
         value: "hello@mail.zolliai.com"
 
