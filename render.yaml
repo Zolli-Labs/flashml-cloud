@@ -225,14 +225,15 @@ services:
       - key: RESEND_API_KEY
         sync: false
       - key: EMAIL_FROM
-        value: "FlashML <no-reply@mail.zolliai.com>"
+        value: "FlashML <no-reply@zolliai.com>"
       # MUST be a mailbox that actually RECEIVES mail. Resend's domain
-      # verification adds DKIM/SPF records to prove `mail.zolliai.com` can
-      # SEND — it says nothing about receiving, and a sending subdomain has
-      # no MX record by default. The declined email's only call to action is
-      # "reply to this message" (re-applying is refused by design, see
-      # `access-request` 409), so an unresolved reply-to strands exactly the
-      # person who most needs a way back in.
+      # verification proves `zolliai.com` can SEND — DKIM plus an SPF/MX pair
+      # on the `send.` subdomain for bounces — and says nothing about
+      # receiving. Verified 2026-08-10: `zolliai.com` has NO MX record, so no
+      # address at that domain receives anything today. The declined email's
+      # only call to action is "reply to this message" (re-applying is
+      # refused by design, see `access-request` 409), so an unresolved
+      # reply-to strands exactly the person who most needs a way back in.
       #
       # RESOLVED 2026-08-10: the owner's own monitored inbox. Deliberately
       # NOT an @zolliai.com address — no Workspace account exists on that
@@ -438,14 +439,15 @@ services:
       - key: RESEND_API_KEY
         sync: false
       - key: EMAIL_FROM
-        value: "FlashML <no-reply@mail.zolliai.com>"
+        value: "FlashML <no-reply@zolliai.com>"
       # MUST be a mailbox that actually RECEIVES mail. Resend's domain
-      # verification adds DKIM/SPF records to prove `mail.zolliai.com` can
-      # SEND — it says nothing about receiving, and a sending subdomain has
-      # no MX record by default. The declined email's only call to action is
-      # "reply to this message" (re-applying is refused by design, see
-      # `access-request` 409), so an unresolved reply-to strands exactly the
-      # person who most needs a way back in.
+      # verification proves `zolliai.com` can SEND — DKIM plus an SPF/MX pair
+      # on the `send.` subdomain for bounces — and says nothing about
+      # receiving. Verified 2026-08-10: `zolliai.com` has NO MX record, so no
+      # address at that domain receives anything today. The declined email's
+      # only call to action is "reply to this message" (re-applying is
+      # refused by design, see `access-request` 409), so an unresolved
+      # reply-to strands exactly the person who most needs a way back in.
       #
       # RESOLVED 2026-08-10: the owner's own monitored inbox. Deliberately
       # NOT an @zolliai.com address — no Workspace account exists on that
