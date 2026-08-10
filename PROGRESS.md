@@ -172,6 +172,36 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-10 — Design the developer surface: client, CLI, MCP server (design only, flashml + flashml-cloud)
+
+What/why: FlashML has no developer client. Every job-author route in `app.py`
+is tagged `browser` and gated on a Supabase JWT; the two CLIs that exist are
+the coordinator (`flashruntime`) and the host agent (`flashnode`). The owner
+asked for an MCP server so users' coding agents can develop with FlashML —
+which turned out to require three things underneath it first. Brainstormed
+and specced, **not implemented**.
+
+How verified: nothing built, so nothing to verify. The four gaps in the spec
+were each read out of the code, not assumed: `auth.py` knows only `fmk_` and
+Supabase JWTs; `preflight.py` runs only inside `/jobs/from-repo` over a
+fetched tarball; `repo.py`'s docstring records public-repo-only and
+`fetch_repo_tarball` is called with no token; the cloud API does not proxy the
+coordinator's `/jobs/{id}/logs`.
+
+Gotchas: the load-bearing design move is that `current_user` learns to accept
+a new `fmu_` prefix — every route already tagged `browser` becomes
+CLI-reachable in one edit, with no second authorization model. The new
+`flashml` package depends on neither `flashruntime` nor this repo, so it adds
+**no new version-pin sites**; the four-site rule is untouched. One open
+question is a possible blocker for the third plan: if `TASK_ATTEMPT_FAILED`
+carries no stderr tail in its `data`, an agent watching its job fail learns
+that it failed and not why — resolve before writing Plan 3.
+
+Next: write Plan 1 (developer identity — `fmu_`, migration 0012, device-code
+`kind`, console page). Parking lot: rate limiting on the new preflight
+endpoint; private-repo fetch (stays closed if `from-upload` ships).
+Design: `flashml-cloud/docs/superpowers/specs/2026-08-10-developer-surface-and-mcp-design.md`.
+
 ### 2026-08-05 — Ship the ZolliAI visual rebrand POC (flashml-cloud/web)
 
 What/why: rebranded the complete web frontend from FlashML Cloud to ZolliAI's
