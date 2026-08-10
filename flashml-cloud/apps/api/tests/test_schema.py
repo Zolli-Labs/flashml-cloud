@@ -203,3 +203,80 @@ def test_unknown_is_one_of_the_three_verdicts_the_schema_allows():
     assert match, "verifications.verdict is not constrained at all"
     allowed = set(re.findall(r"'(\w+)'", match.group(1)))
     assert allowed == {"pass", "flag", "unknown"}
+
+
+def test_cli_credentials_table_exists_with_the_expected_shape(postgres_dsn):
+    import psycopg
+    from psycopg.rows import dict_row
+
+    with psycopg.connect(postgres_dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select column_name, is_nullable
+                  from information_schema.columns
+                 where table_schema = 'public'
+                   and table_name = 'cli_credentials'
+                """
+            )
+            cols = {r["column_name"]: r["is_nullable"] for r in cur.fetchall()}
+
+    assert cols["id"] == "NO"
+    assert cols["owner_id"] == "NO"
+    assert cols["token_hash"] == "NO"
+    assert cols["token_prefix"] == "NO"
+    assert cols["status"] == "NO"
+    assert cols["label"] == "YES"
+    assert cols["last_used_at"] == "YES"
+    assert cols["revoked_at"] == "YES"
+
+
+def test_device_codes_carries_a_kind_defaulting_to_machine(postgres_dsn):
+    import psycopg
+    from psycopg.rows import dict_row
+
+    with psycopg.connect(postgres_dsn, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select column_name, is_nullable, column_default
+                  from information_schema.columns
+                 where table_schema = 'public'
+                   and table_name = 'device_codes'
+                   and column_name in ('kind', 'node_id', 'credential_id')
+                """
+            )
+            cols = {r["column_name"]: r for r in cur.fetchall()}
+
+    assert cols["kind"]["is_nullable"] == "NO"
+    assert "machine" in (cols["kind"]["column_default"] or "")
+    # Relaxed so a CLI code, which has no node, can be inserted at all.
+    assert cols["node_id"]["is_nullable"] == "YES"
+    assert cols["credential_id"]["is_nullable"] == "YES"
+
+
+def test_a_machine_device_code_still_requires_a_node_id(postgres_dsn):
+    """The check constraint that keeps relaxing node_id from weakening the
+    machine flow: only kind='cli' may omit it."""
+    import psycopg
+    from datetime import datetime, timedelta, timezone
+
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    with psycopg.connect(postgres_dsn) as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    insert into public.device_codes
+                        (device_code, user_code, kind, node_id, expires_at)
+                    values ('dc-test-1', 'UC-TEST1', 'machine', null, %s)
+                    """,
+                    (expires,),
+                )
+            except psycopg.errors.CheckViolation:
+                conn.rollback()
+            else:
+                conn.rollback()
+                raise AssertionError(
+                    "a machine device code was accepted with a null node_id"
+                )

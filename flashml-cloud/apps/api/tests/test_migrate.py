@@ -293,6 +293,14 @@ def test_baseline_through_then_apply_runs_only_the_remainder(postgres_dsn):
         conn.execute("create table public.machines (id uuid primary key)")   # 0001, for 0004
         conn.execute("create table public.jobs (id text primary key)")       # 0001, for 0007
         conn.execute("create table public.job_rounds (id uuid primary key)") # 0002, for 0005
+        # 0012 adds `kind`/`credential_id` and relaxes `node_id`, so the
+        # stand-in needs node_id to exist for the DROP NOT NULL and the
+        # machine-needs-node check constraint to have something to bind to.
+        conn.execute(                                                        # 0001, for 0012
+            "create table public.device_codes ("
+            "  device_code text primary key,"
+            "  node_id text not null)"
+        )
 
         done = migrate.apply(conn, REAL_MIGRATIONS)
 

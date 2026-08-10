@@ -65,6 +65,21 @@ class Machine:
     revoked_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class CliCredential:
+    """A row from ``public.cli_credentials``, as returned to callers that
+    have already authenticated the credential (never constructed from
+    caller-supplied data). ``token_hash`` is deliberately absent — nothing
+    that leaves this module needs it."""
+
+    id: str
+    owner_id: str
+    label: str | None
+    status: str
+    created_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
 # ---------------------------------------------------------------------------
 # profiles
 # ---------------------------------------------------------------------------
@@ -713,6 +728,187 @@ def revoke_machine_row(
             (machine_id, owner_id),
         )
         return cur.fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# cli credentials
+# ---------------------------------------------------------------------------
+
+#: The columns of ``public.cli_credentials`` that may ever leave the API.
+#: Spelled out rather than ``select *`` for the same reason
+#: ``MACHINE_PUBLIC_COLUMNS`` is: ``token_hash`` lives in the same table, and
+#: a ``select *`` feeding a JSON response is exactly how a credential digest
+#: ends up in a browser.
+CLI_CREDENTIAL_PUBLIC_COLUMNS = (
+    "id", "label", "status", "token_prefix",
+    "last_used_at", "created_at", "revoked_at",
+)
+
+
+def insert_cli_device_code(
+    db: psycopg.Connection,
+    *,
+    device_code: str,
+    user_code: str,
+    label: str | None,
+    expires_at: datetime,
+) -> None:
+    """A device code for the CLI flow. ``node_id`` is left null — the check
+    constraint added in 0012 permits that only for ``kind = 'cli'``. The
+    label rides in ``hostname``, the column that already carries "what the
+    human will recognise this as"."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.device_codes
+                (device_code, user_code, kind, hostname, expires_at)
+            values (%s, %s, 'cli', %s, %s)
+            """,
+            (device_code, user_code, label, expires_at),
+        )
+
+
+def insert_cli_credential(
+    db: psycopg.Connection, *, owner_id: str, label: str | None
+) -> str:
+    """Create the credential row at APPROVAL time, before any token exists.
+    token_hash is not null, so a placeholder that cannot collide and cannot
+    be presented is written and then overwritten by
+    ``set_cli_credential_token``. The placeholder is not a valid sha256 hex
+    digest, so no token can ever hash to it."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.cli_credentials
+                (owner_id, label, token_hash, token_prefix)
+            values (%s, %s, 'pending:' || gen_random_uuid()::text, '')
+            returning id
+            """,
+            (owner_id, label),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return str(row["id"])
+
+
+def mark_cli_device_code_approved(
+    db: psycopg.Connection, user_code: str, user_id: str, credential_id: str
+) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.device_codes
+               set credential_id = %s, approved_by = %s
+             where user_code = %s and kind = 'cli'
+            """,
+            (credential_id, user_id, user_code),
+        )
+
+
+def claim_cli_device_code_for_redemption(
+    db: psycopg.Connection, device_code: str
+) -> str | None:
+    """Atomically mark a CLI device_code consumed and return its
+    credential_id — but only if it is approved, unexpired, and not already
+    consumed. Returns None in every other case without distinguishing which,
+    so a caller cannot use this as an oracle for which codes exist. The
+    single ``UPDATE ... WHERE consumed_at is null ... RETURNING`` is what
+    makes "redeemed exactly once" hold under concurrent attempts."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.device_codes
+               set consumed_at = now()
+             where device_code = %s
+               and kind = 'cli'
+               and consumed_at is null
+               and credential_id is not null
+               and expires_at > now()
+            returning credential_id
+            """,
+            (device_code,),
+        )
+        row = cur.fetchone()
+        return str(row["credential_id"]) if row else None
+
+
+def set_cli_credential_token(
+    db: psycopg.Connection, credential_id: str, token_hash: str, token_prefix: str
+) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.cli_credentials
+               set token_hash = %s, token_prefix = %s, status = 'active'
+             where id = %s
+            """,
+            (token_hash, token_prefix, credential_id),
+        )
+
+
+def fetch_cli_credential_by_token_hash(
+    db: psycopg.Connection, token_hash: str
+) -> dict[str, Any] | None:
+    with db.cursor() as cur:
+        cur.execute(
+            "select * from public.cli_credentials where token_hash = %s",
+            (token_hash,),
+        )
+        return cur.fetchone()
+
+
+def touch_cli_credential_last_used(db: psycopg.Connection, credential_id: str) -> None:
+    """Rate-limited in SQL, not in Python: the WHERE clause means a
+    credential used a hundred times a second costs one write a minute, and
+    it holds across API processes, which a Python-side cache would not."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.cli_credentials
+               set last_used_at = now()
+             where id = %s
+               and (last_used_at is null or last_used_at < now() - interval '1 minute')
+            """,
+            (credential_id,),
+        )
+
+
+def list_cli_credentials_for_owner(
+    db: psycopg.Connection, owner_id: str
+) -> list[dict[str, Any]]:
+    """Every credential belonging to owner_id, and nothing else. The owner
+    filter is in the SQL, not applied afterwards in Python — omitting it
+    would be a missing argument, not a missing ``if``."""
+    columns = ", ".join(CLI_CREDENTIAL_PUBLIC_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"select {columns} from public.cli_credentials "
+            "where owner_id = %s order by created_at",
+            (owner_id,),
+        )
+        return list(cur.fetchall())
+
+
+def revoke_cli_credential_row(
+    db: psycopg.Connection, credential_id: str, owner_id: str
+) -> bool:
+    """Owner-scoped revoke. Returns True only if a row belonging to owner_id
+    was actually updated — a bad id and an id owned by someone else both
+    return False, indistinguishably."""
+    with db.cursor() as cur:
+        try:
+            cur.execute(
+                """
+                update public.cli_credentials
+                   set status = 'revoked', revoked_at = now()
+                 where id = %s and owner_id = %s and status <> 'revoked'
+                """,
+                (credential_id, owner_id),
+            )
+        except psycopg.errors.InvalidTextRepresentation:
+            # Not even a uuid. Same answer as "no such credential".
+            return False
+        return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------
