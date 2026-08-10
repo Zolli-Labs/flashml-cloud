@@ -63,6 +63,7 @@ from flashruntime.protocol.v1alpha1 import (
 )
 
 from flashml_cloud_api import access
+from flashml_cloud_api import cli_auth
 from flashml_cloud_api import contributions as contribmod
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
@@ -75,6 +76,7 @@ from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
     AuthError,
     hash_invite_token,
+    looks_like_user_token,
     new_invite_token,
     verify_supabase_jwt,
 )
@@ -894,11 +896,41 @@ def create_cloud_app(
         return machine
 
     def current_user(request: Request) -> str:
-        """The signed-in user id from a verified Supabase JWT. A machine
-        token is rejected without ever reaching the JWT decoder."""
+        """The signed-in user id, from either a verified Supabase JWT (a
+        browser) or an `fmu_` developer token (a CLI, or the MCP server
+        built on it). A machine token is rejected without ever reaching
+        either.
+
+        THE THREE KINDS NEVER SHARE A CODE PATH. Each is selected by its
+        prefix before any work happens, for the reason ``machine_caller``
+        documents at length: opening a database connection before checking
+        the credential's shape makes every anonymous request cost a
+        Postgres connection, which is cheap for an attacker and expensive
+        for us. It is also why a browser JWT is never hashed and looked up
+        as though it might be a token.
+
+        An `fmu_` token grants EXACTLY its owner's access. This function
+        returns a user id and nothing else, so every gate layered on top —
+        ``admitted_user``, ``admin_user``, every per-resource ownership
+        check — applies to a CLI caller identically and with no second
+        implementation to keep aligned.
+        """
         token = _bearer(request)
         if token is None or looks_like_machine_token(token):
             raise HTTPException(status_code=401, detail="sign-in required")
+
+        if looks_like_user_token(token):
+            db = request.app.state.connect()
+            try:
+                credential = cli_auth.authenticate_cli(db, token)
+            finally:
+                db.close()
+            if credential is None:
+                # Unknown token and revoked credential give the same answer,
+                # on purpose — same doctrine as ``machine_caller``.
+                raise HTTPException(status_code=401, detail="sign-in required")
+            return credential.owner_id
+
         try:
             return verify_supabase_jwt(token, settings)
         except AuthError:
