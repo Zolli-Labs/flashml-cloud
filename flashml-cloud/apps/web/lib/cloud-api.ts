@@ -707,6 +707,76 @@ export function revokeCliCredential(
   );
 }
 
+// -- GitHub App installations ------------------------------------------
+
+export interface GitHubInstallation {
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  /** `all` or `selected`. Advisory: it explains a 404 on a repo the
+   * installation cannot see. GitHub, not this field, decides what a token
+   * may read. */
+  repository_selection: string;
+  created_at: string;
+}
+
+export interface GitHubInstallations {
+  /** False when the deployment has no GitHub App at all. The page renders
+   * no Connect button in that case — offering one would walk somebody to a
+   * dead end. */
+  configured: boolean;
+  installations: GitHubInstallation[];
+}
+
+export function listGitHubInstallations(): Promise<GitHubInstallations> {
+  return request<GitHubInstallations>("/v1alpha1/github/installations");
+}
+
+/** `POST /v1alpha1/github/install-url` — returns where to send the person.
+ *
+ * The URL is asked for rather than assembled here, and that is not
+ * incidental: it carries a single-use `state` the API minted and recorded
+ * against this account. A URL built in the browser would carry no state,
+ * the callback would be refused, and the failure would look like a GitHub
+ * problem rather than ours. */
+export async function startGitHubInstall(): Promise<string> {
+  const { url } = await request<{ url: string }>(
+    "/v1alpha1/github/install-url",
+    { method: "POST" }
+  );
+  return url;
+}
+
+/** `POST /v1alpha1/github/installations` — finish the flow.
+ *
+ * Both values come from GitHub's redirect query string and must travel
+ * together: the id says what to connect, the state proves this account
+ * started the flow. */
+export function connectGitHubInstallation(
+  installationId: number,
+  state: string
+): Promise<{ installation_id: number; account_login: string }> {
+  return request<{ installation_id: number; account_login: string }>(
+    "/v1alpha1/github/installations",
+    {
+      method: "POST",
+      body: JSON.stringify({ installation_id: installationId, state }),
+    }
+  );
+}
+
+/** Forgets our record of the installation. Does NOT uninstall the App on
+ * GitHub — one installation is shared by every colleague who connected it,
+ * so that is the account admin's call, made on GitHub. */
+export function disconnectGitHubInstallation(
+  installationId: number
+): Promise<void> {
+  return request<void>(
+    `/v1alpha1/github/installations/${encodeURIComponent(installationId)}`,
+    { method: "DELETE" }
+  );
+}
+
 // -- pools and invites -------------------------------------------------
 
 export function listPools(): Promise<PoolSummary[]> {

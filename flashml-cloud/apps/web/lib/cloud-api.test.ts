@@ -18,6 +18,10 @@ import {
   cloudApiBase,
   acceptInvite,
   approveAccessRequest,
+  connectGitHubInstallation,
+  disconnectGitHubInstallation,
+  listGitHubInstallations,
+  startGitHubInstall,
   approveDeviceCode,
   bindMachineToPool,
   createPool,
@@ -1071,6 +1075,91 @@ describe("cloud-api", () => {
       const body = JSON.parse(init.body);
       expect(body).toEqual({ first_name: "Ha", company_name: "VinAI" });
       expect(body).not.toHaveProperty("is_admin");
+    });
+  });
+
+  describe("GitHub installations", () => {
+    it("reports whether the deployment has an App at all", async () => {
+      // The page renders a Connect button off this flag. A deployment with
+      // no App must report false so nobody is walked to a dead end.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { configured: false, installations: [] })
+      );
+
+      const result = await listGitHubInstallations();
+
+      expect(result.configured).toBe(false);
+      expect(result.installations).toEqual([]);
+    });
+
+    it("returns the connected accounts", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          configured: true,
+          installations: [
+            {
+              installation_id: 42,
+              account_login: "acme",
+              account_type: "Organization",
+              repository_selection: "selected",
+              created_at: "2026-08-10T12:00:00+00:00",
+            },
+          ],
+        })
+      );
+
+      const result = await listGitHubInstallations();
+
+      expect(result.installations[0].account_login).toBe("acme");
+      expect(result.installations[0].installation_id).toBe(42);
+    });
+
+    it("asks the API where to send the person, never building the URL here", async () => {
+      // The install URL carries a state the API minted and recorded. A URL
+      // assembled in the browser would carry no state and be refused at the
+      // callback — and the failure would look like a GitHub problem.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          url: "https://github.com/apps/flashml/installations/new?state=st_x",
+        })
+      );
+
+      const url = await startGitHubInstall();
+
+      const [path, init] = fetchMock.mock.calls[0];
+      expect(String(path)).toContain("/v1alpha1/github/install-url");
+      expect(init.method).toBe("POST");
+      expect(url).toContain("state=st_x");
+    });
+
+    it("sends the installation id and the state back together", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(201, { installation_id: 42, account_login: "acme" })
+      );
+
+      await connectGitHubInstallation(42, "st_x");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        installation_id: 42,
+        state: "st_x",
+      });
+    });
+
+    it("disconnects by id", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+
+      await disconnectGitHubInstallation(42);
+
+      const [path, init] = fetchMock.mock.calls[0];
+      expect(String(path)).toContain("/v1alpha1/github/installations/42");
+      expect(init.method).toBe("DELETE");
     });
   });
 });

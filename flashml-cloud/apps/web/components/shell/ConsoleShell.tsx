@@ -257,6 +257,12 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                 icon={Terminal}
                 active={isActive("/account/cli")}
               />
+              <NavItem
+                href="/account/github"
+                label="GitHub"
+                icon={GithubLogo}
+                active={isActive("/account/github")}
+              />
             </div>
 
             <Link
