@@ -212,9 +212,31 @@ export interface PoolMachine {
   module_capable: boolean;
 }
 
+/** A developer CLI credential. Mirrors `public.cli_credentials`, minus
+ * `token_hash` — the API's column allowlist never sends it and this type
+ * must not invite anyone to look for it. */
+export interface CliCredential {
+  id: string;
+  label: string | null;
+  status: "active" | "revoked";
+  /** The first 12 characters of the raw token, kept so a person can tell
+   * two credentials apart. Not a secret and not sufficient to authenticate. */
+  token_prefix: string;
+  last_used_at: string | null;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+/** `POST /v1alpha1/device/approve`. One route, two flows: `kind` says
+ * which, and exactly one of `machine_id` / `credential_id` is present.
+ * `kind` is optional only because a response from an API deployed before
+ * the CLI flow existed carries `machine_id` and no `kind` — treat its
+ * absence as "machine". */
 export interface ApproveDeviceCodeResult {
-  machine_id: string;
   status: string;
+  kind?: "machine" | "cli";
+  machine_id?: string;
+  credential_id?: string;
 }
 
 export interface RevokeMachineResult {
@@ -668,6 +690,19 @@ export function approveDeviceCode(
 export function revokeMachine(machineId: string): Promise<RevokeMachineResult> {
   return request<RevokeMachineResult>(
     `/v1alpha1/machines/${encodeURIComponent(machineId)}/revoke`,
+    { method: "POST" }
+  );
+}
+
+export function listCliCredentials(): Promise<CliCredential[]> {
+  return request<CliCredential[]>("/v1alpha1/cli-credentials");
+}
+
+export function revokeCliCredential(
+  credentialId: string
+): Promise<{ revoked: boolean }> {
+  return request<{ revoked: boolean }>(
+    `/v1alpha1/cli-credentials/${encodeURIComponent(credentialId)}/revoke`,
     { method: "POST" }
   );
 }
