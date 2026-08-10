@@ -454,6 +454,23 @@ def insert_device_code(
         )
 
 
+def fetch_device_code(
+    db: psycopg.Connection, device_code: str
+) -> dict[str, Any] | None:
+    """Read a device code by its long half. Used only to learn which flow
+    a code belongs to before redemption — the redemption itself stays the
+    atomic claim, so this read cannot introduce a race: a code that changes
+    hands between this SELECT and that UPDATE still redeems exactly once,
+    and reading the wrong kind would only route it to a claim query whose
+    ``kind =`` filter then matches nothing."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select * from public.device_codes where device_code = %s",
+            (device_code,),
+        )
+        return cur.fetchone()
+
+
 def fetch_device_code_by_user_code(
     db: psycopg.Connection, user_code: str
 ) -> dict[str, Any] | None:

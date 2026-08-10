@@ -109,3 +109,139 @@ def test_a_supabase_jwt_still_works_unchanged(make_client, db):
     owner = _new_user(db)
     r = client.get("/v1alpha1/me", headers=_bearer(_jwt(owner)))
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# the HTTP device-code surface, routed by kind
+# ---------------------------------------------------------------------------
+
+
+def test_the_cli_device_flow_end_to_end_over_http(make_client, db):
+    client = make_client()
+    approver = _bearer(_jwt(_new_user(db)))
+
+    start = client.post(
+        "/v1alpha1/device/code", json={"kind": "cli", "label": "test-laptop"}
+    )
+    assert start.status_code == 200
+    body = start.json()
+    assert body["user_code"] and body["device_code"]
+    assert body["verification_uri"].endswith("/activate")
+
+    pending = client.post(
+        "/v1alpha1/device/token", json={"device_code": body["device_code"]}
+    )
+    assert pending.status_code == 400
+    assert pending.json()["error"] == "authorization_pending"
+
+    approved = client.post(
+        "/v1alpha1/device/approve",
+        headers=approver,
+        json={"user_code": body["user_code"]},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["kind"] == "cli"
+    assert approved.json()["credential_id"]
+
+    redeemed = client.post(
+        "/v1alpha1/device/token", json={"device_code": body["device_code"]}
+    )
+    assert redeemed.status_code == 200
+    assert redeemed.json()["token"].startswith("fmu_")
+    assert redeemed.json()["token_type"] == "cli"
+
+
+def test_a_cli_start_does_not_require_a_node_id(make_client):
+    """The machine route demands one. A CLI has no node."""
+    client = make_client()
+    r = client.post("/v1alpha1/device/code", json={"kind": "cli"})
+    assert r.status_code == 200
+
+
+def test_a_machine_start_still_demands_a_valid_node_id(make_client):
+    client = make_client()
+    assert client.post("/v1alpha1/device/code", json={}).status_code == 400
+    assert client.post(
+        "/v1alpha1/device/code", json={"node_id": "bad id!"}
+    ).status_code == 400
+
+
+def test_an_unknown_kind_is_refused_rather_than_guessed(make_client):
+    client = make_client()
+    r = client.post("/v1alpha1/device/code", json={"kind": "printer"})
+    assert r.status_code == 400
+
+
+def test_a_machine_approval_still_reports_its_machine_id(make_client, db):
+    """The machine response gains `kind` but keeps `machine_id`, so no agent
+    in the field has to be updated in lockstep."""
+    client = make_client()
+    approver_id = _new_user(db)
+    node = f"n-{uuid.uuid4().hex[:8]}"
+    start = client.post(
+        "/v1alpha1/device/code", json={"node_id": node}
+    ).json()
+    r = client.post(
+        "/v1alpha1/device/approve",
+        headers=_bearer(_jwt(approver_id)),
+        json={"user_code": start["user_code"]},
+    )
+    assert r.status_code == 200
+    assert r.json()["machine_id"]
+    assert r.json()["kind"] == "machine"
+
+
+def test_a_machine_device_code_cannot_be_redeemed_as_a_user_token(make_client, db):
+    """Which flow a code belongs to is read off the stored row, never off
+    the request — otherwise a machine's device_code buys an fmu_ token."""
+    client = make_client()
+    approver_id = _new_user(db)
+    node = f"n-{uuid.uuid4().hex[:8]}"
+    start = client.post("/v1alpha1/device/code", json={"node_id": node}).json()
+    client.post(
+        "/v1alpha1/device/approve",
+        headers=_bearer(_jwt(approver_id)),
+        json={"user_code": start["user_code"]},
+    )
+    redeemed = client.post(
+        "/v1alpha1/device/token", json={"device_code": start["device_code"]}
+    )
+    assert redeemed.json()["token_type"] == "machine"
+    assert redeemed.json()["token"].startswith("fmk_")
+
+
+def test_approving_an_expired_cli_code_is_410(make_client, db):
+    from datetime import datetime, timedelta, timezone
+
+    client = make_client()
+    approver = _bearer(_jwt(_new_user(db)))
+    start = client.post("/v1alpha1/device/code", json={"kind": "cli"}).json()
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.device_codes set expires_at = %s where device_code = %s",
+            (
+                datetime.now(timezone.utc) - timedelta(seconds=1),
+                start["device_code"],
+            ),
+        )
+    r = client.post(
+        "/v1alpha1/device/approve",
+        headers=approver,
+        json={"user_code": start["user_code"]},
+    )
+    assert r.status_code == 410
+
+
+def test_a_pool_id_on_a_cli_approval_is_refused(make_client, db):
+    """pool_id binds a MACHINE to a pool. A credential is not placed on, so
+    silently ignoring it would accept a request that did not do what it
+    said."""
+    client = make_client()
+    approver = _bearer(_jwt(_new_user(db)))
+    start = client.post("/v1alpha1/device/code", json={"kind": "cli"}).json()
+    r = client.post(
+        "/v1alpha1/device/approve",
+        headers=approver,
+        json={"user_code": start["user_code"], "pool_id": str(uuid.uuid4())},
+    )
+    assert r.status_code == 400

@@ -1067,18 +1067,31 @@ def create_cloud_app(
     async def device_code(
         request: Request, db: psycopg.Connection = Depends(db_conn)
     ):
+        """Start a device-code flow, for a machine enrolling or a CLI
+        logging in. ``kind`` selects which; it defaults to ``machine``, so
+        every agent already in the field keeps working byte-for-byte."""
         payload = await _json_object(request)
-        node_id = payload.get("node_id")
-        if not valid_node_id(node_id):
-            # See NODE_ID_RE: this value later becomes a header value on a
-            # request carrying the operator credential.
-            raise HTTPException(status_code=400, detail="invalid node_id")
-        started = enrolment.start_device_code(
-            db,
-            node_id,
-            _opt_str(payload.get("hostname")),
-            _opt_str(payload.get("platform")),
-        )
+        kind = payload.get("kind", "machine")
+        if kind not in ("machine", "cli"):
+            # Refused, not coerced to the default: a typo'd kind must not
+            # silently start the wrong flow and hand back the wrong token.
+            raise HTTPException(status_code=400, detail="unknown kind")
+
+        if kind == "cli":
+            started = cli_auth.start_cli_code(db, _opt_str(payload.get("label")))
+        else:
+            node_id = payload.get("node_id")
+            if not valid_node_id(node_id):
+                # See NODE_ID_RE: this value later becomes a header value on a
+                # request carrying the operator credential.
+                raise HTTPException(status_code=400, detail="invalid node_id")
+            started = enrolment.start_device_code(
+                db,
+                node_id,
+                _opt_str(payload.get("hostname")),
+                _opt_str(payload.get("platform")),
+            )
+
         base = settings.console_url.rstrip("/")
         # /activate, not /enrol. The console has never served /enrol —
         # apps/web/app/activate/page.tsx is the page — so this URL was
@@ -1099,15 +1112,28 @@ def create_cloud_app(
     async def device_token(
         request: Request, db: psycopg.Connection = Depends(db_conn)
     ):
+        """Redeem a device_code. Which flow it belongs to is read off the
+        stored row, never off the request — a caller holding a machine's
+        device_code must not be able to ask for a user token with it."""
         payload = await _json_object(request)
         device_code_value = payload.get("device_code")
         if not isinstance(device_code_value, str) or not device_code_value:
             raise HTTPException(status_code=400, detail="device_code required")
-        token = enrolment.redeem_device_code(db, device_code_value)
+
+        row = dbmod.fetch_device_code(db, device_code_value)
+        kind = row["kind"] if row else "machine"
+        if kind == "cli":
+            token = cli_auth.redeem_cli_code(db, device_code_value)
+            token_type = "cli"
+        else:
+            token = enrolment.redeem_device_code(db, device_code_value)
+            token_type = "machine"
+
         if token is None:
             # RFC 8628's polling shape. Unknown / unapproved / expired /
             # already-redeemed are one indistinguishable answer, so this
-            # cannot be used to learn which codes exist.
+            # cannot be used to learn which codes exist. An unknown code
+            # takes the machine branch above and lands here identically.
             return Response(
                 content=json.dumps(
                     {"error": "authorization_pending",
@@ -1116,7 +1142,7 @@ def create_cloud_app(
                 status_code=400,
                 media_type="application/json",
             )
-        return {"token": token, "token_type": "machine"}
+        return {"token": token, "token_type": token_type}
 
     # -- browser-facing: Supabase JWT --------------------------------------
 
@@ -1340,6 +1366,33 @@ def create_cloud_app(
         if not isinstance(user_code, str) or not user_code:
             raise HTTPException(status_code=400, detail="user_code required")
 
+        # Which flow is being approved is read off the stored row, not the
+        # request body — the approver types a code, and nothing else about
+        # it is theirs to assert.
+        code_row = dbmod.fetch_device_code_by_user_code(db, user_code.strip().upper())
+        if code_row is not None and code_row.get("kind") == "cli":
+            if payload.get("pool_id") is not None:
+                # pool_id binds a MACHINE to a pool. A credential is never
+                # placed on, so accepting and ignoring it would confirm a
+                # request that did not do what it said.
+                raise HTTPException(
+                    status_code=400, detail="pool_id does not apply to a CLI login"
+                )
+            dbmod.upsert_profile(db, user_id)
+            try:
+                credential_id = cli_auth.approve_cli_code(
+                    db, user_code.strip().upper(), user_id
+                )
+            except cli_auth.CliCodeNotFound:
+                raise HTTPException(status_code=404, detail="unknown code") from None
+            except cli_auth.CliCodeExpired:
+                raise HTTPException(status_code=410, detail="code expired") from None
+            return {
+                "credential_id": str(credential_id),
+                "kind": "cli",
+                "status": "approved",
+            }
+
         # An optional pool to auto-attach the approved machine to. Checked
         # BEFORE the device code is ever touched: a malformed, unknown, or
         # not-a-member pool_id must refuse the whole approval, and refusing
@@ -1406,7 +1459,10 @@ def create_cloud_app(
             raise HTTPException(
                 status_code=409, detail="this machine is already enrolled"
             ) from None
-        return {"machine_id": str(machine_id), "status": "approved"}
+        # `kind` rides alongside machine_id rather than replacing it, so the
+        # console can branch on one key in both cases and no agent already
+        # in the field has to be updated in lockstep.
+        return {"machine_id": str(machine_id), "kind": "machine", "status": "approved"}
 
     @app.post("/v1alpha1/machines/{machine_id}/revoke", tags=["browser"])
     async def revoke(
