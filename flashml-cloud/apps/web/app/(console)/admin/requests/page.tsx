@@ -92,12 +92,16 @@ export default function AdminRequestsPage() {
   async function handleApprove(row: AccessRequestRow) {
     setRows((prev) => prev.filter((r) => r.user_id !== row.user_id));
     try {
-      await approveAccessRequest(row.user_id);
-      // This deployment has no email provider — nothing notifies the
-      // person being approved (same constraint `PendingScreen` documents
-      // for the waiting side of this same flow). The copy says so rather
-      // than implying otherwise.
-      toast.success("Approved — they're in. Let them know yourself.");
+      const decision = await approveAccessRequest(row.user_id);
+      // Say which of the two actually happened. An unconditional "we
+      // emailed them" would just relocate the dishonesty this replaced:
+      // mail is skipped when no provider is configured, when the account
+      // has no address, and when the provider refuses.
+      toast.success(
+        decision.emailed
+          ? "Approved — they're in, and we've emailed them."
+          : "Approved — they're in. No email went out, so let them know yourself."
+      );
     } catch (err) {
       if (err instanceof NotFound) {
         // 404 here means "no pending request for this user" — the
@@ -119,8 +123,12 @@ export default function AdminRequestsPage() {
   async function handleDecline(row: AccessRequestRow) {
     setRows((prev) => prev.filter((r) => r.user_id !== row.user_id));
     try {
-      await declineAccessRequest(row.user_id);
-      toast.success("Request declined");
+      const decision = await declineAccessRequest(row.user_id);
+      toast.success(
+        decision.emailed
+          ? "Declined — we've let them know."
+          : "Declined. No email went out."
+      );
     } catch (err) {
       if (err instanceof NotFound) {
         // Same double-decide race as handleApprove above.

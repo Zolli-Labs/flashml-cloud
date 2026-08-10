@@ -65,6 +65,19 @@ class Settings:
     #: know which host to put in front of it. Unset is a real, if
     #: non-fatal, defect — hence the startup warning in `from_env`.
     console_url: str = ""
+    #: Resend API key. Optional: an unconfigured deploy must still boot and
+    #: serve — the failure mode of a missing mail provider is a silent
+    #: product, not a dead API, so this is deliberately NOT in the
+    #: require_auth missing-secret check. Same reasoning as `console_url`,
+    #: which warns rather than refusing.
+    resend_api_key: str = ""
+    #: The From address, e.g. "FlashML <no-reply@mail.zolliai.com>". Mail is
+    #: sent only when this AND `resend_api_key` are both set.
+    email_from: str = ""
+    #: Reply-to. Falls back to `email_from`. The declined email invites a
+    #: reply (re-applying is refused by design — POST /access-request 409s
+    #: once decided), so this should be a monitored mailbox.
+    email_reply_to: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -95,6 +108,9 @@ class Settings:
         # is absent and a connection is actually requested.
         database_url = os.environ.get("DATABASE_URL", "")
         console_url = os.environ.get("FLASHML_CONSOLE_URL", "")
+        resend_api_key = os.environ.get("RESEND_API_KEY", "")
+        email_from = os.environ.get("EMAIL_FROM", "")
+        email_reply_to = os.environ.get("EMAIL_REPLY_TO", "")
 
         settings = cls(
             supabase_url=supabase_url,
@@ -105,6 +121,9 @@ class Settings:
             require_auth=require_auth,
             database_url=database_url,
             console_url=console_url,
+            resend_api_key=resend_api_key,
+            email_from=email_from,
+            email_reply_to=email_reply_to,
         )
 
         if require_auth:
@@ -151,6 +170,17 @@ class Settings:
                     "FLASHML_CONSOLE_URL is unset: device-code enrolment will "
                     "print a relative /activate path that a volunteer cannot "
                     "resolve. Set it to the console's public base URL."
+                )
+
+            # Warn, do not refuse. Half-configured mail is the case worth
+            # naming: a key with no From address (or the reverse) looks
+            # configured in the dashboard and sends nothing, so approvals go
+            # back to being silent with no signal anywhere.
+            if bool(resend_api_key) != bool(email_from):
+                logging.getLogger("flashml-cloud-api").warning(
+                    "Mail is half-configured: RESEND_API_KEY and EMAIL_FROM "
+                    "must both be set. No approval or decline email will be "
+                    "sent until they are."
                 )
 
         return settings

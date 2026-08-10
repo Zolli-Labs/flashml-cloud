@@ -15,6 +15,13 @@ product, fully through the gate, still cannot open the gate for anyone else.
 """
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
+import httpx
+
+from flashml_cloud_api.mailer import Mailer
+
 from test_jobs_from_repo import (  # noqa: F401 - fixtures
     _jwt, _new_user, db, make_client, settings, transport,
 )
@@ -378,3 +385,133 @@ def test_a_malformed_user_id_is_rejected_on_decline(make_client, db):
         "/v1alpha1/admin/access-requests/not-a-uuid/decline", headers=_auth(_admin(db))
     )
     assert r.status_code in (400, 422)
+
+
+# ---------------------------------------------------------------------------
+# email on decision
+#
+# Exactly-once is structural here, not bookkept: `approve_access_request`
+# and `decline_access_request` both filter on `status = 'pending'`, so a
+# second call matches no row and the route 404s before the mailer is
+# reached. That is why there is no sent-log table and no migration.
+# ---------------------------------------------------------------------------
+
+
+class FakeResend(httpx.AsyncBaseTransport):
+    def __init__(self, status: int = 200):
+        self.requests: list[httpx.Request] = []
+        self._status = status
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        self.requests.append(request)
+        return httpx.Response(self._status, json={"id": "msg_1"})
+
+    @property
+    def sent(self) -> list[dict]:
+        return [json.loads(r.content) for r in self.requests]
+
+
+def _mail_client(make_client, settings, status: int = 200):
+    """A client whose mailer is configured and pointed at a fake Resend."""
+    resend = FakeResend(status=status)
+    configured = replace(
+        settings,
+        resend_api_key="re_test_key",
+        email_from="FlashML <no-reply@mail.example>",
+    )
+    client = make_client(mailer=Mailer(configured, transport=resend))
+    return client, resend
+
+
+def test_approving_emails_the_account(make_client, settings, db):
+    client, resend = _mail_client(make_client, settings)
+    admin = _admin(db)
+    user = _pending(client, db, email="her@example.com")
+
+    r = client.post(
+        f"/v1alpha1/admin/access-requests/{user}/approve", headers=_auth(admin)
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "admitted"
+    assert r.json()["emailed"] is True
+
+    assert len(resend.sent) == 1
+    assert resend.sent[0]["to"] == ["her@example.com"]
+    assert "You're in" in resend.sent[0]["subject"]
+
+
+def test_approving_twice_sends_exactly_one_email(make_client, settings, db):
+    client, resend = _mail_client(make_client, settings)
+    admin = _admin(db)
+    user = _pending(client, db, email="her@example.com")
+
+    first = client.post(
+        f"/v1alpha1/admin/access-requests/{user}/approve", headers=_auth(admin)
+    )
+    second = client.post(
+        f"/v1alpha1/admin/access-requests/{user}/approve", headers=_auth(admin)
+    )
+    assert first.status_code == 200
+    assert second.status_code == 404
+    assert len(resend.sent) == 1
+
+
+def test_declining_sends_the_declined_email(make_client, settings, db):
+    client, resend = _mail_client(make_client, settings)
+    admin = _admin(db)
+    user = _pending(client, db, email="them@example.com")
+
+    r = client.post(
+        f"/v1alpha1/admin/access-requests/{user}/decline", headers=_auth(admin)
+    )
+    assert r.status_code == 200
+    assert r.json()["emailed"] is True
+    assert len(resend.sent) == 1
+    assert "About your FlashML request" in resend.sent[0]["subject"]
+    assert "You're in" not in resend.sent[0]["subject"]
+
+
+def test_a_provider_failure_still_admits_the_user(make_client, settings, db):
+    """The admission is committed before the send. A 500 from Resend must
+    cost the user their email, never their access."""
+    client, resend = _mail_client(make_client, settings, status=500)
+    admin = _admin(db)
+    user = _pending(client, db, email="her@example.com")
+
+    r = client.post(
+        f"/v1alpha1/admin/access-requests/{user}/approve", headers=_auth(admin)
+    )
+    assert r.status_code == 200
+    assert r.json()["emailed"] is False
+    assert _request_row(db, user)["status"] == "admitted"
+    assert _admitted_at(db, user) is not None
+
+
+def test_an_account_with_no_address_is_still_admitted(make_client, settings, db):
+    client, resend = _mail_client(make_client, settings)
+    admin = _admin(db)
+    user = _pending(client, db)  # no email seeded in auth.users
+
+    r = client.post(
+        f"/v1alpha1/admin/access-requests/{user}/approve", headers=_auth(admin)
+    )
+    assert r.status_code == 200
+    assert r.json()["emailed"] is False
+    assert resend.sent == []
+    assert _admitted_at(db, user) is not None
+
+
+def test_an_unconfigured_deploy_sends_nothing_and_still_works(make_client, db):
+    """The default client has no mail configured — the shape every other
+    test file in this suite runs under."""
+    client = make_client()
+    admin = _admin(db)
+    user = _pending(client, db, email="her@example.com")
+
+    r = client.post(
+        f"/v1alpha1/admin/access-requests/{user}/approve", headers=_auth(admin)
+    )
+    assert r.status_code == 200
+    assert r.json()["emailed"] is False
+    assert _admitted_at(db, user) is not None

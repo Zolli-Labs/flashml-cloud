@@ -1110,11 +1110,21 @@ export function listAccessRequests(
   );
 }
 
+/** What the admin queue's approve/decline routes answer with. `emailed` is
+ * false when no provider is configured, when the account has no address, or
+ * when the provider refused — the caller must not assume a message went
+ * out. */
+export interface AccessDecision {
+  user_id: string;
+  status: string;
+  emailed: boolean;
+}
+
 /** `POST /v1alpha1/admin/access-requests/{userId}/approve` — admin only.
  * 404s (via `NotFound`) when there was no pending request for this user;
  * `NotFound` here means "nothing to approve", not "unknown user". */
-export function approveAccessRequest(userId: string): Promise<void> {
-  return request<void>(
+export function approveAccessRequest(userId: string): Promise<AccessDecision> {
+  return request<AccessDecision>(
     `/v1alpha1/admin/access-requests/${encodeURIComponent(userId)}/approve`,
     { method: "POST" }
   );
@@ -1122,8 +1132,8 @@ export function approveAccessRequest(userId: string): Promise<void> {
 
 /** The decline counterpart of `approveAccessRequest` — same route shape,
  * same 404-means-nothing-pending doctrine. */
-export function declineAccessRequest(userId: string): Promise<void> {
-  return request<void>(
+export function declineAccessRequest(userId: string): Promise<AccessDecision> {
+  return request<AccessDecision>(
     `/v1alpha1/admin/access-requests/${encodeURIComponent(userId)}/decline`,
     { method: "POST" }
   );

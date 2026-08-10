@@ -214,6 +214,38 @@ services:
         value: https://flashml-web.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
+      # Mail. The API sends two product emails — access approved and access
+      # declined. Absent, it boots and serves and sends nothing: a missing
+      # provider must not take the API down, so these are NOT in
+      # settings.from_env's required list.
+      #
+      # Supabase's own SMTP setting is separate and governs AUTH mail
+      # (password reset, confirmation) — it is configured in the Supabase
+      # dashboard, not here, and points at the same Resend account.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "FlashML <no-reply@zolliai.com>"
+      # MUST be a mailbox that actually RECEIVES mail. Resend's domain
+      # verification proves `zolliai.com` can SEND — DKIM plus an SPF/MX pair
+      # on the `send.` subdomain for bounces — and says nothing about
+      # receiving. Verified 2026-08-10: `zolliai.com` has NO MX record, so no
+      # address at that domain receives anything today. The declined email's
+      # only call to action is "reply to this message" (re-applying is
+      # refused by design, see `access-request` 409), so an unresolved
+      # reply-to strands exactly the person who most needs a way back in.
+      #
+      # RESOLVED 2026-08-10: the owner's own monitored inbox. Deliberately
+      # NOT an @zolliai.com address — no Workspace account exists on that
+      # domain, so any address there would be send-only and would bounce.
+      # Reply-To need not sit on the verified sending domain: DKIM/SPF
+      # govern `From`, while `Reply-To` only redirects the recipient's
+      # reply. Recipients still see "FlashML" as the sender.
+      #
+      # Swap this for a real support address the day Workspace (or a free
+      # forwarder) lands on zolliai.com — one env var, no code change.
+      - key: EMAIL_REPLY_TO
+        value: "phongct1105@gmail.com"
 
   # -------------------------------------------------------------------------
   # 3. The web app — public. Talks only to the API, never to Postgres.
@@ -396,6 +428,38 @@ services:
         value: https://flashml-dev-web.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
+      # Mail. The API sends two product emails — access approved and access
+      # declined. Absent, it boots and serves and sends nothing: a missing
+      # provider must not take the API down, so these are NOT in
+      # settings.from_env's required list.
+      #
+      # Supabase's own SMTP setting is separate and governs AUTH mail
+      # (password reset, confirmation) — it is configured in the Supabase
+      # dashboard, not here, and points at the same Resend account.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "FlashML <no-reply@zolliai.com>"
+      # MUST be a mailbox that actually RECEIVES mail. Resend's domain
+      # verification proves `zolliai.com` can SEND — DKIM plus an SPF/MX pair
+      # on the `send.` subdomain for bounces — and says nothing about
+      # receiving. Verified 2026-08-10: `zolliai.com` has NO MX record, so no
+      # address at that domain receives anything today. The declined email's
+      # only call to action is "reply to this message" (re-applying is
+      # refused by design, see `access-request` 409), so an unresolved
+      # reply-to strands exactly the person who most needs a way back in.
+      #
+      # RESOLVED 2026-08-10: the owner's own monitored inbox. Deliberately
+      # NOT an @zolliai.com address — no Workspace account exists on that
+      # domain, so any address there would be send-only and would bounce.
+      # Reply-To need not sit on the verified sending domain: DKIM/SPF
+      # govern `From`, while `Reply-To` only redirects the recipient's
+      # reply. Recipients still see "FlashML" as the sender.
+      #
+      # Swap this for a real support address the day Workspace (or a free
+      # forwarder) lands on zolliai.com — one env var, no code change.
+      - key: EMAIL_REPLY_TO
+        value: "phongct1105@gmail.com"
 
   - type: web
     name: flashml-dev-web
