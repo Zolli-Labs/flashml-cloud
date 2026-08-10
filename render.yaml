@@ -232,12 +232,19 @@ services:
       # no MX record by default. The declined email's only call to action is
       # "reply to this message" (re-applying is refused by design, see
       # `access-request` 409), so an unresolved reply-to strands exactly the
-      # person who most needs a way back in. Resolve this to a real,
-      # monitored mailbox BEFORE `RESEND_API_KEY` is set anywhere — on this
-      # service, on flashml-dev-api, or in any operator's local .env. See
-      # the plan's "Operator setup" section for the ordering.
+      # person who most needs a way back in.
+      #
+      # RESOLVED 2026-08-10: the owner's own monitored inbox. Deliberately
+      # NOT an @zolliai.com address — no Workspace account exists on that
+      # domain, so any address there would be send-only and would bounce.
+      # Reply-To need not sit on the verified sending domain: DKIM/SPF
+      # govern `From`, while `Reply-To` only redirects the recipient's
+      # reply. Recipients still see "FlashML" as the sender.
+      #
+      # Swap this for a real support address the day Workspace (or a free
+      # forwarder) lands on zolliai.com — one env var, no code change.
       - key: EMAIL_REPLY_TO
-        value: "hello@mail.zolliai.com"
+        value: "phongct1105@gmail.com"
 
   # -------------------------------------------------------------------------
   # 3. The web app — public. Talks only to the API, never to Postgres.
@@ -438,12 +445,19 @@ services:
       # no MX record by default. The declined email's only call to action is
       # "reply to this message" (re-applying is refused by design, see
       # `access-request` 409), so an unresolved reply-to strands exactly the
-      # person who most needs a way back in. Resolve this to a real,
-      # monitored mailbox BEFORE `RESEND_API_KEY` is set anywhere — on this
-      # service, on flashml-api, or in any operator's local .env. See the
-      # plan's "Operator setup" section for the ordering.
+      # person who most needs a way back in.
+      #
+      # RESOLVED 2026-08-10: the owner's own monitored inbox. Deliberately
+      # NOT an @zolliai.com address — no Workspace account exists on that
+      # domain, so any address there would be send-only and would bounce.
+      # Reply-To need not sit on the verified sending domain: DKIM/SPF
+      # govern `From`, while `Reply-To` only redirects the recipient's
+      # reply. Recipients still see "FlashML" as the sender.
+      #
+      # Swap this for a real support address the day Workspace (or a free
+      # forwarder) lands on zolliai.com — one env var, no code change.
       - key: EMAIL_REPLY_TO
-        value: "hello@mail.zolliai.com"
+        value: "phongct1105@gmail.com"
 
   - type: web
     name: flashml-dev-web
