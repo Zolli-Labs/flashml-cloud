@@ -14,12 +14,11 @@ import {
 /** Stands in for the whole console while `access` is `pending` — the
  * request is in and an admin has not decided yet.
  *
- * It deliberately does NOT say an email is on its way. Nothing sends one:
- * this deployment has no email provider, the same constraint that removed
- * magic links from sign-in (`app/(auth)/sign-in/SignInCard.tsx` documents
- * it at length — "This flow sends no email at all"). Approval is silent and
- * the owner tells people by hand, so the only honest instruction we can
- * give someone waiting is to reload.
+ * Approval and decline both send mail now (see
+ * `docs/superpowers/specs/2026-08-10-transactional-email-design.md`), so
+ * this screen may finally promise one. It still offers Reload, because a
+ * person holding this tab open when the decision lands should not have to
+ * wait for an inbox.
  *
  * The "Have an invite code?" link is the one other thing a pending account
  * can still do: `/pools` renders this screen instead of the paste-a-code
@@ -45,14 +44,12 @@ export function PendingScreen({ email }: { email: string | null }) {
         </CardHeader>
         <CardContent className="flex flex-col items-center gap-3 text-center">
           <p className="text-sm text-muted-foreground">
-            We&apos;ll get back to you at{" "}
-            <span className="text-foreground">
+            We&rsquo;ll email you at{" "}
+            <span className="font-medium text-foreground">
               {email ?? "the address you signed up with"}
-            </span>
-            .
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Already approved? Reload this page.
+            </span>{" "}
+            as soon as a human has looked at it. Already approved? Reload
+            this page.
           </p>
           <Button
             variant="outline"
@@ -65,7 +62,7 @@ export function PendingScreen({ email }: { email: string | null }) {
             href="/pools/join"
             className="text-xs text-muted-foreground hover:text-brand-foreground hover:underline"
           >
-            Have a Crew invite code?
+            Have a workspace invite code?
           </Link>
         </CardContent>
       </Card>
