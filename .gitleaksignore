@@ -31,3 +31,22 @@ b1e5df96aa7c76021fb1be5a5fe538a249bedcde:.env.dev.example:generic-api-key:32
 6bc4218192b3df87514db38fc6f7a0b9cec8320d:flashml-cloud/apps/web/lib/cloud-api.test.ts:generic-api-key:317
 6bc4218192b3df87514db38fc6f7a0b9cec8320d:flashml-cloud/apps/web/lib/cloud-api.test.ts:generic-api-key:325
 6bc4218192b3df87514db38fc6f7a0b9cec8320d:flashml-cloud/apps/web/lib/cloud-api.test.ts:generic-api-key:344
+
+# --------------------------------------------------------------------------
+# FALSE POSITIVES — a category the policy above did not have.
+#
+# The note at the top says an entry means "the value has been ROTATED". These
+# two do NOT mean that, and conflating them would be the dangerous direction:
+# a future reader must be able to tell a dead-but-real key from a value that
+# was never a secret at all.
+#
+# Both findings are the SAME string, `token_prefix: "fmu_abc12345"`, in a test
+# fixture and in the plan document that quotes it. A `token_prefix` is by
+# construction the non-secret head of a credential — it is what the console
+# shows a user so they can tell two CLI tokens apart — and `abc12345` is
+# placeholder text. There is nothing to rotate.
+#
+# gitleaks fires on the `fmu_` prefix looking like a vendor key prefix, which
+# is a reasonable heuristic and a wrong call here.
+85a74c8eebf67956bdf28e0b311348599c0a09e2:flashml-cloud/apps/web/lib/cli-credential-status.test.ts:generic-api-key:9
+a174991482e9823894ccaf42131c012f9164c6a2:flashml-cloud/docs/superpowers/plans/2026-08-10-developer-identity.md:generic-api-key:1724
