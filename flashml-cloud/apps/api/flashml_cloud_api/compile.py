@@ -46,7 +46,13 @@ from typing import Any
 from flashruntime.images import manifest_for
 from flashruntime.protocol.v1alpha1 import JobSpec
 
-from flashml_cloud_api.flashml_yaml import FlashmlConfig
+from flashml_cloud_api.datasets import Manifest
+from flashml_cloud_api.elastic import dataset_chunks
+from flashml_cloud_api.flashml_yaml import (
+    SPLIT_REPLICA,
+    SPLIT_SHARD,
+    FlashmlConfig,
+)
 from flashml_cloud_api.images import CuratedImage
 
 #: Where the executor stages declared inputs, and where a task's collected
@@ -106,6 +112,24 @@ DEPENDENCIES_PARAM = "dependencies"
 #: because the base (`torch==2.3.1` and friends) would read as a requirement
 #: the host cannot satisfy. See ``_dependencies``.
 EXTRA_DEPENDENCIES_PARAM = "extra_dependencies"
+
+#: The workload parameter carrying each task's share of every declared
+#: dataset: one list per task, each a list of
+#: ``{"name", "split", "entries": [{"path", "url", "size", "integrity"}]}``.
+#:
+#: Per-TASK and not per-job, unlike every other parameter in this module.
+#: That is the whole design: the slicing decision is made once, here, at
+#: submit time, where the manifest is in scope and the fleet's shape is
+#: known — rather than by each host from a rule it would have to be told and
+#: trusted to apply identically. A host is handed a list of URLs and fetches
+#: them; it never computes which ones are its own.
+#:
+#: Deliberately **not** an entry in ``inputs``, for the same reason
+#: ``LOCAL_INPUTS_PARAM`` is not: ``inputs`` values are ``artifact://`` URIs
+#: for bytes that were uploaded to the control plane, and no dataset byte
+#: ever touches our infrastructure. The URLs point at the submitter's own
+#: origin and the host fetches them directly.
+DATASET_SLICES_PARAM = "dataset_slices"
 
 #: A federated round's lease has to outlive local training, not a single
 #: HTTP call — ``CommandRecipe``'s 60 s default would expire mid-epoch and
@@ -297,6 +321,89 @@ def _dependencies(
         parameters[EXTRA_DEPENDENCIES_PARAM] = extras
 
 
+def _dataset_slices(
+    config: FlashmlConfig,
+    manifests: dict[str, Manifest] | None,
+    parameters: dict[str, Any],
+    *,
+    chunk_ids: Sequence[int],
+    total_chunks: int,
+) -> None:
+    """Cut every declared dataset into one slice per task.
+
+    ``split`` is inferred from ``mode`` when the file does not say:
+    federated means disjoint slices whose union is one pass, and anything
+    else means each task needs the whole dataset. An explicit ``split:``
+    wins — the inference is a default, not a rule, and it is overridable in
+    both directions.
+
+    ``chunk_ids`` is one chunk id per task, in task order, and
+    ``total_chunks`` is how many chunks the whole pass is cut into. For a
+    sweep the two are the same thing (``range(n)`` over ``n`` tasks) and the
+    distinction costs nothing; for a federated round it is load-bearing and
+    the manifest is cut against ``total_chunks``. **Cutting against the
+    number of slots instead would be wrong in exactly the rounds that
+    matter**: a round with two slots online and a four-chunk pass would hand
+    each of them half the dataset while its argv said ``--num-shards 4``, so
+    the driver would credit a swept pass that never happened and the next
+    round would retrain the same bytes. A slot's chunk id is also not its
+    index — ``fedavg.slot_chunks_for`` rotates them through the pass — so
+    the slice follows the id, which is the same integer ``--shard`` carries
+    and ``chunks_done`` reports.
+
+    Absent stays absent, the same judgement ``_local_inputs`` records.
+    """
+    if not config.datasets:
+        return
+    # NOT `or not manifests`. Declared-but-unresolved must fail LOUD: an
+    # early return here emits a job whose tasks fetch nothing, run against
+    # an empty /work/data/, and fail on a missing path — or worse, train on
+    # whatever the entrypoint falls back to. Same "does not fail closed"
+    # shape the payload forwards in `recipes/command.py` are all commented
+    # against. The per-dataset `manifest is None` check below cannot save us
+    # if we return before reaching it.
+    if not manifests:
+        raise CompileError(
+            f"job declares {len(config.datasets)} dataset(s) but none were "
+            f"resolved — refusing to compile a job that would run with no data"
+        )
+    default_split = SPLIT_SHARD if config.is_federated else SPLIT_REPLICA
+    chunk_ids = list(chunk_ids)
+    per_task: list[list[dict[str, Any]]] = [[] for _ in chunk_ids]
+    for declared in config.datasets:
+        manifest = manifests.get(declared["name"])
+        if manifest is None:
+            raise CompileError(
+                f"dataset {declared['name']!r} was declared but not resolved — "
+                f"refusing to compile a job whose tasks would look for it in an "
+                f"empty /work/data/{declared['name']}/"
+            )
+        split = declared.get("split") or default_split
+        # `dict(e.integrity)` so a slice never aliases the manifest's own
+        # dict; the manifest is frozen but that field is not.
+        entries = [
+            {"path": e.path, "url": e.url, "size": e.size,
+             "integrity": dict(e.integrity)}
+            for e in manifest.entries
+        ]
+        if split == SPLIT_REPLICA:
+            for slot in range(len(chunk_ids)):
+                per_task[slot].append(
+                    {"name": manifest.name, "split": split,
+                     "entries": list(entries)}
+                )
+            continue
+        # Against `total_chunks`, indexed by chunk id — see the docstring.
+        groups = dataset_chunks([e.size for e in manifest.entries], total_chunks)
+        for slot, chunk_id in enumerate(chunk_ids):
+            per_task[slot].append({
+                "name": manifest.name,
+                "split": split,
+                "entries": [entries[i] for i in groups[chunk_id]],
+            })
+    parameters[DATASET_SLICES_PARAM] = per_task
+
+
 def _resources(config: FlashmlConfig) -> dict[str, Any]:
     """``flashml.yaml resources:`` → the upstream ``ResourcesSpec`` fields.
 
@@ -380,6 +487,7 @@ def compile_to_jobspec(
     job_name: str,
     *,
     pool: str | None = None,
+    manifests: dict[str, Manifest] | None = None,
 ) -> dict[str, Any]:
     """Compile a validated config into the JobSpec dict the coordinator takes.
 
@@ -389,6 +497,12 @@ def compile_to_jobspec(
 
     ``pool`` is the one exception to "fixed and not configurable" — see the
     ``isolation``/``placement`` lines below.
+
+    ``manifests`` maps a declared dataset's ``name`` to the pinned manifest
+    the route resolved for it. Resolution is a network call and belongs to
+    the caller, not here; this function only cuts what it is handed. A
+    config that declares datasets and is given none is REFUSED — see
+    ``_dataset_slices``.
     """
     if not str(code_artifact_uri).startswith("artifact://"):
         # CommandRecipe.validate_params refuses anything else; catching it
@@ -447,6 +561,13 @@ def compile_to_jobspec(
         parameters["reduce"] = dict(config.reduce)
     _local_inputs(config, parameters)
     _dependencies(config, image, parameters)
+    # One chunk per task and one task per chunk: an independent job has no
+    # pass to sweep and no rotation to honour, so the two numbers a
+    # federated round keeps apart collapse into one here. `or 1` because a
+    # job with no sweep is one task, not zero.
+    _task_count = len(task_params) if task_params else 1
+    _dataset_slices(config, manifests, parameters,
+                    chunk_ids=range(_task_count), total_chunks=_task_count)
 
     repository, tag = _split_reference(image.reference)
 
@@ -515,6 +636,7 @@ def compile_federated_round(
     slot_chunks: Sequence[int],
     total_chunks: int,
     pool: str | None = None,
+    manifests: dict[str, Manifest] | None = None,
 ) -> dict[str, Any]:
     """Compile **one round** of a ``mode: federated`` config into a JobSpec.
 
@@ -536,6 +658,11 @@ def compile_federated_round(
     - one task per **slot**, each told the chunk of the data it is to train
       on, so the slots partition the pass rather than each training on all
       of it.
+    - if the job declares ``datasets:``, that same chunk id also selects the
+      slot's share of each pinned manifest (``manifests``, keyed by declared
+      name). The integers in argv and the files in the slice are cut from
+      one layout, which is what keeps ``chunks_done`` describing the bytes
+      the machine actually trained on.
 
     ``slot_chunks`` and ``total_chunks`` are handed in rather than read off
     the config, because neither is the author's to state: the pass is cut
@@ -597,6 +724,15 @@ def compile_federated_round(
     # machines: the user's `shard_of(x, y, shard, num_shards)` strides the
     # data by it, so it must be the number the chunk ids were minted from or
     # a task trains a slice that overlaps its neighbours'.
+    #
+    # BOTH STAY when the job declares `datasets:` (spec §14.4), even though
+    # the slicing has already happened by then and the task's files are
+    # chosen for it. They are no longer only a slicing instruction: the
+    # worker reports `chunks_done: [args.shard]`, and `run_fedavg` averages
+    # a contribution that names no chunk in with zero weight. Dropping them
+    # would therefore credit every machine in every federated dataset job
+    # nothing at all, while every round looked healthy — the machines train,
+    # the volunteers spend their electricity, and the round reduces nothing.
     fixed = ["python", entry, *config.args,
              "--round", str(round_index),
              "--num-shards", str(total_chunks)]
@@ -631,6 +767,12 @@ def compile_federated_round(
     # A federated round is an ordinary command job (see this function's
     # docstring); the same base-plus-extras resolution applies to it.
     _dependencies(config, image, parameters)
+    # The pass, not the round, is what a declared dataset is cut against:
+    # `total_chunks` chunks, of which this round's slots claim
+    # `slot_chunks`. Passing `len(slot_chunks)` here would silently hand a
+    # narrow round the whole dataset — see `_dataset_slices`.
+    _dataset_slices(config, manifests, parameters,
+                    chunk_ids=slot_chunks, total_chunks=total_chunks)
 
     repository, tag = _split_reference(image.reference)
 

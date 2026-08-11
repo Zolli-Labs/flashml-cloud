@@ -489,3 +489,20 @@ def test_two_datasets_may_not_share_a_name():
 def test_datasets_did_not_widen_the_allowed_keys():
     with pytest.raises(ConfigError, match="dataset"):
         parse_flashml_yaml(MINIMAL + "\ndataset:\n  - name: d\n")
+
+
+def test_at_most_four_datasets_may_be_declared():
+    """Each source is resolved serially against its origin inside the submit
+    request, so the count bounds how long a live HTTP handler can block."""
+    entries = "".join(
+        f"  - name: d{i}\n    source: hf://a/b{i}\n" for i in range(5)
+    )
+    with pytest.raises(ConfigError, match="at most"):
+        parse_flashml_yaml(MINIMAL + "\ndatasets:\n" + entries)
+
+
+def test_four_datasets_are_fine():
+    entries = "".join(
+        f"  - name: d{i}\n    source: hf://a/b{i}\n" for i in range(4)
+    )
+    assert len(parse_flashml_yaml(MINIMAL + "\ndatasets:\n" + entries).datasets) == 4

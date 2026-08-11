@@ -126,6 +126,15 @@ LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: The four addressing schemes v1 understands. All four are fetched
 #: ANONYMOUSLY: the scheme says where the bytes are, not who may read them,
 #: and v1 stores no credential of any kind.
+#: The most datasets one job may declare.
+#:
+#: Not an arbitrary tidiness limit. Each declared source is resolved
+#: SERIALLY against its origin inside the submit request, under a 30s
+#: per-request timeout, so N sources is an N x 30s worst case on a live
+#: HTTP handler. Four keeps that bounded at two minutes without needing
+#: concurrency, and nobody legitimately trains one job on ten origins.
+MAX_DATASETS = 4
+
 DATASET_SCHEMES = ("hf://", "s3://", "r2://", "https://")
 
 #: The two ways one declared dataset becomes N per-task slices. ``shard``
@@ -627,6 +636,12 @@ def _validate_datasets(value: object) -> list[dict]:
         raise ConfigError(
             f"flashml.yaml 'datasets' must be a list of mappings, each with a "
             f"'name' and a 'source', got {value!r}"
+        )
+    if len(value) > MAX_DATASETS:
+        raise ConfigError(
+            f"flashml.yaml 'datasets' declares {len(value)}, and at most "
+            f"{MAX_DATASETS} are allowed: each one is resolved against its "
+            f"origin while your submit request waits"
         )
     out: list[dict] = []
     seen: set[str] = set()
