@@ -123,7 +123,7 @@ jobs:
       # Not a secret: it is already a literal in render.yaml.
       - run: npm run build
         env:
-          NEXT_PUBLIC_CLOUD_API: https://flashml-api.onrender.com
+          NEXT_PUBLIC_CLOUD_API: https://api.zolliai.com
 
       - run: npm test
 
@@ -250,21 +250,113 @@ jobs:
           DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
 
 # ---------------------------------------------------------------------------
-# PRODUCTION DEPLOYS ARE NOT IN THIS FILE.
+# PRODUCTION DEPLOYS LIVE HERE AGAIN (2026-08-11).
 #
-# They were, briefly: `migrate-prod` and `deploy-prod` jobs gated by
-# `environment: production` with a required reviewer. That does not work here.
-# GitHub REFUSED to create the protection rule (2026-08-02):
+# History, because the reversal matters. They were here, then moved out: the
+# gate was meant to be `environment: production` with a required reviewer, and
+# GitHub REFUSED to create the rule (2026-08-02, HTTP 422):
 #
 #   "Failed to create the environment protection rule. Please ensure the
-#    billing plan supports the required reviewers protection rule." (HTTP 422)
+#    billing plan supports the required reviewers protection rule."
 #
-# The Zolli-Labs org is on GitHub **Free**, where environment protection rules
-# are unavailable for PRIVATE repositories. A bare `production` environment can
-# still be created — it just enforces nothing, which is worse than no gate at
-# all because it looks like one.
+# Zolli-Labs is on GitHub Free, where environment protection rules are
+# unavailable for PRIVATE repositories. A bare `production` environment can be
+# created but enforces nothing, which is worse than no gate because it looks
+# like one. So prod deploys became a separate manually-dispatched workflow.
 #
-# So the gate is now that production deploys live in a SEPARATE,
-# manually-triggered workflow: .github/workflows/deploy-prod.yml. Nothing
-# reaches production without someone deliberately starting it.
+# The repository went PUBLIC on 2026-08-11 and the owner asked for automatic
+# deploys on main. The gate that replaces the manual dispatch is the test
+# suite itself: `migrate-prod` needs api, web, e2e AND secrets, so nothing
+# reaches production that has not passed everything CI runs. That is a
+# stronger guarantee than the pre-2026-08-02 arrangement this file was written
+# to fix, where Render's own `autoDeploy` fired on every commit with no tests
+# at all.
+#
+# `.github/workflows/deploy-prod.yml` is KEPT as break-glass: redeploying
+# without a push, or deploying with `skip_migrations`, still needs it.
+#
+# NOT using `environment: production` here on purpose. Required reviewers are
+# now available (public repo), and adding one is a one-line change — but a
+# bare environment with no rule attached is the fake gate this file already
+# argued against. Add the rule and the key together, or neither.
 # ---------------------------------------------------------------------------
+
+  migrate-prod:
+    # Every test job, not just `api`. migrate-dev needs only `api` because dev
+    # is disposable; a prod migration is the one step in this pipeline that a
+    # redeploy cannot undo.
+    needs: [api, web, e2e, secrets]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        working-directory: flashml-cloud/apps/api
+        run: |
+          uv venv .venv
+          uv pip install -e .
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/flashml-cloud/apps/api/.venv
+
+      - name: What is pending
+        working-directory: flashml-cloud/apps/api
+        run: .venv/bin/python -m flashml_cloud_api.migrate --dry-run || true
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+      - name: Apply
+        working-directory: flashml-cloud/apps/api
+        run: .venv/bin/python -m flashml_cloud_api.migrate
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+
+  deploy-prod:
+    # Migrations FIRST, deploy after — never concurrent. dev tolerates the
+    # race (render.yaml's dev block says so, and 0007's try/except absorbs it);
+    # prod must not, or the API comes up against a schema it does not expect.
+    needs: [migrate-prod]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # Service ids are not secrets and are literal on purpose: one is useless
+      # without RENDER_API_KEY, and hiding them would only make this file
+      # harder to read against the Render dashboard. Same ids as
+      # deploy-prod.yml — if one moves, both move.
+      #
+      # ORDER IS LOAD-BEARING. The coordinator goes first: the API will not
+      # serve without one behind it.
+      - name: Deploy coordinator
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-d9mts2u417fc73c7l5g0/deploys" \
+            -d '{}' > /dev/null
+          echo "coordinator deploy triggered"
+
+      - name: Deploy API
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-d9mtspu417fc73c7mip0/deploys" \
+            -d '{}' > /dev/null
+          echo "api deploy triggered"
+
+      - name: Deploy web
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-d9mtt9e417fc73c7ni30/deploys" \
+            -d '{}' > /dev/null
+          echo "web deploy triggered"
