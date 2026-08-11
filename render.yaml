@@ -211,7 +211,7 @@ services:
       # flashml-web in the dashboard, change this to match it: whatever a
       # volunteer is told to open has to be a host that answers.
       - key: FLASHML_CONSOLE_URL
-        value: https://flashml-web.onrender.com
+        value: https://zolliai.com
       - key: PYTHON_VERSION
         value: "3.11"
       # Mail. The API sends two product emails — access approved and access
@@ -311,7 +311,7 @@ services:
       # when this is missing or empty, so a recurrence fails at build time
       # with a message naming the variable, instead of shipping.
       - key: NEXT_PUBLIC_CLOUD_API
-        value: https://flashml-api.onrender.com
+        value: https://api.zolliai.com
       # ONLY the anon key reaches the browser. The service-role key and the
       # operator token must never appear in a NEXT_PUBLIC_* var or a bundle —
       # a leaked service key bypasses every ownership check the API performs.

@@ -40,13 +40,23 @@ b1e5df96aa7c76021fb1be5a5fe538a249bedcde:.env.dev.example:generic-api-key:32
 # a future reader must be able to tell a dead-but-real key from a value that
 # was never a secret at all.
 #
-# Both findings are the SAME string, `token_prefix: "fmu_abc12345"`, in a test
-# fixture and in the plan document that quotes it. A `token_prefix` is by
+# Both findings are the SAME value, in a test fixture and in the plan document
+# that quotes that fixture. The field is a `token_prefix`, which is by
 # construction the non-secret head of a credential — it is what the console
-# shows a user so they can tell two CLI tokens apart — and `abc12345` is
-# placeholder text. There is nothing to rotate.
+# shows a user so they can tell two CLI tokens apart — and the value is
+# obvious placeholder text. There is nothing to rotate.
 #
-# gitleaks fires on the `fmu_` prefix looking like a vendor key prefix, which
-# is a reasonable heuristic and a wrong call here.
+# The value is NOT quoted here. Writing it into this file is what the policy
+# at the top forbids, and doing so made gitleaks flag THIS FILE on the very
+# commit that was meant to silence the finding.
+#
+# gitleaks fires because the prefix resembles a vendor key prefix, which is a
+# reasonable heuristic and a wrong call here.
 85a74c8eebf67956bdf28e0b311348599c0a09e2:flashml-cloud/apps/web/lib/cli-credential-status.test.ts:generic-api-key:9
 a174991482e9823894ccaf42131c012f9164c6a2:flashml-cloud/docs/superpowers/plans/2026-08-10-developer-identity.md:generic-api-key:1724
+# And the finding this file created for itself. The commit above quoted the
+# placeholder value in a comment, which is exactly what the policy at the top
+# forbids — so gitleaks flagged .gitleaksignore on the very commit meant to
+# silence the finding. The quote is gone from the working tree; the commit
+# that carried it cannot be scrubbed from pushed history.
+080ba049697e1fb23ae0d34046bfb17d6131f7ea:.gitleaksignore:generic-api-key:43
