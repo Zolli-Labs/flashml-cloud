@@ -18,7 +18,23 @@ export default function Home() {
         className="landing-cinematic w-full max-w-full overflow-x-clip"
       >
         <div data-surface="dark" className="landing-surface-dark">
-          <Hero />
+          {/*
+            The hero is a scroll story. The map is pinned for the length of this
+            track and the distance the track has left to travel is the timeline
+            `useMapStory` reads out of it — leases running, a machine lost, the
+            work resumed elsewhere, the result accepted.
+
+            Only where the hero fits a frame. Below `xl` it is taller than the
+            viewport, and pinning something taller than the viewport puts its own
+            readout permanently out of reach; the track then collapses to the
+            hero's own height, which is exactly the measurement that hands the
+            story to the timer fallback.
+          */}
+          <div data-hero-scroll className="relative xl:h-[220svh]">
+            <div className="xl:sticky xl:top-0">
+              <Hero />
+            </div>
+          </div>
         </div>
         <div data-surface="light" className="landing-surface-light">
           <EvidenceBand />

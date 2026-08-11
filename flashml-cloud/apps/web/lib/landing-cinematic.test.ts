@@ -46,16 +46,36 @@ describe("cinematic landing foundation", () => {
     expect(css).toContain("prefers-reduced-motion: reduce");
   });
 
-  it("renders the editorial hero and production compute fabric", () => {
+  it("renders the editorial hero and the live coordinator map", () => {
     const markup = renderLanding();
     const hero = markup.match(/<section[^>]*id="hero"[\s\S]*?<\/section>/)?.[0] ?? "";
     expect(hero).toContain('data-surface="dark"');
-    expect(hero).toContain('data-hero-fabric="production"');
+    // The map is the hero's illustration: the coordinator at the centre, the
+    // four sources around it, and the readout strip that makes it a running
+    // system rather than a diagram.
+    expect(hero).toMatch(/data-coordinator-map="(?:running|lost|resumed|accepted)"/);
+    expect(hero).toContain('data-map-core="coordinator"');
+    expect(hero.match(/data-map-node=/g) ?? []).toHaveLength(4);
+    expect(hero).toMatch(/data-map-readout="(?:running|lost|resumed|accepted)"/);
     expect(hero).toContain("Compute that");
     expect(hero).toContain("finishes the job.");
     expect(hero).toContain('href="/workspaces"');
     expect(hero).toContain('href="https://calendly.com/phongct1105/zolli-ai"');
     expect(hero).not.toMatch(/data-evidence-value|production attempts/);
+  });
+
+  it("pins the hero inside a scroll track that drives the map's story", () => {
+    const markup = renderLanding();
+    const page = source("app/(marketing)/page.tsx");
+    const track = markup.match(/<div data-hero-scroll[^>]*>/)?.[0] ?? "";
+
+    // `useMapStory` measures this track rather than reading a breakpoint, so
+    // the sticky child and the spare height are what hand the story to scroll
+    // instead of to the timer fallback.
+    expect(track).toContain("xl:h-[220svh]");
+    expect(markup).toContain("xl:sticky xl:top-0");
+    expect(page).toContain("data-hero-scroll");
+    expect(page).not.toMatch(/ScrollSmoother|addEventListener\(["']wheel/);
   });
 
   it("uses light evidence and sand machine lanes without metric cards", () => {
@@ -155,11 +175,15 @@ describe("cinematic landing foundation", () => {
   });
 
   it("keeps the hero motion scoped and reduced-motion aware", () => {
-    const heroMotion = source("components/landing/HeroComputeFabric.tsx");
+    const heroMotion = source("components/landing/coordinator-map/useMapStory.ts");
     expect(heroMotion).toContain("useLandingMotion");
     expect(heroMotion).toContain("reduced");
     expect(heroMotion).toContain("documentVisible");
-    expect(heroMotion).not.toMatch(/addEventListener\(["']wheel/);
+    // The story reads the page's own scroll position. It never takes the
+    // wheel away from the reader to do it.
+    expect(heroMotion).toContain('window.addEventListener("scroll", schedule, { passive: true })');
+    expect(heroMotion).not.toMatch(/addEventListener\(["'](?:wheel|touchmove)/);
+    expect(heroMotion).not.toMatch(/preventDefault\(/);
   });
 
   it("keeps the workflow progressive and does not hijack scrolling", () => {
@@ -191,7 +215,9 @@ describe("cinematic landing foundation", () => {
 
   it("keeps transform ownership isolated and avoids heavy or layout-driven motion", () => {
     const motionSources = [
-      "components/landing/HeroComputeFabric.tsx",
+      "components/landing/coordinator-map/CoordinatorMap.tsx",
+      "components/landing/coordinator-map/MapParticles.tsx",
+      "components/landing/coordinator-map/useMapStory.ts",
       "components/landing/SystemJourney.tsx",
       "components/landing/WorkflowScene.tsx",
       "components/landing/WorkloadRows.tsx",
@@ -205,7 +231,8 @@ describe("cinematic landing foundation", () => {
 
   it("keeps reduced-motion and hidden-document gates in the shared motion path", () => {
     const provider = source("components/landing/motion/LandingMotionProvider.tsx");
-    const hero = source("components/landing/HeroComputeFabric.tsx");
+    const story = source("components/landing/coordinator-map/useMapStory.ts");
+    const map = source("components/landing/coordinator-map/CoordinatorMap.tsx");
     const supportingMotion = [
       "components/landing/WorkloadRows.tsx",
       "components/landing/WorkloadVelocityRail.tsx",
@@ -215,8 +242,14 @@ describe("cinematic landing foundation", () => {
     expect(provider).toContain("prefers-reduced-motion: reduce");
     expect(provider).toContain("visibilitychange");
     expect(provider).toContain('document.visibilityState === "visible"');
-    expect(hero).toContain("documentVisible");
-    expect(hero).toContain("if (reduced || !documentVisible || !storyPlaying) return");
+    // The hero reads both gates out of the same provider every other landing
+    // surface uses, so there is one place a reader's preference is honoured.
+    expect(story).toContain("useLandingMotion");
+    expect(story).toContain("documentVisible");
+    expect(story).toContain("if (reduced) return");
+    expect(story).toContain("if (reduced || scrollLinked !== false || !documentVisible) return");
+    expect(map).toContain("const { reduced, documentVisible } = useLandingMotion()");
+    expect(map).toContain("paused={!documentVisible}");
     expect(supportingMotion).toContain("documentVisible");
     expect(supportingMotion).toContain("!reduced");
   });

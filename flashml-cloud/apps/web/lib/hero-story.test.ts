@@ -12,12 +12,12 @@ import {
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(`${root}/${path}`, "utf8");
-const productionFabricSourcePaths = [
+const productionMapSourcePaths = [
   "lib/hero-story.ts",
-  "lib/hero-fabric.ts",
-  ...readdirSync(`${root}/components/landing/hero-fabric`)
+  "lib/coordinator-map.ts",
+  ...readdirSync(`${root}/components/landing/coordinator-map`)
     .filter((file) => file.endsWith(".tsx") && !file.includes(".test."))
-    .map((file) => `components/landing/hero-fabric/${file}`),
+    .map((file) => `components/landing/coordinator-map/${file}`),
 ];
 
 describe("production hero story contract", () => {
@@ -90,12 +90,16 @@ describe("production hero story contract", () => {
     });
   });
 
-  it("keeps production fabric isolated from the hero lab and renders only FabricHeroScene", () => {
-    for (const path of productionFabricSourcePaths) expect(source(path)).not.toMatch(/hero-lab/i);
+  it("keeps the production map isolated from the hero lab and renders only CoordinatorMap", () => {
+    for (const path of productionMapSourcePaths) expect(source(path)).not.toMatch(/hero-lab/i);
 
-    const canvas = source("components/landing/hero-fabric/HeroFabricCanvas.tsx");
-    expect(canvas).toContain("<FabricHeroScene");
-    expect(canvas).not.toContain("TopologyScene");
-    expect(canvas).not.toMatch(/variant\??:/);
+    const hero = source("components/landing/Hero.tsx");
+    expect(hero).toContain("<CoordinatorMap");
+    // The three.js hero and its lab-vs-production switch are gone; a variant
+    // prop is how a lab scene creeps back into the shipped page.
+    expect(hero).not.toMatch(/HeroComputeFabric|HeroFabricCanvas|FabricHeroScene|TopologyScene/);
+    expect(source("components/landing/coordinator-map/CoordinatorMap.tsx")).not.toMatch(
+      /variant\??:/,
+    );
   });
 });

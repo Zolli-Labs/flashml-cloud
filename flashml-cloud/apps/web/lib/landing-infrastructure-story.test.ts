@@ -3,7 +3,7 @@ import { act, createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hero } from "@/components/landing/Hero";
-import { HeroComputeFabric } from "@/components/landing/HeroComputeFabric";
+import { CoordinatorMap } from "@/components/landing/coordinator-map/CoordinatorMap";
 import { PlatformSupport } from "@/components/landing/PlatformSupport";
 import { SystemJourney } from "@/components/landing/SystemJourney";
 import { ARCHITECTURE_SIGNALS } from "@/components/landing/ArchitectureSignal";
@@ -14,10 +14,17 @@ import {
 import { WORKLOADS } from "@/lib/landing/workloads";
 import { isPublicPath } from "@/middleware";
 import {
-  getFabricCanvasConfig,
-  getFabricFocusTransition,
-  getFabricRuntimeMode,
-} from "./hero-fabric";
+  MAP_NODES,
+  MAP_VIEWPORT_COMPACT,
+  MAP_VIEWPORT_DESKTOP,
+  RESCUER_KEY,
+  VICTIM_KEY,
+  readoutFor,
+  routeStateFor,
+  type MapNodeKey,
+  type MapPhase,
+  type Viewport,
+} from "./coordinator-map";
 import {
   LandingMotionProvider,
   useLandingMotion,
@@ -29,11 +36,9 @@ import {
   inferPlatformFamily,
 } from "./landing/platform";
 import { WORKFLOW_EVENTS, WORKFLOW_STEPS } from "./landing/workflow";
-import type { HeroSourceKey } from "./hero-story";
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(`${root}/${path}`, "utf8");
-const sourceIfPresent = (path: string) => existsSync(`${root}/${path}`) ? source(path) : "";
 const sourceFilesUnder = (path: string): string[] => readdirSync(`${root}/${path}`, {
   withFileTypes: true,
 }).flatMap((entry) => {
@@ -43,7 +48,7 @@ const sourceFilesUnder = (path: string): string[] => readdirSync(`${root}/${path
     ? [child]
     : [];
 });
-const fabricHarness = vi.hoisted(() => ({
+const motionHarness = vi.hoisted(() => ({
   motion: null as null | {
     reduced: boolean;
     desktop: boolean;
@@ -52,15 +57,11 @@ const fabricHarness = vi.hoisted(() => ({
   },
 }));
 
-function cssDeclarations(css: string, selector: string, fromIndex = 0) {
-  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`${escapedSelector}\\s*\\{`).exec(css.slice(fromIndex));
-  const selectorIndex = match ? fromIndex + match.index : -1;
-  if (selectorIndex < 0) return "";
-  const open = css.indexOf("{", selectorIndex + selector.length);
-  const close = open < 0 ? -1 : css.indexOf("}", open + 1);
-  return open < 0 || close < 0 ? "" : css.slice(open + 1, close);
-}
+const PHASES: readonly MapPhase[] = ["running", "lost", "resumed", "accepted"];
+
+/** Every beat, and every source on it, as `it.each` rows. */
+const PHASE_ROWS = PHASES.map((phase) => [phase] as const);
+const NODE_ROWS = MAP_NODES.map((spec) => [spec.key, spec] as const);
 
 vi.mock("motion/react", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
@@ -113,77 +114,32 @@ vi.mock("gsap", () => ({
   },
 }));
 
+// `next/link` schedules a prefetch through `requestIdleCallback` the moment it
+// mounts. The hero's story is asserted in scheduled timers, so a second timer
+// nobody in this repo wrote would make every one of those counts a guess.
+vi.mock("next/link", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  return {
+    default: React.forwardRef<HTMLAnchorElement, { href: string; children?: ReactNode }>(
+      function TestLink({ href, ...props }, ref) {
+        return React.createElement("a", { ...props, href, ref });
+      },
+    ),
+  };
+});
+
 vi.mock("@/components/landing/motion/LandingMotionProvider", async (importOriginal) => {
   const actual = await importOriginal<
     typeof import("@/components/landing/motion/LandingMotionProvider")
   >();
   return {
     ...actual,
-    useLandingMotion: () => fabricHarness.motion ?? actual.useLandingMotion(),
-  };
-});
-
-vi.mock("next/dynamic", async () => {
-  const React = await vi.importActual<typeof import("react")>("react");
-  return {
-    default: () => function FabricCanvasProbe(props: {
-      selectedSource: string;
-      focusedSource: HeroSourceKey | null;
-      jobStep: string;
-      storyPlaying: boolean;
-      fabricEntranceComplete: boolean;
-      reducedMotion: boolean;
-      documentVisible: boolean;
-      fabricDecision: null | { mode: string; quality?: string; reason?: string };
-      onFabricEntranceComplete: () => void;
-      onFabricFailure: () => void;
-    }) {
-      const decision = props.fabricDecision === null
-        ? "pending"
-        : `${props.fabricDecision.mode}:${props.fabricDecision.quality ?? props.fabricDecision.reason}`;
-      const runtime = props.fabricDecision?.mode === "canvas"
-        ? getFabricRuntimeMode({
-            baseQuality: props.fabricDecision.quality as "high" | "balanced" | "static",
-            storyPlaying: props.storyPlaying,
-            focusedSource: props.focusedSource,
-            entranceCompleted: props.fabricEntranceComplete,
-            focusMotionAllowed: true,
-            reducedMotion: props.reducedMotion,
-            documentVisible: props.documentVisible,
-          })
-        : { quality: "static" as const, continuous: false, motionEnabled: false };
-      const config = getFabricCanvasConfig({
-        quality: runtime.quality,
-        continuous: runtime.continuous,
-        finePointer: true,
-      });
-      return React.createElement("div", {
-        "data-fabric-canvas": "mock",
-        "data-decision": decision,
-        "data-job-step": props.jobStep,
-        "data-selected-source": props.selectedSource,
-        "data-focused-source": props.focusedSource ?? "overview",
-        "data-story-playing": String(props.storyPlaying),
-        "data-runtime-quality": runtime.quality,
-        "data-runtime-loop": config.frameloop,
-        "data-focus-transition": getFabricFocusTransition(
-          runtime.quality,
-          runtime.motionEnabled,
-        ),
-        onClick: props.onFabricFailure,
-      }, React.createElement("button", {
-        "data-complete-fabric-entrance": "true",
-        onClick: (event: { stopPropagation: () => void }) => {
-          event.stopPropagation();
-          props.onFabricEntranceComplete();
-        },
-      }));
-    },
+    useLandingMotion: () => motionHarness.motion ?? actual.useLandingMotion(),
   };
 });
 
 afterEach(() => {
-  fabricHarness.motion = null;
+  motionHarness.motion = null;
   vi.useRealTimers();
 });
 
@@ -328,16 +284,26 @@ class TestElement extends TestEventTarget {
     );
   }
 
-  focus() {
-    this.ownerDocument.activeElement = this;
+  /** Only the attribute selectors this landing actually uses — the hero finds
+   * its scroll track with `[data-hero-scroll]` and nothing else calls this. */
+  closest(selector: string): TestElement | null {
+    if (this.hasAttribute(selector.replace(/^\[|\]$/g, ""))) return this;
+    return this.parentNode?.closest(selector) ?? null;
   }
 
-  getContext(contextId: string) {
-    return this.tagName === "CANVAS"
-      && contextId === "webgl2"
-      && this.ownerDocument.webgl2Supported
-      ? {}
-      : null;
+  // The fake DOM has no box model, and the hero's story is driven by measuring
+  // one. Tests hand the document a layout and then move it; see `TestDocument`.
+  get offsetHeight() {
+    return this.ownerDocument.measure(this).height;
+  }
+
+  getBoundingClientRect() {
+    const { height, top } = this.ownerDocument.measure(this);
+    return { top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top };
+  }
+
+  focus() {
+    this.ownerDocument.activeElement = this;
   }
 
   click() {
@@ -373,8 +339,12 @@ class TestDocument extends TestEventTarget {
   visibilityState: "visible" | "hidden" = "visible";
   defaultView: typeof globalThis.window | undefined;
   activeElement: TestElement | null = null;
+  /** Test-supplied box model, in pixels. Everything is zero-sized until a test
+   * says otherwise, which is what makes an unmeasured hero fall to the timer. */
+  measure: (element: TestElement) => { height: number; top: number } =
+    () => ({ height: 0, top: 0 });
 
-  constructor(public webgl2Supported = true) {
+  constructor() {
     super();
     this.documentElement = this.createElement("html");
     this.body = this.createElement("body");
@@ -407,15 +377,24 @@ class TestMediaQueryList extends TestEventTarget {
   }
 }
 
-function installMotionEnvironment({ webgl2 = true }: { webgl2?: boolean } = {}) {
-  const document = new TestDocument(webgl2);
+function installMotionEnvironment() {
+  const document = new TestDocument();
   const animationFrames = new Map<number, FrameRequestCallback>();
   let nextAnimationFrame = 1;
   const queries = new Map<string, TestMediaQueryList>([
     ["(prefers-reduced-motion: reduce)", new TestMediaQueryList(false)],
     ["(min-width: 1024px)", new TestMediaQueryList(true)],
     ["(pointer: fine)", new TestMediaQueryList(true)],
+    ["(max-width: 880px)", new TestMediaQueryList(false)],
   ]);
+  const requestAnimationFrame = (callback: FrameRequestCallback) => {
+    const handle = nextAnimationFrame++;
+    animationFrames.set(handle, callback);
+    return handle;
+  };
+  const cancelAnimationFrame = (handle: number) => {
+    animationFrames.delete(handle);
+  };
   const window = Object.assign(new TestEventTarget(), {
     document,
     matchMedia(query: string) {
@@ -427,14 +406,8 @@ function installMotionEnvironment({ webgl2 = true }: { webgl2?: boolean } = {}) 
     Element: TestElement,
     SVGElement: TestElement,
     getComputedStyle: () => ({ display: "block" }),
-    requestAnimationFrame(callback: FrameRequestCallback) {
-      const handle = nextAnimationFrame++;
-      animationFrames.set(handle, callback);
-      return handle;
-    },
-    cancelAnimationFrame(handle: number) {
-      animationFrames.delete(handle);
-    },
+    requestAnimationFrame,
+    cancelAnimationFrame,
     setTimeout(handler: TimerHandler, timeout?: number) {
       return globalThis.setTimeout(handler, timeout);
     },
@@ -444,15 +417,66 @@ function installMotionEnvironment({ webgl2 = true }: { webgl2?: boolean } = {}) 
   });
   document.defaultView = window as never;
 
-  const previousWindow = globalThis.window;
-  const previousDocument = globalThis.document;
-  Object.assign(globalThis, { window, document });
+  /** Always intersecting unless a test says otherwise: the hero only listens to
+   * scroll while it is on screen, and every scroll assertion here is about a
+   * hero that is. */
+  const observers = new Set<TestIntersectionObserver>();
+  class TestIntersectionObserver {
+    private readonly targets = new Set<TestElement>();
+
+    constructor(
+      private readonly callback: (
+        entries: readonly { isIntersecting: boolean; target: TestElement }[],
+      ) => void,
+    ) {
+      observers.add(this);
+    }
+
+    observe(target: TestElement) {
+      this.targets.add(target);
+      this.callback([{ isIntersecting: true, target }]);
+    }
+
+    unobserve(target: TestElement) {
+      this.targets.delete(target);
+    }
+
+    disconnect() {
+      this.targets.clear();
+      observers.delete(this);
+    }
+
+    /** Drive the hero off screen, or back on to it. */
+    setIntersecting(isIntersecting: boolean) {
+      this.callback([...this.targets].map((target) => ({ isIntersecting, target })));
+    }
+  }
+
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
+    IntersectionObserver: globalThis.IntersectionObserver,
+  };
+  // The map's render loop and the hero's observer reach for the bare globals,
+  // not for `window.*`, because that is what they get in a browser.
+  Object.assign(globalThis, {
+    window,
+    document,
+    requestAnimationFrame,
+    cancelAnimationFrame,
+    IntersectionObserver: TestIntersectionObserver,
+  });
 
   return {
     container: document.createElement("div"),
     document,
+    window,
     queries,
+    observers,
     pendingAnimationFrames: () => animationFrames.size,
+    windowListeners: (type: string) => window.listeners.get(type)?.size ?? 0,
     runNextAnimationFrame() {
       const entry = animationFrames.entries().next().value as
         | [number, FrameRequestCallback]
@@ -469,7 +493,7 @@ function installMotionEnvironment({ webgl2 = true }: { webgl2?: boolean } = {}) 
       }
     },
     restore() {
-      Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+      Object.assign(globalThis, previous);
     },
   };
 }
@@ -501,46 +525,68 @@ function findButtonWithText(root: TestElement, text: string): TestElement | unde
   );
 }
 
-function findButtonContainingText(root: TestElement, text: string): TestElement | undefined {
-  return findElements(root, (element) => element.tagName === "BUTTON").find(
-    (element) => element.textContent.includes(text),
-  );
+/** React derives `onFocus`/`onKeyDown` from real bubbling events on the root,
+ * so a test has to send the event the browser would rather than call the prop. */
+function send(element: TestElement, type: string, key?: string) {
+  element.dispatchEvent({
+    type,
+    key,
+    target: element,
+    bubbles: true,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopPropagation() {
+      this.propagationStopped = true;
+    },
+  });
 }
 
-const ACTIVE_MOTION = {
+type MotionState = {
+  reduced: boolean;
+  desktop: boolean;
+  finePointer: boolean;
+  documentVisible: boolean;
+};
+
+const ACTIVE_MOTION: MotionState = {
   reduced: false,
   desktop: true,
   finePointer: true,
   documentVisible: true,
-} as const;
+};
 
-async function mountProductionFabric({ webgl2 = true }: { webgl2?: boolean } = {}) {
-  vi.useFakeTimers();
-  const environment = installMotionEnvironment({ webgl2 });
-  fabricHarness.motion = { ...ACTIVE_MOTION };
+/** The map on one fixed beat, with no story driving it. Everything about what
+ * the map *draws* is asserted through this; how the beat is chosen is asserted
+ * through `mountHero`. */
+async function mountMap({
+  phase = "running" as MapPhase,
+  viewport = MAP_VIEWPORT_DESKTOP as Viewport,
+  onSelect,
+}: {
+  phase?: MapPhase;
+  viewport?: Viewport;
+  onSelect?: (key: MapNodeKey) => void;
+} = {}) {
+  const environment = installMotionEnvironment();
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
   const { createRoot } = await import("react-dom/client");
   const reactRoot = createRoot(environment.container as never);
 
-  await act(async () => reactRoot.render(createElement(HeroComputeFabric)));
+  await act(async () =>
+    reactRoot.render(createElement(CoordinatorMap, { phase, viewport, onSelect })),
+  );
 
   return {
     ...environment,
-    probe: () => elementsByAttribute(environment.container, "data-fabric-canvas", "mock")[0],
-    completeEntrance: () => elementsByAttribute(
-      environment.container,
-      "data-complete-fabric-entrance",
-      "true",
-    )[0]?.click(),
-    async renderMotion(motion: typeof ACTIVE_MOTION | {
-      reduced: boolean;
-      desktop: boolean;
-      finePointer: boolean;
-      documentVisible: boolean;
-    }) {
-      fabricHarness.motion = { ...motion };
-      await act(async () => reactRoot.render(createElement(HeroComputeFabric)));
+    node: (key: MapNodeKey) =>
+      elementsByAttribute(environment.container, "data-map-node", key)[0],
+    route: (key: MapNodeKey) =>
+      elementsByAttribute(environment.container, "data-route", key)[0],
+    readout: (cell: string) => {
+      const group = elementsByAttribute(environment.container, "data-readout", cell)[0];
+      return findElements(group, (element) => element.tagName === "P")[1];
     },
     async cleanup() {
       await act(async () => reactRoot.unmount());
@@ -549,62 +595,72 @@ async function mountProductionFabric({ webgl2 = true }: { webgl2?: boolean } = {
   };
 }
 
-type ManualInteractionCase = {
-  name: string;
-  interact: (container: TestElement) => void;
-  expectedSource: string;
-  expectedFocusedSource: string;
-  expectedStep: string;
-  expectedPlaying: string;
-};
+/**
+ * The hero as the page mounts it.
+ *
+ * `track` decides which of the story's two drivers is in force, and it decides
+ * it the way the browser does: a track with spare height over the pinned hero
+ * drives the beat from scroll, and one without hands the story to the timer.
+ * No test asks for a driver by name.
+ */
+async function mountHero({
+  track = false,
+  motion = ACTIVE_MOTION,
+  heroHeight = 900,
+  trackHeight = 2100,
+}: {
+  track?: boolean;
+  motion?: MotionState;
+  heroHeight?: number;
+  trackHeight?: number;
+} = {}) {
+  vi.useFakeTimers();
+  const environment = installMotionEnvironment();
+  motionHarness.motion = { ...motion };
+  let scrolled = 0;
+  environment.document.measure = (element) => {
+    if (element.hasAttribute("data-hero-scroll")) {
+      return { height: trackHeight, top: -scrolled };
+    }
+    return { height: element.getAttribute("id") === "hero" ? heroHeight : 0, top: 0 };
+  };
 
-const MANUAL_INTERACTION_CASES: readonly ManualInteractionCase[] = [
-  {
-    name: "source selection",
-    interact(container) {
-      const button = findButtonWithText(container, "Owned");
-      expect(button).toBeDefined();
-      button?.click();
-    },
-    expectedSource: "owned",
-    expectedFocusedSource: "owned",
-    expectedStep: "accepted",
-    expectedPlaying: "false",
-  },
-  {
-    name: "explicit story-step selection",
-    interact(container) {
-      const button = findButtonContainingText(container, "Node lost");
-      expect(button).toBeDefined();
-      button?.click();
-    },
-    expectedSource: "everyday",
-    expectedFocusedSource: "overview",
-    expectedStep: "lost",
-    expectedPlaying: "false",
-  },
-  {
-    name: "Play/Pause",
-    interact(container) {
-      const button = findButtonWithText(container, "Play story");
-      expect(button).toBeDefined();
-      button?.click();
-    },
-    expectedSource: "everyday",
-    expectedFocusedSource: "overview",
-    expectedStep: "accepted",
-    expectedPlaying: "true",
-  },
-] as const;
+  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
+    .IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const reactRoot = createRoot(environment.container as never);
+  const tree = () =>
+    track
+      ? createElement("div", { "data-hero-scroll": true }, createElement(Hero))
+      : createElement(Hero);
 
-function expectManualState(
-  probe: TestElement,
-  interaction: ManualInteractionCase,
-) {
-  expect(probe.getAttribute("data-selected-source")).toBe(interaction.expectedSource);
-  expect(probe.getAttribute("data-focused-source")).toBe(interaction.expectedFocusedSource);
-  expect(probe.getAttribute("data-job-step")).toBe(interaction.expectedStep);
-  expect(probe.getAttribute("data-story-playing")).toBe(interaction.expectedPlaying);
+  await act(async () => reactRoot.render(tree()));
+  // The first measurement happens in a frame, exactly as it does in a browser.
+  await act(async () => environment.runAnimationFrames());
+
+  const hero = () => elementsByAttribute(environment.container, "data-coordinator-map")[0];
+
+  return {
+    ...environment,
+    phase: () => hero()?.getAttribute("data-coordinator-map"),
+    section: () => findElements(environment.container, (element) =>
+      element.getAttribute("id") === "hero")[0],
+    async scrollTo(offset: number) {
+      scrolled = offset;
+      await act(async () => {
+        environment.window.dispatchEvent({ type: "scroll" });
+        environment.runAnimationFrames();
+      });
+    },
+    async renderMotion(next: MotionState) {
+      motionHarness.motion = { ...next };
+      await act(async () => reactRoot.render(tree()));
+    },
+    async cleanup() {
+      await act(async () => reactRoot.unmount());
+      environment.restore();
+    },
+  };
 }
 
 function installNavigator(overrides: {
@@ -749,36 +805,44 @@ describe("the infrastructure story", () => {
     expect(renderedText).toContain(definition);
     expect(markup.indexOf("Open console")).toBeLessThan(markup.indexOf("Talk to Zolli"));
   });
+});
 
-  it("promotes the production compute fabric without changing the hero message", () => {
+describe("the coordinator map hero", () => {
+  it("promotes the coordinator map without changing the hero message", () => {
     const hero = source("components/landing/Hero.tsx");
-    const fabricPath = "components/landing/HeroComputeFabric.tsx";
-    const fabric = sourceIfPresent(fabricPath);
 
-    expect(existsSync(`${root}/${fabricPath}`)).toBe(true);
-    expect(hero).toContain('import { HeroComputeFabric } from "@/components/landing/HeroComputeFabric"');
-    expect(hero).toContain("<HeroComputeFabric />");
+    expect(hero).toContain(
+      'import { CoordinatorMap } from "@/components/landing/coordinator-map/CoordinatorMap"',
+    );
+    expect(hero).toContain("<CoordinatorMap");
+    expect(hero).toContain("phase={phase}");
+    expect(hero).toContain("useMapStory()");
+    expect(hero).not.toContain("HeroComputeFabric");
     expect(hero).not.toContain("HeroInfrastructureStack");
     expect(hero.indexOf("Compute that ")).toBeLessThan(hero.indexOf("finishes the job."));
     expect(hero.indexOf("Open console")).toBeLessThan(hero.indexOf("Talk to Zolli"));
-    expect(fabric).toContain('data-hero-fabric="production"');
   });
 
-  it("removes the temporary hero experiment after promoting the compute fabric", () => {
+  it("removes the three.js compute fabric and everything generated for it", () => {
     const removedPaths = [
       "app/(marketing)/hero-lab/page.tsx",
       "components/hero-lab",
       "components/landing/HeroInfrastructureStack.tsx",
+      "components/landing/HeroComputeFabric.tsx",
+      "components/landing/HeroComputeFabric.module.css",
+      "components/landing/hero-fabric",
       "lib/hero-lab.ts",
       "lib/hero-lab.test.ts",
+      "lib/hero-fabric.ts",
+      "lib/hero-fabric.test.ts",
+      "lib/hero-fabric-assets.mjs",
+      "lib/hero-fabric-assets.d.ts",
+      "scripts/hero-assets",
+      "public/models/hero/fabric",
     ];
-    expect(removedPaths.map((path) => existsSync(`${root}/${path}`))).toEqual([
-      false,
-      false,
-      false,
-      false,
-      false,
-    ]);
+    expect(
+      removedPaths.filter((path) => existsSync(`${root}/${path}`)),
+    ).toEqual([]);
 
     const productionPaths = [
       "middleware.ts",
@@ -792,285 +856,419 @@ describe("the infrastructure story", () => {
     expect(productionSource).not.toMatch(
       /@\/components\/hero-lab|@\/lib\/hero-lab|\bHeroInfrastructureStack\b|\b(?:HeroLab(?:Canvas)?|StackScene|TopologyScene|BackplaneScene)\b|HERO_LAB_|data-hero-lab/,
     );
+    // The engine, and every seam it was wired through.
+    expect(productionSource).not.toMatch(
+      /hero-fabric|HeroComputeFabric|@react-three|WebGLRenderer|EffectComposer|SelectiveBloom|\buseFrame\b|<Canvas\b/,
+    );
     expect(source("app/globals.css")).not.toContain("hero-infra-");
+
+    const pkg = JSON.parse(source("package.json"));
+    const dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
+    expect(Object.keys(dependencies).filter((name) => /three|postprocessing|gltf/.test(name)))
+      .toEqual([]);
+    expect(Object.keys(pkg.scripts).filter((name) => name.startsWith("hero:"))).toEqual([]);
   });
 
-  it("keeps temporary comparison language out of the production shell", () => {
-    const fabric = sourceIfPresent("components/landing/HeroComputeFabric.tsx");
+  it("keeps experiment and engine language out of the production hero", () => {
+    const hero = [
+      "components/landing/Hero.tsx",
+      "components/landing/coordinator-map/CoordinatorMap.tsx",
+      "components/landing/coordinator-map/useMapStory.ts",
+    ].map(source).join("\n");
 
     for (const temporaryLabel of ["HeroLab", "hero-lab", "CONCEPT", "STRENGTH", "WEAKNESS"]) {
-      expect(fabric).not.toContain(temporaryLabel);
+      expect(hero, temporaryLabel).not.toContain(temporaryLabel);
     }
-    expect(fabric).not.toMatch(/\bB2\b/);
+    expect(hero).not.toMatch(/\bB2\b/);
   });
 
-  it("keeps the production fabric readable from desktop through mobile", () => {
-    const styles = sourceIfPresent("components/landing/HeroComputeFabric.module.css");
-    const compactDesktop = styles.indexOf(
-      "@media (min-width: 821px) and (max-width: 1100px)",
+  it("keeps the whole hero payload inside its markup budget", () => {
+    // The three.js hero shipped a 281 KB gzipped chunk before a pixel was drawn.
+    // This one is markup, and the design caps it at 60 KB uncompressed.
+    const desktop = renderToStaticMarkup(createElement(Hero));
+    const compact = renderToStaticMarkup(
+      createElement(CoordinatorMap, { phase: "resumed", viewport: MAP_VIEWPORT_COMPACT }),
     );
-    const tablet = styles.indexOf("@media (max-width: 820px)");
-    const mobile = styles.indexOf("@media (max-width: 540px)");
 
-    expect(cssDeclarations(styles, ".canvasWrap")).toContain("min-height: 30rem");
-    expect(compactDesktop).toBeGreaterThan(-1);
-    expect(cssDeclarations(styles, ".sceneFrame", compactDesktop)).toContain(
-      "height: 30rem",
-    );
-    expect(cssDeclarations(styles, ".canvasWrap", tablet)).toContain("min-height: 27rem");
-    expect(cssDeclarations(styles, ".canvasWrap", mobile)).toContain("min-height: 22rem");
-    expect(cssDeclarations(styles, ".sourceButton")).toContain("min-height: 2.75rem");
-    expect(cssDeclarations(styles, ".storyHeader button")).toContain("min-height: 2.5rem");
-    expect(cssDeclarations(styles, ".jobRail button")).toContain("min-height: 3.75rem");
-    expect(cssDeclarations(styles, ".canvasHeading,\n.controlCaption")).toContain(
-      "pointer-events: none",
-    );
-    expect(cssDeclarations(styles, ".sourceButtons", mobile)).toContain(
-      "grid-template-columns: repeat(2, minmax(0, 1fr))",
-    );
-    expect(cssDeclarations(styles, ".jobRail", mobile)).toContain(
-      "grid-template-columns: repeat(2, minmax(0, 1fr))",
-    );
-    const canvasRule = cssDeclarations(styles, ".canvasWrap canvas");
-    expect(canvasRule).toContain("touch-action: pan-y");
-    expect(canvasRule).not.toContain("touch-action: none");
+    expect(Buffer.byteLength(desktop, "utf8")).toBeLessThan(60 * 1024);
+    expect(Buffer.byteLength(compact, "utf8")).toBeLessThan(60 * 1024);
   });
 
-  it("waits for a canvas capability decision before starting the story", async () => {
-    const mounted = await mountProductionFabric();
+  it("switches to the stacked composition only where the frame is narrow", () => {
+    const hero = source("components/landing/Hero.tsx");
+
+    expect(hero).toContain('const COMPACT_QUERY = "(max-width: 880px)"');
+    expect(hero).toContain("compact ? MAP_VIEWPORT_COMPACT : HERO_MAP_VIEWPORT");
+    // A crop of the desktop frame, not a second projection: same scale, same
+    // composition, less empty panel beside the headline.
+    expect(hero).toContain("...MAP_VIEWPORT_DESKTOP");
+    expect(MAP_VIEWPORT_COMPACT.height).toBeGreaterThan(MAP_VIEWPORT_COMPACT.width);
+    expect(MAP_VIEWPORT_DESKTOP.width).toBeGreaterThan(MAP_VIEWPORT_DESKTOP.height);
+  });
+
+  it.each(NODE_ROWS)("draws the %s source with its name, chip and platform badges", async (key, spec) => {
+    const mounted = await mountMap();
     try {
-      expect(mounted.probe().getAttribute("data-decision")).toBe("pending");
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
+      const drawn = mounted.node(key);
 
-      await act(async () => { mounted.runNextAnimationFrame(); });
-      expect(mounted.probe().getAttribute("data-decision")).toBe("canvas:high");
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-
-      await act(async () => { mounted.runAnimationFrames(); });
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("true");
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("submitted");
+      expect(drawn).toBeDefined();
+      expect(drawn.textContent).toContain(spec.name);
+      expect(drawn.textContent).toContain(spec.chip);
+      expect(
+        elementsByAttribute(drawn, "data-platform").map((badge) => badge.getAttribute("data-platform")),
+      ).toEqual(spec.badges.map((badge) => badge.toLowerCase()));
     } finally {
       await mounted.cleanup();
     }
   });
 
-  it("never autoplays when capability detection selects the poster fallback", async () => {
-    const mounted = await mountProductionFabric({ webgl2: false });
+  it.each(NODE_ROWS)("announces the %s source and puts it in the tab order", async (key, spec) => {
+    const mounted = await mountMap();
     try {
-      await act(async () => { mounted.runNextAnimationFrame(); });
-      expect(mounted.probe().getAttribute("data-decision")).toBe(
-        "poster:webgl2-unavailable",
-      );
+      const drawn = mounted.node(key);
 
-      await act(async () => { mounted.runAnimationFrames(); });
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("accepted");
-      const playButton = findButtonWithText(mounted.container, "Play story");
-      expect(playButton).toBeDefined();
-      expect(playButton?.hasAttribute("disabled")).toBe(true);
-      expect(playButton?.getAttribute("aria-disabled")).toBe("true");
+      expect(drawn.getAttribute("role")).toBe("button");
+      expect(drawn.getAttribute("tabindex")).toBe("0");
+      expect(drawn.getAttribute("aria-label")).toBe(`${spec.name}. ${spec.chip}.`);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
 
-      await act(async () => playButton?.click());
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-      await act(async () => findButtonWithText(mounted.container, "Owned")?.click());
-      expect(mounted.probe().getAttribute("data-selected-source")).toBe("owned");
-      await act(async () => findButtonContainingText(mounted.container, "Node lost")?.click());
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("lost");
+  it.each(PHASE_ROWS)("dresses every route for the %s beat", async (phase) => {
+    const mounted = await mountMap({ phase });
+    try {
+      for (const spec of MAP_NODES) {
+        expect(mounted.route(spec.key).getAttribute("data-route-state"), spec.key)
+          .toBe(routeStateFor(spec.key, phase));
+      }
+      // The job is on exactly one route on every beat but `lost`, where it is
+      // on none. That gap is the beat: the work has nowhere to be yet.
+      expect(
+        elementsByAttribute(mounted.container, "data-route")
+          .filter((route) => route.getAttribute("data-route-state") === "active"),
+      ).toHaveLength(phase === "lost" ? 0 : 1);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it.each(PHASE_ROWS)("reads the %s beat out on the live strip", async (phase) => {
+    const mounted = await mountMap({ phase });
+    const expected = readoutFor(phase);
+    try {
+      expect(mounted.readout("leases").textContent).toBe(String(expected.leases));
+      expect(mounted.readout("checkpoint").textContent).toBe(expected.checkpoint);
+      expect(mounted.readout("lost").textContent).toBe(String(expected.lost));
+      expect(mounted.readout("goodput").textContent).toBe(`${expected.goodput} / 100`);
+      expect(mounted.readout("state").textContent).toBe(expected.state);
+      // Only the state cell announces; five cells changing at once is a klaxon.
+      expect(mounted.readout("state").getAttribute("aria-live")).toBe("polite");
+      expect(mounted.readout("goodput").getAttribute("aria-live")).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it.each(PHASE_ROWS)("spends orange only on the job's path during %s", async (phase) => {
+    const mounted = await mountMap({ phase });
+    try {
+      const orange = (element: TestElement) =>
+        findElements(element, (candidate) =>
+          [...candidate.attributes.values()].some((value) => value.includes("--z-orange")),
+        );
+
+      // No orange hardware, no orange ground. The one rule that separates this
+      // map from the reference art it replaces.
+      for (const spec of MAP_NODES) {
+        expect(orange(mounted.node(spec.key)), spec.key).toHaveLength(0);
+      }
+      expect(
+        orange(elementsByAttribute(mounted.container, "data-map-layer", "grid")[0]),
+      ).toHaveLength(0);
+
+      // Where orange is spent: the one route carrying the job, and no other —
+      // and on the `lost` beat, where nothing is carrying it, nowhere at all.
+      const orangeRoutes = elementsByAttribute(mounted.container, "data-route")
+        .filter((route) => (route.getAttribute("stroke") ?? "").includes("--z-orange"));
+      expect(orangeRoutes.map((route) => route.getAttribute("data-route-state")))
+        .toEqual(phase === "lost" ? [] : ["active"]);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("marks the machine that died and the result that was accepted", async () => {
+    const lost = await mountMap({ phase: "lost" });
+    try {
+      expect(elementsByAttribute(lost.node(VICTIM_KEY), "data-mark", "failed")).toHaveLength(1);
+      expect(elementsByAttribute(lost.container, "data-mark", "accepted")).toHaveLength(0);
+    } finally {
+      await lost.cleanup();
+    }
+
+    const accepted = await mountMap({ phase: "accepted" });
+    try {
+      // The loss stays on the board as history while the rescuer carries a tick:
+      // attempted work is not accepted work, and the map has to show both.
+      expect(elementsByAttribute(accepted.node(VICTIM_KEY), "data-mark", "failed")).toHaveLength(1);
+      expect(elementsByAttribute(accepted.node(RESCUER_KEY), "data-mark", "accepted")).toHaveLength(1);
+    } finally {
+      await accepted.cleanup();
+    }
+  });
+
+  it("names the map for a screen reader and hides its decoration", async () => {
+    const mounted = await mountMap();
+    try {
+      const svg = findElements(mounted.container, (element) => element.tagName === "SVG")[0];
+
+      expect(svg.getAttribute("role")).toBe("group");
+      expect(svg.getAttribute("aria-label")).toContain("four machine sources");
+      expect(svg.getAttribute("aria-label")).toContain("Zolli coordinator");
+      for (const layer of ["grid", "routes", "particles"]) {
+        expect(
+          elementsByAttribute(mounted.container, "data-map-layer", layer)[0].getAttribute("aria-hidden"),
+          layer,
+        ).toBe("true");
+      }
+      expect(
+        elementsByAttribute(mounted.container, "data-map-core", "coordinator")[0]
+          .getAttribute("aria-hidden"),
+      ).toBe("true");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+});
+
+describe("the hero's scroll story", () => {
+  it("walks the four beats once where nothing pins the hero", async () => {
+    const mounted = await mountHero();
+    try {
+      expect(mounted.phase()).toBe("running");
+
+      await act(async () => { vi.advanceTimersByTime(4_800); });
+      expect(mounted.phase()).toBe("lost");
+
+      await act(async () => { vi.advanceTimersByTime(3_200); });
+      expect(mounted.phase()).toBe("resumed");
+
+      await act(async () => { vi.advanceTimersByTime(4_000); });
+      expect(mounted.phase()).toBe("accepted");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("rests on the accepted result instead of looping like a banner", async () => {
+    const mounted = await mountHero();
+    try {
+      await act(async () => { vi.advanceTimersByTime(12_000); });
+      expect(mounted.phase()).toBe("accepted");
+      expect(vi.getTimerCount()).toBe(0);
+
+      await act(async () => { vi.advanceTimersByTime(120_000); });
+      expect(mounted.phase()).toBe("accepted");
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       await mounted.cleanup();
     }
   });
 
-  it("stops canvas autoplay after a real failure callback and keeps manual inspection usable", async () => {
-    const mounted = await mountProductionFabric();
-    try {
-      await act(async () => { mounted.runNextAnimationFrame(); });
-      await act(async () => { mounted.runAnimationFrames(); });
-      expect(mounted.probe().getAttribute("data-decision")).toBe("canvas:high");
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("submitted");
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("true");
-      expect(vi.getTimerCount()).toBe(1);
-
-      await act(async () => mounted.probe().click());
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("submitted");
-      expect(vi.getTimerCount()).toBe(0);
-
-      await act(async () => { vi.advanceTimersByTime(5_000); });
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("submitted");
-
-      const playButton = findButtonWithText(mounted.container, "Play story");
-      expect(playButton).toBeDefined();
-      expect(playButton?.hasAttribute("disabled")).toBe(true);
-      expect(playButton?.getAttribute("aria-disabled")).toBe("true");
-      await act(async () => playButton?.click());
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-
-      await act(async () => findButtonWithText(mounted.container, "Rented GPU")?.click());
-      expect(mounted.probe().getAttribute("data-selected-source")).toBe("rented");
-      expect(mounted.probe().getAttribute("data-focused-source")).toBe("rented");
-      await act(async () => findButtonContainingText(mounted.container, "Node lost")?.click());
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("lost");
-      expect(mounted.probe().getAttribute("data-focused-source")).toBe("overview");
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("focuses selected sources and returns to overview for story controls", async () => {
-    const mounted = await mountProductionFabric();
-    try {
-      await act(async () => { mounted.runNextAnimationFrame(); });
-      await act(async () => { mounted.runAnimationFrames(); });
-
-      const probe = mounted.probe();
-      expect(probe.getAttribute("data-focused-source")).toBe("overview");
-      await act(async () => findButtonWithText(mounted.container, "Owned")?.click());
-      expect(probe.getAttribute("data-focused-source")).toBe("owned");
-      expect(probe.getAttribute("data-story-playing")).toBe("false");
-      await act(async () => findButtonContainingText(mounted.container, "Node lost")?.click());
-      expect(probe.getAttribute("data-focused-source")).toBe("overview");
-      await act(async () => findButtonWithText(mounted.container, "Rented GPU")?.click());
-      expect(probe.getAttribute("data-focused-source")).toBe("rented");
-      await act(async () => findButtonWithText(mounted.container, "Play story")?.click());
-      expect(probe.getAttribute("data-focused-source")).toBe("overview");
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("keeps High rendering while a source pauses autoplay and damps on demand", async () => {
-    const mounted = await mountProductionFabric();
-    try {
-      await act(async () => { mounted.runNextAnimationFrame(); });
-      expect(mounted.probe().getAttribute("data-runtime-quality")).toBe("high");
-      expect(mounted.probe().getAttribute("data-runtime-loop")).toBe("always");
-
-      await act(async () => { mounted.runAnimationFrames(); });
-      await act(async () => mounted.completeEntrance());
-      await act(async () => findButtonWithText(mounted.container, "Owned")?.click());
-
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-      expect(mounted.probe().getAttribute("data-focused-source")).toBe("owned");
-      expect(mounted.probe().getAttribute("data-runtime-quality")).toBe("high");
-      expect(mounted.probe().getAttribute("data-runtime-loop")).toBe("demand");
-      expect(mounted.probe().getAttribute("data-focus-transition")).toBe("damp");
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it.each(MANUAL_INTERACTION_CASES)(
-    "preserves $name used before capability detection",
-    async (interaction) => {
-      const mounted = await mountProductionFabric();
+  it.each([["pointerenter"], ["focusin"]])(
+    "replays from rest on %s and ignores it mid-story",
+    async (event) => {
+      const mounted = await mountHero();
       try {
-        expect(mounted.probe().getAttribute("data-decision")).toBe("pending");
-        await act(async () => interaction.interact(mounted.container));
-        expectManualState(mounted.probe(), interaction);
+        await act(async () => { vi.advanceTimersByTime(12_000); });
+        expect(mounted.phase()).toBe("accepted");
 
-        await act(async () => { mounted.runAnimationFrames(); });
-        expect(mounted.probe().getAttribute("data-decision")).toBe("canvas:high");
-        await act(async () => { mounted.runAnimationFrames(); });
-        expectManualState(mounted.probe(), interaction);
+        await act(async () => send(mounted.section(), event));
+        expect(mounted.phase()).toBe("running");
+
+        // Mid-story the same event does nothing: restarting would punish the
+        // reader for moving the mouse across the hero.
+        await act(async () => { vi.advanceTimersByTime(4_800); });
+        expect(mounted.phase()).toBe("lost");
+        await act(async () => send(mounted.section(), event));
+        expect(mounted.phase()).toBe("lost");
       } finally {
         await mounted.cleanup();
       }
     },
   );
 
-  it.each(MANUAL_INTERACTION_CASES)(
-    "preserves $name used after capability detection but before initialization",
-    async (interaction) => {
-      const mounted = await mountProductionFabric();
-      try {
-        await act(async () => { mounted.runNextAnimationFrame(); });
-        expect(mounted.probe().getAttribute("data-decision")).toBe("canvas:high");
-        expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-
-        await act(async () => interaction.interact(mounted.container));
-        expectManualState(mounted.probe(), interaction);
-        await act(async () => { mounted.runAnimationFrames(); });
-        expectManualState(mounted.probe(), interaction);
-      } finally {
-        await mounted.cleanup();
-      }
-    },
-  );
-
-  it("cleans story timers and gates advancement while hidden or reduced", async () => {
-    const mounted = await mountProductionFabric();
+  it("takes the beat from scroll progress where the hero is pinned in a track", async () => {
+    // 2100 of track less a 900 hero leaves 1200px of travel for the story.
+    const mounted = await mountHero({ track: true });
     try {
-      await act(async () => { mounted.runNextAnimationFrame(); });
-      await act(async () => { mounted.runAnimationFrames(); });
+      expect(mounted.phase()).toBe("running");
+      expect(vi.getTimerCount()).toBe(0);
+
+      await mounted.scrollTo(120);
+      expect(mounted.phase()).toBe("running");
+      await mounted.scrollTo(480);
+      expect(mounted.phase()).toBe("lost");
+      await mounted.scrollTo(720);
+      expect(mounted.phase()).toBe("resumed");
+      await mounted.scrollTo(1_050);
+      expect(mounted.phase()).toBe("accepted");
+
+      // Rubber-band overshoot at either end, which every touch platform does.
+      await mounted.scrollTo(-300);
+      expect(mounted.phase()).toBe("running");
+      await mounted.scrollTo(4_000);
+      expect(mounted.phase()).toBe("accepted");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("listens to scroll only while the hero is on screen", async () => {
+    const mounted = await mountHero({ track: true });
+    try {
+      expect(mounted.windowListeners("scroll")).toBe(1);
+
+      await act(async () => {
+        for (const observer of mounted.observers) observer.setIntersecting(false);
+      });
+      expect(mounted.windowListeners("scroll")).toBe(0);
+
+      await act(async () => {
+        for (const observer of mounted.observers) observer.setIntersecting(true);
+      });
+      expect(mounted.windowListeners("scroll")).toBe(1);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("starts no loop, timer or frame when the reader asked for stillness", async () => {
+    const mounted = await mountHero({ motion: { ...ACTIVE_MOTION, reduced: true } });
+    try {
+      // One representative frame, and the one worth serving: a machine has
+      // died and its work is already running somewhere else.
+      expect(mounted.phase()).toBe("resumed");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(mounted.pendingAnimationFrames()).toBe(0);
+      expect(
+        elementsByAttribute(mounted.container, "data-map-layer", "particles")[0]
+          .getAttribute("data-motion"),
+      ).toBe("static");
+
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      expect(mounted.phase()).toBe("resumed");
+      expect(mounted.pendingAnimationFrames()).toBe(0);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("holds the story while the tab is hidden and does not advance behind it", async () => {
+    const mounted = await mountHero();
+    try {
+      await act(async () => { vi.advanceTimersByTime(4_800); });
+      expect(mounted.phase()).toBe("lost");
       expect(vi.getTimerCount()).toBe(1);
 
       await mounted.renderMotion({ ...ACTIVE_MOTION, documentVisible: false });
       expect(vi.getTimerCount()).toBe(0);
-      await act(async () => { vi.advanceTimersByTime(5_000); });
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("submitted");
-
-      await mounted.renderMotion({ ...ACTIVE_MOTION });
-      expect(vi.getTimerCount()).toBe(1);
-      await mounted.renderMotion({ ...ACTIVE_MOTION, reduced: true });
-      expect(vi.getTimerCount()).toBe(0);
-      await act(async () => { mounted.runAnimationFrames(); });
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-      expect(findButtonWithText(mounted.container, "Static story")).toBeDefined();
-
-      await mounted.renderMotion({ ...ACTIVE_MOTION });
-      findButtonWithText(mounted.container, "Play story")?.click();
-      await act(async () => undefined);
-      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => { vi.advanceTimersByTime(30_000); });
+      expect(mounted.phase()).toBe("lost");
     } finally {
       await mounted.cleanup();
-      expect(vi.getTimerCount()).toBe(0);
-      expect(mounted.pendingAnimationFrames()).toBe(0);
     }
   });
 
-  it("renders native controls and pauses on source or step selection before resuming in place", async () => {
-    const mounted = await mountProductionFabric();
+  it("runs the map's own loop only while the document is visible", async () => {
+    const mounted = await mountHero();
     try {
-      await act(async () => { mounted.runNextAnimationFrame(); });
-      await act(async () => { mounted.runAnimationFrames(); });
+      expect(mounted.pendingAnimationFrames()).toBeGreaterThan(0);
 
-      const sourceButtons = ["Cloud / HPC", "Rented GPU", "Owned", "Everyday"]
-        .map((label) => findButtonWithText(mounted.container, label));
-      const storyButtons = [
-        "Job submitted",
-        "Zolli assigns",
-        "Checkpoint retained",
-        "Node lost",
-        "Resumed elsewhere",
-        "Result accepted",
-      ].map((label) => findButtonContainingText(mounted.container, label));
-      expect(sourceButtons.every((button) => button?.tagName === "BUTTON")).toBe(true);
-      expect(storyButtons.every((button) => button?.tagName === "BUTTON")).toBe(true);
-      expect(elementsByAttribute(mounted.container, "aria-live", "polite")).toHaveLength(2);
-      expect(findButtonWithText(mounted.container, "Pause story")?.getAttribute("aria-pressed"))
-        .toBe("true");
+      await mounted.renderMotion({ ...ACTIVE_MOTION, documentVisible: false });
+      expect(mounted.pendingAnimationFrames()).toBe(0);
 
-      await act(async () => sourceButtons[2]?.click());
-      expect(sourceButtons[2]?.getAttribute("aria-pressed")).toBe("true");
-      expect(sourceButtons[3]?.getAttribute("aria-pressed")).toBe("false");
-      expect(mounted.probe().getAttribute("data-selected-source")).toBe("owned");
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
+      await mounted.renderMotion({ ...ACTIVE_MOTION });
+      expect(mounted.pendingAnimationFrames()).toBeGreaterThan(0);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
 
-      await act(async () => findButtonWithText(mounted.container, "Play story")?.click());
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("true");
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("submitted");
+  it("releases every timer, frame and listener on unmount", async () => {
+    const mounted = await mountHero({ track: true });
+    await act(async () => { vi.advanceTimersByTime(4_800); });
 
-      await act(async () => storyButtons[3]?.click());
-      expect(storyButtons[3]?.getAttribute("aria-current")).toBe("step");
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("false");
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("lost");
+    await mounted.cleanup();
 
-      await act(async () => findButtonWithText(mounted.container, "Play story")?.click());
-      expect(mounted.probe().getAttribute("data-story-playing")).toBe("true");
-      expect(mounted.probe().getAttribute("data-job-step")).toBe("lost");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(mounted.pendingAnimationFrames()).toBe(0);
+    expect(mounted.windowListeners("scroll")).toBe(0);
+    expect(mounted.windowListeners("resize")).toBe(0);
+    expect(mounted.observers.size).toBe(0);
+  });
+});
+
+describe("inspecting a source on the map", () => {
+  it.each(NODE_ROWS)("lifts the %s source and dims the other three on focus", async (key) => {
+    const mounted = await mountMap();
+    try {
+      await act(async () => send(mounted.node(key), "focusin"));
+
+      for (const spec of MAP_NODES) {
+        expect(mounted.node(spec.key).getAttribute("data-lifted"), spec.key)
+          .toBe(spec.key === key ? "true" : "false");
+      }
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it.each(NODE_ROWS)("activates the %s source from the keyboard and the pointer", async (key) => {
+    const selected: MapNodeKey[] = [];
+    const mounted = await mountMap({ onSelect: (chosen) => selected.push(chosen) });
+    try {
+      await act(async () => send(mounted.node(key), "keydown", "Enter"));
+      await act(async () => send(mounted.node(key), "keydown", " "));
+      await act(async () => mounted.node(key).click());
+      expect(selected).toEqual([key, key, key]);
+
+      // Any other key belongs to the page, not to the map.
+      await act(async () => send(mounted.node(key), "keydown", "a"));
+      expect(selected).toHaveLength(3);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("returns to the plain map when focus leaves the source", async () => {
+    const mounted = await mountMap();
+    try {
+      await act(async () => send(mounted.node("owned"), "focusin"));
+      expect(mounted.node("owned").getAttribute("data-lifted")).toBe("true");
+
+      await act(async () => send(mounted.node("owned"), "focusout"));
+      for (const spec of MAP_NODES) {
+        expect(mounted.node(spec.key).getAttribute("data-lifted"), spec.key).toBe("false");
+      }
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the brightest line on the map the one carrying the job", async () => {
+    const mounted = await mountMap({ phase: "running" });
+    try {
+      const jobRoute = mounted.route(VICTIM_KEY);
+      expect(jobRoute.getAttribute("data-route-state")).toBe("active");
+
+      // Hovering a bystander brightens its route without repainting it orange,
+      // or a reader inspecting the map would rewrite the story by accident.
+      await act(async () => send(mounted.node("cloud"), "focusin"));
+      expect(mounted.route("cloud").getAttribute("stroke")).not.toContain("--z-orange");
+      expect(jobRoute.getAttribute("stroke")).toContain("--z-orange");
     } finally {
       await mounted.cleanup();
     }
@@ -1266,18 +1464,20 @@ describe("the supporting landing story", () => {
   });
 
   it("keeps visual controls and live results named by accessible semantics", () => {
-    const hero = renderToStaticMarkup(createElement(HeroComputeFabric));
+    const hero = renderToStaticMarkup(
+      createElement(CoordinatorMap, { phase: "resumed", viewport: MAP_VIEWPORT_DESKTOP }),
+    );
     const platform = renderToStaticMarkup(createElement(PlatformSupport));
     const architecture = renderToStaticMarkup(createElement(WorkflowScene, {
       step: "recover",
       compact: true,
     }));
 
-    expect(hero).toContain('aria-label="Compute source"');
-    expect(hero.match(/aria-pressed=/g) ?? []).toHaveLength(5);
-    expect(hero).toContain('aria-label="Inspect job state"');
-    expect(hero.match(/aria-current=/g) ?? []).toHaveLength(1);
+    expect(hero).toContain('role="group"');
+    expect(hero.match(/role="button"/g) ?? []).toHaveLength(4);
+    expect(hero.match(/aria-label=/g) ?? []).toHaveLength(5);
     expect(hero).toContain('aria-live="polite"');
+    expect(hero).toContain('role="status"');
     expect(platform.match(/data-runtime-button=/g) ?? []).toHaveLength(9);
     expect(platform).toContain("Check this browser");
     expect(platform).not.toContain("data-machine-result");
