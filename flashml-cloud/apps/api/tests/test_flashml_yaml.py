@@ -506,3 +506,36 @@ def test_four_datasets_are_fine():
         f"  - name: d{i}\n    source: hf://a/b{i}\n" for i in range(4)
     )
     assert len(parse_flashml_yaml(MINIMAL + "\ndatasets:\n" + entries).datasets) == 4
+
+
+def test_partition_and_datasets_cannot_be_combined():
+    """Refused at parse, not left to blow up in the recipe.
+
+    A partition job carries no `task_params` — the coordinator expands the
+    range — so the compiler cuts ONE slice list while N tasks expand, and the
+    mismatch surfaces as a ValueError inside CommandRecipe.expand, after the
+    route already answered 201.
+    """
+    text = (
+        MINIMAL
+        + "\npartition:\n  range: [0, 100]\n  shards: 4\n"
+        + "datasets:\n  - name: d\n    source: hf://a/b\n"
+    )
+    with pytest.raises(ConfigError, match="partition"):
+        parse_flashml_yaml(text)
+
+
+def test_a_sweep_with_datasets_is_still_allowed():
+    """The legitimate combination: every task gets the whole dataset."""
+    text = (
+        MINIMAL
+        + "\nsweep:\n  lr: [0.1, 0.2]\n"
+        + "datasets:\n  - name: d\n    source: hf://a/b\n"
+    )
+    config = parse_flashml_yaml(text)
+    assert config.sweep and config.datasets
+
+
+def test_partition_without_datasets_is_untouched():
+    text = MINIMAL + "\npartition:\n  range: [0, 100]\n  shards: 4\n"
+    assert parse_flashml_yaml(text).partition["shards"] == 4

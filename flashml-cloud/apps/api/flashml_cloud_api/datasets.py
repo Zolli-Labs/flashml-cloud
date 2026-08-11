@@ -540,10 +540,24 @@ async def _resolve_https_manifest(
                 f"fetch and a tampered file is the transport."
             )
         declared = item.get("sha256")
-        if isinstance(declared, str) and declared:
-            integrity = {"kind": "declared-sha256", "value": declared}
-        else:
-            integrity = {"kind": "none", "value": ""}
+        if not isinstance(declared, str) or not declared:
+            # Refused here, not left to the host. `fetch_shard` rejects an
+            # empty integrity value, so minting {"kind": "none", "value": ""}
+            # produced a job that compiled cleanly, admitted cleanly, and then
+            # failed identically on EVERY machine it was placed on — the
+            # slowest possible way to learn that a manifest is incomplete.
+            #
+            # Unlike a listing API, this manifest is the submitter's own
+            # document: they can put a hash in it. And they must, because it
+            # is the only integrity signal an arbitrary HTTPS origin gives us
+            # at all — there is no ETag contract and no revision to pin.
+            raise DatasetResolveError(
+                f"{source}: manifest entry {path!r} has no 'sha256'. Every "
+                f"entry in an https:// manifest needs one — it is the only "
+                f"way a host can tell your file from a corrupted or swapped "
+                f"one, and a host will refuse the shard without it."
+            )
+        integrity = {"kind": "declared-sha256", "value": declared}
         rows.append((path, url, size, integrity))
 
     return _build(dataset, revision=revision, rows=rows)

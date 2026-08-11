@@ -529,6 +529,25 @@ def _validate_partition(raw: dict) -> dict:
             "generators, and a job has exactly one — a sweep fans out over "
             "hyperparameter combinations, a partition over shards of a range"
         )
+    if partition and raw.get("datasets"):
+        # Refused here rather than left to fail later, and the "later" is the
+        # problem: a partition job carries no `task_params` (the coordinator
+        # expands the range itself), so the compiler cuts ONE slice list while
+        # the recipe expands N tasks. The mismatch surfaces as a ValueError
+        # inside `CommandRecipe.expand` — after the route has answered 201, in
+        # a code path the submitter never sees.
+        #
+        # It is also a genuine ambiguity, not merely a plumbing gap: partition
+        # already shards a numeric range, `datasets` already shards a file
+        # list, and nothing says which of the two a given task's slice should
+        # follow. Deciding that silently would be worse than refusing.
+        raise ConfigError(
+            "flashml.yaml cannot combine 'partition' with 'datasets': both "
+            "decide how one job is cut into tasks, and a job has exactly one "
+            "such decision — 'partition' splits a numeric range, 'datasets' "
+            "splits a file list. Use a sweep with 'datasets', or drop "
+            "'datasets' and address your data from the partition indices"
+        )
     return partition
 
 

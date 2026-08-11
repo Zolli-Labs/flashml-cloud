@@ -533,22 +533,32 @@ async def test_an_https_manifest_carries_declared_integrity():
 
 
 @pytest.mark.asyncio
-async def test_an_https_entry_with_no_declared_hash_is_kind_none():
+async def test_an_https_manifest_carries_declared_integrity_for_every_entry():
+    """`kind: none` is no longer reachable here: an entry without a hash is
+    refused at resolve (see the test below), because the host refuses it
+    anyway and failing at submit is strictly better."""
     body = {"entries": [
-        {"path": "a.bin", "url": "https://o.invalid/a.bin", "size": 5},
+        {"path": "a.bin", "url": "https://o.invalid/a.bin", "size": 5,
+         "sha256": "c" * 64},
     ]}
+
+    def handler(request):
+        return httpx.Response(200, json=body)
+
     manifest = await _resolve(
-        {"name": "d", "source": "https://o.invalid/m.json",
+        {"name": "d", "source": "https://o.invalid/manifest.json",
          "select": None, "split": None},
-        httpx.MockTransport(lambda r: httpx.Response(200, json=body)),
+        httpx.MockTransport(handler),
     )
-    assert manifest.entries[0].integrity["kind"] == "none"
+    assert manifest.entries[0].integrity == {
+        "kind": "declared-sha256", "value": "c" * 64
+    }
 
 
 @pytest.mark.asyncio
 async def test_the_https_revision_is_a_digest_of_the_manifest_document():
     body = {"entries": [
-        {"path": "a.bin", "url": "https://o.invalid/a.bin", "size": 5},
+        {"path": "a.bin", "url": "https://o.invalid/a.bin", "size": 5, "sha256": "d" * 64},
     ]}
     manifest = await _resolve(
         {"name": "d", "source": "https://o.invalid/m.json",
@@ -564,7 +574,7 @@ async def test_an_http_url_inside_an_https_manifest_is_refused():
     """The host fetches these over the open internet with no verification
     beyond whatever the author declared. Plaintext is not acceptable."""
     body = {"entries": [
-        {"path": "a.bin", "url": "http://o.invalid/a.bin", "size": 5},
+        {"path": "a.bin", "url": "http://o.invalid/a.bin", "size": 5, "sha256": "d" * 64},
     ]}
     with pytest.raises(DatasetResolveError, match="https"):
         await _resolve(
@@ -589,8 +599,8 @@ async def test_two_manifest_entries_may_not_share_a_path():
     """They land on the same file under /work/data/<name>/, so one silently
     replaces the other and which one wins depends on fetch order."""
     body = {"entries": [
-        {"path": "a.bin", "url": "https://o.invalid/1", "size": 5},
-        {"path": "a.bin", "url": "https://o.invalid/2", "size": 6},
+        {"path": "a.bin", "url": "https://o.invalid/1", "size": 5, "sha256": "d" * 64},
+        {"path": "a.bin", "url": "https://o.invalid/2", "size": 6, "sha256": "d" * 64},
     ]}
     with pytest.raises(DatasetResolveError, match="twice"):
         await _resolve(
@@ -663,3 +673,23 @@ async def test_a_real_public_hf_dataset_resolves_and_pins():
     assert all(e.integrity["kind"] == "sha256" for e in manifest.entries)
     assert all(manifest.revision in e.url for e in manifest.entries)
     assert manifest.total_bytes > 0
+
+
+@pytest.mark.asyncio
+async def test_an_https_entry_without_a_hash_is_refused_at_submit():
+    """It used to mint {"kind": "none", "value": ""}, which compiled and
+    admitted cleanly and then failed identically on every machine — the
+    slowest possible way to learn a manifest is incomplete."""
+    body = {"entries": [
+        {"path": "a.bin", "url": "https://o.invalid/a.bin", "size": 5},
+    ]}
+
+    def handler(request):
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(DatasetResolveError, match="sha256"):
+        await _resolve(
+            {"name": "d", "source": "https://o.invalid/manifest.json",
+             "select": None, "split": None},
+            httpx.MockTransport(handler),
+        )
