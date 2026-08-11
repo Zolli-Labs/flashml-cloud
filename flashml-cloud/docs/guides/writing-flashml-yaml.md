@@ -32,7 +32,8 @@ Two things, and no FlashML imports:
 Your repo is staged at `/work/inputs/code/`. Anything else you declared as
 an input lands beside it. **A task has no network** — it cannot `pip
 install`, fetch a dataset, or reach HuggingFace once it starts. Everything
-comes from the image or from a staged input.
+comes from the image, from a staged input, or from a `datasets:` block the
+host fetched for you before your code started.
 
 ## Every key
 
@@ -75,6 +76,7 @@ the real ceiling on what FlashML can do today, and it is a known one.
 | `resources` | map | e.g. `gpus: 1` |
 | `timeout_seconds` | int | Wall clock per task, capped at 24h |
 | `local_inputs` | list of strings | Labels for data a *host* lends, mounted read-only. Never uploaded |
+| `datasets` | list of maps | Public data the *host* fetches before your task starts. See below |
 | `mode` | string | `independent` (default) or `federated` |
 | `epochs` | int | Federated only, required. Passes over your data |
 | `sync_every` | float | Federated only. Passes between combines. Only `1.0` today |
@@ -140,6 +142,275 @@ finished; until that contract lands, a smaller value is refused rather than
 honoured, because honouring it would silently either discard the work of
 machines still training when a round closed or leave part of your data never
 trained at all.
+
+## Bringing your own data: `datasets`
+
+Until now the only real data a job could see was `local_inputs` — which works
+only when the person with the data also owns the machine. `datasets:` is the
+other half, and it is one line:
+
+```yaml
+datasets:
+  - name: imdb
+    source: hf://stanfordnlp/imdb
+```
+
+**We never store your data.** At submit time we read a *file listing* from
+your origin — paths, byte sizes, checksums — and hand each machine the list of
+URLs it needs. The bytes go from your origin straight to the machine that
+trains on them and never pass through us. What we keep is a manifest measured
+in kilobytes.
+
+**Your task still has no network.** Nothing in the contract above changes:
+`--network none` is still enforced, your code still cannot `pip install` or
+call `load_dataset()`. The host agent fetches *before* the sandbox closes, so
+by the time your code starts the files are simply there, at
+`/work/data/<name>/`, with the directory shape the origin listed. A file at
+`plain_text/train-00000.parquet` lands at
+`/work/data/imdb/plain_text/train-00000.parquet`.
+
+Treat those files as read-only. The host hard-links them out of a cache it
+shares between jobs, so writing to one in place can corrupt the copy the next
+job gets.
+
+### Where to put your data
+
+| Your data | What you write |
+|---|---|
+| Public | `hf://org/name` — the recommendation, for reasons below |
+| Public bucket | `s3://bucket/prefix` or `r2://account-id/bucket/prefix` |
+| Public, anything else | `https://you.example/manifest.json` — you list the files |
+| **Private** | **No path yet.** `local_inputs`, on a machine you host yourself |
+
+**Hugging Face is the recommendation, and not out of habit.** Egress is free
+and CDN-backed, the tree API hands us a real sha256 for every file, and `main`
+resolves to a commit SHA we can pin. Then the unintuitive part: anonymous rate
+limits on the Hub are applied **per IP** — 3,000 file requests per five-minute
+window, per address — so thirty machines on thirty home connections get thirty
+separate budgets. A fleet spread across the internet is *structurally
+advantaged* there, which is rarely true of anything.
+
+The counterweight, which is not fine print: public Hub storage is a commons
+with a stated reuse expectation. Do not push private working data to a public
+repo to get free bandwidth out of us. That is free-riding, it breaks their
+terms, and it breaks the day they enforce.
+
+**A public bucket works too**, listed anonymously. A bucket that requires a
+signature answers 403 and is refused at submit as "not public" — we do not
+retry with a credential, because we have none. Note who pays: S3 charges
+$0.09/GB of egress, and twenty machines pulling a 200 GB dataset over ten
+rounds is 2 TB, about **$184 for one job**. R2 and Hugging Face charge nothing
+for egress at all.
+
+**`https://` is the escape hatch.** Point it at a JSON document you host:
+
+```json
+{"entries": [
+  {"path": "train/shard-000.npy",
+   "url": "https://you.example/shard-000.npy",
+   "size": 4194304,
+   "sha256": "db47d16b…"}
+]}
+```
+
+Every `url` must be `https://` — a volunteer fetches it over the open
+internet, and the transport is the only thing standing between that fetch and
+a tampered file. Give every entry a real `sha256`: an entry without one is
+accepted at submit and then *refused by the host agent*, which is the worst
+possible place to find out.
+
+**Private data has no path yet.** v1 resolves public origins only and stores
+no credential of any kind — not a token, not a key, nothing. A private or
+gated Hub repo is therefore refused at submit *by name, with the reason*,
+rather than 401-ing on thirty machines forty minutes into a round. Until the
+private-data work lands, private means `local_inputs` and a machine you host.
+
+### The revision is pinned at submit
+
+`hf://stanfordnlp/imdb` resolves to a 40-character commit SHA once, when you
+submit, and every URL in the job addresses that SHA. Pushing to the dataset
+while the job runs cannot change what it trains on. Object stores have no
+commit, so their pin is a digest over the key/ETag set that was listed; an
+`https://` manifest is pinned by a hash of the document as served.
+
+Pin it yourself with `hf://stanfordnlp/imdb@<rev>`. Whatever you put after the
+`@` is honoured verbatim, because `@` is you saying "this one" — and that cuts
+both ways: `@main` is **not** a pin, it is a branch name we will use as you
+wrote it, so writing nothing pins harder than writing `@main` does. A tag is
+only as immutable as whoever can move it. A commit SHA cannot be re-pointed at
+all, which is why it is what you get by default.
+
+### `select` narrows the listing
+
+```yaml
+select: "plain_text/train-*.parquet"
+```
+
+A glob against the full path the origin printed, case-sensitive, and `*`
+deliberately crosses `/` so the line above reads the way you expect. For a
+bucket the path is the whole object key, prefix included. A `select` that
+matches nothing is **refused at submit**, naming a few of the paths that were
+listed — a job with no data is not a smaller job.
+
+One dataset may resolve to at most 50,000 files. Past that, narrow it with
+`select:` or combine your shards into bigger ones.
+
+### `split` is inferred from `mode`
+
+| `mode` | inferred `split` | Each machine gets |
+|---|---|---|
+| `federated` | `shard` | a *different*, disjoint, byte-balanced piece; the fleet covers one pass |
+| anything else | `replica` | the whole dataset |
+
+Write `split: shard` or `split: replica` to override; explicit always wins.
+
+The two shapes ask different questions of the Crew. `shard` asks whether one
+machine can hold one slice; `replica` asks whether **every** machine can hold
+the whole thing — so `replica` on a big dataset is refused where `shard`
+admits, and that is the feature rather than a quirk.
+
+Either way the check happens at submit: if the largest task's share is bigger
+than the biggest dataset cache any online machine advertises, the job is
+refused right there, naming both numbers. A slice is fetched whole by one
+host, so the fleet's combined space does not help. That is one second in the
+console instead of twenty machines each downloading for forty minutes and then
+giving up. Hosts set the budget with `FLASHNODE_DATA_BUDGET_GB` (16 GB by
+default, `0` to take no dataset work at all), and an agent too old to know
+about the field advertises nothing and is never sent any.
+
+**A `partition:` job cannot declare `datasets:` yet.** The slices are cut per
+task at submit, and a partition's tasks are expanded later, by the
+coordinator — so the counts disagree and the job fails when it expands rather
+than being refused when you submit it. Use `sweep` or `mode: federated`.
+
+### A dataset with few files caps your fleet
+
+Three files means at most three machines, whatever the pool size. This is the
+same complaint that removed `shards:` — the difference is that it is now said
+out loud rather than leaving eight machines silently idling. You get a warning
+and not a refusal, because a small dataset during development is a legitimate
+thing to run.
+
+The subtle version, and the one that will actually bite you: **the split
+balances bytes, not files.** It has to — real shards are uneven, and dividing
+by file count hands one machine ten times the work while every round waits on
+it. But it means a dataset with *enough* files can still strand machines if
+one file dominates. Five files of 300, 100, 4200, 50 and 900 bytes, cut five
+ways, fill three chunks and leave two empty.
+
+An empty chunk is a machine that fetches nothing, trains nothing and reports
+nothing — and FedAvg then averages in a member whose gradient does not exist.
+Not a smaller round: a different experiment, with everything looking healthy
+throughout. So the warning is measured after the cut rather than guessed from
+the file count, and it names both numbers:
+
+> dataset `'imdb'` has 3 file(s), and their bytes spread across only 3 of this
+> job's 20 parallel slot(s) — the other 17 would fetch nothing and train
+> nothing. Split it into more, and more evenly sized, files to use the whole
+> fleet.
+
+Which is the fix, in both cases, and it is a decision you make when you
+prepare the data rather than when you submit: **more files, of roughly equal
+size.**
+
+### `--shard` and `--num-shards` still mean what they meant
+
+They are still in your argv, carrying the same integers. What changed is what
+they are *for*: they name the chunk of the pass you were handed, so
+`chunks_done: [args.shard]` credits your machine for it. They are no longer
+how you slice, because the slicing already happened — your
+`/work/data/<name>/` contains your files and nobody else's.
+
+So **do not stride the data again.** The federated section above tells you the
+slice is `arange(shard, len(data), num_shards)`; that is right for a job with
+no `datasets:` block and wrong for one with it. Read every file in your
+directory. Striding your slice a second time trains a fraction of a fraction,
+and nothing anywhere reports an error.
+
+### What "verified" means, and where it does not
+
+Integrity is genuinely not equal across origins, so we label it rather than
+imply a guarantee we did not get:
+
+| Origin | Token we record | Checked after download? |
+|---|---|---|
+| `hf://`, LFS file | a real sha256 | **Yes** — a mismatch fails the task |
+| `hf://`, small non-LFS file | a git blob oid | No — it hashes a header plus the content, not the bytes you receive |
+| `s3://`, `r2://` | the object's ETag | No |
+| `https://` | the sha256 *you* declared | Recorded; only `hf://`'s sha256 is verified today |
+
+An ETag is **not** a content hash. For a multipart upload it is
+`<md5-of-md5s>-<partcount>`, which is enough to pin a revision and to notice
+that an object moved under you, and not enough to prove two machines fetched
+the same bytes. We use it for the first thing and never claim the second.
+
+When a checksum does fail, it fails **the task**, never the machine: a broken
+or hostile origin costs the submitter their job, not a volunteer their laptop.
+
+### At most four datasets per job
+
+Each declared source is resolved against its origin, one after another, while
+your submit request waits — up to 30 seconds apiece. Four keeps the worst case
+at two minutes without us needing to get clever, and nobody legitimately
+trains one job on ten origins.
+
+Two datasets in one job may not share a `name`: both would mount at
+`/work/data/<name>/` and overwrite each other. A `name` is a name and not a
+path — it starts with a letter or digit and uses only `[A-Za-z0-9._-]`,
+because it becomes a directory on a stranger's machine. `name`, `source`,
+`select` and `split` are the only keys an entry may carry; anything else is
+refused, the same way an unknown top-level key is.
+
+### A worked federated example
+
+```yaml
+version: 2
+name: acme-fed
+image: pytorch-cpu
+entrypoint: train.py
+mode: federated
+epochs: 3
+
+datasets:
+  - name: tokens
+    source: hf://acme/tokens-2026        # pinned to a commit at submit
+    select: "train/shard-*.npy"          # skip the eval split
+```
+
+Three passes over `acme/tokens-2026`, cut into byte-balanced contiguous
+pieces, one per machine online when each round starts. The dataset-shaped part
+of `train.py`:
+
+```python
+import argparse, glob, json
+import numpy as np
+
+p = argparse.ArgumentParser()
+p.add_argument("--round", type=int)
+p.add_argument("--shard", type=int)        # this chunk's id — for reporting
+p.add_argument("--num-shards", type=int)   # chunks in the whole pass
+a = p.parse_args()
+
+# Every file here is already yours: the slice was cut at submit time.
+# Do NOT stride it again by --shard.
+files = sorted(glob.glob("/work/data/tokens/train/shard-*.npy"))
+data = np.concatenate([np.load(f) for f in files])
+
+# ... read /work/inputs/weights.json (absent on round 0), train, write
+#     /work/out/delta.json — the federated contract above, unchanged ...
+
+json.dump(
+    {"samples": int(len(data)), "loss": float(loss), "chunks_done": [a.shard]},
+    open("/work/out/metrics.json", "w"),
+)
+```
+
+**A note on file formats.** Most Hub datasets are Parquet, and none of the
+curated images can read it — `pytorch-cpu` gives you torch and numpy, and
+neither speaks Parquet. Declaring a dataset does not lift the image ceiling
+described above, so today that means shipping your shards as something a
+curated image can open (`.npy`, `.npz`, `.csv`, text) and, ideally, many
+roughly-equal files rather than three big ones.
 
 ## Fanning out: `sweep` or `partition`, never both
 
