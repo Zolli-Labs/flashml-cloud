@@ -186,7 +186,7 @@ export function EnrolInstructions({ base }: { base: string }) {
         <p>
           The last command prints a short code. Enter it at{" "}
           <span className="font-mono text-foreground">/activate</span> from any
-          signed-in browser — your phone works — to approve the Zolli.
+          signed-in browser — your phone works — to approve the Machine.
         </p>
         {/*
           Git used to be listed here, and it is deliberately gone. It was only

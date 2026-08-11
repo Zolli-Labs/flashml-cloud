@@ -44,7 +44,7 @@ export default function WorkspaceSettingsPage() {
         // to "no such pool" (see `renamePool`'s doc comment in cloud-api.ts).
         // Absent beats disabled here.
         <p className="mt-8 text-sm text-muted-foreground">
-          Only this Crew&apos;s owner can rename it or manage its invite
+          Only this Workspace&apos;s owner can rename it or manage its invite
           link.
         </p>
       )}
@@ -52,7 +52,7 @@ export default function WorkspaceSettingsPage() {
       <section className="panel mt-8 p-5">
         <h2 className="text-sm font-semibold">Details</h2>
         <dl className="mt-4 divide-y divide-border">
-          <DetailRow label="Crew ID">
+          <DetailRow label="Workspace ID">
             <span className="font-mono text-xs text-muted-foreground">
               {pool.id}
             </span>

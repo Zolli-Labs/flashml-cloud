@@ -106,7 +106,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
       setInviteState(null);
       setLink(null);
       toast.success("Invite link revoked", {
-        description: "It can no longer be used to join this Crew.",
+        description: "It can no longer be used to join this Workspace.",
       });
     } catch {
       toast.error("Couldn't revoke the invite link", {
@@ -139,7 +139,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
           membership. */}
       <p className="mt-1 text-xs text-muted-foreground">
         A standing link — anyone who opens it and signs in joins this
-        Crew if they&apos;re already admitted to ZolliAI Cloud; otherwise the
+        Workspace if they&apos;re already admitted to Zolli Cloud; otherwise the
         join is saved and applied once an admin approves them. Either way it
         spends one use. Treat it like a password: it&apos;s good for the uses
         and time shown below, and Regenerate invalidates whatever copy is
@@ -194,7 +194,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
           <p className="mt-2.5 flex items-start gap-1.5 text-xs text-warning-foreground">
             <Warning className="mt-0.5 h-3.5 w-3.5 shrink-0" weight="fill" />
             <span>
-              This link is shown once. Copy it now — ZolliAI can&apos;t show
+              This link is shown once. Copy it now — Zolli can&apos;t show
               it to you again.
             </span>
           </p>
@@ -229,7 +229,7 @@ export function InviteManager({ poolId }: { poolId: string }) {
                 <AlertDialogTitle>Revoke this invite link?</AlertDialogTitle>
                 <AlertDialogDescription>
                   Anyone still holding it can no longer use it to join this
-                  Crew. Members already in the Crew are unaffected.
+                  Workspace. Members already in the Workspace are unaffected.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

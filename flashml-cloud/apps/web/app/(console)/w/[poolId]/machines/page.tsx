@@ -19,9 +19,9 @@ export default function WorkspaceMachinesPage() {
       <WorkspaceHeader />
 
       <section className="mt-8">
-        <h2 className="text-sm font-semibold">Serving this Crew</h2>
+        <h2 className="text-sm font-semibold">Serving this Workspace</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Every Zolli your crewmates have opted in, not only yours.
+          Every Machine your workspace members have opted in, not only yours.
         </p>
         <div className="mt-3">
           <PoolFleetTable machines={machines} />
@@ -34,10 +34,10 @@ export default function WorkspaceMachinesPage() {
 
       {/* The anchor `YourMachines`' empty state links to. Keep the id. */}
       <div id="connect-panel" className="mt-8">
-        <h2 className="text-sm font-semibold">Connect a Zolli</h2>
+        <h2 className="text-sm font-semibold">Connect a Machine</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           No spare laptop? Point a Colab notebook or a rented pod at this
-          Crew instead.
+          Workspace instead.
         </p>
         <div className="mt-4">
           <ConnectPanel poolId={pool.id} />

@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ArrowRight, CheckCircle, Warning } from "@phosphor-icons/react";
+import { ArrowRight, CheckCircle, Desktop, Warning } from "@phosphor-icons/react";
 import {
   InputOTP,
   InputOTPGroup,
@@ -11,7 +11,6 @@ import {
   InputOTPSlot,
 } from "@/components/ui/input-otp";
 import { Spinner } from "@/components/ui/spinner";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import {
   ApiError,
   NotAuthenticated,
@@ -126,7 +125,7 @@ function ActivateInner() {
           );
         } else if (err instanceof ApiError && err.status === 409) {
           setErrorMessage(
-            "That Zolli is already enrolled under a different code. Revoke it from My Zollis first if this isn't expected."
+            "That Machine is already enrolled under a different code. Revoke it from My Machines first if this isn't expected."
           );
         } else if (err instanceof ApiError) {
           setErrorMessage(err.detail);
@@ -208,15 +207,15 @@ function ActivateInner() {
               weight="fill"
             />
           </div>
-          <h1 className="mt-5 font-display text-2xl font-semibold">Zolli approved</h1>
+          <h1 className="mt-5 text-2xl font-semibold">Machine approved</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {label ? (
               <>
                 <span className="font-mono text-foreground">{label}</span> is
-                linked to your account as a Zolli.
+                linked to your account as a machine.
               </>
             ) : (
-              "That Zolli is linked to your account."
+              "That machine is linked to your account."
             )}
           </p>
           {poolId && (
@@ -240,7 +239,7 @@ function ActivateInner() {
             <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
               It appears under{" "}
               <Link href="/machines" className="text-brand-foreground hover:underline">
-                My Zollis
+                My machines
               </Link>{" "}
               and starts claiming work once the agent is running on that
               laptop.
@@ -251,7 +250,7 @@ function ActivateInner() {
             href="/machines"
             className="interactive mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:brightness-110"
           >
-            Go to My Zollis
+            Go to My machines
             <ArrowRight className="h-4 w-4" weight="bold" />
           </Link>
         </div>
@@ -263,15 +262,11 @@ function ActivateInner() {
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
       <div className="panel w-full max-w-sm p-6 shadow-md sm:p-7">
         <div className="text-center">
-          <ZolliCharacter
-            role="scout"
-            size={78}
-            mood="waving"
-            className="mx-auto"
-            label="Scout guides Zolli activation"
-          />
-          <p className="label-caps mt-1 text-brand-foreground">Add a Zolli</p>
-          <h1 className="mt-2 font-display text-2xl font-semibold">Approve a Zolli</h1>
+          <span className="mx-auto grid h-12 w-12 place-items-center rounded-[7px] border border-border bg-[var(--z-app-surface-hover)] text-brand-foreground">
+            <Desktop size={22} aria-hidden />
+          </span>
+          <p className="label-caps mt-4 text-brand-foreground">Add a machine</p>
+          <h1 className="mt-2 text-2xl font-semibold">Approve a machine</h1>
           <p className="mx-auto mt-2 max-w-72 text-sm leading-relaxed text-muted-foreground">
             Enter the code shown on the laptop running{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
@@ -346,7 +341,7 @@ function ActivateInner() {
                 Approving…
               </>
             ) : (
-              "Approve Zolli"
+              "Approve machine"
             )}
           </button>
 

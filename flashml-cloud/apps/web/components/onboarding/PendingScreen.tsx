@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
+import { ClockCountdown } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -28,17 +28,14 @@ import {
 export function PendingScreen({ email }: { email: string | null }) {
   return (
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
-      <Card className="w-full max-w-sm border-border bg-surface shadow-md">
+      <Card className="w-full max-w-sm rounded-[10px] border border-border bg-surface shadow-none ring-0">
         <CardHeader className="items-center text-center">
-          <ZolliCharacter
-            role="keeper"
-            size={88}
-            mood="focused"
-            label="Keeper is holding your place while access is reviewed"
-          />
-          <CardTitle className="font-display text-2xl">Request received</CardTitle>
+          <span className="mb-2 grid h-11 w-11 place-items-center rounded-[7px] border border-border bg-[var(--z-app-surface-hover)] text-brand-foreground">
+            <ClockCountdown size={21} aria-hidden />
+          </span>
+          <CardTitle className="text-2xl font-semibold">Request received</CardTitle>
           <CardDescription>
-            A human reads every request — ZolliAI Cloud is a small alpha, not an
+            A human reads every request — Zolli Cloud is a small alpha, not an
             automated signup.
           </CardDescription>
         </CardHeader>

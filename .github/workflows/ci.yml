@@ -103,9 +103,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 22, not 20: react-dom/client reads `navigator` at import time, and
+      # globalThis.navigator only exists from Node 21. On 20 every test that
+      # mounts a client root dies with "navigator is not defined" — a failure
+      # that cannot reproduce on a developer machine running 22.
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: flashml-cloud/apps/web/package-lock.json
 

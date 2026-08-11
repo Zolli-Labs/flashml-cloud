@@ -58,7 +58,7 @@ function InviteSaved({ name }: { name: string }) {
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
       <Card className="w-full max-w-sm border-border bg-surface shadow-sm">
         <CardHeader>
-          <CardTitle className="font-display text-2xl">Crew invite saved</CardTitle>
+          <CardTitle className="text-2xl font-semibold">Workspace invite saved</CardTitle>
           <CardDescription>{bankedJoinTail(name)}</CardDescription>
         </CardHeader>
         <CardContent>
@@ -141,13 +141,13 @@ function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
     <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-10">
       <Card className="w-full max-w-sm border-border bg-surface shadow-sm">
         <CardHeader>
-          <CardTitle className="font-display text-2xl">
-            {invalidLink ? "That Crew invite didn't work" : "Join a Crew"}
+          <CardTitle className="text-2xl font-semibold">
+            {invalidLink ? "That Workspace invite didn't work" : "Join a Workspace"}
           </CardTitle>
           <CardDescription>
             {invalidLink
               ? "It may be mistyped, expired, or already used — the API folds all three into one answer, so we cannot say which. Paste a fresh invite link or code below."
-              : "Paste the invite link or code someone on ZolliAI sent you."}
+              : "Paste the invite link or code someone on Zolli sent you."}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -184,7 +184,7 @@ function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
               disabled={submitting || value.trim().length === 0}
               className="interactive rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {submitting ? "Joining…" : "Join Crew"}
+              {submitting ? "Joining…" : "Join Workspace"}
             </button>
           </form>
         </CardContent>

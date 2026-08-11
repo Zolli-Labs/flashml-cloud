@@ -12,7 +12,7 @@ import { Kbd } from "@/components/ui/kbd";
 const GOTO: Record<string, { href: string; label: string }> = {
   o: { href: "/overview", label: "Overview" },
   j: { href: "/jobs", label: "Jobs" },
-  m: { href: "/machines", label: "Zollis" },
+  m: { href: "/machines", label: "Machines" },
   s: { href: "/submit", label: "Submit a job" },
   a: { href: "/account", label: "Account" },
   d: { href: "/docs", label: "Documentation" },
@@ -97,18 +97,18 @@ export function Shortcuts() {
         type="button"
         aria-label="Close shortcuts"
         onClick={() => setOpen(false)}
-        className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+        className="absolute inset-0 bg-black/60"
       />
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Keyboard shortcuts"
-        className="glass-strong relative w-full max-w-sm rounded-xl p-5"
+        className="relative w-full max-w-sm rounded-[10px] border border-border bg-surface p-5 shadow-lg"
       >
         <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
         <dl className="mt-4 space-y-2.5">
           <Row keys={["?"]} label="This list" />
-          <Row keys={["⌘", "K"]} label="Search jobs, Zollis, pages" />
+          <Row keys={["⌘", "K"]} label="Search jobs, Machines, pages" />
           <div className="pt-1.5">
             <div className="meta uppercase tracking-[0.12em]">Go to</div>
           </div>

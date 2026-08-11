@@ -16,7 +16,7 @@ export function MemberTable({
       <table className="w-full min-w-[560px] text-left">
         <thead>
           <tr className="border-b border-border">
-            {["Member", "Zollis", "Online", "Joined"].map((h) => (
+            {["Member", "Machines", "Online", "Joined"].map((h) => (
               <th key={h} className="label-caps px-3 py-2 font-medium">
                 {h}
               </th>

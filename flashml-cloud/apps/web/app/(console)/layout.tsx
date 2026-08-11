@@ -1,7 +1,7 @@
 import { ConsoleShell } from "@/components/shell/ConsoleShell";
 
 /** Console chrome: left rail, sticky top bar carrying the fleet pill, and a
- * flat content column. No glass and no atmosphere in here. */
+ * flat content column. No translucent surfaces or atmosphere in here. */
 export default function ConsoleLayout({
   children,
 }: {

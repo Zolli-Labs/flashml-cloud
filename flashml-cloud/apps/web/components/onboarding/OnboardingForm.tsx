@@ -3,7 +3,6 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Warning } from "@phosphor-icons/react";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -130,27 +129,23 @@ export function OnboardingForm({
   const useCaseTooLong = useCaseCount > USE_CASE_MAX;
 
   return (
-    <section className="glass w-full max-w-xl rounded-2xl p-7 sm:p-8 rise">
+    <section className="w-full max-w-xl rounded-[10px] border border-border bg-surface p-7 sm:p-8">
       <div className="flex items-start justify-between gap-5">
         <div className="min-w-0">
           {stepLabel && (
             <p className="label-caps mb-3 text-brand-foreground">{stepLabel}</p>
           )}
-          <h1 className="font-display text-2xl font-semibold tracking-tight">
+          <h1 className="text-2xl font-semibold tracking-[-0.03em]">
             {stepLabel ? "Request access" : "Tell us about you"}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            ZolliAI Cloud is a small alpha. A human reads every request — this
+            Zolli Cloud is a small alpha. A human reads every request — this
             is what they read.
           </p>
         </div>
-        <ZolliCharacter
-          role="scout"
-          size={76}
-          mood="waving"
-          className="-mr-2 shrink-0"
-          label="Scout guides your ZolliAI enrollment"
-        />
+        <span className="rounded-[4px] border border-border bg-[var(--z-app-surface-hover)] px-2.5 py-1.5 font-mono text-[9px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+          access review
+        </span>
       </div>
 
       <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-5">
@@ -272,7 +267,7 @@ export function OnboardingForm({
 
         <div className="flex flex-col gap-2">
           <Label htmlFor="use-case" className="text-xs font-medium">
-            What do you want your Crew to run?
+            What do you want your workspace to run?
           </Label>
           <textarea
             id="use-case"
@@ -327,7 +322,7 @@ export function OnboardingForm({
 
         <div className="flex flex-col gap-2">
           <Label htmlFor="heard-from" className="text-xs font-medium">
-            How did you hear about ZolliAI?
+            How did you hear about Zolli?
           </Label>
           <p className="text-xs text-muted-foreground">Optional.</p>
           {/* Same reasoning as the role Select above: `draft.heard_from`

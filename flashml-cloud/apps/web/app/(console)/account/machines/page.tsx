@@ -17,7 +17,6 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import { isOnline, relativeTime } from "@/lib/machine-status";
 import {
@@ -61,7 +60,7 @@ export default function MachinesPage() {
           return;
         }
         setError(
-          err instanceof Error ? err.message : "Couldn't load your Zollis."
+          err instanceof Error ? err.message : "Couldn't load your Machines."
         );
         setState("error");
       });
@@ -94,9 +93,9 @@ export default function MachinesPage() {
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="title">My Zollis</h1>
+          <h1 className="title">My Machines</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            Zollis you own. Tick one into a Crew to let your crewmates
+            Machines you own. Tick one into a Workspace to let your workspace members
             place jobs on it.
           </p>
         </div>
@@ -116,7 +115,7 @@ export default function MachinesPage() {
             href="/activate"
             className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
           >
-            Add a Zolli
+            Add a Machine
           </Link>
         </div>
       </div>
@@ -161,7 +160,7 @@ export default function MachinesPage() {
             <table className="w-full min-w-[620px] text-left">
               <thead>
                 <tr className="border-b border-border">
-                  {["Zolli", "Platform", "Last seen", ""].map((h, i) => (
+                  {["Machine", "Platform", "Last seen", ""].map((h, i) => (
                     <th
                       key={h || i}
                       className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
@@ -205,12 +204,12 @@ function MachineRow({
     setRevoking(true);
     try {
       await onRevoke(machine.id);
-      toast.success("Zolli revoked", {
+      toast.success("Machine revoked", {
         description: `${label} can no longer claim work.`,
       });
     } catch {
-      toast.error("Couldn't revoke that Zolli", {
-        description: "The Zolli is unchanged. Try again.",
+      toast.error("Couldn't revoke that Machine", {
+        description: "The Machine is unchanged. Try again.",
       });
     } finally {
       setRevoking(false);
@@ -316,10 +315,9 @@ function Empty() {
   return (
     <div className="flex flex-col items-center gap-5 py-14 text-center">
       <div>
-        <ZolliCharacter role="scout" size={72} />
-        <h2 className="text-base font-semibold">No Zollis yet</h2>
+        <h2 className="text-base font-semibold">No machines yet</h2>
         <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted-foreground">
-          Run these on the machine you want to turn into a Zolli. It can be this one.
+          Run these commands on the machine you want to connect. It can be this one.
         </p>
       </div>
       <EnrolInstructions base={cloudApiBase()} />

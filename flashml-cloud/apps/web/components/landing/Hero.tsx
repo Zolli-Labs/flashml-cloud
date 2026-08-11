@@ -1,120 +1,145 @@
 "use client";
 
 import Link from "next/link";
-import { motion, useReducedMotion } from "motion/react";
-import { ArrowRight } from "@phosphor-icons/react";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
-import { MagneticLink } from "@/components/motion/MagneticLink";
-import { ZOLLI_ROLES, type ZolliRole } from "@/lib/zolli-brand";
-import { BASE, staggerParent, wipeLine } from "@/lib/motion";
+import { useEffect, useState } from "react";
+import { ArrowRight, ArrowUpRight } from "@phosphor-icons/react/dist/ssr";
+import { CoordinatorMap } from "@/components/landing/coordinator-map/CoordinatorMap";
+import { useMapStory } from "@/components/landing/coordinator-map/useMapStory";
+import { MAP_VIEWPORT_COMPACT, MAP_VIEWPORT_DESKTOP, type Viewport } from "@/lib/coordinator-map";
+import { MARKETING } from "@/lib/marketing";
 
-const HERO_ROLES = Object.keys(ZOLLI_ROLES) as ZolliRole[];
+/**
+ * The window on `MAP_VIEWPORT_DESKTOP` this hero draws through.
+ *
+ * The desktop composition occupies x 417–1227 and y 43–568 of its 1240 × 620
+ * frame: the prototype parked the hero copy in the empty left third and drew
+ * the map across the rest. This hero keeps the copy in its own column, so that
+ * third would arrive as 450 px of dead panel beside the headline. Cropping to
+ * 900 × 570 starting 372 units in and 20 down leaves the map untouched — same
+ * scale, same composition — with 45 units of air to its left and right and
+ * 22 above and below.
+ *
+ * The frame is not made narrower than 900 on purpose: at 880 and below the
+ * geometry module switches to the stacked composition, and cropping into that
+ * would silently re-lay the whole map out.
+ *
+ * This is a frame, not geometry: nothing here projects anything, and every part
+ * of the map still reads its coordinates out of `lib/coordinator-map`. It
+ * belongs in that module the next time the viewports are touched.
+ */
+const HERO_MAP_CROP = { left: 372, top: 20, width: 900, height: 570 } as const;
 
-/** Each headline line rides up from behind its own clip box. The padding
- * protects descenders from that clipping without adding layout space. */
-function WipeLine({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <span className="block overflow-hidden pb-[0.14em] -mb-[0.14em]">
-      <motion.span variants={wipeLine} className={`block ${className}`}>
-        {children}
-      </motion.span>
-    </span>
-  );
+const HERO_MAP_VIEWPORT: Viewport = {
+  ...MAP_VIEWPORT_DESKTOP,
+  width: HERO_MAP_CROP.width,
+  height: HERO_MAP_CROP.height,
+  originX: MAP_VIEWPORT_DESKTOP.originX - HERO_MAP_CROP.left,
+  originY: MAP_VIEWPORT_DESKTOP.originY - HERO_MAP_CROP.top,
+};
+
+/** The width at which the geometry module stops composing the map as a diamond
+ * and composes it as a vertical stack instead. It is a property of that module,
+ * not a breakpoint of this page, which is why it is a media query string and not
+ * a Tailwind variant. */
+const COMPACT_QUERY = "(max-width: 880px)";
+
+function useCompactMap() {
+  const [compact, setCompact] = useState(false);
+
+  useEffect(() => {
+    const query = window.matchMedia(COMPACT_QUERY);
+    const sync = () => setCompact(query.matches);
+
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  return compact;
 }
 
 export function Hero() {
-  const reduce = useReducedMotion();
+  const { phase, ref } = useMapStory();
+  const compact = useCompactMap();
 
+  // At `xl` the hero is pinned by the scroll track in `app/(marketing)/page.tsx`,
+  // so it takes exactly one viewport and centres itself in it: its bottom border
+  // then lands on the bottom of the frame instead of leaving a seam of bare
+  // track under it. Below `xl` nothing pins and the section stays an ordinary
+  // block, which is what tells `useMapStory` to run the timer instead.
   return (
-    <section className="relative isolate overflow-hidden pt-24 sm:pt-28">
+    <section
+      ref={ref}
+      id="hero"
+      data-surface="dark"
+      className="relative isolate overflow-hidden border-b border-border pt-20 xl:flex xl:min-h-svh xl:flex-col xl:justify-center"
+    >
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 -z-10"
         style={{
           backgroundImage:
-            "radial-gradient(ellipse 55% 45% at 80% 8%, rgb(239 104 40 / 0.11), transparent 68%)",
+            "radial-gradient(circle at 78% 8%, rgb(243 107 50 / 0.08), transparent 23rem)",
         }}
       />
-      <div className="mx-auto max-w-7xl px-4 pb-18 sm:px-6 md:pb-24">
-        <motion.div
-          className="flex flex-col items-center text-center"
-          variants={staggerParent(0.09)}
-          initial={reduce ? false : "hidden"}
-          animate="show"
-        >
-          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-brand-foreground">
-            ZolliAI Cloud
-          </p>
-          <h1 className="mt-5 max-w-5xl font-display text-5xl font-semibold leading-[0.98] tracking-[-0.045em] sm:text-6xl md:text-7xl lg:text-[5.6rem]">
-            <WipeLine>Every machine has{" "}</WipeLine>
-            <WipeLine>a part to play.</WipeLine>
-          </h1>
-
-          <motion.p
-            variants={{
-              hidden: { opacity: 0, y: 16 },
-              show: { opacity: 1, y: 0, transition: BASE },
-            }}
-            className="mt-7 max-w-[58ch] text-base leading-relaxed text-muted-foreground md:text-lg"
-          >
-            Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew. When one Zolli drops out, verified progress helps the next one keep work moving.
-          </motion.p>
-
-          <motion.div
-            variants={{
-              hidden: { opacity: 0, y: 16 },
-              show: { opacity: 1, y: 0, transition: BASE },
-            }}
-            className="mt-9 flex flex-wrap items-center justify-center gap-3"
-          >
-            <MagneticLink
-              href="/workspaces"
-              className="interactive inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-shadow hover:shadow-md"
-            >
-              Build your crew
-              <ArrowRight weight="bold" className="h-4 w-4" />
-            </MagneticLink>
-            <Link
-              href="#recover"
-              className="interactive inline-flex items-center gap-2 rounded-full border border-border bg-surface px-6 py-3 text-sm font-medium text-foreground transition-colors hover:bg-surface-2"
-            >
-              See how recovery works
-            </Link>
-          </motion.div>
-
-          <div className="mt-14 grid w-full grid-cols-3 gap-2 sm:grid-cols-6 sm:gap-3 md:mt-18">
-            {HERO_ROLES.map((role, index) => {
-              const definition = ZOLLI_ROLES[role];
-              return (
-                <motion.div
-                  key={role}
-                  variants={{
-                    hidden: { opacity: 0, y: 24 },
-                    show: { opacity: 1, y: 0, transition: { ...BASE, delay: index * 0.035 } },
-                  }}
-                  className="flex min-w-0 flex-col items-center rounded-2xl border border-border bg-surface/80 px-1 py-3 shadow-sm sm:px-2 sm:py-4"
-                >
-                  <ZolliCharacter
-                    role={role}
-                    size={112}
-                    mood={role === "scout" ? "waving" : role === "worker" ? "focused" : "happy"}
-                    className="h-auto w-full max-w-[7rem]"
-                    label={`${definition.label}, ${definition.subtitle}`}
-                  />
-                  <span className="mt-1 text-xs font-semibold text-foreground sm:text-sm">
-                    {definition.label}
-                  </span>
-                </motion.div>
-              );
-            })}
+      {/* The `xl` paddings are smaller than the ones below it because the pinned
+          section is already a whole viewport tall and centres its content: the
+          air is there whether or not the padding is, and every pixel spent on it
+          is a pixel the map's own frame loses off the bottom of the screen. */}
+      <div className="mx-auto w-full max-w-[1440px] px-5 pb-10 sm:px-6 xl:px-12 xl:pb-6">
+        <div className="grid min-w-0 items-center gap-10 py-8 xl:grid-cols-[minmax(28rem,.9fr)_minmax(0,1.1fr)] xl:gap-10 xl:py-4 2xl:gap-14">
+          <div className="min-w-0">
+            <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
+              Fault-tolerant distributed compute
+            </p>
+            <h1 className="mt-5 max-w-[78rem] text-[clamp(2.75rem,5.6vw,5.7rem)] font-semibold leading-[0.93] tracking-[-0.058em]">
+              <span className="block lg:whitespace-nowrap">Compute that </span>
+              <span className="block text-muted-foreground lg:whitespace-nowrap">finishes the job.</span>
+            </h1>
+            <p className="mt-7 max-w-[58ch] text-[15px] leading-[1.62] tracking-[-0.006em] text-muted-foreground sm:mt-8">
+              Zolli unifies compatible cloud capacity, rented compute, owned GPU infrastructure, and everyday machines under one control plane, then recovers work when a node disappears.
+            </p>
+            <div className="mt-7 flex flex-wrap gap-2.5">
+              <Link
+                href={MARKETING.consolePath}
+                title="Open console"
+                className="interactive inline-flex min-h-10 items-center gap-2 rounded-[7px] border border-primary bg-primary px-4 text-[13px] font-semibold text-primary-foreground hover:bg-[var(--z-orange-bright)]"
+              >
+                Open console
+                <ArrowRight weight="bold" className="h-4 w-4" />
+              </Link>
+              <a
+                href={MARKETING.calendlyUrl}
+                target="_blank"
+                rel="noreferrer"
+                aria-label="Talk to Zolli (opens in a new tab)"
+                className="interactive inline-flex min-h-10 items-center gap-2 rounded-[7px] border border-[var(--z-border-strong)] bg-surface px-4 text-[13px] font-semibold hover:bg-[var(--z-surface-hover)]"
+              >
+                Talk to Zolli
+                <ArrowUpRight weight="bold" className="h-4 w-4" />
+              </a>
+            </div>
           </div>
-        </motion.div>
+
+          {/* Capped, because both viewBoxes have a designed size. Stretching the
+              420-unit portrait frame across a 700 px tablet would make it a
+              thousand pixels tall, and the landscape frame drawn at the full
+              width of a stacked 1024 px layout is a 650 px-tall diagram sitting
+              under three lines of copy. Only the pinned two-column layout at
+              `xl` gets the map at its column's full width. */}
+          <div
+            className={
+              compact
+                ? "mx-auto w-full max-w-[26rem]"
+                : "mx-auto w-full max-w-[46rem] xl:max-w-none"
+            }
+          >
+            <CoordinatorMap
+              phase={phase}
+              viewport={compact ? MAP_VIEWPORT_COMPACT : HERO_MAP_VIEWPORT}
+            />
+          </div>
+        </div>
       </div>
     </section>
   );

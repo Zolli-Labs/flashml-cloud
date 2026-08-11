@@ -34,7 +34,7 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
             reworded into an access-denied message — that would confirm to
             an outsider that the id names a real workspace. */}
         <p className="text-sm text-muted-foreground">
-          This Crew doesn&apos;t exist, or you&apos;re not a member.
+          This Workspace doesn&apos;t exist, or you&apos;re not a member.
         </p>
         {/* `/workspaces`, not `/pools`. `/pools` is a RESOLVER now
             (`WorkspaceResolver`): it drops you inside whichever workspace
@@ -42,7 +42,7 @@ export function WorkspaceGate({ children }: { children: React.ReactNode }) {
             is the opposite of a way out. `/workspaces` is the page that
             actually lets you create or join one. */}
         <Link href="/workspaces" className="text-sm text-brand-foreground hover:underline">
-          Create or join a Crew
+          Create or join a Workspace
         </Link>
       </Shell>
     );

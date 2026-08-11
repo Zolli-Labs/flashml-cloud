@@ -151,7 +151,7 @@ export default function SubmitPage() {
         <p className="text-sm text-muted-foreground mt-1">
           Paste a public GitHub repo with a <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">flashml.yaml</code> at its
           root. We stage the code, run it through preflight, and hand it to
-          the next available Zolli.
+          the next available Machine.
         </p>
       </div>
 
@@ -203,15 +203,15 @@ export default function SubmitPage() {
             </div>
 
             <div>
-              <Label>Crew</Label>
+              <Label>Workspace</Label>
               <p className="mt-1.5 text-sm">
                 Runs in <span className="font-medium">{pool.name}</span>
               </p>
             </div>
 
             <p className="text-xs text-muted-foreground">
-              Jobs in this Crew run without a container sandbox on
-              your crewmates&apos; Zollis. Every member you invited can run
+              Jobs in this Workspace run without a container sandbox on
+              your workspace members&apos; Machines. Every member you invited can run
               code this job stages.
             </p>
 
@@ -219,7 +219,7 @@ export default function SubmitPage() {
               <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5 text-sm text-warning-foreground">
                 <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
                 <span>
-                  0 Zollis online in this Crew right now — the job
+                  0 Machines online in this Workspace right now — the job
                   will queue until one connects.
                 </span>
               </div>

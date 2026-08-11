@@ -7,14 +7,33 @@ import { safeNext } from "@/lib/safe-next";
 // 401 on first call), not a legitimate "logged out" state, so unauthenticated
 // visitors are redirected before the page ever renders rather than left to
 // discover a broken screen.
-const PUBLIC_PATHS = ["/", "/sign-in", "/auth/callback"];
+const PUBLIC_PATHS = [
+  "/",
+  "/sign-in",
+  "/auth/callback",
+  "/contact",
+  "/privacy",
+  "/terms",
+  "/security",
+  "/manifest.webmanifest",
+];
 
-function isPublicPath(pathname: string): boolean {
+export function isPublicPath(pathname: string): boolean {
   if (PUBLIC_PATHS.includes(pathname)) return true;
   // Next.js static assets / metadata files served from the app's public dir.
   if (pathname.startsWith("/_next")) return true;
+  if (pathname.startsWith("/models/")) return true;
   if (pathname === "/favicon.ico") return true;
   return false;
+}
+
+export function buildSignedOutRedirect(
+  requestUrl: Pick<URL, "origin" | "pathname" | "search">
+): URL {
+  const next = safeNext(requestUrl.pathname + requestUrl.search);
+  const redirectUrl = new URL("/sign-in", requestUrl.origin);
+  redirectUrl.searchParams.set("next", next);
+  return redirectUrl;
 }
 
 // Supabase does not always send the browser where we asked. `emailRedirectTo`
@@ -53,19 +72,30 @@ export async function middleware(request: NextRequest) {
   const forwarded = forwardAuthCode(request);
   if (forwarded) return forwarded;
 
+  const { pathname } = request.nextUrl;
+
+  // Public content must not depend on Supabase availability or pay the cost
+  // of constructing an auth client. /sign-in is the sole exception: when
+  // auth is configured it verifies the session so a returning user can be
+  // sent straight to the console.
+  if (isPublicPath(pathname) && pathname !== "/sign-in") {
+    return NextResponse.next({ request });
+  }
+
   let response = NextResponse.next({ request });
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!supabaseUrl || !supabaseAnonKey) {
-    // Misconfigured deploy. Do not silently let every page render as if
-    // signed out (or, worse, as if signed in) — fail loud in the server
-    // log and let the request through as unauthenticated; the API will
-    // reject it with 401 rather than leak data.
+    // A missing auth client cannot establish a private session. Keep the
+    // sign-in screen available so the deployment can recover, but fail all
+    // private routes closed through the same signed-out redirect contract.
     console.error(
       "middleware: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY not set"
     );
-    return response;
+    return pathname === "/sign-in"
+      ? response
+      : NextResponse.redirect(buildSignedOutRedirect(request.nextUrl));
   }
 
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
@@ -93,8 +123,6 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const { pathname } = request.nextUrl;
-
   if (!user && !isPublicPath(pathname)) {
     // `pathname` alone drops the query string — for most routes that is
     // nothing worth keeping, but `/pools/join?token=...` is exactly a
@@ -116,10 +144,7 @@ export async function middleware(request: NextRequest) {
     // `pathname === "//evil.com/foo"` — a protocol-relative value that
     // `SignInCard` would later hand straight to `window.location.assign`,
     // leaving the site. See `lib/safe-next.ts`.
-    const next = safeNext(pathname + request.nextUrl.search);
-    const redirectUrl = new URL("/sign-in", request.nextUrl.origin);
-    redirectUrl.searchParams.set("next", next);
-    return NextResponse.redirect(redirectUrl);
+    return NextResponse.redirect(buildSignedOutRedirect(request.nextUrl));
   }
 
   // Signed in and asking for /sign-in: send them to the console home, not

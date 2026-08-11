@@ -363,7 +363,7 @@ export function RoundProgress({
 
       {contributors.length > 0 && (
         <section className="rounded-lg border border-border bg-surface p-4">
-          <h3 className="text-sm font-semibold">Zollis that contributed</h3>
+          <h3 className="text-sm font-semibold">Machines that contributed</h3>
           <div className="mt-3 space-y-2">
             {contributors.map(([node, count]) => (
               <div key={node} className="flex items-center gap-3">
