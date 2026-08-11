@@ -28,6 +28,7 @@ nothing if this module and the driver disagree.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import ceil
 
@@ -111,3 +112,120 @@ def round_chunk_offset(round_index: int, *, total_chunks: int,
     """
     target = round_coverage_target(total_chunks, sync_every)
     return (round_index * target) % total_chunks
+
+
+def dataset_chunks(sizes: Sequence[int], chunks: int) -> list[list[int]]:
+    """Manifest indices per chunk: contiguous runs split on cumulative BYTES.
+
+    Byte-weighted rather than count-weighted because real shards are
+    uneven — dividing 512 files evenly by count hands whoever gets the big
+    ones several times the work, and a round waits for its slowest slot.
+
+    Contiguous rather than strided because a contiguous range is what makes
+    a host's cache worth having across rounds; ``round_chunk_offset``
+    already moves the window so the fleet still covers a whole pass.
+
+    Total, never raising. The sizes come from a stranger's file listing —
+    ``datasets.resolve`` reports whatever the origin says, including a
+    manifest of empty files — and a submit that dies part-way through
+    cutting slices would refuse a job for a shape that has a perfectly good
+    layout. Two invariants hold for every input:
+
+    * the result is exactly ``max(0, chunks)`` lists long, so a caller may
+      zip it against its own task list without checking anything;
+    * every index in ``sizes`` appears in exactly one of them — unless the
+      caller asked for no chunks at all, which is the one case where there
+      is nowhere to put them.
+
+    That second exception is why no floor of 1 is applied here: a caller
+    that computed zero slots has a zero-length task list, and handing it one
+    chunk anyway turns its own ``enumerate`` into an ``IndexError`` at a
+    point where the manifest is no longer in scope. ``fleet_shape`` and
+    ``cap_chunks_to_manifest`` are where the floor belongs.
+
+    More chunks than files yields empty chunks, which is a real (if
+    wasteful) layout rather than an error. ``cap_chunks_to_manifest`` is
+    what prevents it, and it is the caller's decision because only the
+    caller knows whether the split is ``shard`` or ``replica``.
+    """
+    out: list[list[int]] = [[] for _ in range(max(0, chunks))]
+    if not out or not sizes:
+        return out
+    total = sum(sizes)
+    if total <= 0:
+        # Every file is empty (or a listing reported nonsense): weighting by
+        # bytes would divide by zero, so fall back to position. Nothing is
+        # dropped, and the layout is still contiguous.
+        for index in range(len(sizes)):
+            out[min(index * chunks // len(sizes), chunks - 1)].append(index)
+        return out
+    cursor = 0
+    running = 0
+    for index, size in enumerate(sizes):
+        # The file's MIDPOINT decides its chunk, not its start: weighing a
+        # file by where it begins pushes every boundary file one chunk
+        # early and leaves the last chunk short.
+        midpoint = running + size / 2
+        target = min(int(midpoint * chunks / total), chunks - 1)
+        # Contiguity, and the reason a float divide is safe here: the cursor
+        # never steps backwards, so neither a rounding wobble nor a negative
+        # size a listing invented can interleave two chunks or index ``out``
+        # from the wrong end.
+        cursor = max(cursor, target)
+        out[cursor].append(index)
+        running += size
+    return out
+
+
+def cap_chunks_to_manifest(
+    total_chunks: int, shard_count: int
+) -> tuple[int, str | None]:
+    """Bound a round's chunk count by the data's own granularity.
+
+    ``flashml.yaml`` used to ask for ``shards`` and the answer was always
+    wrong — "eleven machines online with shards: 3 left eight of them doing
+    nothing" is why the knob was removed. A dataset reintroduces the same
+    fixed number through the back door: it has however many shards it has.
+
+    So the number is capped rather than obeyed, and the caller is TOLD.
+    Silently running a 3-machine round on a 20-machine pool is the exact
+    complaint that killed the knob; the difference now is that it is
+    visible. A warning and not a refusal: a small dataset during development
+    is a legitimate thing to run.
+
+    The floor is 1 on both arguments, for two different reasons. A manifest
+    of no files caps to one slot rather than none, because a zero-slot round
+    is not a round — ``fleet_shape`` makes the same call about an empty
+    Crew. A ``total_chunks`` of zero or less is not the dataset's fault, so
+    it is floored silently: the warning names the manifest, and pointing at
+    the manifest for the caller's arithmetic would be a lie.
+    """
+    capped = max(1, min(total_chunks, shard_count))
+    if total_chunks < 1 or shard_count >= total_chunks:
+        return capped, None
+    return capped, (
+        f"this dataset has {shard_count} shard(s), so at most {capped} "
+        f"of the {total_chunks} machines available can work on it. Split the "
+        f"dataset into more files to use the whole fleet."
+    )
+
+
+def effective_width(sizes: Sequence[int], chunks: int) -> int:
+    """How many chunks actually receive at least one file.
+
+    ``cap_chunks_to_manifest`` bounds a round by the manifest's FILE COUNT,
+    which is a proxy — and a leaky one. Byte-weighting assigns by byte
+    position, so a single dominant file can monopolise the middle of the
+    range and leave chunks empty even when there are as many files as
+    chunks: five files of ``[300, 100, 4200, 50, 900]`` over five chunks
+    fills three and strands two.
+
+    An empty chunk is a machine that fetches nothing, trains nothing and
+    reports nothing — and FedAvg then averages over a member whose gradient
+    does not exist. That is not a smaller round, it is a different
+    experiment, and it is the complaint that killed the ``shards:`` knob.
+
+    So the width a round can actually use is measured after the cut, not
+    predicted from a count before it.
+    """
+    return sum(1 for group in dataset_chunks(sizes, chunks) if group)

@@ -403,3 +403,89 @@ def test_dependencies_must_be_a_list_not_a_string():
 def test_dependencies_must_be_a_list_of_strings():
     with pytest.raises(ConfigError, match="dependencies"):
         parse_flashml_yaml(MINIMAL + "\ndependencies: [1, 2]\n")
+
+
+# ---------------------------------------------------------------------------
+# datasets — a public origin the HOST fetches, never us
+# ---------------------------------------------------------------------------
+
+
+def test_datasets_defaults_to_empty():
+    assert parse_flashml_yaml(MINIMAL).datasets == []
+
+
+def test_a_minimal_dataset_needs_only_a_name_and_source():
+    text = MINIMAL + (
+        "\ndatasets:\n"
+        "  - name: imdb\n"
+        "    source: hf://stanfordnlp/imdb\n"
+    )
+    config = parse_flashml_yaml(text)
+    assert config.datasets == [
+        {"name": "imdb", "source": "hf://stanfordnlp/imdb",
+         "select": None, "split": None}
+    ]
+
+
+def test_split_is_not_defaulted_here():
+    """Inference needs `mode`, which is validated separately — a default
+    baked in at parse time would silently win over the inference."""
+    text = MINIMAL + "\ndatasets:\n  - name: d\n    source: hf://a/b\n"
+    assert parse_flashml_yaml(text).datasets[0]["split"] is None
+
+
+def test_an_explicit_split_is_kept():
+    text = MINIMAL + (
+        "\ndatasets:\n  - name: d\n    source: hf://a/b\n    split: replica\n"
+    )
+    assert parse_flashml_yaml(text).datasets[0]["split"] == "replica"
+
+
+def test_an_unknown_split_is_refused():
+    text = MINIMAL + (
+        "\ndatasets:\n  - name: d\n    source: hf://a/b\n    split: sideways\n"
+    )
+    with pytest.raises(ConfigError, match="split"):
+        parse_flashml_yaml(text)
+
+
+def test_datasets_must_be_a_list_of_mappings():
+    with pytest.raises(ConfigError, match="datasets"):
+        parse_flashml_yaml(MINIMAL + "\ndatasets: hf://a/b\n")
+
+
+def test_a_dataset_name_is_a_name_not_a_path():
+    """It becomes a directory on a volunteer's disk — same rule as
+    `local_inputs`, and for the same reason."""
+    for bad in ("../evil", "/abs", "a/b", "."):
+        text = MINIMAL + f'\ndatasets:\n  - name: "{bad}"\n    source: hf://a/b\n'
+        with pytest.raises(ConfigError, match="name"):
+            parse_flashml_yaml(text)
+
+
+def test_an_unsupported_scheme_is_refused_with_the_supported_list():
+    text = MINIMAL + "\ndatasets:\n  - name: d\n    source: ftp://a/b\n"
+    with pytest.raises(ConfigError, match="hf://"):
+        parse_flashml_yaml(text)
+
+
+def test_a_dataset_needs_a_source():
+    with pytest.raises(ConfigError, match="source"):
+        parse_flashml_yaml(MINIMAL + "\ndatasets:\n  - name: d\n")
+
+
+def test_two_datasets_may_not_share_a_name():
+    """They would mount to the same /work/data/<name>/ and silently
+    overwrite each other."""
+    text = MINIMAL + (
+        "\ndatasets:\n"
+        "  - name: d\n    source: hf://a/b\n"
+        "  - name: d\n    source: hf://c/e\n"
+    )
+    with pytest.raises(ConfigError, match="name"):
+        parse_flashml_yaml(text)
+
+
+def test_datasets_did_not_widen_the_allowed_keys():
+    with pytest.raises(ConfigError, match="dataset"):
+        parse_flashml_yaml(MINIMAL + "\ndataset:\n  - name: d\n")

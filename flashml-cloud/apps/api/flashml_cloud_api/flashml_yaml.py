@@ -79,7 +79,7 @@ REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "epochs", "sync_every",
                  "local_inputs", "partition", "validators", "reduce",
-                 "allow_partial", "dependencies"}
+                 "allow_partial", "dependencies", "datasets"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: Today's behaviour, and the default: one round of independent tasks (a
@@ -122,6 +122,23 @@ MAX_ROUNDS = 500
 #: Narrower than any filesystem: ``/``, ``..`` and whitespace are exactly the
 #: characters that turn a name into a traversal, and they are not expressible.
 LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+#: The four addressing schemes v1 understands. All four are fetched
+#: ANONYMOUSLY: the scheme says where the bytes are, not who may read them,
+#: and v1 stores no credential of any kind.
+DATASET_SCHEMES = ("hf://", "s3://", "r2://", "https://")
+
+#: The two ways one declared dataset becomes N per-task slices. ``shard``
+#: cuts it into disjoint pieces whose union is one pass; ``replica`` hands
+#: every task the whole thing.
+SPLIT_SHARD = "shard"
+SPLIT_REPLICA = "replica"
+SPLITS = (SPLIT_SHARD, SPLIT_REPLICA)
+
+#: What one dataset entry may say. Restated as a constant because the
+#: message that refuses an unknown key has to list them, and a list that
+#: drifts from the check is worse than no list at all.
+DATASET_KEYS = ("name", "source", "select", "split")
 
 
 class ConfigError(Exception):
@@ -178,6 +195,13 @@ class FlashmlConfig:
     #: the overwhelmingly common case: a curated image is a head start, not a
     #: whitelist a job must restate to use.
     dependencies: list[str] = field(default_factory=list)
+    #: Public origins the *host* fetches before the task starts — never this
+    #: API, which reads a file listing and hands out URLs. Each entry is
+    #: ``{"name", "source", "select", "split"}`` with ``select``/``split``
+    #: ``None`` when unwritten; ``split`` is inferred from ``mode`` by the
+    #: compiler, not here (see ``_validate_datasets``). Empty is the default
+    #: and the overwhelmingly common case.
+    datasets: list[dict] = field(default_factory=list)
 
     @property
     def is_federated(self) -> bool:
@@ -274,6 +298,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     reduce_spec = _validate_reduce(raw.get("reduce"))
     allow_partial = _validate_bool(raw.get("allow_partial"), "allow_partial")
     dependencies = _validate_dependencies(raw.get("dependencies", []))
+    datasets = _validate_datasets(raw.get("datasets"))
     mode, epochs, sync_every = _validate_mode(raw, version)
 
     return FlashmlConfig(
@@ -294,6 +319,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         reduce=reduce_spec,
         allow_partial=allow_partial,
         dependencies=dependencies,
+        datasets=datasets,
     )
 
 
@@ -580,6 +606,84 @@ def _validate_local_inputs(value: object) -> list[str]:
                 f"start with a letter or digit and use only [A-Za-z0-9._-]"
             )
     return list(value)
+
+
+def _validate_datasets(value: object) -> list[dict]:
+    """``datasets:`` — public origins the HOST fetches, never this API.
+
+    The counterpart to ``local_inputs``: that key names data a host already
+    holds and will not send anywhere, this one names data a host will go and
+    get. Neither ever moves through the control plane, which is what keeps a
+    job's marginal cost at zero.
+
+    ``split`` is deliberately NOT defaulted here. It is inferred from
+    ``mode`` in the compiler (federated → shard, everything else →
+    replica), and a default written in at parse time would silently
+    outrank that inference. ``None`` means "the user did not say".
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or isinstance(value, (str, bytes)):
+        raise ConfigError(
+            f"flashml.yaml 'datasets' must be a list of mappings, each with a "
+            f"'name' and a 'source', got {value!r}"
+        )
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f"flashml.yaml 'datasets' entries must be mappings, got {item!r}"
+            )
+        unknown = set(item) - set(DATASET_KEYS)
+        if unknown:
+            raise ConfigError(
+                f"flashml.yaml dataset has unknown key(s) {sorted(unknown)!r}; "
+                f"allowed keys are {sorted(DATASET_KEYS)!r}"
+            )
+        name = item.get("name")
+        # The same alphabet `local_inputs` labels use, for the same reason:
+        # the name becomes a directory on a volunteer's machine, and '/',
+        # '..' and whitespace are exactly what turns a name into a traversal.
+        if not isinstance(name, str) or not LABEL_RE.match(name) or name in (".", ".."):
+            raise ConfigError(
+                f"flashml.yaml dataset 'name' must be a name, not a path — it "
+                f"becomes a directory on a volunteer's machine, so it must "
+                f"start with a letter or digit and use only [A-Za-z0-9._-]; "
+                f"got {name!r}"
+            )
+        if name in seen:
+            raise ConfigError(
+                f"flashml.yaml dataset 'name' must be unique, got {name!r} "
+                f"twice; both would mount at /work/data/{name}/ and overwrite "
+                f"each other"
+            )
+        seen.add(name)
+        source = item.get("source")
+        if not isinstance(source, str) or not source.strip():
+            raise ConfigError(
+                f"flashml.yaml dataset {name!r} must have a 'source', got "
+                f"{source!r}"
+            )
+        if not source.startswith(DATASET_SCHEMES):
+            raise ConfigError(
+                f"flashml.yaml dataset {name!r} has an unsupported source "
+                f"{source!r}; supported schemes are {list(DATASET_SCHEMES)!r}"
+            )
+        select = item.get("select")
+        if select is not None and not isinstance(select, str):
+            raise ConfigError(
+                f"flashml.yaml dataset {name!r} 'select' must be a glob "
+                f"string, got {select!r}"
+            )
+        split = item.get("split")
+        if split is not None and split not in SPLITS:
+            raise ConfigError(
+                f"flashml.yaml dataset {name!r} 'split' must be one of "
+                f"{list(SPLITS)!r}, got {split!r}"
+            )
+        out.append({"name": name, "source": source, "select": select, "split": split})
+    return out
 
 
 def _validate_sweep(sweep: object) -> dict[str, list]:
