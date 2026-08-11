@@ -650,14 +650,37 @@ def set_machine_capabilities(
     argv_capable: bool,
     unsandboxed_argv_capable: bool,
     module_capable: bool,
+    dataset_cache_bytes: int = 0,
 ) -> None:
-    """Overwrite the display-only capability snapshot from the latest
-    registration (register proxy, best-effort — see migration 0008's
-    header). A single UPDATE, all four columns together, so a machine that
-    re-registers with a narrower capability set shows the narrower set —
-    not the union of every registration it has ever made. Never read by
-    placement or authorization; that stays server-side only, same as
-    ``machines.capabilities`` above it.
+    """Overwrite the capability snapshot from the latest registration
+    (register proxy, best-effort — see migration 0008's header). A single
+    UPDATE, every field together, so a machine that re-registers with a
+    narrower capability set shows the narrower set — not the union of every
+    registration it has ever made.
+
+    **The four booleans stay display-only.** They are never read by
+    placement or authorization, and nothing here changes that.
+
+    ``dataset_cache_bytes`` is the exception, and it is deliberate: it is
+    room, not permission — how many bytes of a declared dataset this machine
+    is willing to hold — and ``dataset_capacity_in_pool`` reads it at submit
+    time so a job whose slices fit on nobody is refused in the console
+    instead of after twenty machines each download for forty minutes. It
+    grants no access and relaxes no gate; the worst a machine can do by
+    over-advertising is take work it then fails to fetch, which is the
+    ordinary failure it could already cause by unplugging itself.
+
+    It lands in the ``capabilities`` jsonb rather than a new column
+    (migration 0001 already ships that column, defaulted to ``{}`` and, until
+    now, written by nothing). A merge, not a replace, so a future key written
+    by something else is not silently dropped — but the key itself is always
+    written, including as ``0``, because absent and ``0`` must mean the same
+    thing here: send me no dataset work. That is the same polarity the
+    runtime's own placement gate applies.
+
+    Defaulting to ``0`` keeps the parameter optional for callers that have
+    nothing to say about datasets, and re-registering without the field
+    correctly retracts a capacity a machine used to advertise.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -666,11 +689,15 @@ def set_machine_capabilities(
                set sandbox_capable = %s,
                    argv_capable = %s,
                    unsandboxed_argv_capable = %s,
-                   module_capable = %s
+                   module_capable = %s,
+                   capabilities = coalesce(capabilities, '{}'::jsonb)
+                                  || jsonb_build_object(
+                                         'dataset_cache_bytes', %s::bigint
+                                     )
              where id = %s
             """,
             (sandbox_capable, argv_capable, unsandboxed_argv_capable,
-             module_capable, machine_id),
+             module_capable, int(dataset_cache_bytes), machine_id),
         )
 
 
@@ -1533,6 +1560,66 @@ def count_online_machines(
                 (pool_id,),
             )
         return int(cur.fetchone()["n"])
+
+
+def dataset_capacity_in_pool(
+    db: psycopg.Connection, *, pool_id: str | None
+) -> int:
+    """The largest dataset cache any ONLINE machine in the pool advertises.
+
+    **The MAX, not the sum.** A dataset slice is fetched whole, by one
+    machine, into that machine's own cache — so the question a submit has to
+    answer is whether *any single host* can hold the biggest slice, never
+    whether the fleet could hold it between them. Summing would admit a job
+    that then sits PENDING forever while every machine in the Crew refuses
+    it one at a time, which is precisely the outcome this check exists to
+    replace with a sentence in the console.
+
+    Scoping matches ``count_online_machines`` exactly, and for the same
+    reason: ``pool_id=None`` is the public queue where any online machine may
+    claim, and a pool id narrows to machines actually opted in through
+    ``machine_pools``. Both go through ``MACHINE_ONLINE_PREDICATE`` so the
+    capacity a submit is judged against belongs to the same machines the
+    console is telling the user are online.
+
+    Zero when nobody advertises anything — which refuses every dataset job,
+    deliberately. That is the polarity the runtime's placement gate already
+    takes (``scheduler``: absent or ``0`` means "send me no dataset work"),
+    and disagreeing with it here would only move the refusal from the console
+    to a queue nothing ever drains.
+
+    Read defensively: the value is a jsonb field, so a machine that somehow
+    stored a string or a boolean there contributes nothing rather than
+    raising mid-submit. ``jsonb_typeof`` gates the cast, and the cast goes
+    through ``numeric`` so a JSON float cannot abort the statement either.
+    """
+    # The aggregate carries its own type guard rather than leaning on the
+    # WHERE clause: a planner is free to evaluate a select-list expression
+    # on rows a qual has not filtered yet, and "the whole submit 500s
+    # because one machine wrote a string" is not a failure worth risking to
+    # save a CASE.
+    capacity = (
+        "coalesce(max(case when jsonb_typeof(m.capabilities -> "
+        "'dataset_cache_bytes') = 'number' then floor("
+        "(m.capabilities ->> 'dataset_cache_bytes')::numeric) end), 0) as n"
+    )
+    with db.cursor() as cur:
+        if pool_id is None:
+            cur.execute(
+                f"select {capacity} from public.machines m "
+                f"where {MACHINE_ONLINE_PREDICATE}"
+            )
+        else:
+            cur.execute(
+                f"""
+                select {capacity}
+                  from public.machines m
+                  join public.machine_pools mp on mp.machine_id = m.id
+                 where mp.pool_id = %s and {MACHINE_ONLINE_PREDICATE}
+                """,
+                (pool_id,),
+            )
+        return max(0, int(cur.fetchone()["n"]))
 
 
 def is_pool_member(db: psycopg.Connection, pool_id: str, user_id: str) -> bool:

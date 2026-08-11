@@ -475,3 +475,61 @@ def test_the_pin_gap_is_a_dropped_forward_and_not_a_rejected_spec():
     )
     tasks = CommandRecipe().expand("job-1", JobSpec.model_validate(spec))
     assert "datasets" not in tasks[0].payload
+
+
+# ---------------------------------------------------------------------------
+# the driver hop — invisible to every test above
+# ---------------------------------------------------------------------------
+
+
+def test_the_federated_driver_carries_manifests_into_every_round():
+    """The route answers 201 and then the DRIVER builds each round.
+
+    `FederatedRun` had no `manifests` field, so `build_round_for` called the
+    compiler without one — and since the compiler correctly refuses
+    declared-but-unresolved rather than emitting a dataless job, EVERY round
+    of a `mode: federated` job that declared `datasets:` raised CompileError
+    inside the driver thread. The submitter saw a 201 and a job that died in
+    the background with nothing in the response explaining why.
+
+    Nothing above catches this: the route tests stop at the response, and the
+    compile tests pass `manifests=` directly.
+    """
+    import json
+
+    from flashml_cloud_api.fedavg import FederatedRun, build_round_for
+
+    config = parse_flashml_yaml(
+        "version: 2\nname: imdb-fed\nimage: pytorch-cpu\nentrypoint: t.py\n"
+        "mode: federated\nepochs: 3\n"
+        "datasets:\n  - name: imdb\n    source: hf://a/imdb\n"
+    )
+    run = FederatedRun(
+        job_id="j1", job_name="imdb-fed", config=config, image=PYTORCH,
+        code_artifact_uri=CODE_URI, pool=None,
+        manifests={"imdb": _manifest()},
+    )
+    build = build_round_for(run)
+    for round_index, weights in ((0, None), (1, "artifact://w"), (2, "artifact://w")):
+        plan = build(round_index, weights)
+        assert "dataset_slices" in json.dumps(plan), (
+            f"round {round_index} lost the manifests"
+        )
+
+
+def test_a_federated_run_without_datasets_still_builds():
+    """Absent stays absent through the driver too — every job deployed today
+    declares no datasets and must be byte-identical."""
+    import json
+
+    from flashml_cloud_api.fedavg import FederatedRun, build_round_for
+
+    config = parse_flashml_yaml(
+        "version: 2\nname: plain\nimage: pytorch-cpu\nentrypoint: t.py\n"
+        "mode: federated\nepochs: 1\n"
+    )
+    run = FederatedRun(
+        job_id="j2", job_name="plain", config=config, image=PYTORCH,
+        code_artifact_uri=CODE_URI, pool=None,
+    )
+    assert "dataset_slices" not in json.dumps(build_round_for(run)(0, None))

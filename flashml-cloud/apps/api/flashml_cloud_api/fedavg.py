@@ -157,6 +157,20 @@ class FederatedRun:
     #: hand-constructed run (a test, a REPL) working rather than raising.
     fleet: FleetShape = field(default_factory=lambda: fleet_shape(0))
 
+    #: Resolved dataset manifests, by declared name, captured at submit time
+    #: exactly as ``fleet`` is and for the same reason: a round must not
+    #: re-resolve, or the origin could move underneath a run and later rounds
+    #: would train on different bytes than earlier ones were credited for.
+    #:
+    #: Empty for every job that declares no ``datasets:``, which is every job
+    #: deployed today. NOT optional to plumb: ``compile._dataset_slices``
+    #: refuses declared-but-unresolved rather than silently emitting a
+    #: dataless job, so omitting this makes EVERY round of a federated
+    #: dataset job raise CompileError inside the driver thread — after the
+    #: route has already answered 201, so the submitter sees a job that dies
+    #: in the background with nothing in the response explaining it.
+    manifests: dict[str, Any] = field(default_factory=dict)
+
 
 def slot_chunks_for(fleet: FleetShape, round_index: int,
                     sync_every: float) -> list[int]:
@@ -204,6 +218,7 @@ def build_round_for(run: FederatedRun) -> Callable[[int, str | None], RoundPlan]
             ),
             total_chunks=run.fleet.total_chunks,
             pool=run.pool,
+            manifests=run.manifests,
         )
         return {"body": body,
                 "task_ids": federated_task_ids(run.fleet.slots)}

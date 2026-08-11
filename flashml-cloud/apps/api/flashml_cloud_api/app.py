@@ -66,6 +66,7 @@ from flashruntime.protocol.v1alpha1 import (
 from flashml_cloud_api import access
 from flashml_cloud_api import cli_auth
 from flashml_cloud_api import contributions as contribmod
+from flashml_cloud_api import datasets as dsmod
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
@@ -82,14 +83,24 @@ from flashml_cloud_api.auth import (
     verify_supabase_jwt,
 )
 from flashml_cloud_api.compile import (
+    DATASET_SLICES_PARAM,
     CompileError,
     compile_federated_round,
     compile_to_jobspec,
 )
 from flashml_cloud_api.db import Machine
-from flashml_cloud_api.elastic import fleet_shape
+from flashml_cloud_api.elastic import (
+    FleetShape,
+    cap_chunks_to_manifest,
+    effective_width,
+    fleet_shape,
+)
 from flashml_cloud_api.emails import derive_email_facts
-from flashml_cloud_api.flashml_yaml import ConfigError, parse_flashml_yaml
+from flashml_cloud_api.flashml_yaml import (
+    SPLIT_SHARD,
+    ConfigError,
+    parse_flashml_yaml,
+)
 from flashml_cloud_api.images import UnknownImage, resolve_image
 from .github_app import GitHubApp, GitHubAppError
 from .mail_templates import admitted_email, declined_email
@@ -318,6 +329,175 @@ def _read_config_text(repo_root: Path) -> str:
     raise HTTPException(
         status_code=400,
         detail="repo has no flashml.yaml at its root — add one to describe the job",
+    )
+
+
+# ---------------------------------------------------------------------------
+# declared datasets: what a host must hold, and what a host says it can
+# ---------------------------------------------------------------------------
+
+
+def _human_bytes(value: int) -> str:
+    """Bytes in the units the person reading the refusal thinks in.
+
+    A refusal that says ``8589934592`` and ``2147483648`` makes the reader do
+    the arithmetic that decides whether their job runs. It says ``8.0 GB`` and
+    ``2.0 GB`` instead.
+    """
+    for unit, size in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if abs(value) >= size:
+            return f"{value / size:.1f} {unit}"
+    return f"{value} bytes"
+
+
+def _advertised_dataset_cache_bytes(parsed: object) -> int:
+    """``capabilities.dataset_cache_bytes`` off a registration body, or 0.
+
+    Mirrors the runtime scheduler's own reading of this field, leg for leg,
+    because the two numbers have to agree: this one decides whether a job is
+    admitted at all, that one decides whether a machine may claim its tasks,
+    and a machine admitted here but refused there is a job that sits PENDING
+    with nothing to explain it.
+
+    - ``capabilities`` may be absent or type-confused. ``isinstance``, never
+      ``(parsed.get("capabilities") or {})`` — a string has no ``.get`` and
+      would take down a registration over a display field.
+    - ``bool`` is excluded explicitly. It is an ``int`` subclass, so a
+      ``dataset_cache_bytes: true`` typo would otherwise advertise one byte
+      of capacity and quietly refuse every dataset job on that host.
+    - Anything else — a float, a string of digits, a negative — advertises
+      nothing. Guessing what a malformed advertisement meant is how a host
+      ends up committed to a fetch it has no room for.
+    """
+    if not isinstance(parsed, dict):
+        return 0
+    capabilities = parsed.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return 0
+    advertised = capabilities.get("dataset_cache_bytes")
+    if not isinstance(advertised, int) or isinstance(advertised, bool):
+        return 0
+    return max(0, advertised)
+
+
+def _admit_datasets(
+    db: psycopg.Connection,
+    *,
+    spec: dict[str, Any],
+    manifests: dict[str, Any],
+    fleet: FleetShape | None,
+    pool: str | None,
+    findings: list[dict[str, str]],
+) -> Response | None:
+    """Decide whether the Crew can actually run this job's data.
+
+    Returns a 400 ``Response`` to refuse, or ``None`` to let the submit
+    continue. Appends any advisory findings to ``findings`` in place, so a
+    warning rides back on the 201 as well as on a refusal.
+
+    **Both numbers are read off the compiled slices, not estimated from the
+    manifest.** ``total_bytes / chunks`` is the obvious estimate and it is
+    wrong in the direction that matters: the cut is byte-weighted and
+    contiguous, so a manifest of ``[300, 100, 4200, 50, 900]`` over five
+    slots puts 4200 in one slice while the average says 1110. A job admitted
+    on the average is one the runtime's own placement gate — which sums the
+    real entry sizes of the real slice — then refuses on every host in the
+    Crew, leaving it PENDING with nothing in the console to explain it.
+    Reading the compiled spec also means there is exactly one cutter: this
+    function never re-derives a layout ``compile._dataset_slices`` already
+    produced, including which split each dataset was given.
+
+    The two questions are different and both are asked:
+
+    * **Can one host hold a slice?** The MAX over tasks of the SUM over that
+      task's datasets — a host holds every dataset its task declares, at
+      once, and a slice is fetched whole by one machine. Refusal.
+    * **Can the fleet spread out over it?** A dataset with three files, or
+      with one dominant file, strands machines whatever the pool size. That
+      is the complaint that killed the ``shards:`` knob, so it is said out
+      loud — but it is a warning, because a small dataset during development
+      is a legitimate thing to run (owner decision).
+    """
+    parameters = spec.get("spec", {}).get("workload", {}).get("parameters", {})
+    slices = parameters.get(DATASET_SLICES_PARAM) or []
+    if not slices:
+        return None
+
+    # The compiler's own split decision, read back. Re-deriving "federated →
+    # shard, everything else → replica" here would be a second copy of a rule
+    # that is free to drift from the one that cut the bytes.
+    splits = {
+        declared["name"]: declared["split"]
+        for task_slice in slices
+        for declared in task_slice
+    }
+
+    # How wide the pass is cut. For a federated round that is the fleet's
+    # chunk count, which is not the number of slots this round happens to
+    # open; for anything else it is one chunk per task.
+    width = fleet.total_chunks if fleet is not None else len(slices)
+    for name in sorted(splits):
+        if splits[name] != SPLIT_SHARD:
+            continue  # a replica lands whole on every task; it cannot strand
+        manifest = manifests.get(name)
+        if manifest is None:
+            continue
+        sizes = [entry.size for entry in manifest.entries]
+        # The cap answers "more slots than files"; `effective_width` answers
+        # the question the cap only approximates — how many slots the cut
+        # actually FILLS. They differ whenever one file dominates: five files
+        # over five slots caps to five and warns about nothing, while the
+        # byte-weighted cut fills three and strands two.
+        capped, _ = cap_chunks_to_manifest(width, len(sizes))
+        usable = effective_width(sizes, capped)
+        if usable >= width:
+            continue
+        findings.append({
+            "level": "warning",
+            "code": "dataset-under-sharded",
+            "message": (
+                f"dataset {name!r} has {len(sizes)} file(s), and their bytes "
+                f"spread across only {usable} of this job's {width} parallel "
+                f"slot(s) — the other {width - usable} would fetch nothing "
+                f"and train nothing. Split it into more, and more evenly "
+                f"sized, files to use the whole fleet."
+            ),
+        })
+
+    needed = max(
+        (
+            sum(int(entry["size"]) for d in task_slice for entry in d["entries"])
+            for task_slice in slices
+        ),
+        default=0,
+    )
+    best = dbmod.dataset_capacity_in_pool(db, pool_id=pool)
+    if needed <= best:
+        return None
+
+    where = "in this workspace" if pool is not None else "in the Crew"
+    nobody = (
+        " In fact no online machine advertises any dataset cache at all, so "
+        "either the Crew is asleep or its agents predate the release that "
+        "advertises one."
+        if best <= 0
+        else ""
+    )
+    return Response(
+        content=json.dumps({
+            "detail": (
+                f"this job's largest task would have to hold "
+                f"{_human_bytes(needed)} of {', '.join(sorted(splits))} at "
+                f"once, and the largest dataset cache advertised by an online "
+                f"machine {where} is {_human_bytes(best)}. A slice is fetched "
+                f"whole by one host, so the fleet's combined space does not "
+                f"help.{nobody} Raise FLASHNODE_DATA_BUDGET_GB on a machine, "
+                f"bring a bigger one online, or declare a smaller dataset."
+            ),
+            "findings": findings,
+        }),
+        status_code=400,
+        media_type="application/json",
     )
 
 
@@ -2129,11 +2309,13 @@ def create_cloud_app(
         wrong with it, all of it, in one answer.
 
         The order below is the whole point of the endpoint. Fetch, extract,
-        parse, **preflight**, and only then touch the coordinator: a repo
-        with an error finding must not upload an artifact, must not submit,
-        and must not leave a ``jobs`` row behind. Findings come back
-        *together*, never one per round trip, because a user fixing four
-        problems should need one more submit, not four.
+        parse, **preflight**, resolve and **admit any declared dataset**, and
+        only then touch the coordinator: a repo with an error finding — or a
+        dataset that is gated, unreachable, or too large for any single host
+        in the Crew — must not upload an artifact, must not submit, and must
+        not leave a ``jobs`` row behind. Findings come back *together*, never
+        one per round trip, because a user fixing four problems should need
+        one more submit, not four.
         """
         raw = await request.body()
         if len(raw) > MAX_JSON_BODY_BYTES:
@@ -2224,6 +2406,44 @@ def create_cloud_app(
                 media_type="application/json",
             )
 
+        # Declared datasets are resolved HERE — after preflight, before
+        # anything is staged and before the coordinator is asked for
+        # anything. A `source:` that turns out to be gated, private,
+        # renamed or simply unreachable is a 400 in the console a second
+        # after the submit, and it leaves no artifact, no coordinator
+        # request and no jobs row behind, exactly like an error finding.
+        #
+        # No dataset byte passes through this process. What is fetched is a
+        # file LISTING — sizes, checksums and a pinned revision — and what
+        # is handed on is a list of URLs the host resolves itself.
+        manifests: dict[str, dsmod.Manifest] = {}
+        if config.datasets:
+            async with httpx.AsyncClient() as http:
+                try:
+                    for declared in config.datasets:
+                        manifests[declared["name"]] = await dsmod.resolve(
+                            declared, http=http
+                        )
+                except dsmod.DatasetResolveError as exc:
+                    # `safe_text`, not `str`: the message quotes a `source:`
+                    # the submitter typed, and an origin's own error text
+                    # travels inside it.
+                    raise HTTPException(
+                        status_code=400, detail=safe_text(exc, 500)
+                    ) from None
+
+        # How this run's rounds are cut, decided once here from the machines
+        # online right now — never by the submitter, who cannot see the Crew,
+        # and never re-counted per round, which would move the chunk layout
+        # underneath a resumed run. Hoisted out of the compile below because
+        # the dataset admission check needs the same width the compiler will
+        # cut against; `None` for a job that has no rounds.
+        fleet = (
+            fleet_shape(dbmod.count_online_machines(db, pool_id=pool))
+            if config.is_federated
+            else None
+        )
+
         # An unguessable key, and deliberately not derived from the user id
         # or the repo name: it is a public-ish artifact namespace, and a
         # predictable key would let one user overwrite another's staged code
@@ -2238,14 +2458,11 @@ def create_cloud_app(
             # the round the driver is about to submit — so a config that
             # cannot become a valid round fails here, in the response, and
             # not silently on a background thread nobody is watching.
-            if config.is_federated:
-                # How this run's rounds are cut, decided once here from the
-                # machines online right now — never by the submitter, who
-                # cannot see the Crew, and never re-counted per round, which
-                # would move the chunk layout underneath a resumed run.
-                fleet = fleet_shape(
-                    dbmod.count_online_machines(db, pool_id=pool)
-                )
+            # `fleet is not None` is exactly `config.is_federated` — see
+            # where it is computed. Spelled this way so the narrowing is
+            # visible to a reader (and a type checker) at the two `fleet.`
+            # accesses below.
+            if fleet is not None:
                 spec = compile_federated_round(
                     config, image, code_uri, config.name,
                     round_index=0, weights_uri=None,
@@ -2254,13 +2471,26 @@ def create_cloud_app(
                     ),
                     total_chunks=fleet.total_chunks,
                     pool=pool,
+                    manifests=manifests,
                 )
             else:
                 spec = compile_to_jobspec(
-                    config, image, code_uri, config.name, pool=pool
+                    config, image, code_uri, config.name, pool=pool,
+                    manifests=manifests,
                 )
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
+
+        if manifests:
+            refusal = _admit_datasets(
+                db, spec=spec, manifests=manifests,
+                fleet=fleet, pool=pool, findings=rendered,
+            )
+            if refusal is not None:
+                # Same three guarantees as the preflight refusal above: no
+                # artifact staged, no coordinator request, no jobs row.
+                # Everything up to this point has been reads.
+                return refusal
 
         upload = await forward_idempotent(
             coordinator,
@@ -2337,6 +2567,7 @@ def create_cloud_app(
                     code_artifact_uri=code_uri,
                     pool=pool,
                     fleet=fleet,
+                    manifests=manifests,
                 ),
                 settings=settings,
                 connect=request.app.state.connect,
@@ -3180,6 +3411,18 @@ def create_cloud_app(
                                 parsed.get("unsandboxed_argv_capable") is True
                             ),
                             module_capable=parsed.get("module_capable") is True,
+                            # Nested, unlike the four above: this one is a
+                            # field of `NodeCapabilities`, not of the
+                            # registration. Read off the RAW body rather
+                            # than through the pinned protocol model on
+                            # purpose — the model only learns the field the
+                            # release the pin moves, and until then
+                            # validating through it would drop the number
+                            # silently and leave every dataset job refused
+                            # for want of capacity nobody could advertise.
+                            dataset_cache_bytes=(
+                                _advertised_dataset_cache_bytes(parsed)
+                            ),
                         )
                 except Exception:
                     log.warning(
