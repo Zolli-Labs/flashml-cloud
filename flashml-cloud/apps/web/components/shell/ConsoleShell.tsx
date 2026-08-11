@@ -12,11 +12,13 @@ import {
   House,
   ListChecks,
   MagnifyingGlass,
+  Plus,
   Desktop,
   ShieldCheck,
   SidebarSimple,
   UsersThree,
   UserCircle,
+  type Icon,
 } from "@phosphor-icons/react";
 import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
@@ -25,7 +27,6 @@ import { StorageWarningBanner } from "@/components/shell/StorageWarningBanner";
 import { WorkspaceHintProvider } from "@/components/shell/WorkspaceHint";
 import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { Wordmark } from "@/components/brand/Mark";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { UserMenu } from "@/components/nav/UserMenu";
 import { DeclinedScreen } from "@/components/onboarding/DeclinedScreen";
 import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
@@ -56,11 +57,11 @@ const REPO = "https://github.com/Zolli-Labs/flashml";
 // adding it here is a compile error, not a silently missing nav item.
 const WORKSPACE_TAB_ITEMS: Record<
   WorkspaceTab,
-  { label: string; icon: React.ElementType }
+  { label: string; icon: Icon }
 > = {
   overview: { label: "Overview", icon: House },
   jobs: { label: "Jobs", icon: ListChecks },
-  machines: { label: "Zollis", icon: Desktop },
+  machines: { label: "Machines", icon: Desktop },
   people: { label: "People", icon: UsersThree },
   settings: { label: "Settings", icon: Gear },
 };
@@ -82,7 +83,7 @@ function NavItem({
 }: {
   href: string;
   label: string;
-  icon: React.ElementType;
+  icon: Icon;
   active: boolean;
 }) {
   return (
@@ -177,8 +178,8 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   const rail = (
     <>
       <div className="flex h-16 items-center px-4">
-        <Link href="/" aria-label="ZolliAI home">
-          <Wordmark product />
+        <Link href="/" aria-label="Zolli Cloud home">
+          <Wordmark product tone="dark" />
         </Link>
       </div>
 
@@ -246,7 +247,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
               <p className="label-caps px-2.5 pb-1">My account</p>
               <NavItem
                 href="/account/machines"
-                label="My Zollis"
+                label="My machines"
                 icon={Desktop}
                 active={isActive("/account/machines")}
               />
@@ -254,18 +255,14 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
 
             <Link
               href="/activate"
-              className="mt-5 flex items-center gap-2.5 rounded-lg border border-primary/20 bg-surface px-2.5 py-2 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-primary/5"
+              className="mt-5 flex items-center gap-2.5 rounded-[7px] border border-border bg-surface px-2.5 py-2 text-left transition-colors hover:border-primary/40 hover:bg-surface-2"
             >
-              <ZolliCharacter
-                role="scout"
-                size={42}
-                mood="waving"
-                className="shrink-0"
-                label="Scout, your guide for adding a Zolli"
-              />
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[4px] border border-border text-primary">
+                <Plus size={16} weight="bold" />
+              </span>
               <span className="min-w-0">
                 <span className="block text-xs font-semibold text-foreground">
-                  Add a Zolli
+                  Add a machine
                 </span>
                 <span className="mt-0.5 block text-[11px] leading-tight text-muted-foreground">
                   Enter an activation code
@@ -327,9 +324,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-dvh">
       <CommandPalette />
       <Shortcuts />
-      {/* Desktop rail. A warm sand step separates navigation from the cream
-          canvas while keeping the console in the same ZolliAI system. */}
-      <aside className="hidden w-[248px] shrink-0 flex-col border-r border-border bg-bg-rail lg:flex">
+      <aside className="console-rail hidden w-[232px] shrink-0 flex-col border-r border-border bg-bg-rail text-foreground lg:flex">
         {rail}
       </aside>
 
@@ -343,14 +338,14 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             onClick={() => setRailOpen(false)}
             className="fixed inset-0 z-40 bg-black/60 lg:hidden"
           />
-          <aside className="fixed inset-y-0 left-0 z-50 flex w-[248px] flex-col border-r border-border bg-bg-rail shadow-xl lg:hidden">
+          <aside className="console-rail fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border bg-bg-rail text-foreground shadow-xl lg:hidden">
             {rail}
           </aside>
         </>
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-border bg-surface/95 px-4 shadow-sm backdrop-blur sm:px-6">
+        <header className="sticky top-0 z-30 flex h-[62px] items-center justify-between gap-3 border-b border-border bg-surface px-4 sm:px-6">
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
@@ -367,7 +362,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main id="content" className="min-w-0 flex-1">
+        <main id="content" className="min-w-0 flex-1 bg-[var(--z-app-canvas)]">
           {screen !== "console" ? (
             // Centred here, once, for all three access screens. Each of them
             // is a self-contained card with its own `max-w-*`, and dropping

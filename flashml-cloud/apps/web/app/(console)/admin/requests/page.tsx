@@ -218,7 +218,7 @@ function RequestCard({
   const invited = inviteLine(row);
 
   return (
-    <section className="panel rise p-5">
+    <section className="panel p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">

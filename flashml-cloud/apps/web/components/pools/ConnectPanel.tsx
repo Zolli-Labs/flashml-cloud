@@ -173,7 +173,7 @@ export function ConnectPanel({ poolId }: { poolId: string }) {
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
             Colab can&apos;t nest a Docker daemon inside its own container,
             so trusted is the only runner tier that works here — it runs
-            this Crew&apos;s jobs unsandboxed, directly in the runtime.
+            this Workspace&apos;s jobs unsandboxed, directly in the runtime.
             Runs
             until the cell is interrupted or the runtime disconnects.
           </p>
@@ -215,7 +215,7 @@ export function ConnectPanel({ poolId }: { poolId: string }) {
             A pod is already a container (or a full VM on secure cloud) and
             can&apos;t nest a second Docker daemon inside itself, so the
             sandboxed runner tiers aren&apos;t available here — trusted runs
-            this Crew&apos;s jobs unsandboxed on the pod. Use{" "}
+            this Workspace&apos;s jobs unsandboxed on the pod. Use{" "}
             <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
               tmux
             </code>{" "}

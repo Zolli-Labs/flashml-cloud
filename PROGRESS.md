@@ -172,6 +172,104 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-10 — Make the production compute fabric readable and cinematic (flashml-cloud/web)
+
+What/why: enlarged and sharpened the production Three.js hero, rebuilt the five
+deterministic GLBs so Everyday, Owned, Rented GPU, and Cloud/HPC have distinct
+infrastructure silhouettes, and added source focus that pauses the job story while
+running one finite camera/island transition on a demand-driven Canvas. Context-loss
+fallback now stops hidden autoplay, and silhouette-ratio validation fails closed.
+
+How verified: web Vitest 45 files/552 tests, strict TypeScript, targeted ESLint
+(zero errors; the CSS Module remains outside the ESLint config), five decoded GLBs
+(148,360 bytes/36,368 triangles), tracked diff checks, and 36 scoped untracked-file
+whitespace checks passed. Independent review accepted all 15 exact production
+screenshots plus three label-hidden 390px diagnostics; pointer, keyboard, touch,
+fallback, Three.js semantics/resources, and measured Balanced/High budgets passed.
+The prior environment-backed build generated 26/26 pages with `/` and no
+`/hero-lab`; the final post-review build attempt was blocked only while fetching
+Google Fonts in the sandbox, after TypeScript and tests had passed.
+
+Gotchas: the prior local `3018` process exited; the approval quota rejected a safe
+restart, so the final focus fix is proven by deterministic production-used
+multi-frame tests but was not re-observed in a live browser. Narrow QA captures
+retain faint CTA bleed behind the sticky header; one tiny parallax allocation and
+one conservative control-plane grid disposal remain non-blocking cleanup items.
+Next: run the documented env-backed dev command to inspect `/`, then make an
+intentional focused commit only after approving the final visual.
+
+### 2026-08-10 — Promote the Zolli compute fabric to the production hero (flashml-cloud/web)
+
+What/why: moved the approved B2 React Three Fiber fabric into the real `/` hero,
+preserved the product message and CTA hierarchy, and removed `/hero-lab`, A2/C,
+the old CSS stack, lab runtime/tests, and lab-only middleware/styles.
+
+How verified: web Vitest 42 files/485 tests, TypeScript, targeted ESLint, five GLBs
+(131,360 bytes), and `git diff --check` passed; the environment-backed build generated
+26/26 static pages with `/` and no `/hero-lab`. Live QA at 1440×900, 1024×768, and
+390×844 proved zero overflow, 40px mobile targets, source/state/Play interactions,
+zero console errors, and the named fabric/control-plane/island/checkpoint/accepted
+Three.js scene. The local production root returns 200 at `http://127.0.0.1:3018/`.
+
+Gotchas: Three.js still logs non-blocking `Clock` and `PCFSoftShadowMap` deprecation warnings.
+Next: review the live hero, then make an intentional focused commit when approved.
+
+### 2026-08-10 — Refine the Zolli 3D hero comparison (flashml-cloud/web)
+
+What/why: rebuilt comparison concepts A and B as an orchestrated compute stack
+and a routed compute fabric. Both now expose selectable capacity sources and one
+synchronized submit, checkpoint, node-loss, resume, and accepted-result story.
+
+How verified: focused Vitest 8/8, full Vitest 37 files/423 tests, TypeScript,
+targeted ESLint, and `git diff --check` passed. The environment-backed Next.js
+production build compiled and generated 27/27 static pages. Real Chrome QA
+covered desktop and mobile layouts, A/B switching, source selection, job-state
+inspection, and WebGL rendering; the local comparison returned HTTP 200.
+
+Next: select the preferred concept in `/hero-lab` before replacing the production hero.
+
+### 2026-08-09 — Complete the Zolli proof-led commercial landing (flashml-cloud/web)
+
+What/why: expanded the warm technical landing into a proof-led commercial surface
+with explicit platform states, workload fit, services, FAQ, contact, privacy, terms,
+and security routes. Production QA also caught and fixed the root cause that the new
+information routes were absent from middleware's public allowlist.
+
+How verified: web Vitest 34 files/342 tests passed; ESLint, `tsc --noEmit`, static
+claim/visual-language audits, and `git diff --check` exited 0; the Next.js production
+build generated 26/26 static pages. Browser QA at 1440×900, 1024×768, 768×1024,
+390×844, and 375×812 covered overflow, hero/proof separation, host-state attachment,
+all eight anchors, FAQ click/Enter/Space, and mobile menu Escape/focus. All four
+Calendly links used `https://calendly.com/phongct1105/zolli-ai`, `target=_blank`,
+and `rel=noreferrer`; public routes returned 200, `/workspaces` redirected exactly
+to `/sign-in?next=%2Fworkspaces`, and production consoles stayed clean.
+
+Gotchas: privacy, terms, and security are early-access operational notices, not reviewed
+legal/compliance documents; obtain legal review before a paid public launch. Authenticated
+console pages still need a live-session visual pass because this QA had no authenticated user.
+
+Next: visually exercise the authenticated console against the full dev stack.
+
+### 2026-08-09 — Recast Zolli Cloud as a warm technical compute platform (flashml-cloud/web)
+
+What/why: replaced the character-led ZolliAI treatment with the approved dark
+graphite, mineral-surface Zolli Cloud system. Marketing now leads with leases,
+checkpoints, recovery, and real protocol proof; auth and console surfaces share
+the same restrained typography, geometry, palette, and workspace/machine vocabulary.
+
+How verified: web Vitest 32 files/326 tests passed; ESLint, `tsc --noEmit`, and
+`git diff --check` exited 0; the Next.js production build compiled and generated
+22/22 static pages. Production-browser QA covered 1440, 1024, 768, 390, and 375 px,
+with no horizontal overflow or console errors; mobile menu/Escape/focus, anchors,
+auth mode switching, and the `/workspaces` sign-in redirect were exercised.
+
+Gotchas: authenticated console routes still need a live-session visual pass. The
+build needs the root `.env.dev`, and network access for Next.js font fetching.
+The implementation spec lives at `docs/superpowers/specs/2026-08-09-zolli-warm-technical-rebrand-design.md`.
+
+Next: visually exercise authenticated workspace, machine, job, and settings routes
+against the full dev stack. Parking lot: regenerate social preview artwork.
+
 ### 2026-08-05 — Ship the ZolliAI visual rebrand POC (flashml-cloud/web)
 
 What/why: rebranded the complete web frontend from FlashML Cloud to ZolliAI's

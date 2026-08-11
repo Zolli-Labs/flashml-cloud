@@ -1,0 +1,485 @@
+{
+  "schemaVersion": 2,
+  "generator": "scripts/hero-assets/build-fabric-assets.mjs",
+  "licenseFile": "LICENSES.md",
+  "optimization": {
+    "tool": "@gltf-transform/cli",
+    "compression": "meshopt",
+    "textureMaxDimension": 1024
+  },
+  "totalByteLength": 148360,
+  "assets": [
+    {
+      "key": "everyday",
+      "file": "everyday-machines.glb",
+      "ownership": "first-party",
+      "byteLength": 48812,
+      "triangleCount": 12708,
+      "meshNames": [
+        "Everyday_HomeServer",
+        "Everyday_HomeServer_Bay_01",
+        "Everyday_HomeServer_Bay_02",
+        "Everyday_HomeServer_Bay_03",
+        "Everyday_HomeServer_Bay_04",
+        "Everyday_HomeServer_StatusLED",
+        "Everyday_HomeServer_Vent_01",
+        "Everyday_HomeServer_Vent_02",
+        "Everyday_HomeServer_Vent_03",
+        "Everyday_HomeServer_Vent_04",
+        "Everyday_HomeServer_Vent_05",
+        "Everyday_HomeServer_Vent_06",
+        "Everyday_HomeServer_Vent_07",
+        "Everyday_HomeServer_Vent_08",
+        "Everyday_Laptop",
+        "Everyday_Laptop_Key_1_1",
+        "Everyday_Laptop_Key_1_2",
+        "Everyday_Laptop_Key_1_3",
+        "Everyday_Laptop_Key_1_4",
+        "Everyday_Laptop_Key_1_5",
+        "Everyday_Laptop_Key_1_6",
+        "Everyday_Laptop_Key_1_7",
+        "Everyday_Laptop_Key_1_8",
+        "Everyday_Laptop_Key_2_1",
+        "Everyday_Laptop_Key_2_2",
+        "Everyday_Laptop_Key_2_3",
+        "Everyday_Laptop_Key_2_4",
+        "Everyday_Laptop_Key_2_5",
+        "Everyday_Laptop_Key_2_6",
+        "Everyday_Laptop_Key_2_7",
+        "Everyday_Laptop_Key_2_8",
+        "Everyday_Laptop_Key_3_1",
+        "Everyday_Laptop_Key_3_2",
+        "Everyday_Laptop_Key_3_3",
+        "Everyday_Laptop_Key_3_4",
+        "Everyday_Laptop_Key_3_5",
+        "Everyday_Laptop_Key_3_6",
+        "Everyday_Laptop_Key_3_7",
+        "Everyday_Laptop_Key_3_8",
+        "Everyday_Laptop_ScreenBezel",
+        "Everyday_Laptop_ScreenRecess",
+        "Everyday_Tower",
+        "Everyday_Tower_FanHousing",
+        "Everyday_Tower_FanHub",
+        "Everyday_Tower_Vent_01",
+        "Everyday_Tower_Vent_02",
+        "Everyday_Tower_Vent_03",
+        "Everyday_Tower_Vent_04",
+        "Everyday_Tower_Vent_05",
+        "Everyday_Tower_Vent_06",
+        "Everyday_Workstation",
+        "Everyday_Workstation_Base",
+        "Everyday_Workstation_ScreenBezel",
+        "Everyday_Workstation_ScreenRecess",
+        "Everyday_Workstation_Stand"
+      ],
+      "boundingBox": {
+        "min": [
+          -2.087918,
+          -0.00003,
+          -1.417403
+        ],
+        "max": [
+          2.151334,
+          1.169989,
+          0.941947
+        ]
+      },
+      "semanticBounds": {
+        "EverydayLaptopAssembly": {
+          "min": [
+            -2.087918,
+            0.050018,
+            -0.101208
+          ],
+          "max": [
+            -0.812082,
+            0.914972,
+            0.941947
+          ]
+        },
+        "EverydayWorkstationAssembly": {
+          "min": [
+            -0.430735,
+            0,
+            0.185
+          ],
+          "max": [
+            0.551871,
+            1.169989,
+            0.855
+          ]
+        },
+        "EverydayTowerAssembly": {
+          "min": [
+            1.448666,
+            0,
+            -0.229753
+          ],
+          "max": [
+            2.151334,
+            1.05,
+            0.641815
+          ]
+        },
+        "EverydayHomeServerAssembly": {
+          "min": [
+            -0.941995,
+            -0.00003,
+            -1.417403
+          ],
+          "max": [
+            0.141995,
+            0.48003,
+            -0.487445
+          ]
+        }
+      },
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "sha256": "14cb6cf7655e11e990c6fadd4c8e5648ca5b54b1c9eef6ba4d5c61d3f1829767"
+    },
+    {
+      "key": "owned",
+      "file": "owned-infrastructure.glb",
+      "ownership": "first-party",
+      "byteLength": 30120,
+      "triangleCount": 5228,
+      "meshNames": [
+        "Owned_Rack",
+        "Owned_Rack_Bay_01",
+        "Owned_Rack_Bay_02",
+        "Owned_Rack_Bay_03",
+        "Owned_Rack_Bay_04",
+        "Owned_Rack_Bay_05",
+        "Owned_Rack_Bay_06",
+        "Owned_Rack_Bay_07",
+        "Owned_Rack_LED_01",
+        "Owned_Rack_LED_02",
+        "Owned_Rack_LED_03",
+        "Owned_Rack_LED_04",
+        "Owned_Rack_LED_05",
+        "Owned_Rack_LED_06",
+        "Owned_Rack_LED_07",
+        "Owned_Rack_LeftRail",
+        "Owned_Rack_RightRail",
+        "Owned_Rack_SmokedDoor",
+        "Owned_Workstation",
+        "Owned_Workstation_FanHub_01",
+        "Owned_Workstation_FanHub_02",
+        "Owned_Workstation_Fan_01",
+        "Owned_Workstation_Fan_02",
+        "Owned_Workstation_GPU_Bay_01",
+        "Owned_Workstation_GPU_Bay_02",
+        "Owned_Workstation_Handle",
+        "Owned_Workstation_Vent_01",
+        "Owned_Workstation_Vent_02",
+        "Owned_Workstation_Vent_03",
+        "Owned_Workstation_Vent_04",
+        "Owned_Workstation_Vent_05",
+        "Owned_Workstation_Vent_06"
+      ],
+      "boundingBox": {
+        "min": [
+          -1.361121,
+          0,
+          -0.636244
+        ],
+        "max": [
+          1.44168,
+          1.86,
+          0.67766
+        ]
+      },
+      "semanticBounds": {
+        "OwnedWorkstationAssembly": {
+          "min": [
+            -1.361121,
+            0,
+            -0.439164
+          ],
+          "max": [
+            -0.318879,
+            1.417112,
+            0.599164
+          ]
+        },
+        "OwnedRackAssembly": {
+          "min": [
+            0.109629,
+            0,
+            -0.636244
+          ],
+          "max": [
+            1.44168,
+            1.86,
+            0.67766
+          ]
+        }
+      },
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "sha256": "850b9412a84d87ffe5de8d5eb19b614f3175fbcc057448fc7fe0d3198b12d235"
+    },
+    {
+      "key": "rented",
+      "file": "rented-gpu.glb",
+      "ownership": "first-party",
+      "byteLength": 21232,
+      "triangleCount": 3372,
+      "meshNames": [
+        "Rented_GPU_Chassis_A",
+        "Rented_GPU_Chassis_A_FanHub_01",
+        "Rented_GPU_Chassis_A_FanHub_02",
+        "Rented_GPU_Chassis_A_FanHub_03",
+        "Rented_GPU_Chassis_A_FanHub_04",
+        "Rented_GPU_Chassis_A_Fan_01",
+        "Rented_GPU_Chassis_A_Fan_02",
+        "Rented_GPU_Chassis_A_Fan_03",
+        "Rented_GPU_Chassis_A_Fan_04",
+        "Rented_GPU_Chassis_A_PowerRail",
+        "Rented_GPU_Chassis_B",
+        "Rented_GPU_Chassis_B_FanHub_01",
+        "Rented_GPU_Chassis_B_FanHub_02",
+        "Rented_GPU_Chassis_B_FanHub_03",
+        "Rented_GPU_Chassis_B_FanHub_04",
+        "Rented_GPU_Chassis_B_Fan_01",
+        "Rented_GPU_Chassis_B_Fan_02",
+        "Rented_GPU_Chassis_B_Fan_03",
+        "Rented_GPU_Chassis_B_Fan_04",
+        "Rented_GPU_Chassis_B_PowerRail",
+        "Rented_GPU_Interconnect",
+        "Rented_GPU_ProviderPlate",
+        "Rented_GPU_Sled"
+      ],
+      "boundingBox": {
+        "min": [
+          -1.61,
+          0.000032,
+          -0.459951
+        ],
+        "max": [
+          1.61,
+          1.425019,
+          0.501
+        ]
+      },
+      "semanticBounds": {
+        "RentedGPUAssembly": {
+          "min": [
+            -1.61,
+            0.000032,
+            -0.459951
+          ],
+          "max": [
+            1.61,
+            1.425019,
+            0.501
+          ]
+        }
+      },
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "sha256": "8e9de29ef801247bb64a6f9ac937dca9f6eda8decad2158ac5be1d1f92477772"
+    },
+    {
+      "key": "cloud",
+      "file": "cloud-hpc.glb",
+      "ownership": "first-party",
+      "byteLength": 25968,
+      "triangleCount": 12060,
+      "meshNames": [
+        "Cloud_HPC_TopologySpine",
+        "Cloud_Rack_A",
+        "Cloud_Rack_A_Bay_01",
+        "Cloud_Rack_A_Bay_02",
+        "Cloud_Rack_A_Bay_03",
+        "Cloud_Rack_A_Bay_04",
+        "Cloud_Rack_A_Bay_05",
+        "Cloud_Rack_A_Bay_06",
+        "Cloud_Rack_A_Bay_07",
+        "Cloud_Rack_A_Bay_08",
+        "Cloud_Rack_A_FabricBus",
+        "Cloud_Rack_A_LED_01",
+        "Cloud_Rack_A_LED_02",
+        "Cloud_Rack_A_LED_03",
+        "Cloud_Rack_A_LED_04",
+        "Cloud_Rack_A_LED_05",
+        "Cloud_Rack_A_LED_06",
+        "Cloud_Rack_A_LED_07",
+        "Cloud_Rack_A_LED_08",
+        "Cloud_Rack_A_LeftRail",
+        "Cloud_Rack_A_RightRail",
+        "Cloud_Rack_B",
+        "Cloud_Rack_B_Bay_01",
+        "Cloud_Rack_B_Bay_02",
+        "Cloud_Rack_B_Bay_03",
+        "Cloud_Rack_B_Bay_04",
+        "Cloud_Rack_B_Bay_05",
+        "Cloud_Rack_B_Bay_06",
+        "Cloud_Rack_B_Bay_07",
+        "Cloud_Rack_B_Bay_08",
+        "Cloud_Rack_B_FabricBus",
+        "Cloud_Rack_B_LED_01",
+        "Cloud_Rack_B_LED_02",
+        "Cloud_Rack_B_LED_03",
+        "Cloud_Rack_B_LED_04",
+        "Cloud_Rack_B_LED_05",
+        "Cloud_Rack_B_LED_06",
+        "Cloud_Rack_B_LED_07",
+        "Cloud_Rack_B_LED_08",
+        "Cloud_Rack_B_LeftRail",
+        "Cloud_Rack_B_RightRail",
+        "Cloud_Rack_C",
+        "Cloud_Rack_C_Bay_01",
+        "Cloud_Rack_C_Bay_02",
+        "Cloud_Rack_C_Bay_03",
+        "Cloud_Rack_C_Bay_04",
+        "Cloud_Rack_C_Bay_05",
+        "Cloud_Rack_C_Bay_06",
+        "Cloud_Rack_C_Bay_07",
+        "Cloud_Rack_C_Bay_08",
+        "Cloud_Rack_C_FabricBus",
+        "Cloud_Rack_C_LED_01",
+        "Cloud_Rack_C_LED_02",
+        "Cloud_Rack_C_LED_03",
+        "Cloud_Rack_C_LED_04",
+        "Cloud_Rack_C_LED_05",
+        "Cloud_Rack_C_LED_06",
+        "Cloud_Rack_C_LED_07",
+        "Cloud_Rack_C_LED_08",
+        "Cloud_Rack_C_LeftRail",
+        "Cloud_Rack_C_RightRail"
+      ],
+      "boundingBox": {
+        "min": [
+          -1.89,
+          0,
+          -0.471964
+        ],
+        "max": [
+          1.89,
+          2.559987,
+          0.545501
+        ]
+      },
+      "semanticBounds": {
+        "CloudRackBank": {
+          "min": [
+            -1.89,
+            0,
+            -0.471964
+          ],
+          "max": [
+            1.89,
+            2.559987,
+            0.545501
+          ]
+        },
+        "CloudRackAAssembly": {
+          "min": [
+            -1.831924,
+            0,
+            -0.471964
+          ],
+          "max": [
+            -0.803246,
+            2.38,
+            0.545501
+          ]
+        },
+        "CloudRackBAssembly": {
+          "min": [
+            -0.511924,
+            0,
+            -0.471964
+          ],
+          "max": [
+            0.516754,
+            2.38,
+            0.545501
+          ]
+        },
+        "CloudRackCAssembly": {
+          "min": [
+            0.808076,
+            0,
+            -0.471964
+          ],
+          "max": [
+            1.836754,
+            2.38,
+            0.545501
+          ]
+        }
+      },
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "sha256": "fd11d1c2fedfa52a65074620cd58e4a9f84493c887ca760d5589c981d77c9ba0"
+    },
+    {
+      "key": "controlPlane",
+      "file": "control-plane.glb",
+      "ownership": "first-party",
+      "byteLength": 22228,
+      "triangleCount": 3000,
+      "meshNames": [
+        "FabricControlPlane_Chassis",
+        "FabricControlPlane_DisplayGlass",
+        "FabricControlPlane_DisplayRecess",
+        "FabricControlPlane_PortLED_1",
+        "FabricControlPlane_PortLED_2",
+        "FabricControlPlane_PortLED_3",
+        "FabricControlPlane_PortLED_4",
+        "FabricControlPlane_Port_1",
+        "FabricControlPlane_Port_2",
+        "FabricControlPlane_Port_3",
+        "FabricControlPlane_Port_4",
+        "FabricControlPlane_ZolliRail"
+      ],
+      "boundingBox": {
+        "min": [
+          -0.85,
+          -0.000045,
+          -0.579983
+        ],
+        "max": [
+          0.85,
+          1.135019,
+          0.6845
+        ]
+      },
+      "semanticBounds": {
+        "FabricControlPlane_Chassis": {
+          "min": [
+            -0.85,
+            -0.000045,
+            -0.579983
+          ],
+          "max": [
+            0.85,
+            0.860045,
+            0.579983
+          ]
+        }
+      },
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "sha256": "d87e9fa6bed07d09226c9d9b87b3645a639ee4d011229de9d896aba1b1a1e0c0"
+    }
+  ]
+}

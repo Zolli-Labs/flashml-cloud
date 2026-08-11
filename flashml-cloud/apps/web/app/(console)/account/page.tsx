@@ -338,7 +338,7 @@ export default function AccountPage() {
           Display name
         </label>
         <p className="mt-1 text-xs text-muted-foreground">
-          How you appear in ZolliAI. Everything else on this page comes from
+          How you appear in Zolli. Everything else on this page comes from
           the account you signed in with.
         </p>
         <div className="mt-3 flex flex-wrap items-start gap-2">
@@ -393,7 +393,7 @@ export default function AccountPage() {
         <p className="mt-1 text-xs text-muted-foreground">
           {detailsEmpty
             ? "You signed up before we asked for this. Filling it in helps us build the right thing."
-            : "Used to understand who's on ZolliAI. Only you and the ZolliAI team see this."}
+            : "Used to understand who's on Zolli. Only you and the Zolli team see this."}
         </p>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -652,7 +652,7 @@ export default function AccountPage() {
       <section className="panel mt-4 p-5">
         <h2 className="text-sm font-semibold">Contributed</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Work your Zollis have accepted, across every job you have ever run
+          Work your Machines have accepted, across every job you have ever run
           &mdash; not just the one job page a credit used to be visible from.
           A running tally, not a balance: nothing here is ever spent.
         </p>
@@ -674,11 +674,11 @@ export default function AccountPage() {
         <h2 className="text-sm font-semibold text-destructive">Sign out</h2>
         <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
           Signing out ends this browser session only. It does{" "}
-          <span className="text-foreground">not</span> revoke any Zolli:
-          Zollis hold their own tokens and keep claiming work until you
+          <span className="text-foreground">not</span> revoke any Machine:
+          Machines hold their own tokens and keep claiming work until you
           revoke them from{" "}
           <Link href="/machines" className="text-brand-foreground hover:underline">
-            Zollis
+            Machines
           </Link>
           .
         </p>

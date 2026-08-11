@@ -38,7 +38,7 @@ export function MemberCredits({
         <table className="w-full min-w-[520px] text-left">
           <thead>
             <tr className="border-b border-border">
-              {["Member", "Zolli", "Tasks credited", "Time"].map((h) => (
+              {["Member", "Machine", "Tasks credited", "Time"].map((h) => (
                 <th key={h} className="label-caps px-4 py-2 font-medium">
                   {h}
                 </th>

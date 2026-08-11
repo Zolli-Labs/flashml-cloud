@@ -1,17 +1,11 @@
 import type { Metadata } from "next";
-import { Fraunces, Geist_Mono, Inter } from "next/font/google";
+import { Geist_Mono, Instrument_Sans } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-  display: "swap",
-});
-
-const fraunces = Fraunces({
-  variable: "--font-fraunces",
+const instrumentSans = Instrument_Sans({
+  variable: "--font-instrument-sans",
   subsets: ["latin"],
   display: "swap",
 });
@@ -27,11 +21,11 @@ export const metadata: Metadata = {
     process.env.NEXT_PUBLIC_SITE_URL ?? "https://zolliai.com",
   ),
   title: {
-    default: "ZolliAI",
-    template: "%s · ZolliAI",
+    default: "Zolli Cloud",
+    template: "%s · Zolli Cloud",
   },
   description:
-    "ZolliAI Cloud brings laptops, GPU rigs, and cloud instances together as a resilient distributed compute crew.",
+    "Pool cloud GPUs, home rigs, and spare machines with leases, verified checkpoints, and deterministic recovery.",
   keywords: [
     "distributed training",
     "federated learning",
@@ -62,9 +56,9 @@ export const metadata: Metadata = {
   },
   manifest: "/manifest.webmanifest",
   openGraph: {
-    title: "ZolliAI",
+    title: "Zolli Cloud",
     description:
-      "Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew.",
+      "Compute that finishes the job, even when a machine disappears.",
     type: "website",
     images: [
       {
@@ -77,9 +71,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "ZolliAI",
+    title: "Zolli Cloud",
     description:
-      "Bring laptops, GPU rigs, and cloud instances together as one resilient compute crew.",
+      "Compute that finishes the job, even when a machine disappears.",
     images: ["/brand/social/og-image-1200x630.png"],
   },
 };
@@ -92,10 +86,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${fraunces.variable} ${geistMono.variable}`}
+      className={`${instrumentSans.variable} ${geistMono.variable}`}
     >
-      {/* `grain` paints a fixed paper texture over the warm surfaces. */}
-      <body className="grain min-h-dvh flex flex-col antialiased">
+      <body className="min-h-dvh flex flex-col antialiased">
         {/* Keyboard and screen-reader users otherwise tab through the whole
             nav on every page before reaching content. Visible only when
             focused. */}

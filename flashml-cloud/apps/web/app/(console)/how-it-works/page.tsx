@@ -42,7 +42,7 @@ export default function HowItWorksPage() {
               this console calls it a <strong>workspace</strong>. A few
               older screens &mdash; the switcher in the rail, some toasts, the
               submit form under a workspace &mdash; still say{" "}
-              <strong>Crew</strong>, left over from before the rename and not
+              <strong>Workspace</strong>, left over from before the rename and not
               yet swept. The API and the database call it{" "}
               <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
                 pool
@@ -60,7 +60,7 @@ export default function HowItWorksPage() {
               is never co-owned. A workspace only gets to run work on a
               machine because its owner explicitly ticked it in from{" "}
               <Link href="/account/machines" className="text-brand-foreground hover:underline">
-                My Zollis
+                My Machines
               </Link>
               . That opt-in is why &ldquo;my machines&rdquo; and &ldquo;this
               workspace&apos;s machines&rdquo; are two different lists in this

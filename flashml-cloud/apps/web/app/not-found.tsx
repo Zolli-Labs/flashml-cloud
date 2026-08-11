@@ -10,7 +10,7 @@ export default function NotFound() {
       <p className="mt-3 font-mono text-sm text-muted-foreground">404</p>
       <h1 className="mt-2 text-lg font-semibold">This page doesn&apos;t exist</h1>
       <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-        The link may be out of date, or the job or Zolli it pointed at may
+        The link may be out of date, or the job or Machine it pointed at may
         have been removed.
       </p>
       <div className="mt-6 flex flex-wrap justify-center gap-2">

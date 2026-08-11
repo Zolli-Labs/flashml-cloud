@@ -2,28 +2,45 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { List, X } from "@phosphor-icons/react";
-import { motion, useMotionValueEvent, useReducedMotion, useScroll } from "motion/react";
 import { Wordmark } from "@/components/brand/Mark";
-import { QUICK } from "@/lib/motion";
+import { MARKETING } from "@/lib/marketing";
 
 const navLinks = [
-  { href: "#how-it-works", label: "How it works" },
-  { href: "#crew", label: "Meet the crew" },
+  { href: "/#how-it-works", label: "How it works" },
+  { href: "/#platform", label: "Platform" },
+  { href: "/#services", label: "Services" },
 ];
 
-const RUNTIME_REPO = "https://github.com/Zolli-Labs/flashml";
-
 export function Navbar() {
-  const [compressed, setCompressed] = useState(false);
+  const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const { scrollY } = useScroll();
-  const reduce = useReducedMotion();
+  const isHome = pathname === "/";
+  const opaque = !isHome || scrolled;
 
-  useMotionValueEvent(scrollY, "change", (latest) => {
-    setCompressed(latest > 100);
-  });
+  useEffect(() => {
+    if (!isHome) return;
+
+    let frame = 0;
+    const syncScrolledState = () => {
+      frame = 0;
+      setScrolled(window.scrollY > 48);
+    };
+    const scheduleSync = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(syncScrolledState);
+    };
+
+    scheduleSync();
+    window.addEventListener("scroll", scheduleSync, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", scheduleSync);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [isHome]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -42,44 +59,49 @@ export function Navbar() {
   const closeMenu = () => setMenuOpen(false);
 
   return (
-    <header className="pointer-events-none fixed inset-x-0 top-0 z-50 px-3 sm:px-5">
-      <motion.div
-        animate={reduce ? undefined : { y: compressed ? 8 : 0 }}
-        transition={QUICK}
-        className={`pointer-events-auto mx-auto mt-0 transition-[max-width,background-color,border-color,border-radius,box-shadow] duration-300 ${
-          compressed || menuOpen
-            ? "glass-strong max-w-5xl rounded-2xl border border-border shadow-lg"
-            : "max-w-7xl rounded-none border border-transparent bg-transparent"
-        }`}
-      >
-        <div className={`flex items-center justify-between px-4 sm:px-6 ${compressed ? "h-14" : "h-18"}`}>
-          <Link href="/" aria-label="ZolliAI home" onClick={closeMenu}>
-            <Wordmark product />
+    <header
+      data-opaque={opaque ? "true" : "false"}
+      className={`fixed inset-x-0 top-0 z-50 border-b ${
+        opaque
+          ? "border-border bg-[color:rgb(11_13_14_/_0.94)]"
+          : "border-transparent bg-transparent"
+      }`}
+    >
+      <div className="mx-auto max-w-[1240px]">
+        <div className="flex h-[68px] items-center justify-between px-5 sm:px-6">
+          <Link
+            href="/"
+            aria-label="Zolli Cloud home"
+            onClick={closeMenu}
+            className="interactive inline-flex min-h-10 items-center"
+          >
+            <Wordmark product tone="dark" />
           </Link>
 
-          <nav aria-label="Primary navigation" className="hidden items-center gap-1 md:flex">
+          <nav aria-label="Primary navigation" className="hidden items-center gap-7 md:flex">
             {navLinks.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
-                className="rounded-full px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"
+                className="inline-flex min-h-10 items-center text-[13px] text-muted-foreground transition-colors hover:text-foreground"
               >
                 {link.label}
               </Link>
             ))}
             <a
-              href={RUNTIME_REPO}
+              href={MARKETING.runtimeRepo}
               target="_blank"
               rel="noreferrer"
-              className="rounded-full px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"
+              aria-label="Open runtime (opens in a new tab)"
+              className="inline-flex min-h-10 items-center text-[13px] text-muted-foreground transition-colors hover:text-foreground"
             >
               Open runtime
             </a>
             <Link
-              href="/workspaces"
-              className="ml-2 inline-flex rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-shadow hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2"
+              href={MARKETING.consolePath}
+              className="interactive ml-2 inline-flex min-h-10 items-center rounded-[7px] border border-white/30 bg-[#f2efe6] px-4 text-[13px] font-semibold text-[#111415] hover:bg-white"
             >
-              Build your crew
+              Open console
             </Link>
           </nav>
 
@@ -90,49 +112,49 @@ export function Navbar() {
             aria-controls="mobile-navigation"
             aria-expanded={menuOpen}
             onClick={() => setMenuOpen((open) => !open)}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-border bg-surface text-foreground shadow-sm md:hidden"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-[7px] border border-border bg-surface text-foreground md:hidden"
           >
             {menuOpen ? <X size={20} weight="bold" /> : <List size={20} weight="bold" />}
           </button>
         </div>
 
-        {menuOpen && (
-          <nav
-            id="mobile-navigation"
-            aria-label="Mobile navigation"
-            className="border-t border-border px-4 py-4 md:hidden"
-          >
-            <div className="flex flex-col gap-1">
-              {navLinks.map((link) => (
-                <Link
-                  key={link.href}
-                  href={link.href}
-                  onClick={closeMenu}
-                  className="rounded-xl px-3 py-3 text-base font-medium text-foreground hover:bg-surface-2"
-                >
-                  {link.label}
-                </Link>
-              ))}
-              <a
-                href={RUNTIME_REPO}
-                target="_blank"
-                rel="noreferrer"
-                onClick={closeMenu}
-                className="rounded-xl px-3 py-3 text-base font-medium text-foreground hover:bg-surface-2"
-              >
-                Open runtime
-              </a>
+        <nav
+          id="mobile-navigation"
+          aria-label="Mobile navigation"
+          hidden={!menuOpen}
+          className="border-t border-border bg-background px-5 py-4 md:hidden"
+        >
+          <div className="flex flex-col gap-1">
+            {navLinks.map((link) => (
               <Link
-                href="/workspaces"
+                key={link.href}
+                href={link.href}
                 onClick={closeMenu}
-                className="mt-2 inline-flex justify-center rounded-full bg-primary px-5 py-3 text-sm font-semibold text-primary-foreground transition-shadow hover:shadow-md"
+                className="rounded-[7px] px-3 py-3 text-sm font-medium text-foreground hover:bg-surface-2"
               >
-                Build your crew
+                {link.label}
               </Link>
-            </div>
-          </nav>
-        )}
-      </motion.div>
+            ))}
+            <a
+              href={MARKETING.runtimeRepo}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open runtime (opens in a new tab)"
+              onClick={closeMenu}
+              className="rounded-[7px] px-3 py-3 text-sm font-medium text-foreground hover:bg-surface-2"
+            >
+              Open runtime
+            </a>
+            <Link
+              href={MARKETING.consolePath}
+              onClick={closeMenu}
+              className="interactive mt-2 inline-flex min-h-10 items-center justify-center rounded-[7px] bg-[#f2efe6] px-5 py-3 text-sm font-semibold text-[#111415] hover:bg-white"
+            >
+              Open console
+            </Link>
+          </div>
+        </nav>
+      </div>
     </header>
   );
 }

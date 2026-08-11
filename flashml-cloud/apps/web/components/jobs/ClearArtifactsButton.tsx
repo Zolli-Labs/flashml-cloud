@@ -32,7 +32,7 @@ import { ApiError, NotFound, deleteJobArtifacts } from "@/lib/cloud-api";
  * all. Clearing artifacts is less recoverable than either — a cancelled
  * job's data is untouched and a declined request can be re-invited, but
  * this permanently frees the bytes — so it follows `account/machines`'
- * revoke-a-Zolli dialog instead: a real modal overlaying the page, a
+ * revoke-a-machine dialog instead: a real modal overlaying the page, a
  * second and separate click on `AlertDialogAction`, and copy that says
  * plainly that this cannot be undone.
  *
