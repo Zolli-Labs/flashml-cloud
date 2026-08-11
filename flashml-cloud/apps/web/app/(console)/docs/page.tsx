@@ -23,7 +23,7 @@ import { cloudApiBase } from "@/lib/cloud-api";
 const REPO = "https://github.com/Zolli-Labs/flashml";
 
 const SECTIONS = [
-  { id: "attach", label: "Add a Zolli" },
+  { id: "attach", label: "Add a Machine" },
   { id: "run", label: "Run a job" },
   { id: "reading", label: "Reading a job" },
   { id: "glossary", label: "Glossary" },
@@ -69,9 +69,9 @@ export default function DocsPage() {
           </p>
 
           <section id="attach" className="scroll-mt-20 pt-12">
-            <h2 className="text-lg font-semibold">Add a Zolli</h2>
+            <h2 className="text-lg font-semibold">Add a Machine</h2>
             <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-              A machine becomes a Zolli after it is enrolled. Run this
+              A machine becomes a Machine after it is enrolled. Run this
               on the machine you want to lend, then approve the code it prints
               on the{" "}
               <Link href="/activate" className="text-brand-foreground hover:underline">
@@ -130,7 +130,7 @@ flashml/bin/flashnode login --coordinator ${base}`}
             </div>
 
             <h3 className="mt-8 text-sm font-semibold text-foreground">
-              From a notebook or a rented pod, for a Crew
+              From a notebook or a rented pod, for a Workspace
             </h3>
             <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
               A Colab notebook or a rented pod (RunPod and similar) can&apos;t
@@ -141,7 +141,7 @@ flashml/bin/flashnode login --coordinator ${base}`}
               has nothing to check there &mdash; skip it. This path is also
               for a{" "}
               <Link href="/pools" className="text-brand-foreground hover:underline">
-                Crew
+                Workspace
               </Link>{" "}
               you were invited to, not the open pool above: run{" "}
               <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
@@ -168,9 +168,9 @@ flashnode work --coordinator ${base} --runner trusted`}
                 <span className="text-muted-foreground">
                   No container, no network isolation &mdash; whatever the
                   job&apos;s command does, it does directly on this machine.
-                  No job from outside your Crew ever runs here &mdash;
-                  argv work is confined to your Crew by three
-                  fail-closed checks. Only run this for a Crew
+                  No job from outside your Workspace ever runs here &mdash;
+                  argv work is confined to your Workspace by three
+                  fail-closed checks. Only run this for a Workspace
                   you&apos;d hand a shell account to.
                 </span>
               </p>
@@ -197,7 +197,7 @@ flashnode work --coordinator ${base} --runner trusted`}
             </p>
             <p className="mt-4 max-w-prose text-sm leading-relaxed text-muted-foreground">
               Press <Kbd>⌘</Kbd> <Kbd>K</Kbd> anywhere in the console to jump
-              to a job, a Zolli or a page.
+              to a job, a Machine or a page.
             </p>
           </section>
 
@@ -213,11 +213,11 @@ flashnode work --coordinator ${base} --runner trusted`}
               {[
                 [
                   "Progress",
-                  "What the run achieved. Loss per round for federated runs, plus which Zollis contributed to each.",
+                  "What the run achieved. Loss per round for federated runs, plus which Machines contributed to each.",
                 ],
                 [
                   "Placement",
-                  "Where it ran. One lane per Zolli, one block per attempt, so a Zolli that died mid-task and the Zolli that finished the work both appear.",
+                  "Where it ran. One lane per Machine, one block per attempt, so a Machine that died mid-task and the Machine that finished the work both appear.",
                 ],
                 [
                   "Ledger",

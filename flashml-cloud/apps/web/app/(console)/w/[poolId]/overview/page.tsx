@@ -33,7 +33,7 @@ export default function WorkspaceOverviewPage() {
 
       <div className="mt-6 grid gap-3 sm:grid-cols-3">
         <Stat
-          label="Zollis online"
+          label="Machines online"
           value={online.length}
           total={machines.length}
         />
@@ -121,7 +121,7 @@ function EmptyJobs({ hasAny, poolId }: { hasAny: boolean; poolId: string }) {
       <p className="max-w-sm text-sm text-muted-foreground">
         {hasAny
           ? "Nothing running right now. Everything you have submitted has finished."
-          : "No jobs in this Crew yet."}
+          : "No jobs in this Workspace yet."}
       </p>
       <Link
         href={workspacePath(poolId, "submit")}

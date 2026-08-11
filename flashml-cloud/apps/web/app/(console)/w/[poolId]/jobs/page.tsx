@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { ArrowClockwise, Plus } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
-import { ZolliCharacter } from "@/components/brand/ZolliCharacter";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import { isActiveJob } from "@/lib/job-scope";
@@ -68,7 +67,7 @@ export default function WorkspaceJobsPage() {
         <div>
           <h2 className="text-sm font-semibold">Jobs</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Everything submitted in this Crew.
+            Everything submitted in this Workspace.
           </p>
         </div>
         {/* No spin-while-loading here, unlike the source page: this tab
@@ -188,9 +187,8 @@ function Empty({
   }
   return (
     <div className="flex flex-col items-center gap-3 py-16 text-center">
-      <ZolliCharacter role="worker" size={64} />
       <p className="max-w-sm text-sm text-muted-foreground">
-        No jobs in this Crew yet.
+        No jobs in this workspace yet.
       </p>
       <Link
         href={workspacePath(poolId, "submit")}

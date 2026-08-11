@@ -49,13 +49,13 @@ export function RenameWorkspace({
       // the old name until a full page reload. Fired after the API has
       // confirmed the new name, never before.
       notifyWorkspacesChanged();
-      toast.success("Crew renamed", { description: updated.name });
+      toast.success("Workspace renamed", { description: updated.name });
     } catch (err) {
       if (err instanceof NotFound) {
         // Owner-only, and the API answers 404 for "not the owner" exactly as
         // it does for "no such pool" — so this cannot be reported as a
         // permissions problem without guessing which one it was.
-        setError("This Crew can't be renamed from here.");
+        setError("This Workspace can't be renamed from here.");
       } else {
         setError(
           err instanceof ApiError ? err.detail : "Couldn't rename it. Try again."
@@ -83,7 +83,7 @@ export function RenameWorkspace({
               setName(e.target.value);
               setError(null);
             }}
-            aria-label="Crew name"
+            aria-label="Workspace name"
             disabled={saving}
             maxLength={200}
           />

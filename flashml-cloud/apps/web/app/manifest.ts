@@ -2,14 +2,14 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "ZolliAI Cloud",
-    short_name: "ZolliAI",
+    name: "Zolli Cloud",
+    short_name: "Zolli",
     description:
-      "A resilient distributed compute crew for laptops, GPU rigs, and cloud instances.",
+      "Fault-tolerant distributed compute for cloud GPUs, home rigs, and spare machines.",
     start_url: "/",
     display: "standalone",
-    background_color: "#FFFDF3",
-    theme_color: "#FF7427",
+    background_color: "#0B0D0E",
+    theme_color: "#0B0D0E",
     icons: [
       {
         src: "/brand/icons/android-chrome-192.png",

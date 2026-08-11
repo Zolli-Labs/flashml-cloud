@@ -57,7 +57,7 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
 
   return (
     <div className="relative px-3 pb-3">
-      <p className="label-caps mb-1.5 px-0.5">Crew</p>
+      <p className="label-caps mb-1.5 px-0.5">Workspace</p>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -66,7 +66,7 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
         className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-2 text-left text-sm text-foreground shadow-sm transition-colors hover:border-primary/30 hover:bg-surface-2"
       >
         <span className="min-w-0 flex-1 truncate font-medium">
-          {current ? current.name : "Choose a Crew"}
+          {current ? current.name : "Choose a workspace"}
         </span>
         <CaretUpDown size={14} className="shrink-0 text-muted-foreground" />
       </button>
@@ -78,7 +78,7 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
               than a document-level listener. */}
           <button
             type="button"
-            aria-label="Close Crew menu"
+            aria-label="Close workspace menu"
             onClick={() => setOpen(false)}
             className="fixed inset-0 z-40"
           />
@@ -120,7 +120,7 @@ export function WorkspaceSwitcher({ currentId }: { currentId: string | null }) {
                 className="flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-primary/5 hover:text-foreground"
               >
                 <Plus size={14} className="shrink-0" />
-                New Crew
+                New workspace
               </Link>
             </div>
           </div>

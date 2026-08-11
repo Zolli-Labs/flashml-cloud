@@ -186,7 +186,7 @@ export default function JobDetailPage({
   const name = job.spec?.metadata?.name ?? job.name ?? job.job_id;
   const backHref =
     job.pool_id != null ? workspacePath(job.pool_id, "jobs") : "/workspaces";
-  const backLabel = job.pool_id != null ? "Jobs" : "Crews";
+  const backLabel = job.pool_id != null ? "Jobs" : "Workspaces";
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
@@ -382,7 +382,7 @@ function NoMetrics() {
     <section className="rounded-lg border border-border bg-surface p-6">
       <h2 className="text-sm font-semibold">No training metrics for this job</h2>
       <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-        ZolliAI displays the mean loss that FlashML records for each federated
+        Zolli displays the mean loss that FlashML records for each federated
         round. Independent jobs report no model metrics today, so there is
         nothing to chart here rather than an empty axis.
       </p>
@@ -428,7 +428,7 @@ function PlacementView({
           <section className="panel p-4">
             <h2 className="text-sm font-semibold">Where the work is</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              Scrub or replay to see the Crew at any moment of this run.
+              Scrub or replay to see the Workspace at any moment of this run.
             </p>
             <div className="mt-4">
               <FleetTopology attempts={attempts} now={now} />
@@ -436,7 +436,7 @@ function PlacementView({
           </section>
 
           <section className="panel p-4">
-            <h2 className="text-sm font-semibold">Attempts by Zolli</h2>
+            <h2 className="text-sm font-semibold">Attempts by Machine</h2>
             <p className="mt-1 text-xs text-muted-foreground">
               Reconstructed from the coordinator&apos;s lease and commit
               events.
@@ -457,7 +457,7 @@ function PlacementView({
             <table className="w-full min-w-[520px] text-left">
               <thead>
                 <tr className="border-b border-border">
-                  {["Task", "State", "Attempts", "Zolli", "Lease ends"].map(
+                  {["Task", "State", "Attempts", "Machine", "Lease ends"].map(
                     (h) => (
                       <th key={h} className="label-caps px-4 py-2 font-medium">
                         {h}

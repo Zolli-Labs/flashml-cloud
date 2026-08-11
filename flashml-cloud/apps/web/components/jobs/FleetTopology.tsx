@@ -288,7 +288,7 @@ export function FleetTopology({
 
       <p className="meta mt-2">
         {snap.activeCount} task{snap.activeCount === 1 ? "" : "s"} in flight
-        across {machines.length} Zolli{machines.length === 1 ? "" : "s"}.
+        across {machines.length} Machine{machines.length === 1 ? "" : "s"}.
         Replayed from the coordinator&apos;s lease and commit events.
       </p>
     </div>

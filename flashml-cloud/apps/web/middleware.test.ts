@@ -12,11 +12,12 @@ import { NextRequest } from "next/server";
 // found" before getUser() is ever reached — a CI-only failure. Mocking the
 // boundary means no real client, and therefore no realtime client, is ever
 // constructed.
-const getUser = vi.fn();
+const { createServerClient, getUser } = vi.hoisted(() => ({
+  createServerClient: vi.fn(),
+  getUser: vi.fn(),
+}));
 vi.mock("@supabase/ssr", () => ({
-  createServerClient: () => ({
-    auth: { getUser },
-  }),
+  createServerClient,
 }));
 
 import { middleware } from "./middleware";
@@ -101,6 +102,8 @@ describe("signed-out redirect to /sign-in", () => {
   beforeEach(() => {
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://fake-project.supabase.co");
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "fake-anon-key");
+    createServerClient.mockReset();
+    createServerClient.mockReturnValue({ auth: { getUser } });
     getUser.mockReset();
     getUser.mockResolvedValue({ data: { user: null } });
   });
@@ -151,6 +154,30 @@ describe("signed-out redirect to /sign-in", () => {
     expect(res.status).not.toBe(307);
   });
 
+  it.each([
+    "/",
+    "/contact",
+    "/privacy",
+    "/terms",
+    "/security",
+    "/models/hero/fabric/everyday-machines.glb",
+    "/auth/callback",
+    "/manifest.webmanifest",
+  ])("serves public path %s without constructing an auth client", async (pathname) => {
+    const res = await get(`http://localhost:3000${pathname}`);
+
+    expect(res.status).not.toBe(307);
+    expect(createServerClient).not.toHaveBeenCalled();
+    expect(getUser).not.toHaveBeenCalled();
+  });
+
+  it("still checks auth on /sign-in so signed-in visitors can be redirected", async () => {
+    await get("http://localhost:3000/sign-in");
+
+    expect(createServerClient).toHaveBeenCalledTimes(1);
+    expect(getUser).toHaveBeenCalledTimes(1);
+  });
+
   // `https://this-site.com//evil.com/foo` parses with pathname
   // `//evil.com/foo` — no scheme, so a naive check would wave it through,
   // but the leading `//` makes it protocol-relative. Unsanitized, this
@@ -163,4 +190,41 @@ describe("signed-out redirect to /sign-in", () => {
     expect(location.pathname).toBe("/sign-in");
     expect(location.searchParams.get("next")).toBe("/machines");
   });
+});
+
+describe("missing Supabase configuration", () => {
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "");
+    createServerClient.mockReset();
+    getUser.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function get(url: string) {
+    return middleware(new NextRequest(new Request(url)));
+  }
+
+  it("fails a private route closed through the exact signed-out redirect contract", async () => {
+    const res = await get("http://localhost:3000/pools/join?token=fmi_abc");
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe(
+      "http://localhost:3000/sign-in?next=%2Fpools%2Fjoin%3Ftoken%3Dfmi_abc"
+    );
+    expect(createServerClient).not.toHaveBeenCalled();
+  });
+
+  it.each(["/", "/contact", "/manifest.webmanifest", "/sign-in"])(
+    "still serves %s when auth configuration is absent",
+    async (pathname) => {
+      const res = await get(`http://localhost:3000${pathname}`);
+
+      expect(res.status).not.toBe(307);
+      expect(createServerClient).not.toHaveBeenCalled();
+    }
+  );
 });

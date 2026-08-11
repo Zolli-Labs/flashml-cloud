@@ -217,9 +217,9 @@ function SignInCardContent() {
         id="content"
         className="flex min-h-dvh items-center justify-center bg-cream px-4 py-12"
       >
-        <section className="glass w-full max-w-sm rounded-2xl p-7 rise">
+        <section className="w-full max-w-sm rounded-[10px] border border-border bg-surface p-7">
           <p className="label-caps mb-3 text-brand-foreground">Account status</p>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">
+          <h1 className="text-2xl font-semibold tracking-[-0.03em]">
             Account created, but not usable yet
           </h1>
           <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
@@ -329,7 +329,7 @@ function SignInCardContent() {
         <Button
           type="submit"
           size="lg"
-          className="interactive h-12 w-full rounded-xl font-semibold shadow-[0_12px_30px_-16px_rgba(239,104,40,0.8)]"
+          className="interactive h-12 w-full rounded-[7px] font-semibold"
           disabled={pending !== null}
         >
           {pending === "password"

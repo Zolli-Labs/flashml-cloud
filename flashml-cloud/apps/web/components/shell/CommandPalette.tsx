@@ -11,6 +11,7 @@ import {
   Plus,
   BookOpen,
   UserCircle,
+  type Icon,
 } from "@phosphor-icons/react";
 import {
   listJobs,
@@ -32,7 +33,7 @@ interface Item {
   label: string;
   hint?: string;
   href: string;
-  icon: React.ElementType;
+  icon: Icon;
   group: string;
 }
 
@@ -40,8 +41,8 @@ const STATIC: Item[] = [
   { id: "nav-overview", label: "Overview", href: "/overview", icon: House, group: "Go to" },
   { id: "nav-jobs", label: "Jobs", href: "/jobs", icon: ListChecks, group: "Go to" },
   { id: "nav-submit", label: "Submit a job", href: "/submit", icon: Plus, group: "Go to" },
-  { id: "nav-machines", label: "Zollis", href: "/machines", icon: Desktop, group: "Go to" },
-  { id: "nav-activate", label: "Add a Zolli", href: "/activate", icon: DeviceMobile, group: "Go to" },
+  { id: "nav-machines", label: "Machines", href: "/machines", icon: Desktop, group: "Go to" },
+  { id: "nav-activate", label: "Add a Machine", href: "/activate", icon: DeviceMobile, group: "Go to" },
   { id: "nav-docs", label: "Documentation", href: "/docs", icon: BookOpen, group: "Go to" },
   { id: "nav-account", label: "Account", href: "/account", icon: UserCircle, group: "Go to" },
 ];
@@ -136,7 +137,7 @@ export function CommandPalette() {
         hint: m.status,
         href: "/machines",
         icon: Desktop,
-        group: "Zollis",
+        group: "Machines",
       })),
     ];
     return [...STATIC, ...dynamic].filter(
@@ -164,13 +165,13 @@ export function CommandPalette() {
         type="button"
         aria-label="Close command palette"
         onClick={() => setOpen(false)}
-        className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+        className="absolute inset-0 bg-black/60"
       />
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        className="glass-strong relative w-full max-w-lg overflow-hidden rounded-xl"
+        className="relative w-full max-w-lg overflow-hidden rounded-[10px] border border-border bg-surface shadow-lg"
       >
         <div className="flex items-center gap-2.5 border-b border-border px-4">
           <MagnifyingGlass size={15} className="shrink-0 text-muted-foreground" />
@@ -190,7 +191,7 @@ export function CommandPalette() {
                 go(items[active]);
               }
             }}
-            placeholder="Jump to a job, a Zolli, or a page"
+            placeholder="Jump to a job, a Machine, or a page"
             aria-activedescendant={items[active]?.id}
             className="w-full bg-transparent py-3.5 text-sm outline-none placeholder:text-muted-foreground/70"
           />
