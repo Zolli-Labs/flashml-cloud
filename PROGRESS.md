@@ -106,8 +106,10 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       coordinator (D14); job ownership scoped to the verified JWT `sub`,
       including job-scoped artifact reads. **Google OAuth is not yet
       enabled** — a manual step in the Supabase dashboard (Authentication →
-      Providers → Google), not inferable from this repo; must be done by
-      hand before any real sign-in works.
+      Providers → Google), not inferable from this repo. NOT a blocker as
+      once stated here: email+password sign-up and sign-in were proven end
+      to end on prod on 2026-08-11, including admission and the approval
+      email. Google remains a nice-to-have, not a prerequisite.
 - [x] **Plan 4 — GitHub repo → job + preflight** ✅ (2026-08-01) repo tarball
       staged as an artifact:// input into a curated pinned image; static ast
       preflight; contract proven end to end by e2e/test_repo_job_contract.py.
@@ -171,6 +173,112 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
       Docker misconfiguration rather than on anything distributed.
 
 ## Entries
+
+### 2026-08-11 — Fresh production: database reset, admin bootstrap, GitHub App, email proven (flashml-cloud, prod)
+What/why: owner wanted a clean prod for the competition demo. Truncated every
+app table and all `auth.users`, preserving `schema_migrations` so nothing
+re-migrates. Configured the Zolli-Labs GitHub App (id 4559304, slug
+`zolli-ai`, Contents+Metadata read-only) and proved the admission email path.
+How verified: post-wipe counts 0 across accounts/jobs/machines/pools/
+contributions, `schema_migrations` still 13; api `{"status":"ok","database":
+"ok"}`. Owner signed up, was granted admin, then approved a second real
+account — sign-in, approval and the Resend email all confirmed working.
+Gotchas: the admin bootstrap needs the `access_requests` row DELETED, not just
+`admitted_at` set — `access_state_for` gives the row priority, so setting the
+flag alone strands the account on "Request received" forever while the API
+considers it admitted. Resend DNS (DKIM/SPF/MX) was intact the whole time; an
+earlier report that it had been wiped was a broken local `dig`, not reality.
+Next: enrol a machine and run the first real dataset job. Parking lot: DMARC
+(`_dmarc` TXT, optional); rotating the dev Supabase publishable key now that
+the repo is public.
+
+### 2026-08-11 — Production auto-deploys on a green main, and moves to zolliai.com (flashml-cloud, ci + prod)
+What/why: owner asked for auto-deploy. Render's own `autoDeploy` is the wrong
+mechanism — it fires on COMMIT, not on checks passing, which is the
+pre-2026-08-02 state this repo already fixed, and it ignores migration
+ordering. Trigger moved back into ci.yml: `migrate-prod` needs
+[api, web, e2e, secrets], `deploy-prod` needs migrate-prod.
+How verified: first run green on d98a2ef — all 7 jobs, and all three prod
+services report `live` with `trigger: api`. zolliai.com 200, api.zolliai.com
+/healthz + /docs 200, and the live console bundle references api.zolliai.com
+with zero references to the old onrender host.
+Gotchas: `NEXT_PUBLIC_CLOUD_API` is INLINED AT BUILD TIME — render.yaml and
+ci.yml both still named `flashml-api.onrender.com` after the DNS move, which
+would have shipped a console calling the wrong host. Both updated together;
+that drift is the 2026-08-04 "Unregistered API key" outage.
+Next: keep deploy-prod.yml as break-glass. Parking lot: `environment:
+production` + required reviewer, now possible since the repo went public.
+
+### 2026-08-11 — Release flashruntime 0.6.0 and flashnode 0.4.0, and move every pin (workspace-wide)
+What/why: flashml-cloud consumes flashruntime as a published PyPI version, so
+declared datasets could not reach the cloud until both packages shipped.
+How verified: both live on PyPI, verified by clean install — 0.6.0 carries
+`dataset_cache_bytes`, the `dataset_slices` forward and the image manifests.
+flashnode 0.4.0 release green on all 4 jobs including `resolvable`. The
+cross-repo test that had been skipping since Wave 3 now PASSES against the
+published pin; api suite 1228 passed against it.
+Gotchas: NODE_VERSION was bumped to 0.4.0 before flashnode 0.4.0 existed,
+so e2e failed with "no version of flashnode==0.4.0" — the exact 0.4.4 mistake
+already recorded in this log. Check PyPI before bumping a pin. Also: the
+release run shows RED while publishing fine — only `docs-deploy` fails, and
+`pypi-publish` genuinely gates on [build, test, agent-compat]. There is a
+FIFTH version site the "four pin sites" rule does not name: NODE_VERSION.
+Next: nothing blocking. Parking lot: raise flashnode's floor commentary once
+0.6 has soaked.
+
+### 2026-08-11 — Declared datasets, control-plane half: resolve, slice, admit (flashml-cloud/api)
+What/why: ROADMAP P1.7. `datasets:` in flashml.yaml, resolved anonymously at
+submit into a checksummed manifest pinned to an immutable revision, cut into
+per-task slices, and admitted before any artifact is staged.
+How verified: api 1228 passed, 2 skipped. Live `-m network` test confirms
+`hf://stanfordnlp/imdb` resolves to a 40-char commit SHA with real `lfs.oid`
+per shard. Local rehearsal through the real mapper: 4 tasks over 8 shards,
+disjoint and complete, mean loss 0.6455 → 0.5737 across four rounds.
+Gotchas: THREE bugs that would have shipped silently wrong. (1) Both listing
+APIs paginate at 1000 — reading page one does not error, it trains the fleet
+on a PREFIX of the dataset. (2) `FederatedRun` had no `manifests` field, so
+every round of a federated dataset job raised CompileError in the driver
+thread AFTER the route answered 201 — invisible to route tests and compile
+tests alike. (3) Admission on `total/chunks` is an average; the cut is
+byte-weighted, so one dominant file needs far more than the mean on a single
+host. Now MAX-over-tasks of SUM-over-datasets, matching the placement gate.
+Next: private datasets need their own spec — it would be the first stored
+third-party credential in this schema.
+
+### 2026-08-11 — Declared datasets, runtime and agent half (flashml: protocol, scheduler, flashnode)
+What/why: the host agent fetches declared data before the sandbox closes, so
+a task keeps `--network none` and still finds its shards on disk.
+How verified: flashruntime 1178 passed, 5 skipped; flashnode 585 passed. Four
+integration tests against the real HF CDN — 20,470,363 bytes, sha256 verified
+independently, and a genuine 206 resume after a mid-stream drop.
+Gotchas: a systemic edge found three times — any exception that is NOT a
+TaskExecutionError skips `_execute_inner`'s fail(), rots the lease, and lands
+in execute_one's catch-all, which "DOES count against the host". So a flaky
+CDN (`IncompleteRead`, which descends from HTTPException not OSError), an
+empty manifest path (`IsADirectoryError`) or a malformed payload
+(`AttributeError`) would charge a VOLUNTEER for a submitter's fault. All three
+converted. Separately: `materialise` hard-links out of the cache, so a task
+writing to its own input rewrote the CACHE and every later job on that host
+got the corrupted bytes as a hit — measured, then fixed with 0o444.
+Next: `client.py` has the same IncompleteRead gap on the coordinator
+transport. Parking lot: locality scheduling; parquet in a curated image.
+
+### 2026-08-11 — Where customer data lives: two research notes and an approved spec (design only, flashml-cloud)
+What/why: a model needs data and Supabase cannot hold it. Researched how
+comparable systems solve it, then specced it.
+How verified: `scripts/experiments/hf_dataset_origin_probe.py` — 10/10 checks
+green against the live Hub. Measured rather than assumed: HF's tree API yields
+path+size+sha256 so we derive the manifest; `resolve` 302s to a signed CDN URL
+with a 60-minute TTL, single-object scope and NO IP condition; ranged GETs
+return 206; anonymous resolver quota is 3000/5min PER IP.
+Gotchas: HF charges nothing for egress, which decides the design — Git LFS is
+disqualified by a number (GitHub's 10 GiB/month is exceeded 20x by the first
+round of one realistic job). A6b of the probe found the cap must measure
+`effective_width` after the cut, not file count: five files over five chunks
+still strands two machines when one file dominates the bytes.
+Next: run Stage B of the probe (private-repo broker) before speccing private
+datasets. Parking lot: R2 temporary credentials for the private path.
+
 
 ### 2026-08-10 — Private repositories through a GitHub App (flashml-cloud/api, /web)
 
