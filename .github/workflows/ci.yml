@@ -281,12 +281,52 @@ jobs:
 # argued against. Add the rule and the key together, or neither.
 # ---------------------------------------------------------------------------
 
+  changes:
+    # Does this push touch anything that could change what RUNS in production?
+    #
+    # Auto-deploy means every push to main restarts the coordinator, the API
+    # and the web service. That is right for code and wrong for a PROGRESS.md
+    # entry: a docs commit would interrupt running jobs to ship a paragraph.
+    #
+    # Fails SAFE. An unknown or unreachable base commit (a force-push, a fresh
+    # branch, a shallow fetch) reports deployable=true, because skipping a
+    # deploy that should have happened is the worse error — it leaves prod
+    # silently behind main with a green tick.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      deployable: ${{ steps.check.outputs.deployable }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          set -euo pipefail
+          base="${{ github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "base unknown — treating as deployable"
+            echo "deployable=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          changed=$(git diff --name-only "$base" "${{ github.sha }}")
+          echo "$changed"
+          # Anything that is NOT a markdown file or under a docs/ tree counts.
+          if printf '%s\n' "$changed" | grep -qvE '(^|/)docs/|\.md$'; then
+            echo "deployable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs-only push — skipping the production deploy"
+            echo "deployable=false" >> "$GITHUB_OUTPUT"
+          fi
+
   migrate-prod:
     # Every test job, not just `api`. migrate-dev needs only `api` because dev
     # is disposable; a prod migration is the one step in this pipeline that a
     # redeploy cannot undo.
-    needs: [api, web, e2e, secrets]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [api, web, e2e, secrets, changes]
+    if: >-
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
+      && needs.changes.outputs.deployable == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -323,6 +363,11 @@ jobs:
     # Migrations FIRST, deploy after — never concurrent. dev tolerates the
     # race (render.yaml's dev block says so, and 0007's try/except absorbs it);
     # prod must not, or the API comes up against a schema it does not expect.
+    # `needs: [migrate-prod]` already requires it to have SUCCEEDED, and
+    # migrate-prod is itself gated on `changes`, so a docs-only push skips
+    # both. No extra condition here — and note that a hyphenated job cannot
+    # be referenced as `needs.migrate-prod.result`: GitHub parses the `-` as
+    # subtraction. It would have to be `needs['migrate-prod'].result`.
     needs: [migrate-prod]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
