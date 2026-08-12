@@ -41,6 +41,21 @@ The handle is written to the row **before** anything is destroyed, so a crash
 between "the venue answered" and "we destroyed it" still leaves the machine
 named. ``provider_handle`` is only ever filled in, never cleared.
 
+**So is ``machine_id``, and that is not symmetry for its own sake.** It used
+to be written on the success path only -- inside :func:`_move_to_active` --
+which meant the rows likeliest to hold a machine that is still billing
+reached :func:`reconcile.unreleased_rows` naming no machine at all. That
+query's fastest branch is *a bound credential that is already revoked, swept
+at once with no allowance*, and it is unreachable from a row whose
+``machine_id`` is null. So an ``ACQUIRE_NOT_DESTROYED`` row -- the one case
+where we hold a handle, could not destroy what it names, and have just
+revoked its credential -- fell into *nothing to ask* instead and waited
+``abandoned_after_s``: thirty minutes of billing for the case we are surest
+about. Recording the machine on the way out also puts the row back in reach
+of :func:`reconcile.finished_rentals_with_live_credentials`, which joins on
+``machine_id``: without it, a revoke that failed here had nothing anywhere
+that would ever retry it.
+
 ``failure_code`` follows ``reconcile.py``'s convention: a stable, greppable
 ``ACQUIRE_*`` token whenever the row is left for the sweep -- those are the
 rows an operator hunts for -- and the exception class name when the row is
@@ -158,21 +173,33 @@ def _move_to_active(
         return cur.rowcount == 1
 
 
-def _record_handle(db: psycopg.Connection, rid: str, handle: str) -> None:
-    """Write the handle without touching the state.
+def _record_evidence(
+    db: psycopg.Connection, rid: str, *, handle: str | None,
+    machine_id: str | None,
+) -> None:
+    """Write what this acquisition created, without touching the state.
 
-    Runs on the failure path before anything is destroyed. ``provider_handle``
-    is only ever filled in, never cleared -- the one thing that must not happen
-    to a machine we are paying for is losing its name.
+    Runs on the failure path before anything is destroyed. Both columns are
+    only ever filled in, never cleared -- the one thing that must not happen
+    to a machine we are paying for is losing its name, and the credential it
+    is renting under is the other half of that name.
+
+    ``machine_id`` matters to the *sweep*, not just to the record: a rental
+    with a bound, revoked credential is swept immediately, while one with no
+    machine bound waits ``reconcile.DEFAULT_ABANDONED_AFTER_S``. Leaving this
+    to the success path alone gave the rows we are surest about -- we hold a
+    handle and something refused to destroy it -- the slowest window there
+    is. See the module docstring.
     """
     with db.cursor() as cur:
         cur.execute(
             """
             update public.rented_capacity
-               set provider_handle = coalesce(provider_handle, %s)
+               set provider_handle = coalesce(provider_handle, %s),
+                   machine_id = coalesce(machine_id, %s::uuid)
              where id = %s
             """,
-            (handle, rid),
+            (handle, machine_id, rid),
         )
     db.commit()
 
@@ -263,12 +290,15 @@ async def _abandon(
     notes = [f"{code}: {exc}"]
 
     # 1. Durable before destructive. If this process dies on the next line,
-    #    the row still names the thing that is billing.
-    if handle:
+    #    the row still names the thing that is billing AND the credential it
+    #    is billing under -- which is what puts it in the sweep's no-allowance
+    #    branch the moment the revoke below lands.
+    machine_id = credential.machine_id if credential is not None else None
+    if handle or machine_id:
         try:
-            _record_handle(db, rid, handle)
+            _record_evidence(db, rid, handle=handle, machine_id=machine_id)
         except Exception as note:  # pragma: no cover - defensive
-            notes.append(f"[handle not recorded: {note}]")
+            notes.append(f"[handle/machine not recorded: {note}]")
 
     # 2. Stop the money, and decide what we actually know afterwards.
     if handle:

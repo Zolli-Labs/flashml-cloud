@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 from flashml_cloud_api.capacity.budget import BudgetRefused, assert_within_budget
+from flashml_cloud_api.settings import Settings
 from test_jobs_from_repo import db  # noqa: F401 - fixture
 
 
@@ -112,6 +113,99 @@ def test_the_window_ceiling_counts_prior_acquisitions(db, spender):
             settings=_Settings(),
         )
     assert "window" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# the emergency stop, through the REAL Settings object
+# ---------------------------------------------------------------------------
+#
+# Every test above hands the gate a `_Settings` stub, which is fine for the
+# arithmetic and useless for this: the bug was that `0` never survived the
+# environment long enough to reach the arithmetic. `Settings.from_env` is the
+# only place that can be asked, so these go through it.
+
+
+@pytest.fixture
+def env(monkeypatch):
+    """`Settings.from_env()` with a clean-ish environment.
+
+    `FLASHML_REQUIRE_AUTH` off so the missing-secret check does not refuse to
+    build a Settings at all, and the three rented ceilings cleared so a value
+    exported in the developer's own shell cannot decide the result.
+    """
+    monkeypatch.setenv("FLASHML_REQUIRE_AUTH", "false")
+    for name in (
+        "RENTED_USD_PER_ACQUISITION_MAX",
+        "RENTED_USD_WINDOW_MAX",
+        "RENTED_USD_WINDOW_HOURS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def test_an_explicit_zero_window_ceiling_stops_renting(db, env):
+    """**The emergency stop.** `RENTED_USD_WINDOW_MAX=0` is the obvious way
+    for an operator to say "rent nothing, right now", and it used to return
+    $10/hr: `_float_env` treated any non-positive value as a typo and fell
+    back to the field default. The one input that means STOP was the input
+    that produced the standing allowance.
+
+    Asserted twice on purpose — the value that arrives on `Settings`, and
+    what the gate then does with it. A `0.0` that no acquisition is actually
+    refused against would be the same bug wearing a passing test.
+    """
+    env.setenv("RENTED_USD_WINDOW_MAX", "0")
+    settings = Settings.from_env()
+    assert settings.rented_usd_window_max == 0.0
+
+    with pytest.raises(BudgetRefused) as exc:
+        assert_within_budget(
+            db, venue_id="runpod", usd_per_hour=0.5, settings=settings,
+        )
+    assert "window" in str(exc.value).lower()
+
+
+def test_an_explicit_zero_per_acquisition_ceiling_stops_renting_too(db, env):
+    """The other ceiling, same reasoning: the two knobs an operator reaches
+    for in a hurry must both mean zero when they are set to zero."""
+    env.setenv("RENTED_USD_PER_ACQUISITION_MAX", "0")
+    settings = Settings.from_env()
+    assert settings.rented_usd_per_acquisition_max == 0.0
+
+    with pytest.raises(BudgetRefused):
+        assert_within_budget(
+            db, venue_id="runpod", usd_per_hour=0.5, settings=settings,
+        )
+
+
+def test_a_zero_window_WIDTH_is_refused_rather_than_honoured(db, env):
+    """The deliberate exception, and the reason `allow_zero` is opt-in.
+
+    `RENTED_USD_WINDOW_HOURS` is a width, not a ceiling. Honouring `0` there
+    would make `window_spend_usd` sum over an empty interval — always $0
+    committed — which switches the loop ceiling OFF instead of tightening it.
+    Zero means the opposite thing on this variable, so it keeps the old
+    fallback.
+    """
+    env.setenv("RENTED_USD_WINDOW_HOURS", "0")
+    assert Settings.from_env().rented_usd_window_hours == 24.0
+
+
+def test_garbage_and_negatives_still_fall_back_to_the_documented_defaults(env):
+    """A typo must not take the API down, and must not be read as a stricter
+    zero either: a negative ceiling refuses everything for a reason nobody
+    typed. Unset is included because these defaults are what the comments in
+    `settings.py` promise an operator who has set nothing at all."""
+    assert Settings.from_env().rented_usd_window_max == 10.0
+
+    env.setenv("RENTED_USD_WINDOW_MAX", "-1")
+    assert Settings.from_env().rented_usd_window_max == 10.0
+
+    env.setenv("RENTED_USD_WINDOW_MAX", "stop")
+    assert Settings.from_env().rented_usd_window_max == 10.0
+
+    env.setenv("RENTED_USD_PER_ACQUISITION_MAX", "")
+    assert Settings.from_env().rented_usd_per_acquisition_max == 2.0
 
 
 def test_the_window_is_left_clean_for_the_next_file(db):

@@ -141,12 +141,38 @@ log = logging.getLogger(__name__)
 #: ``failure_detail`` is for a human reading a row, not for a stack trace.
 _DETAIL_MAX = 2000
 
-#: The states that still cost money and that the sweep may act on. A row
-#: outside this set is either finished (``RELEASED``) or already closed with
-#: its reason (``FAILED``) -- and ``FAILED`` is deliberately not swept, which
-#: is precisely why ``acquire.py`` refuses to write it while a handle may
-#: still be live.
-SWEEPABLE = ("REQUESTED", "ACTIVE")
+# THE SWEEPABLE SET, AND WHY IT IS NOT A CONSTANT
+# -----------------------------------------------
+# ``('REQUESTED', 'ACTIVE')`` are the states that still cost money and that
+# the sweep may act on. A row outside that set is either finished
+# (``RELEASED``) or already closed with its reason (``FAILED``) -- and
+# ``FAILED`` is deliberately not swept, which is precisely why ``acquire.py``
+# refuses to write it while a handle may still be live.
+#
+# There was a `SWEEPABLE = ("REQUESTED", "ACTIVE")` here, and it was deleted.
+# It named the invariant and changed nothing. Every site that depends on the
+# set carries its own SQL literal -- six of them:
+#
+#   * `unreleased_rows` and `_mark_released`, here;
+#   * `acquire._close_failed`, and `acquire._keep_sweepable` twice (state
+#     and `released_at`);
+#   * the partial index `rented_capacity_unreleased_idx` in migration 0022.
+#
+# `finished_rentals_with_live_credentials` then spells the COMPLEMENT,
+# ('RELEASED', 'FAILED'), which has to keep agreeing with all six.
+#
+# Editing the constant moved none of that and left the suite green, which is
+# worse than having no constant at all: the next reader edits it, runs the
+# tests, and believes the sweep changed.
+#
+# Routing the statements through it would mean interpolating a Python tuple
+# into SQL, exactly what `_note`'s `guard` argument refuses to allow for
+# anything but a static fragment -- and it still could not reach the index,
+# in another language in another file, or the CHECK constraint beside it. So
+# the literals stay inline, this comment is what names the invariant, and
+# changing the set means changing all six sites and the complement together.
+# The test that tells you if you missed one:
+# test_unreleased_rows_selects_only_what_is_still_billing_and_settled.
 
 #: Heartbeat silence that counts as gone. Ten times the 90-second window
 #: ``db.MACHINE_ONLINE_PREDICATE`` calls "online", and the same figure

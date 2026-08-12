@@ -68,12 +68,28 @@ def _int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def _float_env(name: str, default: float) -> float:
+def _float_env(name: str, default: float, *, allow_zero: bool = False) -> float:
     """Read a float env var, falling back on anything unparseable.
 
-    A typo in a budget ceiling must not take the API down at startup — but
-    it must also not silently become zero, which for a spend ceiling would
-    refuse every acquisition rather than only the one that should trip it.
+    A typo must not take the API down at startup. What happens to a value
+    that parses but is not positive depends on what the number MEANS, so the
+    caller says which:
+
+    * ``allow_zero=False`` — the default, and ``_int_env``'s behaviour. Zero
+      falls back. For a width, a timeout or an interval, zero is never what
+      an operator wants and is usually a half-finished edit.
+    * ``allow_zero=True`` — **zero is honoured exactly as typed.** For a
+      spend ceiling, ``0`` is the emergency stop: the obvious way to say
+      "rent nothing, right now". Coercing it to the default handed an
+      operator who had just tried to halt all renting a $10/hr allowance
+      instead, which is the opposite of what they asked for and the reason
+      this flag exists. It is deliberately opt-in: ``_int_env``'s callers
+      (``FC_SANDBOX_TIMEOUT_MS``) mean the other thing, where zero would be
+      a sandbox that expires the moment it is created.
+
+    Negatives fall back either way, and now say so in the log: a negative
+    ceiling is a typo rather than a stricter zero, and silently refusing
+    every acquisition on one is a failure nobody typed and nothing explains.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -85,7 +101,12 @@ def _float_env(name: str, default: float) -> float:
             "%s=%r is not a number; using %s", name, raw, default
         )
         return default
-    return value if value > 0 else default
+    if value > 0 or (allow_zero and value == 0):
+        return value
+    logging.getLogger(__name__).warning(
+        "%s=%r is not a usable value here; using %s", name, raw, default
+    )
+    return default
 
 
 def _with_default_scheme(url: str, scheme: str) -> str:
@@ -275,13 +296,43 @@ class Settings:
     # a LOOP of correct-looking decisions, which is what actually empties
     # an account. See `capacity/budget.py`.
     #
-    #: Per-acquisition ceiling. One mistake cannot exceed this.
+    # **BOTH NUMBERS ARE RATES — DOLLARS PER HOUR — NOT TOTALS.** Neither
+    # one is a cap on how many dollars may ever be spent, because this
+    # system has no such cap and no column recording dollars actually
+    # billed: `rented_capacity` stores an hourly rate per rental and
+    # `budget.window_spend_usd` adds those rates up. Anyone bounding real
+    # spend from this file is bounding a rate of commitment and must do the
+    # multiplication themselves.
+    #
+    #: Per-acquisition ceiling, in $/hr: the most any ONE rental may be
+    #: quoted — or answered — at. Bounds a single mistake, not a sequence of
+    #: them. An explicit `0` is honoured and refuses every priced
+    #: acquisition (see `_float_env`).
     rented_usd_per_acquisition_max: float = 2.0
-    #: Rolling-window ceiling across ALL acquisitions. This is the one that
-    #: bounds a loop of correct-looking decisions. The standing operational
-    #: ceiling on rented spend is $10 total.
+    #: Rolling-window ceiling, in $/hr, across ALL acquisitions. This is the
+    #: one that bounds a loop of correct-looking decisions.
+    #:
+    #: What it actually bounds: the SUM OF THE HOURLY RATES of every
+    #: `rented_capacity` row created in the last `rented_usd_window_hours`,
+    #: whatever state those rows are now in. At the default that reads "the
+    #: rentals committed in the last 24 hours may commit at most $10 PER
+    #: HOUR between them" — which, held at the ceiling and left running, is
+    #: about $240 a day. It is NOT $10 of spend, and it does not stop
+    #: falling once the money is gone, because nothing here counts money
+    #: that has been spent.
+    #:
+    #: The standing $10 operational ceiling on TOTAL rented spend is an
+    #: agreement between people, enforced by watching the venue's own
+    #: billing page. To make this variable enforce something like it, size
+    #: it against the window: e.g. `$0.40/hr` over a 24h window is ~$10 a
+    #: day if every rental runs the whole day.
+    #:
+    #: An explicit `0` is honoured and is the emergency stop: no priced
+    #: acquisition passes the gate at all.
     rented_usd_window_max: float = 10.0
-    #: Width of the rolling window the ceiling above is measured over.
+    #: Width of the rolling window the ceiling above is measured over, in
+    #: hours. A width, not a ceiling: `0` here would make the window count
+    #: nothing and is therefore refused (it falls back to this default).
     rented_usd_window_hours: float = 24.0
 
     @property
@@ -415,11 +466,20 @@ class Settings:
         oss_access_key_id = os.environ.get("OSS_ACCESS_KEY_ID", "").strip()
         oss_access_key_secret = os.environ.get("OSS_ACCESS_KEY_SECRET", "").strip()
 
-        # Rented capacity budget gate.
+        # Rented capacity budget gate. `allow_zero=True` on the two CEILINGS,
+        # because `0` there is the emergency stop and has to survive as `0`.
+        #
+        # Deliberately NOT on the window WIDTH: a zero-hour window makes
+        # `window_spend_usd` count nothing, so the rolling ceiling stops
+        # bounding the loop it exists to bound — an explicit `0` there would
+        # switch a ceiling OFF, which is the same class of surprise this
+        # whole flag exists to remove. It falls back to 24h and logs.
         rented_usd_per_acquisition_max = _float_env(
-            "RENTED_USD_PER_ACQUISITION_MAX", 2.0
+            "RENTED_USD_PER_ACQUISITION_MAX", 2.0, allow_zero=True
         )
-        rented_usd_window_max = _float_env("RENTED_USD_WINDOW_MAX", 10.0)
+        rented_usd_window_max = _float_env(
+            "RENTED_USD_WINDOW_MAX", 10.0, allow_zero=True
+        )
         rented_usd_window_hours = _float_env("RENTED_USD_WINDOW_HOURS", 24.0)
 
         settings = cls(

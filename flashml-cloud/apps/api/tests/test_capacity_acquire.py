@@ -173,6 +173,15 @@ def _rows_for(db, owner_id):
         return cur.fetchall()
 
 
+def _machine_status(db, machine_id):
+    with db.cursor() as cur:
+        cur.execute(
+            "select status from public.machines where id = %s", (machine_id,)
+        )
+        row = cur.fetchone()
+    return row["status"] if row else None
+
+
 def _is_swept(db, rid) -> bool:
     """Would the reconciler find this row? The real query, not a restatement
     of it — the whole failure-path design is written against this list, so a
@@ -184,6 +193,13 @@ def _is_swept(db, rid) -> bool:
     to boot, or to go quiet, before nobody is using it — and none of that is
     what these tests are about: the question here is only whether a row a
     failed acquisition left behind is still in the list at all.
+
+    **It is also blind to WHEN, and that hid a real bug for a whole branch**:
+    every failure row here was selected by "old enough", so nothing noticed
+    that the rows carrying a live handle were reaching the sweep with no
+    `machine_id` and therefore waiting 30 minutes. `_swept_now` below asks the
+    same question with the deployed windows, where only an immediate branch
+    can answer yes; use it for anything that is about how FAST a row is found.
     """
     return str(rid) in {
         str(r["id"])
@@ -191,6 +207,19 @@ def _is_swept(db, rid) -> bool:
             db, quiet_after_s=0.0, boot_grace_s=0.0, abandoned_after_s=0.0,
         )
     }
+
+
+def _swept_now(db, rid) -> bool:
+    """Would the reconciler find this row on its DEFAULT windows, today?
+
+    No arguments, exactly as `reconcile_rented` calls it in production. A row
+    these tests just created is seconds old, so every time-based branch —
+    `abandoned_after_s` at 30 minutes, `boot_grace_s` at an hour — says no.
+    Only `unreleased_rows`' first branch, a bound credential that is already
+    revoked, can put it in the list, which makes this a direct measurement of
+    the thing the zeroed windows cannot see.
+    """
+    return str(rid) in {str(r["id"]) for r in unreleased_rows(db)}
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +495,112 @@ async def test_a_machine_that_will_not_die_reopens_the_row_it_lost_the_race_to(
     assert _is_swept(db, row["id"])
     # The credential dies whatever the venue said — `cleanup_session`'s rule.
     assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
+
+
+# ---------------------------------------------------------------------------
+# how fast the sweep finds them, asked with the windows that actually ship
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_machine_that_will_not_die_is_swept_on_the_DEFAULT_windows(
+    db, an_owner, a_pool
+):
+    """The same row as the test above, asked the way the deployed loop asks.
+
+    `_is_swept` zeroes every window, and every other assertion in this file
+    is content with that — which is exactly how this shipped: the rows we are
+    SUREST hold a live machine were reaching `unreleased_rows` with
+    `machine_id` null, missing its no-allowance branch (a revoked credential
+    can never claim our work again) and landing in "nothing to ask", which
+    waits `DEFAULT_ABANDONED_AFTER_S` — thirty minutes of billing.
+
+    `machine_id` used to be written only by `_move_to_active`, the SUCCESS
+    path. Nothing that failed ever named its machine. So this test asserts the
+    row names both halves of what the acquisition created, and then asks the
+    reconciler with the windows it actually ships with. The row is seconds
+    old, so a `True` here can only have come from the revoked credential.
+    """
+    venue = _Venue(sweeps_with=db, refuse_destroy=True)
+    with pytest.raises(RuntimeError):
+        await acquire_for_job(
+            db, venue, _Settings(), request=_request(an_owner, a_pool),
+        )
+    # The premise: the machine really is still running at the venue.
+    assert len(venue.live_handles()) == 1
+
+    row = _rows_for(db, an_owner)[0]
+    assert row["failure_code"] == ACQUIRE_NOT_DESTROYED
+    assert row["provider_handle"] == venue.live_handles()[0]
+    # Never ACTIVE, and still named.
+    assert row["state"] == "REQUESTED"
+    assert row["machine_id"] is not None
+    # ...and revoked, which is what the sweep's immediate branch keys on.
+    assert _machine_status(db, row["machine_id"]) == "revoked"
+
+    assert _swept_now(db, row["id"])
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_acquisition_is_listed_now_not_in_half_an_hour(
+    db, an_owner, a_pool
+):
+    """The other row `_abandon` leaves behind, measured the same way.
+
+    Nothing can be destroyed from here — `acquire` raised before returning a
+    handle, so there is no name to destroy. But this list is what an operator
+    reconciles against the venue's own machine listing, and a possible orphan
+    belongs on it while they are still looking, not thirty minutes after the
+    process that created it died.
+    """
+    provider = _Venue(fail_after_create=True)
+    with pytest.raises(RuntimeError):
+        await acquire_for_job(
+            db, provider, _Settings(), request=_request(an_owner, a_pool),
+        )
+    row = _rows_for(db, an_owner)[0]
+    assert row["failure_code"] == ACQUIRE_UNCONFIRMED
+    # Nothing to name, so nothing was named — but the credential we minted is
+    # ours to account for either way.
+    assert row["provider_handle"] is None
+    assert row["machine_id"] is not None
+    assert _machine_status(db, row["machine_id"]) == "revoked"
+
+    assert _swept_now(db, row["id"])
+
+
+@pytest.mark.asyncio
+async def test_a_row_closed_before_the_venue_is_not_swept_by_any_window(
+    db, an_owner, a_pool
+):
+    """The guard on the fix: making failure rows visible sooner must not make
+    the provably-empty ones visible at all.
+
+    A pool that already holds a machine fails before `provider.acquire` is
+    ever called, so nothing can exist at the venue; the row is closed FAILED
+    and `unreleased_rows` selects neither FAILED nor RELEASED. If this ever
+    turns True, the list an operator reconciles against the venue has started
+    filling with attempts that provably never reached it.
+    """
+    sitting_tenant = str(
+        dbmod.insert_machine(
+            db, owner_id=an_owner, node_id=f"laptop-{uuid.uuid4()}",
+            name="the owner's own laptop", platform="linux",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=sitting_tenant, pool_id=str(a_pool))
+
+    with pytest.raises(si.PoolNotIsolated):
+        await acquire_for_job(
+            db, _Venue(), _Settings(), request=_request(an_owner, a_pool),
+        )
+    row = _rows_for(db, an_owner)[0]
+    assert row["state"] == "FAILED"
+    # The mint rolled back with its transaction, so there is no machine to
+    # name — and nothing invented one.
+    assert row["machine_id"] is None
+    assert not _swept_now(db, row["id"])
+    assert not _is_swept(db, row["id"])
 
 
 # ---------------------------------------------------------------------------

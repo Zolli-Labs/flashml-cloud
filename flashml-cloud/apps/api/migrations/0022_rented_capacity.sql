@@ -37,6 +37,20 @@
 -- which is a separate decision, not something to smuggle in by writing
 -- `restrict` here and breaking somebody else's product.
 --
+-- AND THE LOSS THAT IS WORSE THAN THE LOST RECORD: deleting an account while
+-- one of its rentals is still REQUESTED or ACTIVE takes `provider_handle`
+-- with it — the ONLY string in this system that can destroy a machine that
+-- is still billing. The money does not stop with the row; it keeps running
+-- at the venue with nothing left anywhere that names it, and the reconciler
+-- cannot sweep a row that no longer exists. That is strictly worse than
+-- losing the spend record, which is only a hole in the history. Note that
+-- `machine_id` is `set null` precisely so a deleted MACHINE cannot cause
+-- this, and then the owner cascade does it anyway by a different door: the
+-- protection is against the smaller of the two losses. Whatever eventually
+-- fixes it — the account-independent journal above, or refusing to delete an
+-- account with unreleased rentals until they are torn down — has to reckon
+-- with the handle, not just the dollars.
+--
 -- `machine_id` is `set null`, not `cascade`, for exactly the reason 0014
 -- gives for `sandbox_sessions.machine_id`: a row whose machine was deleted
 -- still holds a live `provider_handle` that must be destroyed at the venue,

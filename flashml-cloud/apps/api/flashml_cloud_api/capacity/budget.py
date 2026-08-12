@@ -4,6 +4,13 @@ A per-acquisition cap bounds ONE mistake. A rolling-window cap bounds a
 LOOP of correct-looking decisions, which is what actually empties an
 account. The window one is the load-bearing half.
 
+**Both are rates -- dollars per HOUR -- and neither is a cap on total
+spend.** ``rented_capacity`` records an hourly rate per rental and nothing
+in this system records dollars actually billed, so there is no total here
+to cap. ``settings.rented_usd_window_max`` says how fast new commitments
+may be made, not how much may ever be spent; see its comment in
+``settings.py`` for the arithmetic an operator needs to do.
+
 Both refuse. Neither queues.
 """
 from __future__ import annotations
