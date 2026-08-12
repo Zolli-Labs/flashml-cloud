@@ -123,3 +123,58 @@ is resolved at the **repo root** only, so four workloads need four roots.
    not compose with the fetch route.
 5. **The marketplace has no HTTP surface at all.** See
    `2026-08-12-console-ui-plan.md`.
+
+---
+
+## 8. Cross-venue experiment — 2026-08-12, and §7 items 2 and 3 are now closed
+
+Four machines, four venues, one pool. Total rental **~$0.89**.
+
+| Venue | Machine | Tier |
+|---|---|---|
+| owned | laptop, 10-core arm64, no GPU | sandboxed (Docker) |
+| runpod | RTX 4090, Iceland | trusted (unsandboxed argv) |
+| runpod | RTX 3090, Czechia | trusted |
+| runpod | RTX 4000 Ada, Iceland | trusted |
+
+**Fan-out across venues.** The 6-trial HPO sweep completed **2 on the RTX 4000
+Ada, 2 on the RTX 3090, 2 on the laptop** — one job served by three venues and
+by two different isolation tiers at once.
+
+**Routing by hardware, not preference.** `gpu-train` (`resources: {gpus: 1}`,
+classified TRAINING) ran **only** on a GPU machine. The laptop was never
+eligible. Proof from the task's own stdout: *"CUDA device 0: NVIDIA GeForce RTX
+4090 — compute capability 8.9, 23.5 GiB VRAM"*.
+
+**Resume after machine death, on deployed infrastructure.** Previously proven
+only locally. The `gpu-death` job (200 epochs, checkpoint per epoch) was leased
+on the RTX 4090; the pod was **destroyed outright** mid-run. The task was
+reclaimed by the **RTX 3090** ~30 s later and reported:
+
+> `RESUMED at step 16298 (epoch 58/200) — that much work survived the machine dying.`
+> `epochs_executed 142` (of 200), finishing on a different card, a different
+> generation, in a different country.
+
+58 epochs of work crossed a machine death and a card change without being
+recomputed.
+
+### Constraints this experiment discovered
+
+1. **`allowFallback` iff `pool`.** Unsandboxed machines are eligible only for
+   **pool-scoped** jobs. Rented capacity sits idle for a public job no matter
+   how much of it is online — the four earlier runs could only ever reach the
+   laptop. This is the single most important operational fact here.
+2. **CPU pods cannot deploy from a RunPod template**, and `create-pod` has no
+   start-command field, so a CPU pod cannot be given a bootstrap through the
+   API at all. A cheap GPU pod was the shorter path to a start command.
+3. **The rented pytorch image crash-loops a naive `pip install`.** Its
+   Debian-packaged `cryptography` has no RECORD file, so pip cannot uninstall
+   it to satisfy flashnode's dependency, exits non-zero, and `set -e` restarts
+   the container every ~17 s. Install into a venv with
+   `--system-site-packages`.
+4. **Fetching the bootstrap over HTTP made the crash loop self-healing** — a
+   push to the demo repo fixed a running pod without recreating it. Worth
+   keeping deliberately.
+5. Dev's coordinator is free-tier and its node registry is **in-memory**: a
+   restart answers `unregistered node — register first` until agents
+   re-register. Looks like a failure during a demo and is not.

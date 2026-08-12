@@ -1875,6 +1875,182 @@ def matches_for_owner(
         return list(cur.fetchall())
 
 
+#: Reasons that belong to one movement under DIFFERENT names: a settlement
+#: debits the buyer's escrow as ``spent_accepted_work`` and credits the
+#: host as ``earned_accepted_work``, sharing one ref. Everything else is
+#: its own group. Mirrored in the SQL CASE in
+#: :func:`ledger_movements_for_owner` — the two must move together.
+_LEDGER_REASON_GROUP = {
+    "spent_accepted_work": "settlement",
+    "earned_accepted_work": "settlement",
+}
+
+
+def ledger_movements_for_owner(
+    db: psycopg.Connection,
+    owner_id: str,
+    *,
+    limit: int = 50,
+    before: int | None = None,
+) -> list[dict[str, Any]]:
+    """This account's movements, newest first, each with ALL of its legs.
+
+    A movement is one ``post`` — every leg that shares its
+    ``(reason, ref_type, ref_id)`` — and the counterparty leg travels with
+    the viewer's own, because a feed that collapses a movement into
+    "balance went up" deletes the counterparty and the counterparty is the
+    point of a double-entry ledger. A mint (``grant``) has one leg; that is
+    a true statement about minting, not a missing counterparty.
+
+    Each leg carries ``mine`` so the route can render both sides without a
+    second query, and ``kind`` for BOTH accounts — the counterparty's kind
+    is what tells a host "this came from a buyer's escrow" without naming
+    the buyer.
+
+    ``before`` is an exclusive cursor on the movement's newest entry id:
+    the console pages by passing back the last movement's ``cursor``.
+    Entries, not movements, are paged, so a page boundary can never split
+    a movement — the join reassembles it whole on whichever page holds the
+    viewer's leg.
+
+    A movement is every leg of one ``post``, and the legs of a settlement
+    carry DIFFERENT reasons (``spent_accepted_work`` on the buyer's escrow,
+    ``earned_accepted_work`` on the host's spendable) while sharing the
+    ref — so the join groups on the ref plus a reason-GROUP that folds the
+    settlement pair into one movement and keeps every other reason its
+    own. Two posts can never share a group and a ref: the per-leg unique
+    index would refuse the second one.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select id, kind from public.credit_accounts"
+            " where owner_id = %s::uuid",
+            (owner_id,),
+        )
+        accounts = {str(row["id"]): str(row["kind"]) for row in cur.fetchall()}
+    if not accounts:
+        return []
+
+    params: list[Any] = [sorted(accounts)]
+    before_clause = ""
+    if before is not None:
+        before_clause = " and id < %s"
+        params.append(int(before))
+    params.append(int(limit))
+
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            with paged as (
+                select id, reason, ref_type, ref_id
+                  from public.credit_entries
+                 where account_id = any(%s::uuid[]){before_clause}
+                 order by id desc
+                 limit %s
+            )
+            select e.id, e.account_id, a.kind, e.delta_zc, e.reason,
+                   e.ref_type, e.ref_id, e.created_at,
+                   p.id as owner_entry_id, p.reason as owner_reason
+              from paged p
+              join public.credit_entries e
+                on coalesce(e.ref_type, '') = coalesce(p.ref_type, '')
+               and coalesce(e.ref_id, '') = coalesce(p.ref_id, '')
+               and case when e.reason in ('spent_accepted_work',
+                                          'earned_accepted_work')
+                        then 'settlement' else e.reason end
+                 = case when p.reason in ('spent_accepted_work',
+                                          'earned_accepted_work')
+                        then 'settlement' else p.reason end
+              join public.credit_accounts a on a.id = e.account_id
+             order by e.id
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    movements: dict[tuple[str, str, str], dict[str, Any]] = {}
+    legs_seen: dict[tuple[str, str, str], set[int]] = {}
+    owner_ids: dict[tuple[str, str, str], set[int]] = {}
+    for row in rows:
+        key = (
+            _LEDGER_REASON_GROUP.get(str(row["owner_reason"]), str(row["owner_reason"])),
+            str(row["ref_type"] or ""),
+            str(row["ref_id"] or ""),
+        )
+        movement = movements.setdefault(
+            key,
+            {
+                "cursor": 0,
+                "_newest": 0,
+                "created_at": None,
+                "reason": str(row["owner_reason"]),
+                "ref_type": row["ref_type"],
+                "ref_id": row["ref_id"],
+                "legs": [],
+            },
+        )
+        owner_entry_id = int(row["owner_entry_id"])
+        if owner_entry_id > movement["_newest"]:
+            movement["_newest"] = owner_entry_id
+            movement["created_at"] = row["created_at"]
+        # Every owner leg of the movement, including ones the page limit
+        # did not select but the join reassembled: the cursor is their
+        # minimum, so `id < cursor` skips the whole movement.
+        if str(row["account_id"]) in accounts:
+            owner_ids.setdefault(key, set()).add(int(row["id"]))
+        entry_id = int(row["id"])
+        if entry_id not in legs_seen.setdefault(key, set()):
+            legs_seen[key].add(entry_id)
+            movement["legs"].append(
+                {
+                    "kind": str(row["kind"]),
+                    "delta_zc": int(row["delta_zc"]),
+                    "mine": str(row["account_id"]) in accounts,
+                }
+            )
+    for key, movement in movements.items():
+        # The cursor is the OLDEST owner leg of the movement: paging with
+        # `id < cursor` must skip every leg of it, and a two-legged movement
+        # paged by its newest leg would reappear on the next page by its
+        # older one.
+        movement["cursor"] = min(owner_ids[key])
+        movement.pop("_newest", None)
+    return sorted(movements.values(), key=lambda m: m["cursor"], reverse=True)
+
+
+def match_for_claim(
+    db: psycopg.Connection, *, machine_id: str, job_id: str
+) -> str | None:
+    """The GRANTED entitlement this machine is about to pull under, or None.
+
+    The mirror of ``db._live_match_for_attempt`` one hop earlier: at claim
+    time the match is still ``granted`` (the hold is what moves it to
+    ``claimed``), so this is the only state that names work nobody has
+    committed money for yet. The ``(machine, bid.job)`` pair is the same
+    join the settlement side uses, and the deterministic order matches a
+    machine pulling twice under two entitlements to the older grant first.
+
+    ``None`` is the ordinary answer — workspace and donated work carries no
+    entitlement, and a claim with no match behind it holds nothing.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select m.id
+              from public.matches m
+              join public.bids b on b.id = m.bid_id
+             where m.machine_id = %s::uuid
+               and b.job_id = %s
+               and m.state = 'granted'
+             order by m.granted_at, m.id
+             limit 1
+            """,
+            (machine_id, job_id),
+        )
+        row = cur.fetchone()
+    return str(row["id"]) if row is not None else None
+
+
 # --- price observations -----------------------------------------------------
 
 

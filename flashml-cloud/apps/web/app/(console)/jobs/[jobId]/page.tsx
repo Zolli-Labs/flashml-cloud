@@ -335,8 +335,9 @@ export default function JobDetailPage({
         read: artifactsRead,
         jobState: job?.state ?? "",
         tasks,
+        federated: job?.mode === "federated",
       }),
-    [artifactsRead, job?.state, tasks]
+    [artifactsRead, job?.state, tasks, job?.mode]
   );
 
   // This route's path carries no pool id, so the rail would otherwise show

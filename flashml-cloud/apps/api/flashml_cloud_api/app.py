@@ -86,6 +86,7 @@ from flashml_cloud_api import metrics as metricsmod
 from flashml_cloud_api import marketplace as marketplacemod
 from flashml_cloud_api import repo as repomod
 from flashml_cloud_api import placement as placementmod
+from flashml_cloud_api import prices as pricesmod
 from flashml_cloud_api import router as routermod
 from flashml_cloud_api import sandbox_orchestrator as orchmod
 from flashml_cloud_api import sandbox_sessions as ssmod
@@ -5355,6 +5356,260 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown session")
         return row
 
+    # -- Marketplace: credits, ledger, listings, matches, prices ------------
+    #
+    # The HTTP surface over marketplace.py and prices.py (plan
+    # 2026-08-12-console-ui-plan.md §3.1). The repository had 105 tests and
+    # zero routes; the console's marketplace section reads only these.
+    # Same doctrine as every browser route here: current_user (admitted_user
+    # for writes), 404 never 403 on resource ids, _jsonable on rows.
+
+    @app.get("/v1alpha1/credits", tags=["browser"])
+    async def get_credits(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """This account's balance, spendable vs held, in millicredits.
+
+        The one-time grant rides along: ``grant_starting_credits`` is a
+        no-op from its second call on — the unique index says so, not the
+        caller — so the first read opens the account and every later read
+        is correct without depending on some other hop having run first.
+        """
+        marketplacemod.grant_starting_credits(db, user_id)
+        found = marketplacemod.balances(db, user_id)
+        return {"spendable_zc": found["spendable"], "held_zc": found["escrow"]}
+
+    @app.get("/v1alpha1/credits/ledger", tags=["browser"])
+    async def get_credits_ledger(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+        limit: int = Query(50, ge=1, le=200),
+        before: int | None = Query(None, ge=0),
+    ):
+        """Movements, newest first, each with ALL of its legs.
+
+        The counterparty leg travels with the viewer's own — a feed that
+        collapses a movement into "balance went up" deletes the
+        counterparty, and the counterparty is the point of a double-entry
+        ledger. ``next_before`` is the cursor for the next page, present
+        only when this page was full.
+        """
+        movements = marketplacemod.ledger_movements_for_owner(
+            db, user_id, limit=limit, before=before
+        )
+        return {
+            "movements": [_jsonable(m) for m in movements],
+            "next_before": (
+                movements[-1]["cursor"] if len(movements) == limit else None
+            ),
+        }
+
+    @app.get("/v1alpha1/market/listings", tags=["browser"])
+    async def list_market_listings(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The open ask side of every book, plus this host's own listings.
+
+        ``asks`` is what a buyer shops: class, ask, and the host's record
+        in that class — ``acceptance_rate`` null for an unproven host,
+        never an invented number. ``mine`` is what a host manages,
+        including paused and withdrawn rows the open book hides.
+        """
+        rate_rows = metricsmod.acceptance_rates(
+            dbmod.acceptance_rate_rows(db, machine_ids=None)
+        )
+        rate_by_key = {
+            (str(row["machine_id"]), str(row["capability_class"])): row
+            for row in rate_rows
+        }
+        asks: list[dict[str, Any]] = []
+        for klass in marketplacemod.CAPABILITY_CLASSES:
+            for ask in marketplacemod.open_asks(
+                db,
+                klass,
+                acceptance_rates={
+                    key: row["acceptance_rate"]
+                    for key, row in rate_by_key.items()
+                },
+            ):
+                record = rate_by_key.get((ask.machine_id, klass))
+                asks.append(
+                    {
+                        "id": ask.listing_id,
+                        "machine_id": ask.machine_id,
+                        "host_id": ask.host_id,
+                        "capability_class": klass,
+                        "ask_zc_per_hour": ask.ask_zc_per_hour,
+                        "donated": marketplacemod.is_donated(
+                            ask.ask_zc_per_hour
+                        ),
+                        "price_label": marketplacemod.price_label(
+                            ask.ask_zc_per_hour
+                        ),
+                        "max_concurrent_tasks": ask.max_concurrent_tasks,
+                        "acceptance_rate": ask.acceptance_rate,
+                        "resolved_n": (
+                            record["resolved"] if record is not None else None
+                        ),
+                    }
+                )
+        mine = [
+            {
+                **_jsonable(row),
+                "donated": marketplacemod.is_donated(
+                    int(row["ask_zc_per_hour"])
+                ),
+                "price_label": marketplacemod.price_label(
+                    int(row["ask_zc_per_hour"])
+                ),
+            }
+            for row in marketplacemod.listings_for_owner(db, user_id)
+        ]
+        return {"asks": asks, "mine": mine}
+
+    @app.post("/v1alpha1/market/listings", status_code=201, tags=["browser"])
+    async def create_market_listing(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """List a machine you own at your own ask (M2).
+
+        The class is NOT an argument and never will be: it is computed
+        from the capabilities the agent reported, because a host who could
+        name their own class would sell a 3070 as Hopper-class. Refusals
+        are 409, not 400 — the request was well formed, the machine is
+        simply not something the ladder can promise.
+        """
+        payload = await _json_object(request)
+        machine_id = payload.get("machine_id")
+        ask = payload.get("ask_zc_per_hour")
+        max_tasks = payload.get("max_concurrent_tasks", 1)
+        if (
+            not isinstance(machine_id, str)
+            or isinstance(ask, bool)
+            or not isinstance(ask, int)
+            or isinstance(max_tasks, bool)
+            or not isinstance(max_tasks, int)
+            or max_tasks < 1
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="machine_id, an integer ask_zc_per_hour and a "
+                "positive integer max_concurrent_tasks are required",
+            )
+        try:
+            row = marketplacemod.create_listing(
+                db,
+                machine_id=machine_id,
+                owner_id=user_id,
+                ask_zc_per_hour=ask,
+                max_concurrent_tasks=max_tasks,
+            )
+        except psycopg.errors.InvalidTextRepresentation:
+            raise HTTPException(status_code=404, detail="unknown machine")
+        except LookupError:
+            raise HTTPException(status_code=404, detail="unknown machine")
+        except marketplacemod.UnclassifiableMachine as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except marketplacemod.AlreadyListed as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            **_jsonable(row),
+            "donated": marketplacemod.is_donated(int(row["ask_zc_per_hour"])),
+            "price_label": marketplacemod.price_label(
+                int(row["ask_zc_per_hour"])
+            ),
+        }
+
+    @app.delete("/v1alpha1/market/listings/{listing_id}", tags=["browser"])
+    async def withdraw_market_listing(
+        listing_id: str,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Withdraw your listing, open or paused. 404 for every reason it
+        is not yours to withdraw — the id's existence is not revealed."""
+        try:
+            for from_state in ("open", "paused"):
+                if marketplacemod.withdraw_listing(
+                    db,
+                    listing_id=listing_id,
+                    owner_id=user_id,
+                    from_state=from_state,
+                ):
+                    return {"withdrawn": True}
+        except psycopg.errors.InvalidTextRepresentation:
+            pass
+        raise HTTPException(status_code=404, detail="unknown listing")
+
+    @app.get("/v1alpha1/market/matches", tags=["browser"])
+    async def list_market_matches(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """This account's priced entitlements, on both sides, state verbatim.
+
+        ``granted`` reaches the console as granted — an entitlement no
+        money has moved for — because the one misunderstanding this
+        surface can cause is a buyer reading a match as an assignment.
+        """
+        return {
+            "as_buyer": [
+                _jsonable(m)
+                for m in marketplacemod.matches_for_owner(db, user_id, side="buyer")
+            ],
+            "as_host": [
+                _jsonable(m)
+                for m in marketplacemod.matches_for_owner(db, user_id, side="host")
+            ],
+        }
+
+    @app.get("/v1alpha1/prices", tags=["browser"])
+    async def get_prices(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """External quotes with provenance, the venues with none, and the
+        ZC ladder beside them — never converted into one another.
+
+        Every quote carries ``captured_at`` and ``source`` and its own
+        ``stale`` verdict, so a scraped price can never sit on the page
+        looking live. Venues with no quote render *not observed*, never 0.
+        The ZC side is the reference ladder plus the best live ask per
+        class (null where the book is empty), returned as its own list —
+        a shape with nowhere to put a cross-currency total.
+        """
+        now = datetime.now(timezone.utc)
+        quotes = pricesmod.latest_quotes(db)
+        zc = []
+        for klass in marketplacemod.CAPABILITY_CLASSES:
+            series = marketplacemod.price_series(db, klass, limit=1)
+            best = series[0]["best_ask_zc"] if series else None
+            zc.append(
+                {
+                    "capability_class": klass,
+                    "reference_zc_per_hour": (
+                        marketplacemod.REFERENCE_ZC_PER_HOUR[klass]
+                    ),
+                    "best_ask_zc": int(best) if best is not None else None,
+                }
+            )
+        return {
+            "quotes": [pricesmod.render(q, now) for q in quotes],
+            "unpriced": [
+                pricesmod.render_unpriced(venue)
+                for venue in pricesmod.unpriced(
+                    [venue.id for venue in routermod.VENUES], quotes
+                )
+            ],
+            "zc": zc,
+        }
+
     @app.post("/v1alpha1/sandbox-sessions", status_code=201, tags=["browser"])
     async def create_sandbox_session(
         request: Request,
@@ -5816,6 +6071,38 @@ def create_cloud_app(
                     )
             except Exception:
                 log.warning("could not record attempt for machine %s", machine.id)
+            # ESCROW IS HELD ON CLAIM, NEVER ON GRANT. This is the single
+            # hop where a lease first exists, so it is the earliest moment
+            # money may be committed — and a granted match with no claim
+            # behind it holds nothing, on purpose. The match is found the
+            # same way settlement finds it later (machine + the bid's job),
+            # one hop earlier in the state machine: still `granted`, which
+            # the hold itself moves to `claimed`. Best-effort, exactly like
+            # the attempt row: an accounting write must never be the reason
+            # a machine fails to pick up work, and the movement is
+            # idempotent per lease, so a retry completes rather than
+            # doubles it.
+            if response.status_code == 200:
+                try:
+                    claimed = json.loads(response.body)
+                    with contextlib.closing(app.state.connect()) as conn:
+                        match_id = marketplacemod.match_for_claim(
+                            conn,
+                            machine_id=machine.id,
+                            job_id=str(claimed.get("job_id")),
+                        )
+                        if match_id is not None:
+                            marketplacemod.hold_escrow_on_claim(
+                                conn,
+                                match_id=match_id,
+                                lease_id=str(claimed["lease_id"]),
+                            )
+                except Exception:
+                    log.warning(
+                        "could not hold escrow for machine %s; the claim "
+                        "stands and the hold is idempotently retryable",
+                        machine.id,
+                    )
         return response
 
     @app.post("/v1alpha1/attempts/{lease_id}/heartbeat", tags=["agent"])

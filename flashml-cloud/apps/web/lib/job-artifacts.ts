@@ -134,10 +134,21 @@ function storageCopy(storage: string, mirroredAt: string | null): string {
 export const ARTIFACTS_UNREADABLE_MESSAGE =
   "Couldn't read this job's artifact list. That is not the same as the job having produced nothing — this console does not know either way.";
 
+/** A federated run's listing is empty BY DESIGN, and saying "this job
+ * finished without writing any artifacts" about it would be a lie of the
+ * cardinal kind: every round wrote output, under its own coordinator job.
+ * The parent id names no coordinator job, and the rounds' keys would not
+ * compose with the fetch-by-key route, so the honest answer is to explain
+ * the gap rather than render an empty box — the same words the API's own
+ * route docstring gives. */
+export const FEDERATED_ARTIFACTS_MESSAGE =
+  "Federated runs write their output per round, under each round's own job — this parent id lists nothing, and the rounds' keys would not compose with the download route. The per-round jobs carry the files.";
+
 export function summariseJobArtifacts({
   read,
   jobState,
   tasks,
+  federated = false,
 }: {
   read: ArtifactsRead;
   jobState: JobState | string;
@@ -145,6 +156,10 @@ export function summariseJobArtifacts({
    * task breakdown still lists its files; the groups just carry a null
    * `taskState`. */
   tasks: JobTask[];
+  /** The job's `mode` says "federated": the empty listing is then the
+   * designed answer, not a finished-empty job, and the card explains the
+   * per-round shape instead of claiming nothing was written. */
+  federated?: boolean;
 }): ArtifactsPanel {
   if (read.status === "loading") return EMPTY_PANEL;
 
@@ -169,11 +184,16 @@ export function summariseJobArtifacts({
     // No storage note: there are no bytes, so there is nothing to say about
     // where they are held. `storage` and `mirroredAt` are still carried
     // verbatim — the API said them — but the card has no sentence to build.
+    // A federated run is the exception: its empty listing is the designed
+    // answer, and the explanation replaces the empty-job sentence rather
+    // than sitting beside it.
     return {
       ...base,
       state: "empty",
       storageNote: null,
-      emptyMessage: emptyCopy(jobState),
+      emptyMessage: federated
+        ? FEDERATED_ARTIFACTS_MESSAGE
+        : emptyCopy(jobState),
     };
   }
 
