@@ -174,6 +174,22 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-12 — Define the vision-led Zolli landing story (flashml-cloud, web design)
+What/why: Reframed the landing from fault-tolerance mechanics to the open
+compute-allocation network Zolli is building: people seeking competitively
+priced compute on one side, and people providing unused machines on the other.
+The approved design preserves the visual system and freezes the coordinator-map
+SVG while adding a two-state hero message, plain-language market context,
+current-versus-vision disclosures, and workload examples paired with machines.
+How verified: written spec self-reviewed for placeholders, contradictions,
+scope drift, accessibility, claim accuracy, and implementation acceptance
+criteria; `git diff --check` passed for the design slice.
+Gotchas: host cash payout and broad automatic capacity purchasing are vision,
+not live capability; the landing must say so. The SVG and every coordinator-map
+source file are explicitly outside the implementation diff.
+Next: owner reviews `2026-08-12-zolli-vision-led-landing-story-design.md`, then
+write the implementation plan.
+
 ### 2026-08-12 — Add testing credits and parity-aware marketplace pricing (flashml-cloud, api + web)
 What/why: New accounts receive a one-time 10 ZC grant; existing balances and
 historical grants remain unchanged. Admitted users can request a specific
