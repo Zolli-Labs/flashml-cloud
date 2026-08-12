@@ -29,10 +29,9 @@ import { Sparkline } from "./Sparkline";
  * external venues quoted in a strip beside the board.
  *
  * Markup only: every figure arrives through `lib/market-prices.ts` and
- * `lib/market-credits.ts`. The layout is the currency discipline — ZC and
- * vendor denominations sit in adjacent columns and no cell combines them,
- * because there is no exchange rate behind this page. A failed read is
- * unreadable, never empty; null is never 0. */
+ * `lib/market-credits.ts`. The layout keeps source amounts beside the API's
+ * fixed-parity equivalents without calculating or summing either. A failed
+ * read is unreadable, never empty; null is never 0. */
 export function PricesPanel({
   state,
   view,
@@ -151,7 +150,7 @@ export function PricesPanel({
             {/* The board itself — one ticker row per capability class. */}
             <section className="min-w-0 lg:col-span-2">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h2 className="label-caps">The board — best ask, ZC per hour</h2>
+                <h2 className="label-caps">The board — ZC asks and USD equivalents</h2>
                 <p className="text-[11px] text-muted-foreground">
                   select a class to open its observations
                 </p>
@@ -195,6 +194,7 @@ export function PricesPanel({
                       {view.zc.map((rung) => {
                         const isOpen = expanded.has(rung.capability_class);
                         const delta = deltaCell(rung.change_zc);
+                        const row = zcRungRow(rung);
                         return (
                           <Fragment key={rung.capability_class}>
                             <tr
@@ -220,10 +220,11 @@ export function PricesPanel({
                                 </span>
                               </td>
                               <td className="px-2 py-2.5 text-right font-mono">
-                                {rung.best_ask_zc === null ? (
-                                  <span className="text-muted-foreground">—</span>
-                                ) : (
-                                  formatZc(rung.best_ask_zc)
+                                <div>{row.bestAskText}</div>
+                                {row.bestAskEquivalentText && (
+                                  <div className="mt-0.5 text-[10px] text-muted-foreground">
+                                    {row.bestAskEquivalentText}
+                                  </div>
                                 )}
                               </td>
                               <td
@@ -238,7 +239,10 @@ export function PricesPanel({
                                 <Sparkline points={sparkPoints(rung.history)} />
                               </td>
                               <td className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] text-muted-foreground">
-                                {zcRungRow(rung).referenceText}
+                                <div>{row.referenceText}</div>
+                                <div className="mt-0.5 text-[10px]">
+                                  {row.referenceEquivalentText}
+                                </div>
                               </td>
                             </tr>
                             {isOpen && (
@@ -258,10 +262,17 @@ export function PricesPanel({
                                           <span className="text-muted-foreground">
                                             {time(point.at)}
                                           </span>
-                                          <span>
-                                            {point.best_ask_zc === null
-                                              ? "—"
-                                              : `${formatZc(point.best_ask_zc)} ZC/h`}
+                                          <span className="text-right">
+                                            <span>
+                                              {point.best_ask_zc === null
+                                                ? "—"
+                                                : `${formatZc(point.best_ask_zc)} ZC/h`}
+                                            </span>
+                                            {point.best_ask_usd !== null && (
+                                              <span className="ml-2 text-muted-foreground">
+                                                ${point.best_ask_usd}/h equivalent
+                                              </span>
+                                            )}
                                           </span>
                                           <span className="text-muted-foreground">
                                             {point.open_asks} open asks
@@ -282,17 +293,16 @@ export function PricesPanel({
               )}
             </section>
 
-            {/* External venues — the comparison strip. It sits beside the
-                board the way an FX panel sits beside an equity board:
-                vendor digits in vendor currencies, nothing converted. */}
+            {/* External venues retain vendor amounts beside API-provided ZC
+                equivalents; the console never derives a conversion. */}
             <section className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <Globe className="h-3.5 w-3.5 text-muted-foreground" />
                 <h2 className="label-caps">External venues</h2>
               </div>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                Quoted in each venue&apos;s own digits and currency, beside
-                the board — never converted into ZC.
+                Vendor amounts stay in their own currency, with a ZC
+                equivalent only when the API provides one.
               </p>
 
               {view.quotes.length === 0 && view.unpriced.length === 0 ? (
@@ -383,6 +393,11 @@ function QuoteCard({ row }: { row: QuoteRow }) {
         <span className="min-w-0 truncate text-xs">{row.venue}</span>
         <span className="shrink-0 font-mono text-xs">{row.amountText}</span>
       </div>
+      {row.equivalentText && (
+        <p className="mt-0.5 text-right font-mono text-[11px] text-muted-foreground">
+          {row.equivalentText}
+        </p>
+      )}
       {row.detail && (
         <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
           {row.detail}

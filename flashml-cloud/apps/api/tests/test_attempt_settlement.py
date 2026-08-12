@@ -161,14 +161,20 @@ def test_a_reported_failure_refunds_the_buyer_without_anybody_asking(db):
         task_id="t-1",
     )
     mk.hold_escrow_on_claim(db, match_id=world["match_id"], lease_id=lease)
-    assert mk.balances(db, world["buyer"]) == {"spendable": 249_000, "escrow": 1_000}
+    assert mk.balances(db, world["buyer"]) == {
+        "spendable": mk.STARTING_GRANT_ZC - 1_000,
+        "escrow": 1_000,
+    }
 
     assert dbmod.record_attempt_failure(
         db, lease_id=lease, machine_id=world["machine"]
     ) is True
 
     assert outcome_of(db, lease) == "failed"
-    assert mk.balances(db, world["buyer"]) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, world["buyer"]) == {
+        "spendable": mk.STARTING_GRANT_ZC,
+        "escrow": 0,
+    }
     # The host earns nothing. That is not a penalty — it is the property that
     # lets this market decline to bill for time at all.
     assert mk.balances(db, world["host"]) == {"spendable": 0, "escrow": 0}
@@ -197,7 +203,10 @@ def test_an_expired_attempt_refunds_the_buyer_too(db):
     assert dbmod.reconcile_expired_attempts(db) >= 1
 
     assert outcome_of(db, lease) == "expired"
-    assert mk.balances(db, world["buyer"]) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, world["buyer"]) == {
+        "spendable": mk.STARTING_GRANT_ZC,
+        "escrow": 0,
+    }
     assert mk.balances(db, world["host"]) == {"spendable": 0, "escrow": 0}
     assert refund_legs(db, lease) == 2
     assert mk.verify_ledger(db) == []
@@ -225,7 +234,7 @@ def test_an_inferred_expiry_corrected_to_a_failure_refunds_exactly_once(db):
 
     dbmod.reconcile_expired_attempts(db)
     after_first = mk.balances(db, world["buyer"])
-    assert after_first == {"spendable": 250_000, "escrow": 0}
+    assert after_first == {"spendable": mk.STARTING_GRANT_ZC, "escrow": 0}
 
     # The observation lands late and corrects the inference. The outcome moves;
     # the money does not move again.
@@ -260,7 +269,10 @@ def test_calling_the_refund_again_by_hand_credits_nothing(db):
         db, match_id=world["match_id"], lease_id=lease
     )
     assert again == {"refunded_zc": 0}
-    assert mk.balances(db, world["buyer"]) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, world["buyer"]) == {
+        "spendable": mk.STARTING_GRANT_ZC,
+        "escrow": 0,
+    }
     assert refund_legs(db, lease) == 2
 
 
@@ -285,7 +297,10 @@ def test_a_second_fail_report_moves_neither_the_outcome_nor_the_money(db):
         db, lease_id=lease, machine_id=world["machine"]
     ) is False
     assert refund_legs(db, lease) == 2
-    assert mk.balances(db, world["buyer"]) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, world["buyer"]) == {
+        "spendable": mk.STARTING_GRANT_ZC,
+        "escrow": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +344,10 @@ def test_a_refund_that_fails_does_not_lose_the_failure(db, monkeypatch):
     assert outcome_of(db, lease) == "failed"
     # …and the money is exactly where it was, i.e. still recoverable rather
     # than half-moved.
-    assert mk.balances(db, world["buyer"]) == {"spendable": 249_000, "escrow": 1_000}
+    assert mk.balances(db, world["buyer"]) == {
+        "spendable": mk.STARTING_GRANT_ZC - 1_000,
+        "escrow": 1_000,
+    }
     assert refund_legs(db, lease) == 0
     assert mk.verify_ledger(db) == []
 
@@ -338,7 +356,10 @@ def test_a_refund_that_fails_does_not_lose_the_failure(db, monkeypatch):
     assert mk.refund_unaccepted_work(
         db, match_id=world["match_id"], lease_id=lease
     ) == {"refunded_zc": 1_000}
-    assert mk.balances(db, world["buyer"]) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, world["buyer"]) == {
+        "spendable": mk.STARTING_GRANT_ZC,
+        "escrow": 0,
+    }
 
 
 def test_an_attempt_with_no_entitlement_behind_it_moves_no_money(db):

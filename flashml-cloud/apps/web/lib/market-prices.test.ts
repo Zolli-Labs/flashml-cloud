@@ -27,6 +27,7 @@ function quote(over: Partial<PriceQuote> = {}): PriceQuote {
     max_age_seconds: 86_400,
     source: "runpod REST v2 GPU catalogue",
     observed_by: null,
+    zc_equivalent_amount: "0.34",
     ...over,
   };
 }
@@ -48,6 +49,7 @@ describe("quoteRow", () => {
   it("keeps the vendor's digits as a string, denomination visible", () => {
     const row = quoteRow(quote());
     expect(row.amountText).toBe("USD 0.34 / gpu-hour");
+    expect(row.equivalentText).toBe("0.34 ZC / gpu-hour equivalent");
     expect(row.venue).toBe("runpod — NVIDIA RTX 4090");
     expect(row.detail).toBe("global · community");
   });
@@ -78,6 +80,7 @@ describe("unpricedRow — a venue with no quote is still a row", () => {
       stale: null,
       source: null,
       observed_by: null,
+      zc_equivalent_amount: null,
     };
     const row = unpricedRow(venue);
     expect(row.amountText).toBe("not observed");
@@ -85,11 +88,13 @@ describe("unpricedRow — a venue with no quote is still a row", () => {
   });
 });
 
-describe("zcRungRow — the ZC side, never converted", () => {
+describe("zcRungRow — source ask plus fixed cash equivalent", () => {
   const rung = (over: Partial<ZcRung>): ZcRung => ({
     capability_class: "gpu-24gb",
     reference_zc_per_hour: 1000,
+    reference_usd_per_hour: "1.00",
     best_ask_zc: null,
+    best_ask_usd: null,
     change_zc: null,
     depth: 0,
     history: [],
@@ -106,9 +111,31 @@ describe("zcRungRow — the ZC side, never converted", () => {
 
   it("names a zero best ask as donated", () => {
     const row = zcRungRow(
-      rung({ capability_class: "cpu-small", reference_zc_per_hour: 100, best_ask_zc: 0 })
+      rung({
+        capability_class: "cpu-small",
+        reference_zc_per_hour: 100,
+        reference_usd_per_hour: "0.10",
+        best_ask_zc: 0,
+        best_ask_usd: "0.00",
+      })
     );
     expect(row.bestAskText).toBe("donated");
+    expect(row.bestAskEquivalentText).toBe("$0.00/hour equivalent");
+  });
+
+  it("shows a live ask in ZC and its 1:1 USD equivalent", () => {
+    const row = zcRungRow(
+      rung({
+        reference_zc_per_hour: 800,
+        reference_usd_per_hour: "0.80",
+        best_ask_zc: 800,
+        best_ask_usd: "0.80",
+      })
+    );
+    expect(row.referenceText).toBe("0.80 ZC/hour reference");
+    expect(row.referenceEquivalentText).toBe("$0.80/hour equivalent");
+    expect(row.bestAskText).toBe("0.80 ZC/hour best ask");
+    expect(row.bestAskEquivalentText).toBe("$0.80/hour equivalent");
   });
 });
 
@@ -116,6 +143,7 @@ describe("the compute board", () => {
   const point = (best: number | null, day: number): PricePoint => ({
     at: `2026-08-0${day}T00:00:00Z`,
     best_ask_zc: best,
+    best_ask_usd: best === null ? null : String(best / 1000),
     open_asks: 1,
   });
 

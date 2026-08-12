@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import {
   ArrowsLeftRight,
   Coin,
@@ -14,7 +14,16 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 
-import type { CreditsBalance, LedgerMovement } from "@/lib/cloud-api";
+import type {
+  CreditRequest,
+  CreditsBalance,
+  LedgerMovement,
+} from "@/lib/cloud-api";
+import {
+  creditRequestSummary,
+  parseZcInput,
+  usdForMillicredits,
+} from "@/lib/credit-requests";
 import {
   activityStrip,
   amountTone,
@@ -47,6 +56,11 @@ export function CreditsPanel({
   onLoadMore,
   onRetry,
   error,
+  creditRequests,
+  creditRequestState,
+  creditRequestError,
+  onSubmitCreditRequest,
+  onRetryCreditRequests,
 }: {
   state: "loading" | "present" | "unreadable";
   balance: CreditsBalance | null;
@@ -56,6 +70,11 @@ export function CreditsPanel({
   onLoadMore: () => void;
   onRetry: () => void;
   error: string | null;
+  creditRequests: CreditRequest[];
+  creditRequestState: "loading" | "present" | "unreadable";
+  creditRequestError: string | null;
+  onSubmitCreditRequest: (requestedZc: number, purpose: string) => Promise<void>;
+  onRetryCreditRequests: () => void;
 }) {
   return (
     <section>
@@ -108,6 +127,11 @@ export function CreditsPanel({
           rows={rows}
           nextBefore={nextBefore}
           onLoadMore={onLoadMore}
+          creditRequests={creditRequests}
+          creditRequestState={creditRequestState}
+          creditRequestError={creditRequestError}
+          onSubmitCreditRequest={onSubmitCreditRequest}
+          onRetryCreditRequests={onRetryCreditRequests}
         />
       )}
     </section>
@@ -149,12 +173,22 @@ function PresentWallet({
   rows,
   nextBefore,
   onLoadMore,
+  creditRequests,
+  creditRequestState,
+  creditRequestError,
+  onSubmitCreditRequest,
+  onRetryCreditRequests,
 }: {
   balance: CreditsBalance;
   movements: LedgerMovement[];
   rows: LedgerRow[];
   nextBefore: number | null;
   onLoadMore: () => void;
+  creditRequests: CreditRequest[];
+  creditRequestState: "loading" | "present" | "unreadable";
+  creditRequestError: string | null;
+  onSubmitCreditRequest: (requestedZc: number, purpose: string) => Promise<void>;
+  onRetryCreditRequests: () => void;
 }) {
   const tiles = walletTiles(balance);
   const chips = activityStrip(movements);
@@ -204,6 +238,14 @@ function PresentWallet({
           ))}
         </div>
       )}
+
+      <CreditRequestPanel
+        requests={creditRequests}
+        state={creditRequestState}
+        error={creditRequestError}
+        onSubmit={onSubmitCreditRequest}
+        onRetry={onRetryCreditRequests}
+      />
 
       {/* The ledger as a table: a header row, day separators, and rows
           carrying their icon, counterparty, and signed amount. */}
@@ -303,6 +345,134 @@ function PresentWallet({
         )}
       </div>
     </>
+  );
+}
+
+function CreditRequestPanel({
+  requests,
+  state,
+  error,
+  onSubmit,
+  onRetry,
+}: {
+  requests: CreditRequest[];
+  state: "loading" | "present" | "unreadable";
+  error: string | null;
+  onSubmit: (requestedZc: number, purpose: string) => Promise<void>;
+  onRetry: () => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [submission, setSubmission] = useState<"idle" | "submitting">("idle");
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const requestedZc = parseZcInput(amount);
+  const pending = requests.find((request) => request.status === "pending");
+  const history = requests.filter((request) => request.status !== "pending").slice(0, 3);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (requestedZc === null || !purpose.trim()) return;
+    setSubmission("submitting");
+    setSubmissionError(null);
+    try {
+      await onSubmit(requestedZc, purpose.trim());
+      setAmount("");
+      setPurpose("");
+    } catch (err) {
+      setSubmissionError(
+        err instanceof Error ? err.message : "Couldn't submit this request."
+      );
+    } finally {
+      setSubmission("idle");
+    }
+  }
+
+  return (
+    <section className="mt-6 rounded-lg border border-border bg-surface p-4 sm:p-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold">Request more credits</h3>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            Requests are reviewed by hand. Your spendable balance stays available while one is pending.
+          </p>
+        </div>
+      </div>
+
+      {state === "loading" ? (
+        <div className="mt-4 space-y-2">
+          <div className="skeleton h-9 rounded-md" />
+          <div className="skeleton h-16 rounded-md" />
+        </div>
+      ) : state === "unreadable" ? (
+        <div className="mt-4 rounded-md border border-warning/30 bg-warning/5 p-3">
+          <p className="text-sm text-warning-foreground">
+            Couldn&apos;t read your credit requests. This does not mean there are none.
+          </p>
+          {error && <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{error}</p>}
+          <button type="button" onClick={onRetry} className="mt-3 rounded-md border border-border px-2.5 py-1 text-xs hover:bg-surface-2">
+            Try again
+          </button>
+        </div>
+      ) : pending ? (
+        <div className="mt-4 rounded-md border border-primary/25 bg-primary/5 p-3.5">
+          <p className="text-sm font-medium">Request pending review</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {creditRequestSummary(pending)} · {usdForMillicredits(pending.requested_zc)}
+          </p>
+          <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">{pending.purpose}</p>
+        </div>
+      ) : (
+        <form className="mt-4 grid gap-3" onSubmit={submit}>
+          <label className="grid gap-1.5 text-sm">
+            <span className="label-caps">Requested ZC</span>
+            <input
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              inputMode="decimal"
+              placeholder="25"
+              className="h-9 rounded-md border border-border bg-background px-3 font-mono text-sm outline-none placeholder:text-muted-foreground focus:border-primary"
+            />
+            <span className="text-xs text-muted-foreground">
+              {requestedZc === null && amount ? "Enter a positive amount with up to three decimals." : requestedZc === null ? "ZC is submitted exactly to three decimal places." : `${usdForMillicredits(requestedZc)} estimated value`}
+            </span>
+          </label>
+          <label className="grid gap-1.5 text-sm">
+            <span className="label-caps">Purpose</span>
+            <textarea
+              value={purpose}
+              onChange={(event) => setPurpose(event.target.value)}
+              required
+              rows={3}
+              placeholder="What work will these credits support?"
+              className="resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus:border-primary"
+            />
+          </label>
+          {submissionError && <p className="text-xs text-destructive">{submissionError}</p>}
+          <div>
+            <button
+              type="submit"
+              disabled={requestedZc === null || !purpose.trim() || submission === "submitting"}
+              className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {submission === "submitting" ? "Submitting…" : "Submit request"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {history.length > 0 && (
+        <div className="mt-4 border-t border-border pt-3">
+          <h4 className="label-caps">Recent decisions</h4>
+          <div className="mt-2 space-y-1.5">
+            {history.map((request) => (
+              <p key={request.id} className="text-xs text-muted-foreground">
+                {creditRequestSummary(request)}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

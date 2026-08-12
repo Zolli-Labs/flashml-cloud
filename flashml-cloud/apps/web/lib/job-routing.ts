@@ -34,10 +34,9 @@
  * Reasons are carried through verbatim: a paraphrase would be more confident
  * than the evidence behind it.
  *
- * ZC AND USD ARE NEVER SUMMED. There is no exchange rate between them and no
- * field here implies one. A plan's cost leaves this module as a LIST of
- * per-currency figures, not a pair of numbers next to a total, because a
- * list has nowhere to put a total.
+ * ZC AND USD RETAIN SEPARATE SETTLEMENT FIELDS. The API may expose a normalized
+ * comparison value for the scheduler, but this module preserves the source
+ * figures and the routing card does not render a combined cash total.
  */
 
 import type {
@@ -144,6 +143,9 @@ export interface PlanRow {
   /** Side by side, in their own currencies, in a container with nowhere to
    * put a total. */
   costs: CurrencyFigure[];
+  /** Fixed-rate normalized value for scheduler comparison. The job routing
+   * card deliberately does not render it: settlement stays source-specific. */
+  totalUsdValue: number;
   /** `null` when the planner reported no makespan. Not observed, not 0. */
   makespanSeconds: number | null;
   deadlineMet: boolean | null;
@@ -281,6 +283,7 @@ function planRow(plan: PreviewPlan): PlanRow {
     tasksPlaced: plan.tasks_placed,
     tasksUnplaced: plan.tasks_unplaced,
     costs: costsOf(plan),
+    totalUsdValue: plan.cost.total_usd_value,
     makespanSeconds: plan.makespan_seconds,
     deadlineMet: plan.deadline_met,
     achievableDeadlineSeconds: plan.achievable_deadline_seconds,

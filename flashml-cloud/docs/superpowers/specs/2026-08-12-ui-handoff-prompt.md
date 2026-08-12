@@ -54,8 +54,10 @@ Audit and write findings before changing anything.
 - **A failed read must never render as an empty result.** Every panel needs
   loading / present / empty / unreadable as four distinct states.
 - `null` means *not observed*, never `0`.
-- **ZC and USD are shown side by side and NEVER summed.** There is no exchange
-  rate; no field may imply one.
+- **ZC and USD retain separate settlement fields.** The fixed 1 ZC = $1 USD
+  equivalent is displayed only on wallet, credits, and marketplace surfaces;
+  the routing card keeps its original ZC/USD columns and does not show a
+  combined cash total.
 - **No fixture-shaped or credential-shaped literals anywhere.** The owner has
   rejected these explicitly. Build test fixtures at runtime.
 

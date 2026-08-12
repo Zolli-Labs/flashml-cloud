@@ -15,8 +15,9 @@ comparison view that nobody could defend when asked where it came from:
   wrong, which Alibaba really produces.
 - **`unpriced()`.** A venue with no quote is named, so the view can render
   *not observed* rather than 0 or nothing.
-- **No code path sums or converts across currencies.** Behaviourally, and by
-  reading the module's own source for a rate table nobody should ever add.
+- **Source currencies stay distinct.** ZC/USD normalization is explicit and
+  fixed at parity; CU/CNY still return no normalized dollar value and source
+  denominated aggregation remains guarded by currency checks.
 - **Every seeded quote carries a source and a captured_at**, and neither is
   a placeholder — a quote nobody can go and re-check is the thing this table
   was built to make impossible.
@@ -26,7 +27,6 @@ comparison view that nobody could defend when asked where it came from:
 """
 from __future__ import annotations
 
-import ast
 import pathlib
 import re
 import uuid
@@ -56,34 +56,6 @@ FC_GPU_CAPTURE = datetime(2026, 8, 12, 3, 57, tzinfo=timezone.utc)
 FC_SANDBOX_CAPTURE = datetime(2026, 8, 12, 3, 58, tzinfo=timezone.utc)
 
 NOW = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
-
-
-def _identifiers(source: str) -> set[str]:
-    """Every name the module's CODE uses, ignoring comments and docstrings."""
-    names: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            names.add(node.attr)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.arg):
-            names.add(node.arg)
-        elif isinstance(node, ast.keyword) and node.arg:
-            names.add(node.arg)
-    return names
-
-
-def _numbers(source: str) -> set[float]:
-    """Every numeric literal in the module's code. Prose does not count."""
-    return {
-        node.value
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, (int, float))
-        and not isinstance(node.value, bool)
-    }
 
 
 def quote(**overrides) -> prices.Quote:
@@ -244,7 +216,7 @@ def test_every_provider_the_comparison_names_has_a_seeded_quote(db):
 
 
 # ---------------------------------------------------------------------------
-# No conversion, and no summing, across denominations.
+# Source-denominated aggregation and explicit ZC/USD normalization.
 # ---------------------------------------------------------------------------
 
 
@@ -262,9 +234,8 @@ def test_combine_refuses_to_add_two_currencies(db):
 
 
 def test_combine_refuses_every_pair_of_currencies_not_just_zc_and_usd():
-    """Written generically, so a denomination added later inherits the rule
-    without anybody remembering to extend it. ZC is reserved and unwritten
-    today; the day it is written, this is already enforced."""
+    """Source-denominated aggregation remains generic even though the
+    scheduler has a separate fixed-parity ZC/USD comparison path."""
     for other in ("ZC", "CU", "CNY"):
         with pytest.raises(prices.CurrencyMismatch):
             prices.combine([(quote(), 1), (quote(currency=other), 1)])
@@ -300,38 +271,18 @@ def test_two_currencies_are_never_comparable():
     assert prices.comparable(quote(), quote(currency="CU")) is False
 
 
-def test_the_module_names_nothing_that_could_be_an_exchange_rate():
-    """Read the CODE, not the prose: the damaging change is somebody ADDING a
-    rate table, and by the time it has a caller the comparison is already
-    unreproducible.
+def test_fixed_parity_normalizes_only_zc_and_usd():
+    """The current policy names its one supported cross-currency comparison.
 
-    Parsed rather than grepped, because the module's own docstring names
-    `convert_to_usd` as the thing never to write and a text search cannot
-    tell a prohibition from an implementation.
+    Normalization preserves source settlement elsewhere; it does not turn the
+    price module into a general FX service. CU and CNY remain unpriced for this
+    comparison and therefore cannot be silently treated as dollars.
     """
-    # The one name allowed to mention conversion is the exception raised to
-    # REFUSE one.
-    permitted = {"UnconvertibleUnit"}
-    identifiers = _identifiers(SOURCE) - permitted
-    for fragment in ("usd", "fx", "convert", "rate"):
-        offenders = [n for n in identifiers if fragment in n.lower()]
-        assert offenders == [], (fragment, offenders)
-
-
-def test_the_only_constants_in_this_module_are_the_ones_it_can_justify():
-    """An exchange rate is, in the end, a NUMBER. So this pins which numbers
-    may appear at all:
-
-      3600 — seconds in an hour, the one exact conversion here
-        24 — the staleness threshold, in hours
-        50 — the default history page size
-         0 — the zero of Decimal and timedelta
-         1 — "more than one currency", in the refusal itself
-
-    Anything else has to be argued for in review rather than slipped in as a
-    literal, which is exactly the guard a rate constant would need to defeat.
-    """
-    assert _numbers(SOURCE) == {0, 1, 24, 50, 3600}
+    assert prices.marketplacemod.USD_PER_ZC == Decimal("1")
+    assert prices.normalized_usd_amount("ZC", Decimal("2.5")) == Decimal("2.5")
+    assert prices.normalized_usd_amount("USD", Decimal("2.5")) == Decimal("2.5")
+    assert prices.normalized_usd_amount("CU", Decimal("2.5")) is None
+    assert prices.normalized_usd_amount("CNY", Decimal("2.5")) is None
 
 
 # ---------------------------------------------------------------------------
@@ -352,8 +303,8 @@ def test_per_second_becomes_per_hour_exactly():
 
 def test_normalising_never_touches_the_currency():
     """The normaliser puts a venue's time base onto a common one. Nothing
-    else. Two quotes in different currencies are exactly as incomparable
-    after this call as before it."""
+    else. A CU quote remains source-denominated and is not made comparable
+    to USD or CNY by this call."""
     cu = quote(currency="CU", unit="vcpu-second", amount=Decimal("1"))
     assert prices.to_hourly(cu).currency == "CU"
 

@@ -14,7 +14,10 @@ relaxed, only dressed better:
 - every number, name, size, timestamp still comes from the API;
 - null is never 0; unproven is a sentence; a failed read is unreadable,
   never empty;
-- ZC and vendor currencies stay side by side, never summed;
+- ZC and vendor currencies retain their source settlement values side by side;
+  the fixed 1 ZC = $1 USD equivalent is shown only on wallet, credits, and
+  marketplace surfaces, while routing compares normalized value without
+  rendering a combined routing total;
 - no colour that is not a token in `app/globals.css`;
 - decisions in `lib/` (vitest), markup in `components/`.
 
@@ -187,10 +190,10 @@ open_asks}]` (≤24 rows) and `change_zc: number | null`.
 ### 3.2 External venues — the comparison strip
 
 Right column, compact quote cards (provider · sku, amount in the vendor's
-own digits and currency, captured-ago + source in 11px, stale cards
-dimmed with the staleness sentence up front). Unpriced venues render as
-cards too, "not observed". Nothing converts; the strip sits beside the
-board the way an FX panel sits beside an equity board.
+own digits and currency, fixed ZC equivalent when the API provides one,
+captured-ago + source in 11px, stale cards dimmed with the staleness sentence
+up front). Unpriced venues render as cards too, "not observed". Source prices
+remain intact beside their fixed-parity comparison values.
 
 ### 3.3 Board header strip
 

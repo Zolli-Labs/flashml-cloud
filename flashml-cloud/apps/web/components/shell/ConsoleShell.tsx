@@ -223,7 +223,10 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             </p>
           </div>
 
-          <nav className="flex-1 overflow-y-auto px-3 pb-4">
+          {/* `min-h-0`: the rail is exactly viewport-tall, so the nav must be
+              allowed to shrink below its content and scroll on short
+              viewports instead of pushing the footer off-screen. */}
+          <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
             {currentWorkspace && (
               <div className="space-y-0.5">
                 {WORKSPACE_TABS.map((tab) => {
@@ -367,7 +370,13 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-dvh">
       <CommandPalette />
       <Shortcuts />
-      <aside className="console-rail hidden w-[232px] shrink-0 flex-col border-r border-border bg-bg-rail text-foreground lg:flex">
+      {/* `sticky top-0 self-start h-dvh`: the rail is pinned to the viewport
+          instead of stretched with the document, so however far the content
+          column scrolls, the dark column — and its footer nav — stays
+          full-height on screen, the same guarantee the mobile drawer gets
+          from `fixed inset-y-0`. `self-start` opts the item out of stretch so
+          sticky has room to travel; `h-dvh` then sizes it to the viewport. */}
+      <aside className="console-rail sticky top-0 hidden h-dvh w-[232px] shrink-0 flex-col self-start border-r border-border bg-bg-rail text-foreground lg:flex">
         {rail}
       </aside>
 

@@ -22,6 +22,7 @@ import {
 import { formatZc } from "@/lib/market-credits";
 import {
   askPriceLabel,
+  askUsdEquivalentLabel,
   bookChips,
   effectiveLabel,
   listingStateLabel,
@@ -490,13 +491,10 @@ export function ListingsPanel({
                         {listing.capability_class}
                       </td>
                       <td className="px-3 py-2.5 text-right font-mono text-xs text-foreground">
-                        {listing.donated ? (
-                          <span className="rounded-full border border-brand/40 bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] text-brand-foreground">
-                            donated
-                          </span>
-                        ) : (
-                          `${formatZc(listing.ask_zc_per_hour)} ZC/hour`
-                        )}
+                        <div>{askPriceLabel(listing)}</div>
+                        <div className="mt-0.5 text-[10px] text-muted-foreground">
+                          {askUsdEquivalentLabel(listing)}
+                        </div>
                       </td>
                       <td className="px-3 py-2.5">
                         <span
@@ -657,16 +655,13 @@ function AskRow({ ask }: { ask: MarketAsk }) {
         </span>
       )}
       <div className="ml-auto shrink-0 text-right">
-        {!ask.donated && (
-          <div className="font-mono text-xs text-foreground">
-            {askPriceLabel(ask)}
-          </div>
-        )}
-        <div
-          className={`text-[11px] text-muted-foreground${
-            ask.donated ? "" : " mt-0.5"
-          }`}
-        >
+        <div className="font-mono text-xs text-foreground">
+          {askPriceLabel(ask)}
+        </div>
+        <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+          {askUsdEquivalentLabel(ask)}
+        </div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground">
           {effectiveLabel(ask)}
         </div>
       </div>

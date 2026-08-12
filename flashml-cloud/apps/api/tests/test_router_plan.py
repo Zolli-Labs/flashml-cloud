@@ -1,4 +1,4 @@
-"""The planner's invariants: gates first, money as a vector, no assignment.
+"""The planner's invariants: gates first, cash-normalized value, no assignment.
 
 Three things this file pins, in the order they matter.
 
@@ -8,9 +8,9 @@ the actual runtime predicate rather than a stand-in, so a price can never buy
 past a capability, a pool, a host's local data or an isolation requirement.
 The planner holds no copy of those gates to drift from.
 
-**Cost is a vector.** ZC and USD are separate axes with no rate between them
-(decision M4), so nothing here may reduce them to one number. There is a test
-for the absence of every method that could.
+**Settlement stays a vector; comparison uses cash value.** ZC and USD remain
+separate settlement totals, while the fixed 1 ZC = 1 USD policy exposes one
+normalized value for ordering and frontier dominance.
 
 **A plan is a fleet, not an assignment.** FlashML is a pull system; nothing
 in the runtime can make a host run a particular task. Allocations are counts
@@ -560,17 +560,15 @@ def test_a_tier_the_router_does_not_recognise_is_treated_as_unproven():
 
 
 # ---------------------------------------------------------------------------
-# cost is a vector
+# settlement totals and normalized value
 # ---------------------------------------------------------------------------
 
 
-def test_cost_offers_no_way_to_reduce_two_currencies_to_one_number():
-    """Every one of these would have to answer "how many dollars is a Zolli
-    credit?", which M4 forbids and which ``contributions.py`` refuses in the
-    strongest terms it has."""
-    for forbidden in ("total", "sum", "amount", "as_usd", "as_zc", "value"):
-        assert not hasattr(P.Cost, forbidden), forbidden
+def test_cost_exposes_cash_value_without_rewriting_settlement_totals():
     cost = P.Cost(zc=9.8, usd=6.4)
+    assert cost.zc == 9.8
+    assert cost.usd == 6.4
+    assert cost.total_usd_value() == pytest.approx(16.2)
     with pytest.raises(TypeError):
         float(cost)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
@@ -584,7 +582,7 @@ def test_adding_costs_stays_component_wise():
     assert P.Cost(zc=1.0, usd=1.0) + P.Cost(zc=2.0, usd=3.0) == P.Cost(zc=3.0, usd=4.0)
 
 
-def test_a_mixed_currency_plan_reports_both_and_sums_neither():
+def test_a_mixed_currency_plan_preserves_both_totals_and_exposes_cash_value():
     got = P.fastest_plan(
         _task(gpus=1),
         [
@@ -598,7 +596,8 @@ def test_a_mixed_currency_plan_reports_both_and_sums_neither():
     )
     assert got.cost == P.Cost(zc=5.0, usd=10.0)
     assert set(got.cost.currencies()) == {P.CURRENCY_ZC, P.CURRENCY_USD}
-    assert any("never summed" in note for note in got.notes)
+    assert got.cost.total_usd_value() == 15.0
+    assert any("settlement" in note and "USD value" in note for note in got.notes)
 
 
 def test_each_allocation_carries_its_own_currency():
@@ -629,17 +628,33 @@ def test_an_unknown_currency_raises_rather_than_quoting_a_machine_as_free():
         )
 
 
-def test_currencies_never_decide_an_order_by_magnitude():
-    """Crossing from ZC to USD is a preference stated once in the venue order,
-    not a comparison of two numbers with no rate between them. A USD machine
-    priced far below a ZC one is still second."""
+def test_cheapest_compares_zc_and_usd_at_parity():
+    """A venue rank may break a tie, but cannot hide a higher cash price."""
     got = P.cheapest_plan(
         _task(gpus=1),
         [
             _machine("zolli", venue=P.VENUE_MARKET, currency=P.CURRENCY_ZC,
-                     price_per_hour=600.0),
+                     price_per_hour=0.80),
             _machine("rented", venue=P.VENUE_RENTED, currency=P.CURRENCY_USD,
-                     price_per_hour=0.006),
+                     price_per_hour=0.70),
+        ],
+        eligible=ELIGIBLE,
+        tasks=5,
+        duration=MEASURED,
+    )
+    assert [a.machine_id for a in got.allocations] == ["rented"]
+    assert got.cost.zc == 0
+    assert got.cost.usd > 0
+
+
+def test_equal_normalized_prices_use_venue_order():
+    got = P.cheapest_plan(
+        _task(gpus=1),
+        [
+            _machine("zolli", venue=P.VENUE_MARKET, currency=P.CURRENCY_ZC,
+                     price_per_hour=0.80),
+            _machine("rented", venue=P.VENUE_RENTED, currency=P.CURRENCY_USD,
+                     price_per_hour=0.80),
         ],
         eligible=ELIGIBLE,
         tasks=5,
@@ -669,7 +684,7 @@ def test_an_unrecognised_venue_sorts_last_and_is_never_dropped():
     got = P.cheapest_plan(
         _task(gpus=1),
         [
-            _machine("mystery", venue="somewhere-else", price_per_hour=0.0),
+            _machine("mystery", venue="somewhere-else", price_per_hour=600.0),
             _machine("market", venue=P.VENUE_MARKET, price_per_hour=600.0),
         ],
         eligible=ELIGIBLE,
@@ -705,13 +720,12 @@ def test_a_strictly_worse_plan_is_marked_dominated():
     assert marked[1].dominated_by == "a"
 
 
-def test_cheaper_in_one_currency_and_dearer_in_another_is_not_dominated():
-    """The whole reason this is a frontier and not a ranking: with no rate
-    between ZC and USD the two plans are genuinely incomparable, and the
-    correct output is both of them."""
+def test_frontier_dominance_uses_normalized_cash_value():
+    """The cheaper, faster USD plan dominates at the fixed 1:1 rate."""
     marked = P.frontier([_plan("zolli", zc=9.8, makespan=31.0),
                          _plan("rented", usd=6.4, makespan=9.0)])
-    assert all(plan.dominated_by is None for plan in marked)
+    assert marked[0].dominated_by == "rented"
+    assert marked[1].dominated_by is None
 
 
 def test_an_identical_plan_shown_twice_is_marked_rather_than_presented_as_a_choice():

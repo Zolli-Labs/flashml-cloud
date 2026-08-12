@@ -7,11 +7,9 @@
  * a venue with no quote as *not observed* rather than skip it. Those are
  * decisions, so they live here where a test can reach them.
  *
- * THE CURRENCY DISCIPLINE. ZC and vendor currencies are shown side by side
- * and never summed — there is no exchange rate and no field may imply one.
- * This module therefore has no function that takes both a ZC amount and a
- * foreign amount: the two lists are formatted separately and meet only in
- * markup, in adjacent columns.
+ * THE CURRENCY DISCIPLINE. Source amounts remain distinct, while the API's
+ * fixed-parity equivalents appear beside them on marketplace surfaces. This
+ * module never calculates a conversion: it only labels API-provided strings.
  *
  * THE STALENESS DISCIPLINE. The verdict is the API's (`stale`), the age is
  * the API's (`age_seconds`), and the page adds only a human shape for the
@@ -48,6 +46,7 @@ export interface QuoteRow {
   venue: string;
   detail: string;
   amountText: string;
+  equivalentText: string | null;
   capturedText: string;
   sourceText: string;
   stale: boolean;
@@ -59,6 +58,10 @@ export function quoteRow(quote: PriceQuote): QuoteRow {
     venue: `${quote.provider} — ${quote.sku}`,
     detail: where,
     amountText: `${quote.currency} ${quote.amount} / ${quote.unit}`,
+    equivalentText:
+      quote.zc_equivalent_amount === null
+        ? null
+        : `${quote.zc_equivalent_amount} ZC / ${quote.unit} equivalent`,
     capturedText: quote.stale
       ? `stale — observed ${ageLabel(quote.age_seconds)}`
       : `observed ${ageLabel(quote.age_seconds)}`,
@@ -74,31 +77,45 @@ export function unpricedRow(venue: PriceUnpriced): QuoteRow {
     venue: venue.provider,
     detail: "",
     amountText: "not observed",
+    equivalentText: null,
     capturedText: "no published price has been captured for this venue",
     sourceText: "",
     stale: false,
   };
 }
 
-/** The ZC side of the comparison: reference ladder and best live ask,
- * formatted but never converted. A null best ask is "no live ask" — an
+/** The ZC side of the comparison: reference ladder and best live ask with
+ * their API-provided USD equivalents. A null best ask is "no live ask" — an
  * empty book, not a zero price. */
 export interface ZcRungRow {
   capabilityClass: string;
   referenceText: string;
+  referenceEquivalentText: string;
   bestAskText: string;
+  bestAskEquivalentText: string | null;
+}
+
+function formatMarketZc(amount: number): string {
+  const formatted = formatZc(amount);
+  const decimalPlaces = formatted.split(".")[1]?.length ?? 0;
+  return decimalPlaces === 1 ? `${formatted}0` : formatted;
 }
 
 export function zcRungRow(rung: ZcRung): ZcRungRow {
   return {
     capabilityClass: rung.capability_class,
-    referenceText: `${formatZc(rung.reference_zc_per_hour)} ZC/hour reference`,
+    referenceText: `${formatMarketZc(rung.reference_zc_per_hour)} ZC/hour reference`,
+    referenceEquivalentText: `$${rung.reference_usd_per_hour}/hour equivalent`,
     bestAskText:
       rung.best_ask_zc === null
         ? "no live ask"
         : rung.best_ask_zc === 0
           ? "donated"
-          : `${formatZc(rung.best_ask_zc)} ZC/hour best ask`,
+          : `${formatMarketZc(rung.best_ask_zc)} ZC/hour best ask`,
+    bestAskEquivalentText:
+      rung.best_ask_usd === null
+        ? null
+        : `$${rung.best_ask_usd}/hour equivalent`,
   };
 }
 

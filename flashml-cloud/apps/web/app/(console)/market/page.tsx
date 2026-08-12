@@ -10,6 +10,9 @@ import {
   getCredits,
   getCreditsLedger,
   getMarketMatches,
+  listCreditRequests,
+  submitCreditRequest,
+  type CreditRequest,
   type CreditsBalance,
   type LedgerMovement,
   type MarketMatches,
@@ -30,42 +33,81 @@ export default function MarketPage() {
   const [nextBefore, setNextBefore] = useState<number | null>(null);
   const [matches, setMatches] = useState<MarketMatches | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [creditRequests, setCreditRequests] = useState<CreditRequest[]>([]);
+  const [creditRequestState, setCreditRequestState] = useState<
+    "loading" | "present" | "unreadable"
+  >("loading");
+  const [creditRequestError, setCreditRequestError] = useState<string | null>(null);
 
   // No synchronous setState here: this runs from an effect on mount, and
   // the initial state is already "loading". Retries go through `retry`,
   // which is a click handler and may say so.
-  const load = useCallback(() => {
-    Promise.all([
+  const load = useCallback(async () => {
+    try {
+      const [credits, ledger, found] = await Promise.all([
       getCredits(),
       getCreditsLedger({ limit: 25 }),
       getMarketMatches().catch(() => null),
-    ])
-      .then(([credits, ledger, found]) => {
-        setBalance(credits);
-        setMovements(ledger.movements);
-        setNextBefore(ledger.next_before);
-        setMatches(found);
-        setError(null);
-        setState("present");
-      })
-      .catch((err) => {
-        if (err instanceof NotAuthenticated) {
-          router.push("/sign-in?next=/market");
-          return;
-        }
-        setError(err instanceof Error ? err.message : "Couldn't load.");
-        setState("unreadable");
-      });
+      ]);
+      setBalance(credits);
+      setMovements(ledger.movements);
+      setNextBefore(ledger.next_before);
+      setMatches(found);
+      setError(null);
+      setState("present");
+    } catch (err) {
+      if (err instanceof NotAuthenticated) {
+        router.push("/sign-in?next=/market");
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Couldn't load.");
+      setState("unreadable");
+    }
+  }, [router]);
+
+  const loadCreditRequests = useCallback(async () => {
+    try {
+      const requests = await listCreditRequests();
+      setCreditRequests(requests);
+      setCreditRequestError(null);
+      setCreditRequestState("present");
+    } catch (err) {
+      if (err instanceof NotAuthenticated) {
+        router.push("/sign-in?next=/market");
+        return;
+      }
+      setCreditRequestError(
+        err instanceof Error ? err.message : "Couldn't load credit requests."
+      );
+      setCreditRequestState("unreadable");
+    }
   }, [router]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    const timer = window.setTimeout(() => {
+      void load();
+      void loadCreditRequests();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load, loadCreditRequests]);
 
   const retry = useCallback(() => {
     setState("loading");
     load();
   }, [load]);
+
+  const retryCreditRequests = useCallback(() => {
+    setCreditRequestState("loading");
+    loadCreditRequests();
+  }, [loadCreditRequests]);
+
+  const requestMoreCredits = useCallback(
+    async (requestedZc: number, purpose: string) => {
+      await submitCreditRequest({ requested_zc: requestedZc, purpose });
+      await Promise.all([load(), loadCreditRequests()]);
+    },
+    [load, loadCreditRequests]
+  );
 
   const loadMore = useCallback(() => {
     if (nextBefore === null) return;
@@ -101,6 +143,11 @@ export default function MarketPage() {
           onLoadMore={loadMore}
           onRetry={retry}
           error={error}
+          creditRequests={creditRequests}
+          creditRequestState={creditRequestState}
+          creditRequestError={creditRequestError}
+          onSubmitCreditRequest={requestMoreCredits}
+          onRetryCreditRequests={retryCreditRequests}
         />
         <MatchesPanel matches={state === "present" ? matches : null} />
       </div>

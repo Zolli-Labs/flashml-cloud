@@ -48,10 +48,16 @@ export function AuthShell({
   mode,
   onModeChange,
   children,
+  bare = false,
 }: {
   mode: AuthMode;
-  onModeChange: (mode: AuthMode) => void;
+  onModeChange?: (mode: AuthMode) => void;
   children?: React.ReactNode;
+  /** Right column renders `children` as-is — no mode switch, no card frame,
+      a wider measure. Signup step 2 uses it: the onboarding form brings its
+      own card, and the left brand panel stays so the step is not a lone form
+      floating on an empty canvas. */
+  bare?: boolean;
 }) {
   const copy = COPY[mode];
 
@@ -92,7 +98,7 @@ export function AuthShell({
       </section>
 
       <section className="flex min-h-dvh w-full items-center justify-center px-5 py-10 sm:px-8 lg:px-12">
-        <div className="w-full max-w-[470px]">
+        <div className={bare ? "w-full max-w-xl" : "w-full max-w-[470px]"}>
           <div className="mb-9 flex items-center justify-between lg:hidden">
             <Link href="/" aria-label="Zolli Cloud home" className="inline-flex">
               <Wordmark size={24} product />
@@ -100,39 +106,45 @@ export function AuthShell({
             <HomeLink />
           </div>
 
-          <div className="mb-6 grid grid-cols-2 rounded-[7px] border border-border bg-[var(--z-app-bg)] p-1" aria-label="Authentication mode">
-            {(["signin", "signup"] as const).map((option) => {
-              const active = option === mode;
-              return (
-                <button
-                  key={option}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => onModeChange(option)}
-                  className={`rounded-[4px] px-3 py-2.5 text-sm font-semibold transition-colors ${
-                    active
-                      ? "bg-surface text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {option === "signin" ? "Sign in" : "Create account"}
-                </button>
-              );
-            })}
-          </div>
+          {bare ? (
+            children
+          ) : (
+            <>
+              <div className="mb-6 grid grid-cols-2 rounded-[7px] border border-border bg-[var(--z-app-bg)] p-1" aria-label="Authentication mode">
+                {(["signin", "signup"] as const).map((option) => {
+                  const active = option === mode;
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => onModeChange?.(option)}
+                      className={`rounded-[4px] px-3 py-2.5 text-sm font-semibold transition-colors ${
+                        active
+                          ? "bg-surface text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {option === "signin" ? "Sign in" : "Create account"}
+                    </button>
+                  );
+                })}
+              </div>
 
-          <section className="rounded-[10px] border border-border bg-surface p-7 sm:p-9">
-            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
-              {copy.eyebrow}
-            </p>
-            <h2 className="mt-3 text-3xl font-semibold tracking-[-0.035em] sm:text-4xl">
-              {copy.title}
-            </h2>
-            <p className="mt-3 text-[15px] leading-relaxed text-muted-foreground">
-              {copy.subtitle}
-            </p>
-            <div className="mt-7">{children}</div>
-          </section>
+              <section className="rounded-[10px] border border-border bg-surface p-7 sm:p-9">
+                <p className="font-mono text-[10px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
+                  {copy.eyebrow}
+                </p>
+                <h2 className="mt-3 text-3xl font-semibold tracking-[-0.035em] sm:text-4xl">
+                  {copy.title}
+                </h2>
+                <p className="mt-3 text-[15px] leading-relaxed text-muted-foreground">
+                  {copy.subtitle}
+                </p>
+                <div className="mt-7">{children}</div>
+              </section>
+            </>
+          )}
         </div>
       </section>
     </main>

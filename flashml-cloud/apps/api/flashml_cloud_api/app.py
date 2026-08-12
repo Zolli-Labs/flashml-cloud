@@ -54,6 +54,7 @@ import time
 from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
@@ -1331,6 +1332,12 @@ DEFAULT_PUBLIC_RATE_WINDOW_S = 60.0
 #: and no loop.
 DEFAULT_RECONCILE_INTERVAL_S = 300.0
 
+#: Rental sessions trade persistence for safe reuse. Fifteen minutes is long
+#: enough to ride out ordinary network gaps and short enough that a terminated
+#: paid pod does not remain attached to an account for days.
+DEFAULT_EPHEMERAL_MACHINE_TTL_S = 15 * 60.0
+DEFAULT_EPHEMERAL_RECONCILE_S = 60.0
+
 
 class EvaluationSpecError(ValueError):
     """The stored ``evaluation_spec`` cannot be compiled into a JobSpec.
@@ -1803,11 +1810,11 @@ class FixedWindowLimiter:
 #
 # Two rules run through every function here:
 #
-# **ZC and USD are never summed.** `router.plan.Cost` has no total, no
-# `__float__` and no `amount`, deliberately (decision M4: there is no exchange
-# rate and inventing one is what `contributions.py` forbids in the strongest
-# terms it has). The JSON keeps them as two keys and adds nothing that
-# combines them, including a budget verdict — those are per currency too.
+# **Settlement totals stay separate; comparison uses fixed cash value.**
+# `router.plan.Cost` keeps ZC and USD as their original source totals and adds
+# `total_usd_value` under the active 1 ZC = 1 USD policy. Budget verdicts stay
+# per settlement currency: normalized value compares plans; it does not decide
+# which account or provider gets charged.
 #
 # **Every figure carries its basis and its n, or it is null.** `null` renders
 # as *not observed*; 0 is a claim, and on this surface it is usually a
@@ -1829,18 +1836,23 @@ _PREVIEW_MAX_TASKS = 5000
 
 
 def _preview_cost(cost: routermod.Cost) -> dict[str, float]:
-    """A cost vector as JSON. Two keys, and never a third that adds them."""
+    """Source settlement totals and their fixed-rate comparable USD value."""
     rounded = cost.rounded()
-    return {"zc": rounded.zc, "usd": rounded.usd}
+    return {
+        "zc": rounded.zc,
+        "usd": rounded.usd,
+        "total_usd_value": round(rounded.total_usd_value(), 4),
+    }
 
 
 def _within_budget(spent: float, budget: float | None) -> bool | None:
     """Whether one currency's spend fits one currency's budget.
 
     ``None`` when no budget was given for that currency — a fact about a
-    question nobody asked, not a pass. Compared within a currency only: a ZC
-    plan is never measured against a USD budget, because that comparison is
-    the exchange rate by another name.
+    question nobody asked, not a pass. A ZC budget says how much may leave
+    the wallet and a USD budget says how much may reach an external provider.
+    The normalized total is for routing comparison, not display on the job
+    routing card and not a replacement settlement budget.
     """
     if budget is None:
         return None
@@ -2153,6 +2165,18 @@ def create_cloud_app(
     reconcile_interval_s = float(
         os.environ.get("FLASHML_SANDBOX_RECONCILE_S", DEFAULT_RECONCILE_INTERVAL_S)
     )
+    ephemeral_ttl_s = float(
+        os.environ.get(
+            "FLASHML_EPHEMERAL_MACHINE_TTL_SECONDS",
+            DEFAULT_EPHEMERAL_MACHINE_TTL_S,
+        )
+    )
+    ephemeral_reconcile_s = float(
+        os.environ.get(
+            "FLASHML_EPHEMERAL_MACHINE_RECONCILE_SECONDS",
+            DEFAULT_EPHEMERAL_RECONCILE_S,
+        )
+    )
 
     async def _reconcile_once() -> list[str]:
         """One sweep, on its own connection, never fatal.
@@ -2207,21 +2231,59 @@ def create_cloud_app(
                 return
             await asyncio.sleep(reconcile_interval_s)
 
+    async def _ephemeral_machine_loop() -> None:
+        # Unlike a billing sandbox, a stale rental row is not costing money
+        # during this first minute. Delay the first sweep so merely starting
+        # the app does not open Postgres before any authenticated work exists;
+        # the public agent routes deliberately reject malformed credentials
+        # without spending a database connection.
+        if ephemeral_reconcile_s > 0:
+            await asyncio.sleep(ephemeral_reconcile_s)
+        while True:
+            conn = None
+            try:
+                conn = await run_in_threadpool(app.state.connect)
+                expired = await run_in_threadpool(
+                    dbmod.expire_stale_ephemeral_machines,
+                    conn,
+                    stale_seconds=ephemeral_ttl_s,
+                )
+                if expired:
+                    log.info(json.dumps({
+                        "text": "expired stale ephemeral machines",
+                        "machines": expired,
+                    }))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one failed sweep must not end it
+                log.warning("ephemeral machine sweep failed", exc_info=True)
+            finally:
+                if conn is not None:
+                    await run_in_threadpool(conn.close)
+            if ephemeral_reconcile_s <= 0:
+                return
+            await asyncio.sleep(ephemeral_reconcile_s)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        task: asyncio.Task | None = None
+        tasks: list[asyncio.Task] = []
+        tasks.append(asyncio.create_task(
+            _ephemeral_machine_loop(), name="ephemeral-machine-reconcile"
+        ))
         # Gated on the deployment being configured for sandboxes at all, which
         # is what keeps "unconfigured changes nothing" true of startup as well
         # as of the routes: with no FC configuration there is no sandbox that
         # could be billing, and no gateway to ask.
         if settings.fc_sandbox_configured:
             task = asyncio.create_task(_reconcile_loop(), name="fc-sandbox-reconcile")
+            tasks.append(task)
             _app.state.sandbox_reconciler = task
         try:
             yield
         finally:
-            if task is not None:
+            for task in tasks:
                 task.cancel()
+            for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
 
@@ -2512,11 +2574,15 @@ def create_cloud_app(
                 # See NODE_ID_RE: this value later becomes a header value on a
                 # request carrying the operator credential.
                 raise HTTPException(status_code=400, detail="invalid node_id")
+            lifecycle = payload.get("lifecycle", "persistent")
+            if lifecycle not in ("persistent", "ephemeral"):
+                raise HTTPException(status_code=400, detail="invalid lifecycle")
             started = enrolment.start_device_code(
                 db,
                 node_id,
                 _opt_str(payload.get("hostname")),
                 _opt_str(payload.get("platform")),
+                lifecycle=lifecycle,
             )
 
         base = settings.console_url.rstrip("/")
@@ -3357,9 +3423,11 @@ def create_cloud_app(
         derivable is ``null`` — *not observed*, never 0. A plan's basis is the
         WEAKEST behind any machine it allocates to.
 
-        **ZC and USD are reported side by side and never summed.** There is
-        no exchange rate between them (M4) and no field here implies one,
-        including ``within_budget``, which is answered per currency.
+        **ZC and USD settlement totals remain side by side.** Under the fixed
+        1 ZC = 1 USD testing-credit policy, each cost also carries
+        ``total_usd_value`` for comparison. ``within_budget`` stays per source
+        currency so the response still distinguishes wallet debits from
+        external-provider charges.
 
         **Gates before price, always**, and the gate is the runtime's own —
         injected, never reimplemented (see ``create_cloud_app``). With no
@@ -3663,9 +3731,16 @@ def create_cloud_app(
                     "name": row["name"],
                     "venue": candidate.venue,
                     "currency": candidate.currency,
+                    "price_per_hour": candidate.price_per_hour,
                     "price_zc_per_hour": candidate.price_per_hour,
-                    "price_label": marketplacemod.price_label(
+                    "price_usd_per_hour": candidate.price_per_hour,
+                    "price_label": pricesmod.zc_ask_price_label(
                         row["ask_zc_per_hour"]
+                    ),
+                    "usd_equivalent_label": (
+                        pricesmod.zc_ask_usd_equivalent_label(
+                            row["ask_zc_per_hour"]
+                        )
                     ),
                     "listing_id": row["listing_id"],
                     "capability_class": candidate.capability_class,
@@ -5364,6 +5439,83 @@ def create_cloud_app(
     # Same doctrine as every browser route here: current_user (admitted_user
     # for writes), 404 never 403 on resource ids, _jsonable on rows.
 
+    @app.get("/v1alpha1/credit-requests", tags=["browser"])
+    async def get_credit_requests(
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        return [
+            _jsonable(row)
+            for row in marketplacemod.list_credit_requests(db, user_id)
+        ]
+
+    @app.post("/v1alpha1/credit-requests", status_code=201, tags=["browser"])
+    async def create_credit_request(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        payload = await _json_object(request)
+        try:
+            created = marketplacemod.create_credit_request(
+                db,
+                user_id,
+                requested_zc=payload.get("requested_zc"),
+                purpose=payload.get("purpose"),
+            )
+        except marketplacemod.InvalidCreditRequest as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except marketplacemod.PendingCreditRequestExists as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return _jsonable(created)
+
+    @app.get("/v1alpha1/admin/credit-requests", tags=["admin"])
+    async def get_admin_credit_requests(
+        status: str = "pending",
+        _admin: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        try:
+            requests = marketplacemod.list_admin_credit_requests(db, status=status)
+        except marketplacemod.InvalidCreditRequest as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return [_jsonable(row) for row in requests]
+
+    @app.post("/v1alpha1/admin/credit-requests/{request_id}/approve", tags=["admin"])
+    async def approve_credit_request(
+        request_id: str,
+        request: Request,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        payload = await _json_object(request)
+        try:
+            decided = marketplacemod.approve_credit_request(
+                db,
+                request_id,
+                admin_id=admin_id,
+                approved_zc=payload.get("approved_zc"),
+            )
+        except marketplacemod.InvalidCreditRequest as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except marketplacemod.CreditRequestNotPending as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return _jsonable(decided)
+
+    @app.post("/v1alpha1/admin/credit-requests/{request_id}/decline", tags=["admin"])
+    async def decline_credit_request(
+        request_id: str,
+        admin_id: str = Depends(admin_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        try:
+            decided = marketplacemod.decline_credit_request(
+                db, request_id, admin_id=admin_id
+            )
+        except marketplacemod.CreditRequestNotPending as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return _jsonable(decided)
+
     @app.get("/v1alpha1/credits", tags=["browser"])
     async def get_credits(
         user_id: str = Depends(current_user),
@@ -5378,9 +5530,14 @@ def create_cloud_app(
         """
         marketplacemod.grant_starting_credits(db, user_id)
         found = marketplacemod.balances(db, user_id)
+        spendable_usd = Decimal(found["spendable"]) / Decimal(1000)
+        held_usd = Decimal(found["escrow"]) / Decimal(1000)
         return {
             "spendable_zc": found["spendable"],
             "held_zc": found["escrow"],
+            "usd_per_zc": format(Decimal(1), ".2f"),
+            "spendable_usd": format(spendable_usd, ".2f"),
+            "held_usd": format(held_usd, ".2f"),
             # Lifetime sums read out of the ledger, for the wallet's
             # earned/spent tiles. True zeros for a fresh account, labelled
             # "lifetime" on the client so 0 reads as "nothing yet".
@@ -5481,8 +5638,16 @@ def create_cloud_app(
                     ),
                     "ask_zc_per_hour": ask.ask_zc_per_hour,
                     "donated": marketplacemod.is_donated(ask.ask_zc_per_hour),
-                    "price_label": marketplacemod.price_label(
+                    "ask_usd_per_hour": pricesmod.zc_ask_usd_amount_text(
                         ask.ask_zc_per_hour
+                    ),
+                    "price_label": pricesmod.zc_ask_price_label(
+                        ask.ask_zc_per_hour
+                    ),
+                    "usd_equivalent_label": (
+                        pricesmod.zc_ask_usd_equivalent_label(
+                            ask.ask_zc_per_hour
+                        )
                     ),
                     "max_concurrent_tasks": ask.max_concurrent_tasks,
                     "acceptance_rate": ask.acceptance_rate,
@@ -5500,8 +5665,16 @@ def create_cloud_app(
                 "donated": marketplacemod.is_donated(
                     int(row["ask_zc_per_hour"])
                 ),
-                "price_label": marketplacemod.price_label(
+                "ask_usd_per_hour": pricesmod.zc_ask_usd_amount_text(
                     int(row["ask_zc_per_hour"])
+                ),
+                "price_label": pricesmod.zc_ask_price_label(
+                    int(row["ask_zc_per_hour"])
+                ),
+                "usd_equivalent_label": (
+                    pricesmod.zc_ask_usd_equivalent_label(
+                        int(row["ask_zc_per_hour"])
+                    )
                 ),
             }
             for row in marketplacemod.listings_for_owner(db, user_id)
@@ -5560,7 +5733,13 @@ def create_cloud_app(
         return {
             **_jsonable(row),
             "donated": marketplacemod.is_donated(int(row["ask_zc_per_hour"])),
-            "price_label": marketplacemod.price_label(
+            "ask_usd_per_hour": pricesmod.zc_ask_usd_amount_text(
+                int(row["ask_zc_per_hour"])
+            ),
+            "price_label": pricesmod.zc_ask_price_label(
+                int(row["ask_zc_per_hour"])
+            ),
+            "usd_equivalent_label": pricesmod.zc_ask_usd_equivalent_label(
                 int(row["ask_zc_per_hour"])
             ),
         }
@@ -5673,14 +5852,16 @@ def create_cloud_app(
         db: psycopg.Connection = Depends(db_conn),
     ):
         """External quotes with provenance, the venues with none, and the
-        ZC ladder beside them — never converted into one another.
+        ZC ladder beside them with fixed 1:1 equivalents.
 
         Every quote carries ``captured_at`` and ``source`` and its own
         ``stale`` verdict, so a scraped price can never sit on the page
         looking live. Venues with no quote render *not observed*, never 0.
         The ZC side is the reference ladder plus the best live ask per
-        class (null where the book is empty), returned as its own list —
-        a shape with nowhere to put a cross-currency total.
+        class (null where the book is empty). Original quote currencies and
+        integer-millicredit ZC asks remain intact; USD quotes add ZC
+        equivalents and ZC asks add exact decimal USD equivalents only for
+        this wallet/marketplace comparison surface.
         """
         now = datetime.now(timezone.utc)
         quotes = pricesmod.latest_quotes(db)
@@ -5690,8 +5871,10 @@ def create_cloud_app(
         observations_24h = 0
         for klass in marketplacemod.CAPABILITY_CLASSES:
             board = marketplacemod.class_board(db, klass)
+            reference_zc = marketplacemod.REFERENCE_ZC_PER_HOUR[klass]
+            best_ask_zc = board["last_zc"]
             open_total += board["depth"]
-            if board["last_zc"] is not None:
+            if best_ask_zc is not None:
                 live_classes += 1
             observations_24h += sum(
                 1
@@ -5701,13 +5884,31 @@ def create_cloud_app(
             zc.append(
                 {
                     "capability_class": klass,
-                    "reference_zc_per_hour": (
-                        marketplacemod.REFERENCE_ZC_PER_HOUR[klass]
+                    "reference_zc_per_hour": reference_zc,
+                    "reference_usd_per_hour": (
+                        pricesmod.zc_ask_usd_amount_text(reference_zc)
                     ),
-                    "best_ask_zc": board["last_zc"],
+                    "best_ask_zc": best_ask_zc,
+                    "best_ask_usd": (
+                        pricesmod.zc_ask_usd_amount_text(best_ask_zc)
+                        if best_ask_zc is not None
+                        else None
+                    ),
                     "change_zc": board["change_zc"],
                     "depth": board["depth"],
-                    "history": [_jsonable(h) for h in board["history"]],
+                    "history": [
+                        {
+                            **_jsonable(point),
+                            "best_ask_usd": (
+                                pricesmod.zc_ask_usd_amount_text(
+                                    point["best_ask_zc"]
+                                )
+                                if point["best_ask_zc"] is not None
+                                else None
+                            ),
+                        }
+                        for point in board["history"]
+                    ],
                 }
             )
         return {

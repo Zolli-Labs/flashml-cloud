@@ -451,15 +451,18 @@ def insert_device_code(
     hostname: str | None,
     platform: str | None,
     expires_at: datetime,
+    lifecycle: str = "persistent",
 ) -> None:
     with db.cursor() as cur:
         cur.execute(
             """
             insert into public.device_codes
-                (device_code, user_code, node_id, hostname, platform, expires_at)
-            values (%s, %s, %s, %s, %s, %s)
+                (device_code, user_code, node_id, hostname, platform, expires_at,
+                 lifecycle)
+            values (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (device_code, user_code, node_id, hostname, platform, expires_at),
+            (device_code, user_code, node_id, hostname, platform, expires_at,
+             lifecycle),
         )
 
 
@@ -554,6 +557,7 @@ def insert_machine(
     node_id: str,
     name: str | None,
     platform: str | None,
+    lifecycle: str = "persistent",
 ) -> str:
     """Insert a new pending machine and return its id.
 
@@ -565,11 +569,12 @@ def insert_machine(
     with db.cursor() as cur:
         cur.execute(
             """
-            insert into public.machines (owner_id, node_id, name, platform, status)
-            values (%s, %s, %s, %s, 'pending')
+            insert into public.machines
+                (owner_id, node_id, name, platform, status, lifecycle)
+            values (%s, %s, %s, %s, 'pending', %s)
             returning id
             """,
-            (owner_id, node_id, name, platform),
+            (owner_id, node_id, name, platform, lifecycle),
         )
         row = cur.fetchone()
         assert row is not None
@@ -602,6 +607,7 @@ def reactivate_machine(
     machine_id: str,
     name: str | None,
     platform: str | None,
+    lifecycle: str = "persistent",
 ) -> str:
     """Return a revoked machine to 'pending' so it can redeem a fresh token.
 
@@ -626,11 +632,12 @@ def reactivate_machine(
                    token_hash = null,
                    token_prefix = null,
                    name = %s,
-                   platform = %s
+                   platform = %s,
+                   lifecycle = %s
              where id = %s
             returning id
             """,
-            (name, platform, machine_id),
+            (name, platform, lifecycle, machine_id),
         )
         row = cur.fetchone()
         assert row is not None
@@ -831,10 +838,44 @@ def list_machines_for_owner(
     with db.cursor() as cur:
         cur.execute(
             f"select {columns} from public.machines "
-            "where owner_id = %s order by created_at",
+            "where owner_id = %s "
+            "and not (lifecycle = 'ephemeral' and status = 'revoked') "
+            "order by created_at",
             (owner_id,),
         )
         return list(cur.fetchall())
+
+
+def expire_stale_ephemeral_machines(
+    db: psycopg.Connection, *, stale_seconds: float
+) -> list[str]:
+    """Revoke and unbind rental sessions that stopped heartbeating.
+
+    Persistent machines are deliberately outside this query: a laptop being
+    off for a month does not transfer its identity to somebody else. Rental
+    sessions opt into the shorter lifetime during device-code enrolment.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            with expired as (
+                update public.machines
+                   set status = 'revoked', revoked_at = now()
+                 where lifecycle = 'ephemeral'
+                   and status <> 'revoked'
+                   and coalesce(last_seen_at, created_at)
+                       < now() - make_interval(secs => %s)
+                returning id
+            ), unbound as (
+                delete from public.machine_pools
+                 where machine_id in (select id from expired)
+                returning machine_id
+            )
+            select id from expired order by id
+            """,
+            (float(stale_seconds),),
+        )
+        return [str(row["id"]) for row in cur.fetchall()]
 
 
 def revoke_machine_row(

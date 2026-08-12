@@ -174,6 +174,38 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-12 — Add testing credits and parity-aware marketplace pricing (flashml-cloud, api + web)
+What/why: New accounts receive a one-time 10 ZC grant; existing balances and
+historical grants remain unchanged. Admitted users can request a specific
+testing amount with a purpose, and admins can approve, edit, or decline it.
+The fixed 1 ZC = $1 USD value is shown on wallet, credits, and marketplace
+surfaces; routing compares normalized value while retaining source settlement
+columns and never rendering a combined routing total.
+How verified: Full API suite 2,335 passed (2 skipped, 3 network deselected,
+1 expected failure); full web suite 822 passed; ESLint, environment-backed
+Next production build, `git diff --check`, and independent final review passed.
+Gotchas: CU and CNY remain unconverted; migration `0018_marketplace.sql` and
+historical design records retain their original doctrine. Migration `0021`
+marks pre-existing profiles ineligible before defaulting future profiles to
+eligible, so an old account's first wallet visit cannot receive the new grant.
+Next: Apply migrations and deploy when the feature is ready to release.
+
+### 2026-08-12 — Retire disposable rental identities (flashnode + cloud API)
+What/why: Added explicit ephemeral enrollment for RunPod-style rentals. The
+root cause was a host-persistent random node id being reused while the cloud
+treated every node id as permanent, leaving dead rentals in the old account
+and causing the next renter's approval to collide. `flashnode login
+--ephemeral` now rotates the id; the API records the lifecycle, revokes and
+unbinds it after 15 minutes without a heartbeat, and hides retired rentals.
+How verified: red-first regressions; full FlashNode suite 588 passed (12
+deselected); full cloud API suite 2,218 passed, 2 skipped, 3 deselected, 1
+expected failure. Real migrations ran against the suite's disposable
+PostgreSQL server; both repositories passed `git diff --check`.
+Gotchas: Persistent laptops never auto-expire. The cleanup waits one 60-second
+interval before its first DB connection so anonymous startup/request paths
+remain connection-free. Updated both RunPod guide and public FlashNode README.
+Next: release a new FlashNode wheel before advertising `--ephemeral` to users.
+
 ### 2026-08-11 — Artifact downloads: 401 on every click, fixed by splitting url-lookup from bytes (flashml-cloud, api + web)
 What/why: every artifact download answered 401. The console had been changed
 to plain `<a href download>` anchors so a browser would follow the download

@@ -3,6 +3,10 @@
 invariants that matter rather than re-describing every column."""
 import pathlib
 import re
+import uuid
+
+import psycopg
+import pytest
 
 # One test below asserts against a real, freshly-migrated database rather
 # than against the SQL text: a column list read out of `information_schema`
@@ -26,7 +30,7 @@ TABLES = ["profiles", "machines", "device_codes", "jobs", "contributions"]
 
 ALL_TABLES = TABLES + [
     "job_rounds", "pools", "pool_members", "pool_invites", "machine_pools",
-    "sandbox_sessions", "sandbox_events",
+    "sandbox_sessions", "sandbox_events", "credit_requests",
 ]
 
 
@@ -468,3 +472,137 @@ def test_a_machine_device_code_still_requires_a_node_id(postgres_dsn):
                 raise AssertionError(
                     "a machine device code was accepted with a null node_id"
                 )
+
+
+def test_starter_grant_eligibility_marks_only_post_migration_profiles(db):
+    """Existing profiles receive false when 0021 adds the column; only then
+    does true become the default for profiles created after launch."""
+    migration = (MIGRATIONS / "0021_credit_requests.sql").read_text().lower()
+    false_boundary = migration.index(
+        "starter_grant_eligible boolean not null default false"
+    )
+    future_default = migration.index(
+        "alter column starter_grant_eligible set default true"
+    )
+    assert false_boundary < future_default
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select is_nullable, column_default"
+            " from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'profiles'"
+            " and column_name = 'starter_grant_eligible'"
+        )
+        column = cur.fetchone()
+    assert column == {"is_nullable": "NO", "column_default": "true"}
+
+
+def test_credit_requests_use_millicredits_and_constrained_decision_states(db):
+    """Amounts and state shape are database invariants, so a future writer
+    cannot bypass repository validation and leave an impossible review row."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select column_name, data_type from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'credit_requests'"
+        )
+        columns = {row["column_name"]: row["data_type"] for row in cur.fetchall()}
+        cur.execute(
+            "select pg_get_constraintdef(oid) as def from pg_constraint"
+            " where conrelid = 'public.credit_requests'::regclass"
+            "   and contype = 'c'"
+        )
+        checks = " ".join(row["def"].lower() for row in cur.fetchall())
+
+    assert columns["id"] == "uuid"
+    assert columns["requested_zc"] == "bigint"
+    assert columns["approved_zc"] == "bigint"
+    assert "requested_zc > 0" in checks
+    assert "approved_zc > 0" in checks
+    assert "char_length(btrim(purpose)) >= 1" in checks
+    assert "char_length(btrim(purpose)) <= 2000" in checks
+    assert "purpose = btrim(purpose)" in checks
+    assert all(status in checks for status in ("pending", "approved", "declined"))
+    assert "approved_zc is null" in checks
+    assert "approved_zc is not null" in checks
+    assert "decided_at is null" in checks
+    assert "decided_at is not null" in checks
+    assert "decided_by is null" in checks
+
+
+def test_credit_request_foreign_keys_have_the_required_delete_actions(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "select a.attname as column_name, c.confdeltype"
+            "  from pg_constraint c"
+            "  join unnest(c.conkey) with ordinality as key(attnum, ord) on true"
+            "  join pg_attribute a on a.attrelid = c.conrelid and a.attnum = key.attnum"
+            " where c.conrelid = 'public.credit_requests'::regclass"
+            "   and c.confrelid = 'public.profiles'::regclass"
+            "   and c.contype = 'f'"
+        )
+        actions = {row["column_name"]: row["confdeltype"] for row in cur.fetchall()}
+
+    assert actions == {"user_id": "c", "decided_by": "n"}
+
+
+def test_credit_request_indexes_match_history_admin_and_pending_queries(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "select indexname, indexdef from pg_indexes"
+            " where schemaname = 'public' and tablename = 'credit_requests'"
+        )
+        indexes = {
+            row["indexname"]: row["indexdef"].lower().replace('"', "")
+            for row in cur.fetchall()
+        }
+
+    assert "(user_id, requested_at desc)" in indexes[
+        "credit_requests_user_history_idx"
+    ]
+    assert "(status, requested_at)" in indexes["credit_requests_admin_queue_idx"]
+    pending = indexes["credit_requests_one_pending_per_user_idx"]
+    assert "unique index" in pending
+    assert "(user_id)" in pending
+    assert "where (status = 'pending'::text)" in pending
+
+
+def test_credit_request_pending_uniqueness_preserves_decided_history(db):
+    owner = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into auth.users (id, email) values (%s::uuid, %s)",
+            (owner, f"{owner}@example.test"),
+        )
+        cur.execute("insert into public.profiles (id) values (%s::uuid)", (owner,))
+        cur.execute(
+            "insert into public.credit_requests (user_id, requested_zc, purpose)"
+            " values (%s::uuid, 1000, 'First test')",
+            (owner,),
+        )
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        with db.transaction():
+            db.execute(
+                "insert into public.credit_requests (user_id, requested_zc, purpose)"
+                " values (%s::uuid, 2000, 'Second test')",
+                (owner,),
+            )
+
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.credit_requests"
+            "   set status = 'declined', decided_at = now()"
+            " where user_id = %s::uuid and status = 'pending'",
+            (owner,),
+        )
+        cur.execute(
+            "insert into public.credit_requests (user_id, requested_zc, purpose)"
+            " values (%s::uuid, 2000, 'Second test')",
+            (owner,),
+        )
+        cur.execute(
+            "select status from public.credit_requests"
+            " where user_id = %s::uuid order by requested_at",
+            (owner,),
+        )
+        assert [row["status"] for row in cur.fetchall()] == ["declined", "pending"]

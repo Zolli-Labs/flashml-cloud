@@ -222,7 +222,7 @@ export function OnboardingForm({
               onValueChange={(value) => set("role", value ?? "")}
               disabled={submitting}
             >
-              <SelectTrigger id="role" className="w-full">
+              <SelectTrigger id="role" size="lg" className="w-full">
                 <SelectValue placeholder="Choose one">
                   {(v) => labelFor(ROLE_OPTIONS, v) ?? "Choose one"}
                 </SelectValue>
@@ -249,7 +249,7 @@ export function OnboardingForm({
               onValueChange={(value) => set("team_size", value ?? "")}
               disabled={submitting}
             >
-              <SelectTrigger id="team-size" className="w-full">
+              <SelectTrigger id="team-size" size="lg" className="w-full">
                 <SelectValue placeholder="Choose one">
                   {(v) => labelFor(TEAM_SIZE_OPTIONS, v) ?? "Choose one"}
                 </SelectValue>
@@ -335,7 +335,7 @@ export function OnboardingForm({
             onValueChange={(value) => set("heard_from", value ?? "")}
             disabled={submitting}
           >
-            <SelectTrigger id="heard-from" className="w-full">
+            <SelectTrigger id="heard-from" size="lg" className="w-full">
               <SelectValue placeholder="Choose one">
                 {(v) => labelFor(HEARD_FROM_OPTIONS, v) ?? "Choose one"}
               </SelectValue>

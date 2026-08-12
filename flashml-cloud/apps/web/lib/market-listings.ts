@@ -58,9 +58,17 @@ export function recordLabel(ask: MarketAsk): string {
 
 /** The ask, as a price line. Donated first: zero is a legal ask and its
  * label is the word, not the number. */
-export function askPriceLabel(ask: MarketAsk): string {
+export function askPriceLabel(ask: MarketAsk | MarketListing): string {
   if (ask.donated) return "donated";
   return `${formatZc(ask.ask_zc_per_hour)} ZC/hour`;
+}
+
+/** The API's fixed-parity cash-equivalent label for an ask. It is already
+ * formatted server-side, so the marketplace never recomputes it locally. */
+export function askUsdEquivalentLabel(
+  ask: MarketAsk | MarketListing
+): string {
+  return ask.usd_equivalent_label;
 }
 
 /** The host's own listing, as a status line. The state vocabulary is the

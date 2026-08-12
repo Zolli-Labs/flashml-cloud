@@ -34,14 +34,14 @@ function SelectTrigger({
   children,
   ...props
 }: SelectPrimitive.Trigger.Props & {
-  size?: "sm" | "default"
+  size?: "sm" | "default" | "lg"
 }) {
   return (
     <SelectPrimitive.Trigger
       data-slot="select-trigger"
       data-size={size}
       className={cn(
-        "flex w-fit items-center justify-between gap-1.5 rounded-lg border border-input bg-transparent py-2 pr-2 pl-2.5 text-sm whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-placeholder:text-muted-foreground data-[size=default]:h-8 data-[size=sm]:h-7 data-[size=sm]:rounded-[min(var(--radius-md),10px)] *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 dark:bg-input/30 dark:hover:bg-input/50 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "flex w-fit items-center justify-between gap-1.5 rounded-lg border border-input bg-transparent py-2 pr-2 pl-2.5 text-sm whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-placeholder:text-muted-foreground data-[size=default]:h-8 data-[size=sm]:h-7 data-[size=sm]:rounded-[min(var(--radius-md),10px)] data-[size=lg]:h-11 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 dark:bg-input/30 dark:hover:bg-input/50 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className
       )}
       {...props}
@@ -63,21 +63,18 @@ function SelectContent({
   sideOffset = 4,
   align = "center",
   alignOffset = 0,
-  // Base UI's default. Leave it alone.
+  // Deliberately NOT Base UI's default (`true` overlays the trigger like a
+  // native <select>, which in a form reads as the menu detaching and
+  // floating over the fields). `false` gives the conventional web dropdown:
+  // a panel anchored below the trigger.
   //
-  // It was briefly set to `false` here to "fix" a popup that appeared
-  // collapsed. That was a misdiagnosis: the popup had no BACKGROUND (the
-  // theme was missing `--color-popover`, so `bg-popover` generated nothing)
-  // and the page showing through it read as a broken menu. Base UI already
-  // handles the case this was meant to address — item alignment "is
-  // automatically disabled if there is not enough space", per its own docs.
-  //
-  // `false` also broke opening by click. `SelectTrigger` opens the popup
-  // UNDER the cursor on mousedown so the following mouseup can land on an
-  // item; positioned below the trigger instead, that mouseup lands back on
-  // the trigger and toggles the popup straight shut. The menu flashed open
-  // and vanished unless you held the button down.
-  alignItemWithTrigger = true,
+  // Two old fears kept this at `true` and both are gone. The "collapsed
+  // popup" was a missing BACKGROUND (the theme then lacked `--color-popover`,
+  // so `bg-popover` generated nothing) — mapped in `@theme` now. The
+  // flash-close on click (mouseup landing back on the trigger toggling it
+  // shut) was real in older Base UI; 1.6.0's SelectTrigger mouseup handler
+  // explicitly ignores releases on the trigger or positioner.
+  alignItemWithTrigger = false,
   ...props
 }: SelectPrimitive.Popup.Props &
   Pick<

@@ -25,8 +25,8 @@ import {
  *
  * The one rule it enforces on its own, because it is a rule about layout:
  * ZC and USD are rendered as two separate figures in two separate cells,
- * with no row, cell or label that could hold a total. There is no exchange
- * rate between them.
+ * with no row, cell or label that could hold a total. The scheduler may use
+ * fixed parity internally, but this card shows only settlement provenance.
  */
 export function RoutingCard({
   panel,

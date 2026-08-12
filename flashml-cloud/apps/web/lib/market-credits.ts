@@ -20,10 +20,9 @@
  * genuinely has no other side. A leg shape this module does not recognise
  * is named raw rather than paraphrased into the nearest known sentence.
  *
- * Nothing here converts ZC to any other denomination. The prices page puts
- * ZC and vendor currencies side by side and never sums them; this module
- * has no function that could, because a helper that cannot exist cannot
- * drift into existing.
+ * Wallet USD values arrive from the API as display strings under the fixed
+ * parity policy. This module formats the source ZC integers but never re-prices
+ * them locally, so product policy cannot drift between server and browser.
  */
 import type {
   CreditsBalance,
@@ -186,14 +185,14 @@ export function walletTiles(balance: CreditsBalance): WalletTile[] {
     {
       icon: "spendable",
       label: "ZC spendable",
-      valueText: formatZc(balance.spendable_zc),
-      sub: "yours to commit to work",
+      valueText: `${formatZc(balance.spendable_zc)} ZC`,
+      sub: `$${balance.spendable_usd} · yours to commit to work`,
     },
     {
       icon: "held",
       label: "ZC held in escrow",
-      valueText: formatZc(balance.held_zc),
-      sub: "committed against claimed work; settles only for accepted work",
+      valueText: `${formatZc(balance.held_zc)} ZC`,
+      sub: `$${balance.held_usd} · committed against claimed work; settles only for accepted work`,
     },
     {
       icon: "earned",

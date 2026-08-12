@@ -34,6 +34,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
+from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api.enrolment import (
     DeviceCodeExpired,
@@ -384,3 +385,50 @@ def test_a_revoked_machine_cannot_be_claimed_by_a_different_account(db, owner, o
     second = enrolment.start_device_code(db, node_id, "host", "linux")
     with pytest.raises(NodeAlreadyEnrolled):
         enrolment.approve_device_code(db, second["user_code"], other_owner)
+
+
+def test_stale_ephemeral_machine_is_revoked_unbound_and_hidden(db, owner):
+    pool_id = str(dbmod.create_pool(db, name="Rental pool", owner_id=owner)["id"])
+    started = enrolment.start_device_code(
+        db,
+        _node_id("ephemeral-expiry"),
+        "runpod",
+        "linux",
+        lifecycle="ephemeral",
+    )
+    machine_id = enrolment.approve_device_code(db, started["user_code"], owner)
+    enrolment.redeem_device_code(db, started["device_code"])
+    dbmod.bind_machine_pool(db, machine_id=str(machine_id), pool_id=pool_id)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines "
+            "set last_seen_at = now() - interval '2 hours' where id = %s",
+            (machine_id,),
+        )
+
+    expired = dbmod.expire_stale_ephemeral_machines(db, stale_seconds=900)
+
+    assert expired == [str(machine_id)]
+    assert dbmod.pool_ids_bound_to_machine(db, str(machine_id)) == []
+    assert dbmod.fetch_machine_for_owner(db, str(machine_id), owner)["status"] == "revoked"
+    visible_ids = {
+        str(row["id"]) for row in dbmod.list_machines_for_owner(db, owner)
+    }
+    assert str(machine_id) not in visible_ids
+
+
+def test_stale_persistent_machine_is_never_auto_revoked(db, owner):
+    started = enrolment.start_device_code(
+        db, _node_id("persistent-expiry"), "laptop", "linux"
+    )
+    machine_id = enrolment.approve_device_code(db, started["user_code"], owner)
+    enrolment.redeem_device_code(db, started["device_code"])
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines "
+            "set last_seen_at = now() - interval '30 days' where id = %s",
+            (machine_id,),
+        )
+
+    assert dbmod.expire_stale_ephemeral_machines(db, stale_seconds=900) == []
+    assert dbmod.fetch_machine_for_owner(db, str(machine_id), owner)["status"] == "active"

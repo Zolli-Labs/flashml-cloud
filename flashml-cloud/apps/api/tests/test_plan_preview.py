@@ -9,9 +9,9 @@ What is pinned here:
 
 - **Three plans, each carrying its basis and its n.** A plan is never better
   founded than the thinnest evidence behind any machine it allocates to.
-- **ZC and USD are never summed.** `Cost` has no total by construction and
-  the JSON grows none — including in the budget verdict, which is answered per
-  currency because comparing across them IS the exchange rate M4 forbids.
+- **ZC and USD settlement totals stay separate.** The fixed 1 ZC = 1 USD
+  policy adds a normalized USD value for comparison without rewriting either
+  source total; the budget verdict remains per settlement currency.
 - **Gates before price.** The predicate is the runtime's own, injected; a
   machine the gates refuse is excluded however free it is.
 - **Degrading beats erroring.** With routing unconfigured, or no machine
@@ -306,10 +306,8 @@ def test_three_plans_each_carry_a_basis_and_an_n(db, client):
         assert candidate(body, machine)["capability_class"] == "gpu-24gb"
 
 
-def test_zc_and_usd_are_reported_side_by_side_and_never_summed(db, client):
-    """Decision M4. There is no exchange rate between a Zolli credit and a
-    dollar, so a field that combined them would be inventing one — and
-    `contributions.py` refuses that in the strongest terms it has."""
+def test_zc_and_usd_keep_settlement_totals_and_add_normalized_value(db, client):
+    """Source totals remain visible while 1 ZC = 1 USD makes them comparable."""
     owner = make_user(db)
     make_machine(db, owner)
     job = make_job(db, owner)
@@ -318,14 +316,22 @@ def test_zc_and_usd_are_reported_side_by_side_and_never_summed(db, client):
     body = preview(client, owner, job_id=job, deadline=3600, budget_zc=1000)
 
     for plan in body["plans"]:
-        assert set(plan["cost"]) == {"zc", "usd"}
+        assert set(plan["cost"]) == {"zc", "usd", "total_usd_value"}
+        assert plan["cost"]["total_usd_value"] == pytest.approx(
+            plan["cost"]["zc"] + plan["cost"]["usd"]
+        )
         assert set(plan["within_budget"]) == {"zc", "usd"}
         # A budget given in one currency answers in that currency only. None
         # is "nobody asked", never "it fits".
         assert plan["within_budget"]["zc"] is True
         assert plan["within_budget"]["usd"] is None
         for allocation in plan["allocations"]:
-            assert set(allocation["cost"]) == {"zc", "usd"}
+            assert set(allocation["cost"]) == {
+                "zc", "usd", "total_usd_value"
+            }
+            assert allocation["cost"]["total_usd_value"] == pytest.approx(
+                allocation["cost"]["zc"] + allocation["cost"]["usd"]
+            )
 
 
 def test_workspace_capacity_is_free_and_the_open_market_is_priced(db, client):
@@ -345,7 +351,7 @@ def test_workspace_capacity_is_free_and_the_open_market_is_priced(db, client):
 
     assert plans["cheapest"]["cost"]["zc"] == 0.0
     assert plans["fastest"]["cost"]["zc"] > 0.0
-    # Never converted, never guessed: nothing here sells USD capacity.
+    # No external vendor is in this fixture, so the USD settlement total is 0.
     assert plans["fastest"]["cost"]["usd"] == 0.0
 
     assert candidate(body, ours)["venue"] == "workspace"
@@ -354,7 +360,10 @@ def test_workspace_capacity_is_free_and_the_open_market_is_priced(db, client):
     assert market["venue"] == "market"
     # Millicredits in the ledger, credits in a quote.
     assert market["price_zc_per_hour"] == 2.0
-    assert market["price_label"] == "priced"
+    assert market["price_per_hour"] == 2.0
+    assert market["price_usd_per_hour"] == 2.0
+    assert market["price_label"] == "2.00 ZC/hour"
+    assert market["usd_equivalent_label"] == "$2.00/hour equivalent"
 
 
 def test_a_teammates_machine_is_free_and_a_strangers_is_not(db, client):
@@ -446,7 +455,10 @@ def test_the_preview_matches_nothing_and_moves_no_credit(db, client):
     before = counts()
     preview(client, owner, job_id=job, deadline=3600)
     assert counts() == before
-    assert mk.balances(db, owner) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, owner) == {
+        "spendable": mk.STARTING_GRANT_ZC,
+        "escrow": 0,
+    }
 
     with db.cursor() as cur:
         cur.execute(

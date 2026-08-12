@@ -34,7 +34,7 @@ pip install flashnode
 ```
 
 ```bash
-flashnode login --coordinator https://flashml-api.onrender.com
+flashnode login --coordinator https://flashml-api.onrender.com --ephemeral
 ```
 
 This prints a short code and a URL — `Your code: XXXX-XXXX`,
@@ -42,6 +42,13 @@ This prints a short code and a URL — `Your code: XXXX-XXXX`,
 the code, and the terminal prints `Approved. This machine is enrolled` on
 its own. (`--coordinator` is required; there's no default it falls back
 to.)
+
+`--ephemeral` is required for rented pods. It replaces any FlashNode identity
+left in a reused home directory, so a pod handed to another Zolli account does
+not collide with the previous renter. The cloud also retires the machine after
+15 minutes without a heartbeat, removing it from the previous account and its
+workspace bindings. Do not use this flag on a laptop or workstation whose
+identity should survive being offline.
 
 It then prints the exact command to run next, with the coordinator
 already filled in (flashnode 0.3.5 — earlier versions printed a bare

@@ -677,10 +677,10 @@ export interface JobContribution {
 // conventions, and the types below are written to make breaking them
 // awkward:
 //
-//   1. ZC and USD sit SIDE BY SIDE and are never summed. There is no
-//      exchange rate. `PreviewCost` therefore has exactly two fields and
-//      deliberately no third that adds them, and nothing downstream may add
-//      one.
+//   1. ZC and USD retain separate settlement fields. The API also supplies a
+//      normalized comparison value under the fixed 1 ZC = $1 USD policy. The
+//      routing card deliberately does not render that value as a combined
+//      cash total.
 //   2. Every figure carries its `basis` and its `n`.
 //   3. Anything not derivable is `null` — *not observed*, never 0. That is
 //      why `makespan_seconds`, `basis`, `n`, `acceptance_rate` and friends
@@ -694,10 +694,12 @@ export interface JobContribution {
 // those keys entirely. A consumer that assumes they are present renders the
 // router's verdict for a job the router never looked at.
 
-/** A cost vector. Two currencies, never a total — see invariant 1. */
+/** A cost vector. Source currencies remain separate; their fixed-rate
+ * comparable value is supplied for scheduler ordering, not settlement. */
 export interface PreviewCost {
   zc: number;
   usd: number;
+  total_usd_value: number;
 }
 
 /** A duration estimate with the evidence behind it. `null` for the whole
@@ -1695,13 +1697,19 @@ export function updateProfile(
 // The seven routes the 2026-08-12 plan put over marketplace.py / prices.py.
 // Every money figure is MILLICREDITS as an integer (1 ZC = 1000) — the API
 // settles in integers so it cannot round, and formatting for display lives
-// in lib/market-credits.ts where a test can reach it. Nothing here converts
-// ZC to USD or back: the two travel in separate fields and meet only on
-// screen, side by side.
+// in lib/market-credits.ts where a test can reach it. Fixed-parity display
+// strings arrive from the API alongside source-denominated settlement fields;
+// the browser does not calculate the policy value itself.
 
 export interface CreditsBalance {
   spendable_zc: number;
   held_zc: number;
+  /** Display strings supplied by the API alongside integer balances. The
+   * console never re-prices the wallet locally: these are the values the
+   * current API says its ZC amounts represent. */
+  usd_per_zc: string;
+  spendable_usd: string;
+  held_usd: string;
   /** Lifetime sums read out of the ledger. True zeros for a fresh account
    * — a lifetime sum of zero is a fact, unlike an unmeasured metric; the
    * tiles are labelled "lifetime" so 0 reads as "nothing yet". */
@@ -1715,6 +1723,73 @@ export interface CreditsBalance {
 
 export function getCredits(): Promise<CreditsBalance> {
   return request<CreditsBalance>("/v1alpha1/credits");
+}
+
+/** A requester's own credit-request record. Amounts remain integer
+ * millicredits even after approval so the UI can distinguish what was
+ * requested from what was granted without rounding either. */
+export interface CreditRequest {
+  id: string;
+  user_id: string;
+  requested_zc: number;
+  approved_zc: number | null;
+  purpose: string;
+  status: "pending" | "approved" | "declined";
+  requested_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+}
+
+/** `GET /v1alpha1/admin/credit-requests` adds the requester profile and
+ * their live account balances to the base request record. */
+export interface AdminCreditRequest extends CreditRequest {
+  display_name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  company_name: string | null;
+  role: string | null;
+  team_size: string | null;
+  spendable_zc: number;
+  escrow_zc: number;
+}
+
+export function listCreditRequests(): Promise<CreditRequest[]> {
+  return request<CreditRequest[]>("/v1alpha1/credit-requests");
+}
+
+export function submitCreditRequest(body: {
+  requested_zc: number;
+  purpose: string;
+}): Promise<CreditRequest> {
+  return request<CreditRequest>("/v1alpha1/credit-requests", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listAdminCreditRequests(
+  status: "pending" | "approved" | "declined" = "pending"
+): Promise<AdminCreditRequest[]> {
+  return request<AdminCreditRequest[]>(
+    `/v1alpha1/admin/credit-requests?status=${encodeURIComponent(status)}`
+  );
+}
+
+export function approveCreditRequest(
+  requestId: string,
+  approvedZc: number
+): Promise<CreditRequest> {
+  return request<CreditRequest>(
+    `/v1alpha1/admin/credit-requests/${encodeURIComponent(requestId)}/approve`,
+    { method: "POST", body: JSON.stringify({ approved_zc: approvedZc }) }
+  );
+}
+
+export function declineCreditRequest(requestId: string): Promise<CreditRequest> {
+  return request<CreditRequest>(
+    `/v1alpha1/admin/credit-requests/${encodeURIComponent(requestId)}/decline`,
+    { method: "POST" }
+  );
 }
 
 /** One leg of one ledger movement. `mine` says whether the account belongs
@@ -1768,8 +1843,10 @@ export interface MarketAsk {
   machine_name: string | null;
   gpu_label: string | null;
   ask_zc_per_hour: number;
+  ask_usd_per_hour: string;
   donated: boolean;
   price_label: string;
+  usd_equivalent_label: string;
   max_concurrent_tasks: number;
   acceptance_rate: number | null;
   resolved_n: number | null;
@@ -1806,10 +1883,12 @@ export interface MarketListing {
   machine_id: string;
   capability_class: string;
   ask_zc_per_hour: number;
+  ask_usd_per_hour: string;
   max_concurrent_tasks: number;
   state: string;
   donated: boolean;
   price_label: string;
+  usd_equivalent_label: string;
   created_at: string;
 }
 
@@ -1893,6 +1972,7 @@ export interface PriceQuote {
   max_age_seconds: number;
   source: string;
   observed_by: string | null;
+  zc_equivalent_amount: string | null;
 }
 
 /** A venue with no quote, shaped like one so the view cannot skip it.
@@ -1908,6 +1988,7 @@ export interface PriceUnpriced {
   stale: null;
   source: null;
   observed_by: null;
+  zc_equivalent_amount: null;
 }
 
 /** One observation of a class's book, recorded as the book moved. The
@@ -1916,6 +1997,7 @@ export interface PriceUnpriced {
 export interface PricePoint {
   at: string;
   best_ask_zc: number | null;
+  best_ask_usd: string | null;
   open_asks: number;
 }
 
@@ -1926,7 +2008,9 @@ export interface PricePoint {
 export interface ZcRung {
   capability_class: string;
   reference_zc_per_hour: number;
+  reference_usd_per_hour: string;
   best_ask_zc: number | null;
+  best_ask_usd: string | null;
   change_zc: number | null;
   depth: number;
   history: PricePoint[];

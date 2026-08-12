@@ -18,6 +18,7 @@ import {
   cloudApiBase,
   acceptInvite,
   approveAccessRequest,
+  approveCreditRequest,
   connectGitHubInstallation,
   disconnectGitHubInstallation,
   listGitHubInstallations,
@@ -27,9 +28,11 @@ import {
   createPool,
   createPoolInvite,
   declineAccessRequest,
+  declineCreditRequest,
   deleteJobArtifacts,
   fetchJobArtifactBlob,
   getJob,
+  getCredits,
   getJobArtifactUrl,
   getMe,
   getMyContributions,
@@ -37,6 +40,8 @@ import {
   getPool,
   getPoolInviteState,
   listAccessRequests,
+  listAdminCreditRequests,
+  listCreditRequests,
   listJobArtifacts,
   listJobContributions,
   getJobResult,
@@ -49,6 +54,7 @@ import {
   renamePool,
   revokePoolInvites,
   submitAccessRequest,
+  submitCreditRequest,
   submitFromRepo,
   unbindMachineFromPool,
   updateProfile,
@@ -1155,6 +1161,130 @@ describe("cloud-api", () => {
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toContain("/decline");
       expect(init.method).toBe("POST");
+    });
+  });
+
+  describe("credit requests", () => {
+    it("keeps the wallet's exact integer and API-provided USD response fields", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          spendable_zc: 10_125,
+          held_zc: 2_500,
+          usd_per_zc: "1.00",
+          spendable_usd: "10.13",
+          held_usd: "2.50",
+          lifetime: {
+            earned_zc: 0,
+            spent_zc: 0,
+            granted_zc: 10_125,
+            refunded_zc: 0,
+          },
+        })
+      );
+
+      const balance = await getCredits();
+
+      expect(balance.spendable_zc).toBe(10_125);
+      expect(balance.held_zc).toBe(2_500);
+      expect(balance.spendable_usd).toBe("10.13");
+      expect(balance.held_usd).toBe("2.50");
+      expect(balance.lifetime.granted_zc).toBe(10_125);
+    });
+
+    it("submits an integer millicredit amount and purpose", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(201, { id: "r1", requested_zc: 10_125, status: "pending" })
+      );
+
+      const result = await submitCreditRequest({
+        requested_zc: 10_125,
+        purpose: "Run our first batch evaluation.",
+      });
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toContain("/v1alpha1/credit-requests");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        requested_zc: 10_125,
+        purpose: "Run our first batch evaluation.",
+      });
+      expect(result.status).toBe("pending");
+    });
+
+    it("lists the requester history and admin pending queue", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(200, []))
+        .mockResolvedValueOnce(jsonResponse(200, []));
+
+      await listCreditRequests();
+      await listAdminCreditRequests("pending");
+
+      expect(fetchMock.mock.calls[0][0]).toContain("/v1alpha1/credit-requests");
+      expect(fetchMock.mock.calls[1][0]).toContain(
+        "/v1alpha1/admin/credit-requests?status=pending"
+      );
+    });
+
+    it("keeps the admin queue's requester, request, and live-balance fields", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, [
+          {
+            id: "r1",
+            user_id: "u1",
+            requested_zc: 50_000,
+            approved_zc: null,
+            purpose: "Evaluate a testing workload.",
+            status: "pending",
+            requested_at: "2026-08-12T00:00:00Z",
+            decided_at: null,
+            decided_by: null,
+            display_name: "Ha Nguyen",
+            first_name: "Ha",
+            last_name: "Nguyen",
+            company_name: "Zolli Labs",
+            role: "researcher",
+            team_size: "2_5",
+            spendable_zc: 10_125,
+            escrow_zc: 2_500,
+          },
+        ])
+      );
+
+      const [request] = await listAdminCreditRequests("pending");
+
+      expect(request).toMatchObject({
+        id: "r1",
+        user_id: "u1",
+        requested_zc: 50_000,
+        approved_zc: null,
+        purpose: "Evaluate a testing workload.",
+        status: "pending",
+        spendable_zc: 10_125,
+        escrow_zc: 2_500,
+      });
+      expect(request.requested_at).toBe("2026-08-12T00:00:00Z");
+    });
+
+    it("approves an encoded request id with millicredits and declines without an amount", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(200, { id: "r1", status: "approved" }))
+        .mockResolvedValueOnce(jsonResponse(200, { id: "r1", status: "declined" }));
+
+      await approveCreditRequest("a b/c", 25_000);
+      await declineCreditRequest("a b/c");
+
+      const [approveUrl, approveInit] = fetchMock.mock.calls[0];
+      expect(approveUrl).toContain(encodeURIComponent("a b/c"));
+      expect(approveUrl).toContain("/approve");
+      expect(JSON.parse(approveInit.body)).toEqual({ approved_zc: 25_000 });
+      const [declineUrl, declineInit] = fetchMock.mock.calls[1];
+      expect(declineUrl).toContain("/decline");
+      expect(declineInit.body).toBeUndefined();
     });
   });
 

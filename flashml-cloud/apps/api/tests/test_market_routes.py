@@ -126,6 +126,13 @@ def _new_user(db, *, admitted: bool = True) -> str:
     return user_id
 
 
+def _new_admin(db) -> str:
+    user_id = _new_user(db)
+    with db.cursor() as cur:
+        cur.execute("update public.profiles set is_admin = true where id = %s", (user_id,))
+    return user_id
+
+
 def _browser_jwt(user_id: str) -> str:
     return jwt.encode(
         {"sub": user_id, "aud": "authenticated", "exp": time.time() + 3600},
@@ -264,6 +271,247 @@ def test_held_tracks_an_escrow_hold(client, db):
     assert body["spendable_zc"] == marketmod.STARTING_GRANT_ZC - 1000
 
 
+def test_credits_include_decimal_usd_balances(client, db):
+    user, admin = _new_user(db), _new_admin(db)
+    client.get("/v1alpha1/credits", headers=_auth(user))
+    request = marketmod.create_credit_request(
+        db, user, requested_zc=1234, purpose="Test rented GPUs"
+    )
+    marketmod.approve_credit_request(
+        db, str(request["id"]), admin_id=admin, approved_zc=1234
+    )
+
+    body = client.get("/v1alpha1/credits", headers=_auth(user)).json()
+
+    assert body["usd_per_zc"] == "1.00"
+    assert body["spendable_usd"] == "11.23"
+    assert body["held_usd"] == "0.00"
+
+
+# ---------------------------------------------------------------------------
+# /v1alpha1/credit-requests
+# ---------------------------------------------------------------------------
+
+
+def test_credit_requests_require_sign_in(client):
+    assert client.get("/v1alpha1/credit-requests").status_code == 401
+    assert client.post("/v1alpha1/credit-requests", json={}).status_code == 401
+
+
+def test_credit_requests_require_admission(client, db):
+    user = _new_user(db, admitted=False)
+
+    assert client.get(
+        "/v1alpha1/credit-requests", headers=_auth(user)
+    ).status_code == 403
+    assert client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "Test rented GPUs"},
+    ).status_code == 403
+
+
+def test_credit_request_rejects_invalid_amount_and_purpose(client, db):
+    user = _new_user(db)
+
+    invalid_amount = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 1.5, "purpose": "Test rented GPUs"},
+    )
+    invalid_purpose = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "   "},
+    )
+
+    assert invalid_amount.status_code == 400
+    assert invalid_purpose.status_code == 400
+
+
+def test_credit_request_trims_purpose_and_history_is_owner_scoped(client, db):
+    user, other = _new_user(db), _new_user(db)
+    created = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "  Test rented GPUs  "},
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["purpose"] == "Test rented GPUs"
+    assert client.get(
+        "/v1alpha1/credit-requests", headers=_auth(user)
+    ).json() == [created.json()]
+    assert client.get(
+        "/v1alpha1/credit-requests", headers=_auth(other)
+    ).json() == []
+
+
+def test_credit_request_rejects_a_second_pending_request(client, db):
+    user = _new_user(db)
+    payload = {"requested_zc": 50_000, "purpose": "Test rented GPUs"}
+
+    assert client.post(
+        "/v1alpha1/credit-requests", headers=_auth(user), json=payload
+    ).status_code == 201
+    assert client.post(
+        "/v1alpha1/credit-requests", headers=_auth(user), json=payload
+    ).status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# /v1alpha1/admin/credit-requests
+# ---------------------------------------------------------------------------
+
+
+def test_admin_credit_requests_require_an_admin(client, db):
+    user = _new_user(db)
+
+    assert client.get(
+        "/v1alpha1/admin/credit-requests", headers=_auth(user)
+    ).status_code == 403
+
+
+def test_admin_credit_requests_reject_invalid_status(client, db):
+    admin = _new_admin(db)
+
+    response = client.get(
+        "/v1alpha1/admin/credit-requests",
+        headers=_auth(admin),
+        params={"status": "waiting"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_admin_credit_requests_include_requester_profile_and_balances(client, db):
+    user, admin = _new_user(db), _new_admin(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set display_name = %s, company_name = %s"
+            " where id = %s",
+            ("GPU Tester", "Zolli Labs", user),
+        )
+    marketmod.grant_starting_credits(db, user)
+    created = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "Test rented GPUs"},
+    ).json()
+
+    response = client.get(
+        "/v1alpha1/admin/credit-requests", headers=_auth(admin)
+    )
+
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["id"] == created["id"])
+    assert row["user_id"] == user
+    assert row["display_name"] == "GPU Tester"
+    assert row["company_name"] == "Zolli Labs"
+    assert row["spendable_zc"] == marketmod.STARTING_GRANT_ZC
+    assert row["escrow_zc"] == 0
+
+
+def test_admin_decision_routes_require_sign_in(client):
+    request_id = str(uuid.uuid4())
+
+    assert client.post(
+        f"/v1alpha1/admin/credit-requests/{request_id}/approve",
+        json={"approved_zc": 25_000},
+    ).status_code == 401
+    assert client.post(
+        f"/v1alpha1/admin/credit-requests/{request_id}/decline"
+    ).status_code == 401
+
+
+def test_admin_decision_routes_require_an_admin(client, db):
+    user = _new_user(db)
+    request_id = str(uuid.uuid4())
+
+    assert client.post(
+        f"/v1alpha1/admin/credit-requests/{request_id}/approve",
+        headers=_auth(user),
+        json={"approved_zc": 25_000},
+    ).status_code == 403
+    assert client.post(
+        f"/v1alpha1/admin/credit-requests/{request_id}/decline",
+        headers=_auth(user),
+    ).status_code == 403
+
+
+def test_admin_can_replace_the_requested_amount(client, db):
+    user, admin = _new_user(db), _new_admin(db)
+    created = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "Test rented GPUs"},
+    ).json()
+
+    response = client.post(
+        f"/v1alpha1/admin/credit-requests/{created['id']}/approve",
+        headers=_auth(admin),
+        json={"approved_zc": 25_000},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["approved_zc"] == 25_000
+    assert response.json()["status"] == "approved"
+
+
+def test_admin_rejects_invalid_approval_amount(client, db):
+    user, admin = _new_user(db), _new_admin(db)
+    created = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "Test rented GPUs"},
+    ).json()
+
+    response = client.post(
+        f"/v1alpha1/admin/credit-requests/{created['id']}/approve",
+        headers=_auth(admin),
+        json={"approved_zc": True},
+    )
+
+    assert response.status_code == 400
+
+
+def test_repeated_approval_returns_not_found_without_a_second_adjustment(client, db):
+    user, admin = _new_user(db), _new_admin(db)
+    created = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "Test rented GPUs"},
+    ).json()
+    url = f"/v1alpha1/admin/credit-requests/{created['id']}/approve"
+
+    assert client.post(url, headers=_auth(admin), json={"approved_zc": 25_000}).status_code == 200
+    assert client.post(url, headers=_auth(admin), json={"approved_zc": 25_000}).status_code == 404
+
+    body = client.get("/v1alpha1/credits", headers=_auth(user)).json()
+    assert body["spendable_zc"] == marketmod.STARTING_GRANT_ZC + 25_000
+
+
+def test_admin_can_decline_a_pending_credit_request(client, db):
+    user, admin = _new_user(db), _new_admin(db)
+    created = client.post(
+        "/v1alpha1/credit-requests",
+        headers=_auth(user),
+        json={"requested_zc": 50_000, "purpose": "Test rented GPUs"},
+    ).json()
+
+    response = client.post(
+        f"/v1alpha1/admin/credit-requests/{created['id']}/decline",
+        headers=_auth(admin),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "declined"
+    assert client.post(
+        f"/v1alpha1/admin/credit-requests/{created['id']}/decline",
+        headers=_auth(admin),
+    ).status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # GET /v1alpha1/credits/ledger
 # ---------------------------------------------------------------------------
@@ -299,7 +547,9 @@ def test_a_hold_movement_carries_both_legs_of_the_pair(client, db):
     host, buyer = _new_user(db), _new_user(db)
     client.get("/v1alpha1/credits", headers=_auth(buyer))
     _, _, _, match = _listed_match(db, host=host, buyer=buyer)
-    marketmod.hold_escrow_on_claim(db, match_id=str(match["id"]), lease_id="lease-2")
+    marketmod.hold_escrow_on_claim(
+        db, match_id=str(match["id"]), lease_id=f"lease-{uuid.uuid4()}"
+    )
 
     movements = client.get(
         "/v1alpha1/credits/ledger", headers=_auth(buyer)
@@ -446,7 +696,7 @@ def test_the_book_shows_open_asks_with_their_record(client, db):
     host, buyer = _new_user(db), _new_user(db)
     machine = _machine(db, host, capabilities=GPU_24GB)
     created = marketmod.create_listing(
-        db, machine_id=machine, owner_id=host, ask_zc_per_hour=1200
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=800
     )
 
     body = client.get(
@@ -454,8 +704,11 @@ def test_the_book_shows_open_asks_with_their_record(client, db):
     ).json()
     ask = next(a for a in body["asks"] if a["id"] == str(created["id"]))
     assert ask["capability_class"] == "gpu-24gb"
-    assert ask["ask_zc_per_hour"] == 1200
+    assert ask["ask_zc_per_hour"] == 800
     assert ask["donated"] is False
+    assert ask["ask_usd_per_hour"] == "0.80"
+    assert ask["price_label"] == "0.80 ZC/hour"
+    assert ask["usd_equivalent_label"] == "$0.80/hour equivalent"
     # Unproven host: the rate is null, never an invented number.
     assert ask["acceptance_rate"] is None
     assert body["mine"] == []
@@ -463,7 +716,10 @@ def test_the_book_shows_open_asks_with_their_record(client, db):
     mine = client.get(
         "/v1alpha1/market/listings", headers=_auth(host)
     ).json()["mine"]
-    assert str(created["id"]) in [m["id"] for m in mine]
+    own = next(m for m in mine if m["id"] == str(created["id"]))
+    assert own["ask_usd_per_hour"] == "0.80"
+    assert own["price_label"] == "0.80 ZC/hour"
+    assert own["usd_equivalent_label"] == "$0.80/hour equivalent"
 
 
 def test_withdraw_removes_the_ask_and_a_second_withdraw_is_404(client, db):
@@ -558,6 +814,7 @@ def test_venues_with_no_quote_render_not_observed(client, db):
     assert {"owned", "fc-gpu"} <= unpriced
     for row in body["unpriced"]:
         assert row["amount"] is None
+        assert row["zc_equivalent_amount"] is None
         assert row["state"] == "not observed"
 
 
@@ -877,5 +1134,9 @@ def test_prices_board_carries_history_depth_and_change(client, db):
     assert row["history"][0]["best_ask_zc"] == 900
     # A single observation has no 24h-ago pair: change is null, not 0.
     assert row["change_zc"] is None
+    assert row["reference_usd_per_hour"] == "0.10"
+    assert row["best_ask_usd"] == "0.90"
     assert body["board"]["open_asks_total"] >= 1
     assert body["board"]["live_classes"] >= 1
+    usd_quote = next(q for q in body["quotes"] if q["currency"] == "USD")
+    assert usd_quote["zc_equivalent_amount"] == usd_quote["amount"]

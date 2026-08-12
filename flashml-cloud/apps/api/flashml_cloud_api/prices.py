@@ -23,21 +23,19 @@ be readable and testable without a database, and the rows are facts. It is
 also what lets the staleness boundary be pinned by a test that constructs two
 timestamps rather than by one that has to age a database row.
 
-WHAT THIS MODULE WILL NOT DO
-----------------------------
+FIXED VALUE, NARROWLY APPLIED
+-----------------------------
 
-**It never converts between currencies, and it never sums across them.**
-There is no rate table here, no ``fx``, no ``convert_to_usd``, and adding one
-is the single change that would turn a defensible comparison back into a
-made-up one. ZC and USD must never be summed — that is absolute. So is USD
-and CU: ``CU`` is Alibaba's Compute Unit, it is not money, and no published
-CU price has been cited anywhere in this repository. An unconverted CU figure
-is honest; a dollar figure derived from a rate nobody can point at is not.
+**ZC and USD normalize at 1:1 on wallet and marketplace surfaces.** The
+active testing-credit policy fixes 1 ZC = 1 USD. Helpers in this module expose
+that value without replacing the source denomination: a community ask remains
+ZC settlement and a RunPod quote remains USD.
 
-The refusal is generic rather than a pair of special cases: :func:`combine`
-requires one currency across everything it adds and raises
-:class:`CurrencyMismatch` otherwise, so every future denomination inherits the
-rule without anybody remembering to extend it.
+This is not a general FX table. ``CU`` is Alibaba's Compute Unit rather than
+money, and no CU-to-USD value is published here; CNY also has no policy rate.
+:func:`combine` still requires one source currency because its return type
+holds one denomination. Cross-source comparison uses explicit normalized
+fields instead of collapsing settlement provenance into that type.
 
 **It never converts a unit whose factor is a convention.** Seconds to hours
 is 3600 and always was. GB-month to GB-hour requires choosing 730 or 720 or
@@ -69,6 +67,8 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
+from flashml_cloud_api import marketplace as marketplacemod
+
 #: How old a quote may be before the comparison view must label it stale.
 #:
 #: Twenty-four hours. RunPod's catalogue moves on no schedule anyone
@@ -87,8 +87,8 @@ DEFAULT_MAX_AGE = timedelta(hours=24)
 #:
 #: `CU` is in this set and is NOT money. It is here because it is the
 #: denomination of a number we recorded, and keeping it in the same column as
-#: USD is what makes the no-conversion rule enforceable by one code path
-#: instead of by everybody's memory.
+#: USD and ZC have the fixed policy value above. CU and CNY remain source
+#: denominations with no conversion supplied by this module.
 CURRENCIES = frozenset({"USD", "CNY", "ZC", "CU"})
 
 #: What one `amount` buys. Mirrors 0019's check constraint.
@@ -167,10 +167,9 @@ PRICED_PROVIDERS = ("runpod", "alibaba-fc")
 class CurrencyMismatch(ValueError):
     """Two amounts in different denominations were about to be combined.
 
-    The one refusal this module exists to make. There is no rate anywhere in
-    this repository, so the only honest outcome is to stop — a total that
-    silently added USD to CU (or to ZC) would be a number no reader could
-    reproduce and no judge could check.
+    ``combine`` returns one source-denominated :class:`Cost`, so it cannot
+    preserve two settlement currencies. ZC/USD normalized comparison is
+    explicit elsewhere; CU and CNY have no policy rate at all.
     """
 
 
@@ -299,6 +298,54 @@ class Cost:
 # ---------------------------------------------------------------------------
 
 
+def normalized_usd_amount(
+    currency: str, amount: Decimal | int | str
+) -> Decimal | None:
+    """Comparable USD value for ZC or USD, preserving the source elsewhere.
+
+    ``None`` for CNY, CU, or an unknown denomination: the fixed testing-credit
+    policy is deliberately not a general exchange-rate service.
+    """
+    exact = _exact(amount, "amount")
+    if currency == "USD":
+        return exact
+    if currency == "ZC":
+        return exact * marketplacemod.USD_PER_ZC
+    return None
+
+
+def zc_equivalent_amount(
+    currency: str, amount: Decimal | int | str
+) -> Decimal | None:
+    """ZC equivalent for a USD or ZC marketplace quote at fixed parity."""
+    exact = _exact(amount, "amount")
+    if currency == "ZC":
+        return exact
+    if currency == "USD":
+        return exact / marketplacemod.USD_PER_ZC
+    return None
+
+
+def zc_ask_price_label(ask_zc_per_hour: int) -> str:
+    """A source-settlement label for one integer-millicredit ZC ask."""
+    credits = _zc_ask_amount(ask_zc_per_hour)
+    if credits == 0:
+        return "donated"
+    return f"{_market_amount(credits)} ZC/hour"
+
+
+def zc_ask_usd_amount_text(ask_zc_per_hour: int) -> str:
+    """Exact decimal USD text for an integer-millicredit ZC ask."""
+    usd = normalized_usd_amount("ZC", _zc_ask_amount(ask_zc_per_hour))
+    assert usd is not None
+    return _market_amount(usd)
+
+
+def zc_ask_usd_equivalent_label(ask_zc_per_hour: int) -> str:
+    """The fixed cash equivalent beside a ZC ask, never in its place."""
+    return f"${zc_ask_usd_amount_text(ask_zc_per_hour)}/hour equivalent"
+
+
 def quote_age(quote: Quote, now: datetime) -> timedelta:
     """How long ago this price was OBSERVED. Signed, deliberately.
 
@@ -355,11 +402,11 @@ def dimension(unit: str) -> str:
 def to_hourly(quote: Quote) -> Quote:
     """The same quote expressed per hour, when that is exact arithmetic.
 
-    THE NORMALISER, and note what it does not touch: the currency is
-    unchanged, always. It puts a venue's native time base onto a common one
-    so that per-second and per-hour prices can sit in one column — nothing
-    more. Two quotes in different currencies remain incomparable after this
-    call, which is the point.
+    THE UNIT NORMALISER, and note what it does not touch: the source currency
+    is unchanged, always. It puts a venue's native time base onto a common one
+    so that per-second and per-hour prices can sit in one column. ZC/USD cash
+    normalization is an explicit second step through
+    :func:`normalized_usd_amount`; CU and CNY remain unconverted.
 
     Per-second to per-hour is x3600 and exact in ``Decimal``. Already-hourly
     quotes are returned unchanged (the same object's values, not a rounded
@@ -398,12 +445,13 @@ def to_hourly(quote: Quote) -> Quote:
 
 
 def comparable(left: Quote, right: Quote) -> bool:
-    """Whether these two may be put side by side at all.
+    """Whether source-denominated quote arithmetic may compare these directly.
 
     Same currency AND same dimension. Necessary, not sufficient — see
     ``_DIMENSIONS``: two SKUs can share a unit and still be different things.
-    This function answers "would comparing these be arithmetic nonsense?",
-    not "is this a fair comparison?", and only a human answers the second.
+    This function answers whether the original quote fields align. A
+    marketplace may separately compare ZC/USD normalized values while still
+    displaying these source fields; that does not make CU or CNY comparable.
     """
     return (
         left.currency == right.currency
@@ -414,12 +462,11 @@ def comparable(left: Quote, right: Quote) -> bool:
 def combine(components: Sequence[tuple[Quote, Decimal | int | str]]) -> Cost:
     """Add up a shape: e.g. 4 vCPU + 8 GiB of memory + 30 GiB of disk, per hour.
 
-    THE ONLY PLACE IN THIS MODULE THAT ADDS TWO PRICES TOGETHER, and it
-    refuses to do so across denominations. One currency for every component
-    or :class:`CurrencyMismatch` — which is how "ZC and USD must never be
-    summed" is enforced by a code path rather than by a convention. The rule
-    is written against *any* two differing currencies, so USD/CU and any
-    denomination added later inherit it without an edit.
+    THE ONLY PLACE IN THIS MODULE THAT BUILDS ONE SOURCE-DENOMINATED COST, so
+    every component must share that source currency. ZC/USD fixed-value
+    comparison belongs in :func:`normalized_usd_amount`; collapsing them here
+    would discard which account or provider actually settles each component.
+    CU/CNY combinations are additionally unpriced because no rate exists.
 
     Every component is normalised to its hourly unit first, so a venue
     quoting per-second and a venue quoting per-hour add up correctly instead
@@ -444,9 +491,10 @@ def combine(components: Sequence[tuple[Quote, Decimal | int | str]]) -> Cost:
     currencies = {quote.currency for quote, _ in hourly}
     if len(currencies) > 1:
         raise CurrencyMismatch(
-            "refusing to add amounts in " + " and ".join(sorted(currencies))
-            + ": no exchange rate is published in this system and inventing "
-            "one would make the total unreproducible. Show them separately."
+            "refusing to collapse source amounts in "
+            + " and ".join(sorted(currencies))
+            + ": combine() returns one settlement denomination. Preserve "
+            "the sources and normalize ZC/USD explicitly for comparison."
         )
 
     total = sum((quote.amount * qty for quote, qty in hourly), Decimal(0))
@@ -530,6 +578,7 @@ def render(
     this table is that it can be.
     """
     age = quote_age(quote, now)
+    equivalent = zc_equivalent_amount(quote.currency, quote.amount)
     return {
         "provider": quote.provider,
         "sku": quote.sku,
@@ -545,6 +594,11 @@ def render(
         "max_age_seconds": int(max_age.total_seconds()),
         "source": quote.source,
         "observed_by": quote.observed_by,
+        "zc_equivalent_amount": (
+            format(equivalent.normalize(), "f")
+            if equivalent is not None
+            else None
+        ),
     }
 
 
@@ -560,6 +614,7 @@ def render_unpriced(venue: str) -> dict[str, Any]:
         "provider": venue,
         "state": "not observed",
         "amount": None,
+        "zc_equivalent_amount": None,
         "currency": None,
         "unit": None,
         "captured_at": None,
@@ -816,6 +871,23 @@ def _exact(value: Decimal | int | str | Any, what: str) -> Decimal:
     if isinstance(value, str):
         return Decimal(value)
     raise ImpreciseAmount(f"{what} must be a Decimal, int or str, not {type(value)!r}")
+
+
+def _zc_ask_amount(ask_zc_per_hour: int) -> Decimal:
+    if isinstance(ask_zc_per_hour, bool) or not isinstance(ask_zc_per_hour, int):
+        raise TypeError("ask_zc_per_hour must be integer millicredits")
+    if ask_zc_per_hour < 0:
+        raise ValueError("ask_zc_per_hour must not be negative")
+    return Decimal(ask_zc_per_hour) / Decimal(
+        marketplacemod.MILLICREDITS_PER_CREDIT
+    )
+
+
+def _market_amount(value: Decimal) -> str:
+    """At least cents, retaining a third millicredit digit when needed."""
+    whole, fraction = format(value, ".3f").split(".")
+    fraction = fraction.rstrip("0")
+    return f"{whole}.{fraction.ljust(2, '0')}"
 
 
 def _aware(value: datetime, what: str) -> datetime:

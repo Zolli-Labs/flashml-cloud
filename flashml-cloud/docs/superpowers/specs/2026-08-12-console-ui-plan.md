@@ -98,10 +98,11 @@ A new console section. Minimum viable, in order:
 - **Price comparison** — the pitch. Quotes carry `captured_at` and `source`;
   **render both**. `is_stale()` exists — a stale price must look stale.
 
-**ZC and USD are reported side by side and NEVER summed.** There is no exchange
-rate between them, and no field may imply one. Return them as a list of
-per-currency figures — a shape with nowhere to put a total — rather than two
-fields a template might add.
+**ZC and USD retain separate source settlement fields.** The fixed 1 ZC = $1
+USD equivalent may appear on wallet, credits, and marketplace surfaces only;
+the API supplies that display value and the scheduler uses it for comparison.
+The job routing card keeps its original ZC and USD columns and does not render
+a combined cash total.
 
 ## 4. §B — Finish the surfaces that exist
 

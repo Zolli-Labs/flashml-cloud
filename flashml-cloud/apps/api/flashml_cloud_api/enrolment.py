@@ -73,6 +73,7 @@ def start_device_code(
     node_id: str,
     hostname: str | None,
     platform: str | None,
+    lifecycle: str = "persistent",
 ) -> dict:
     """Issue a fresh device_code/user_code pair for a machine that wants
     to enrol. Nobody is authenticated yet — node_id is only a claim at
@@ -93,6 +94,7 @@ def start_device_code(
                 hostname=hostname,
                 platform=platform,
                 expires_at=expires_at,
+                lifecycle=lifecycle,
             )
         except psycopg.errors.UniqueViolation:
             # user_code collision (astronomically unlikely at 32**8) or,
@@ -161,6 +163,7 @@ def approve_device_code(db: psycopg.Connection, user_code: str, user_id: str) ->
             machine_id=existing["id"],
             name=row["hostname"],
             platform=row["platform"],
+            lifecycle=row["lifecycle"],
         )
     else:
         try:
@@ -170,6 +173,7 @@ def approve_device_code(db: psycopg.Connection, user_code: str, user_id: str) ->
                 node_id=row["node_id"],
                 name=row["hostname"],
                 platform=row["platform"],
+                lifecycle=row["lifecycle"],
             )
         except psycopg.errors.UniqueViolation as exc:
             # Lost a race against a concurrent approval of a different code

@@ -32,12 +32,12 @@ The first draft of the marketplace design had ``effective_price = ask ÷
 P(accepted)``; that was removed for manufacturing a quantity the ledger does
 not hold, and nothing here reintroduces it.
 
-*Cost is a vector.* ``Cost`` carries ZC and USD side by side and offers no
-way to reduce them to one number, because the exchange rate that would take
-is precisely what decision M4 forbids and what ``contributions.py`` warns a
-credit balance must never imply. Cross-currency ordering is therefore done by
-**venue precedence** — a stated product preference — never by comparing
-magnitudes.
+*Settlement is a vector; comparison is cash-normalized.* ``Cost`` carries ZC
+and USD side by side so a plan still says what the wallet settles and what an
+external provider charges. The active testing-credit policy fixes 1 ZC = 1
+USD, so ``Cost.total_usd_value`` exposes their comparable value and cheapest
+ordering uses that same parity. Venue precedence remains only an exact-price
+tie-break; it may never put a more expensive venue first.
 
 *Fit narrows; it never widens, and it is not a price.* A ``PlanRequest`` may
 carry the job's ``WorkloadKind`` (``workload.classify``), and when it does,
@@ -107,13 +107,12 @@ VENUE_WORKSPACE = "workspace"
 VENUE_MARKET = "market"
 VENUE_RENTED = "rented"
 
-#: Which venue is spent first. A **preference order**, not an exchange rate —
-#: the distinction is the whole reason this constant exists.
+#: Which venue wins an exact normalized-price tie.
 #:
-#: Sorting a mixed list of ZC and USD asks by magnitude would silently invent
-#: the rate M4 forbids: saying 0.40 ZC/h is "cheaper" than $0.34/h is a
-#: conversion, however it is spelled. So crossing a currency boundary is a
-#: tier decision taken once, in the open, and never a comparison of numbers.
+#: The fixed testing-credit policy supplies the rate: 1 ZC = 1 USD. Price
+#: therefore leads every mixed-currency comparison. This order is consulted
+#: only when normalized numeric prices are equal, so a $0.70 venue beats a
+#: 0.80 ZC venue regardless of where either appears here.
 #:
 #: The order encodes two product decisions and nothing else. Workspace first
 #: because workspace machines are free to their own members (M1), so using
@@ -181,18 +180,16 @@ EligibilityPredicate = Callable[[TaskSpec, Mapping[str, Any]], bool]
 
 @dataclass(frozen=True)
 class Cost:
-    """What a plan costs, in every currency it costs anything in.
+    """What a plan settles in each source currency, plus comparable value.
 
-    **There is deliberately no total.** No ``total()``, no ``__float__``, no
-    ``__int__``, no ``amount`` — and none may be added. Any of them would
-    have to answer "how many dollars is a Zolli credit?", which decision M4
-    forbids and which ``contributions.py`` refuses in the strongest terms it
-    has: a number that implies a drawdown "promises an exchange rate this
-    product has not designed and cannot honour."
+    ``zc`` and ``usd`` are never rewritten: the first is debited from the
+    Zolli wallet and the second is charged by an external provider. The fixed
+    testing-credit policy defines 1 ZC = 1 USD, so :meth:`total_usd_value`
+    adds the two only for scheduler and frontier comparison. The job routing
+    card intentionally does not render this combined value.
 
-    ``Cost + Cost`` is component-wise and stays a ``Cost``, which is the only
-    arithmetic that is meaningful: 9.8 ZC and $6.40 side by side is the
-    honest comparison, and 9.8 + 6.40 is not a number about anything.
+    ``Cost + Cost`` remains component-wise. That keeps settlement provenance
+    intact while allowing a caller to ask explicitly for normalized value.
     """
 
     zc: float = 0.0
@@ -205,6 +202,10 @@ class Cost:
 
     def rounded(self) -> "Cost":
         return Cost(zc=round(self.zc, _COST_PLACES), usd=round(self.usd, _COST_PLACES))
+
+    def total_usd_value(self) -> float:
+        """Comparable value at the fixed 1 ZC = 1 USD policy rate."""
+        return self.zc + self.usd
 
     def currencies(self) -> tuple[str, ...]:
         """The currencies actually spent. Empty for a free plan."""
@@ -549,11 +550,12 @@ def venue_admitted(
 
 @dataclass(frozen=True)
 class _Resolved:
-    """A candidate with its planning duration and per-task price settled."""
+    """A candidate with source and normalized per-task prices settled."""
 
     candidate: Candidate
     seconds: float
-    unit_price: float  # per task, in the candidate's own currency
+    settlement_unit_price: float  # per task, in the candidate's currency
+    normalized_unit_usd: float
     venue_rank: int
 
     @property
@@ -585,11 +587,15 @@ def _resolve(
         if seconds is None or not math.isfinite(seconds) or seconds <= 0:
             unplannable.append(candidate)
             continue
+        settlement_unit_price = _settlement_unit_price(candidate, float(seconds))
         plannable.append(
             _Resolved(
                 candidate=candidate,
                 seconds=float(seconds),
-                unit_price=_unit_price(candidate, float(seconds)),
+                settlement_unit_price=settlement_unit_price,
+                normalized_unit_usd=_normalized_unit_usd(
+                    candidate, settlement_unit_price
+                ),
                 venue_rank=_venue_rank(candidate.venue, venue_order),
             )
         )
@@ -603,7 +609,7 @@ def _venue_rank(venue: str, venue_order: Sequence[str]) -> int:
         return _UNKNOWN_VENUE_RANK
 
 
-def _unit_price(candidate: Candidate, seconds: float) -> float:
+def _settlement_unit_price(candidate: Candidate, seconds: float) -> float:
     """What one accepted task costs on this machine, in its own currency.
 
     ``ask_per_hour x hours_per_task``, which is the marketplace design §6.1
@@ -639,6 +645,16 @@ def _unit_price(candidate: Candidate, seconds: float) -> float:
             f"on the network."
         )
     return ask * seconds / 3600.0
+
+
+def _normalized_unit_usd(candidate: Candidate, settlement_unit_price: float) -> float:
+    """One task's comparable USD value without changing settlement currency."""
+    if candidate.currency not in {CURRENCY_ZC, CURRENCY_USD}:
+        raise ValueError(
+            f"unknown currency {candidate.currency!r}: only {CURRENCY_ZC} and "
+            f"{CURRENCY_USD} have a normalized USD value"
+        )
+    return settlement_unit_price
 
 
 def _slots(members: Sequence[_Resolved], tasks: int) -> list[tuple[float, str]]:
@@ -752,7 +768,9 @@ def _assemble(
             continue
         item = by_id[machine_id]
         candidate = item.candidate
-        component = _cost_of(candidate.currency, item.unit_price * count)
+        component = _cost_of(
+            candidate.currency, item.settlement_unit_price * count
+        )
         cost = cost + component
         concurrency = max(int(candidate.max_concurrent_tasks), 1)
         rounds = math.ceil(count / concurrency)
@@ -776,8 +794,9 @@ def _assemble(
     plan_notes = list(notes)
     if len(cost.currencies()) > 1:
         plan_notes.append(
-            "this plan spends ZC and USD; the two are reported side by side "
-            "and are never summed — there is no exchange rate between them"
+            "this plan has separate ZC and USD settlement totals; at the "
+            f"fixed 1 ZC = 1 USD rate its comparable USD value is "
+            f"{cost.total_usd_value():g}"
         )
     if unplaced:
         plan_notes.append(
@@ -841,13 +860,12 @@ def _cost_of(currency: str, amount: float) -> Cost:
 # ---------------------------------------------------------------------------
 
 
-def _price_order(item: _Resolved) -> tuple[int, float, str]:
-    """Venue, then price within the venue, then id.
+def _price_order(item: _Resolved) -> tuple[float, int, str]:
+    """Normalized USD price, then venue rank, then machine id.
 
-    Venue leads so that no two currencies are ever compared by magnitude —
-    crossing from ZC to USD is a preference stated once in
-    ``DEFAULT_VENUE_ORDER``, never a comparison of two numbers that have no
-    rate between them.
+    Price leads under the fixed 1 ZC = 1 USD policy. Venue rank is consulted
+    only for equal normalized prices, so it remains a preference without
+    becoming permission to choose a more expensive source.
 
     Reliability is deliberately absent. It belongs in ``_slots``, where it
     decides whose slots go unused; putting it here would split a price tier
@@ -855,7 +873,7 @@ def _price_order(item: _Resolved) -> tuple[int, float, str]:
     draft's ``ask ÷ P(accepted)`` invented a quantity the ledger does not
     hold.
     """
-    return (item.venue_rank, item.unit_price, item.machine_id)
+    return (item.normalized_unit_usd, item.venue_rank, item.machine_id)
 
 
 def _cheapest_over(
@@ -869,10 +887,11 @@ def _cheapest_over(
 ) -> Plan:
     """Minimum cost: fill the cheapest tier to capacity, then the next.
 
-    Candidates are grouped by ``(venue, unit price)`` and the groups
-    consumed in that order. **Inside a group the fill water-fills**, which
-    costs nothing — every machine in a group charges the same per task, so
-    the split cannot change the price — and strictly improves the makespan.
+    Candidates are grouped by ``(normalized unit USD, venue rank)`` and the
+    groups consumed in that order. Venue rank therefore breaks only an exact
+    price tie. **Inside a group the fill water-fills**, which costs nothing —
+    every machine in a group charges the same per task, so the split cannot
+    change the price — and strictly improves the makespan.
     Without it "cheapest" would hand all forty trials to whichever single
     machine sorted first and quote a makespan forty times longer than the
     identically-priced alternative, which is a dominated plan presented as a
@@ -1101,23 +1120,18 @@ def fastest_plan(
 # ---------------------------------------------------------------------------
 
 
-def _objectives(plan: Plan) -> tuple[int, float, float, float]:
-    """``(unplaced, ZC, USD, makespan)`` — the vector plans are compared on.
+def _objectives(plan: Plan) -> tuple[int, float, float]:
+    """``(unplaced, normalized USD value, makespan)`` for dominance.
 
-    Four entries, three of them cost-or-time and one of them completeness.
     Unplaced tasks lead because without them a plan that places two of forty
-    trials looks like the cheapest and fastest thing on the board.
-
-    ZC and USD stay separate axes. That is the whole reason this is a
-    frontier and not a ranking: with no exchange rate, a cheaper-in-ZC and a
-    cheaper-in-USD plan are genuinely incomparable, and the correct output is
-    both of them.
+    trials looks like the cheapest and fastest thing on the board. Source ZC
+    and USD totals remain on :class:`Cost`; only their fixed-rate cash value
+    is reduced for this comparison.
     """
     makespan = plan.makespan_seconds
     return (
         plan.tasks_unplaced,
-        plan.cost.zc,
-        plan.cost.usd,
+        plan.cost.total_usd_value(),
         math.inf if makespan is None else makespan,
     )
 

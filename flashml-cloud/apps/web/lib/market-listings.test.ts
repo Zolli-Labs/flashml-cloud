@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { MarketAsk, MarketHint, MarketListing } from "./cloud-api";
 import {
   askPriceLabel,
+  askUsdEquivalentLabel,
   bookChips,
   effectiveLabel,
   groupBookByClass,
@@ -20,12 +21,31 @@ function ask(over: Partial<MarketAsk> = {}): MarketAsk {
     machine_name: "laptop",
     gpu_label: "NVIDIA GeForce RTX 4090 · 24 GB",
     ask_zc_per_hour: 1000,
+    ask_usd_per_hour: "1.00",
     donated: false,
     price_label: "1 ZC/hour",
+    usd_equivalent_label: "$1.00/hour equivalent",
     max_concurrent_tasks: 1,
     acceptance_rate: null,
     resolved_n: null,
     effective_zc_per_hour: null,
+    ...over,
+  };
+}
+
+function listing(over: Partial<MarketListing> = {}): MarketListing {
+  return {
+    id: "l",
+    machine_id: "m",
+    capability_class: "gpu-24gb",
+    ask_zc_per_hour: 1000,
+    ask_usd_per_hour: "1.00",
+    max_concurrent_tasks: 1,
+    state: "open",
+    donated: false,
+    price_label: "1 ZC/hour",
+    usd_equivalent_label: "$1.00/hour equivalent",
+    created_at: "2026-08-12T00:00:00Z",
     ...over,
   };
 }
@@ -76,22 +96,23 @@ describe("askPriceLabel", () => {
   });
 });
 
+describe("askUsdEquivalentLabel", () => {
+  it("returns the API's equivalent label verbatim for asks and listings", () => {
+    const equivalent = "$0.22/hour equivalent";
+    expect(
+      askUsdEquivalentLabel(ask({ usd_equivalent_label: equivalent }))
+    ).toBe(equivalent);
+    expect(
+      askUsdEquivalentLabel(listing({ usd_equivalent_label: equivalent }))
+    ).toBe(equivalent);
+  });
+});
+
 describe("listingStateLabel", () => {
   it("renders the API's state vocabulary with its consequence", () => {
-    const listing = (state: string): MarketListing => ({
-      id: "l",
-      machine_id: "m",
-      capability_class: "gpu-24gb",
-      ask_zc_per_hour: 1000,
-      max_concurrent_tasks: 1,
-      state,
-      donated: false,
-      price_label: "1 ZC/hour",
-      created_at: "2026-08-12T00:00:00Z",
-    });
-    expect(listingStateLabel(listing("open"))).toContain("open");
-    expect(listingStateLabel(listing("paused"))).toContain("paused");
-    expect(listingStateLabel(listing("weird"))).toContain('"weird"');
+    expect(listingStateLabel(listing({ state: "open" }))).toContain("open");
+    expect(listingStateLabel(listing({ state: "paused" }))).toContain("paused");
+    expect(listingStateLabel(listing({ state: "weird" }))).toContain('"weird"');
   });
 });
 

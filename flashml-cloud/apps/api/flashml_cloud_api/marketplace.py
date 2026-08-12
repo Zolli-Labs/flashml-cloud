@@ -58,8 +58,10 @@ import math
 from datetime import timedelta
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 from typing import Any
+from uuid import UUID
 
 import psycopg
 
@@ -73,26 +75,25 @@ import psycopg
 #: unfixable in aggregate.
 MILLICREDITS_PER_CREDIT = 1_000
 
-#: The reference class. **1 ZC buys one hour of ``gpu-24gb``** (design
-#: §2.5.1). The unit is deliberately physical: defining "1 ZC = $1" would
-#: create exactly the exchange rate M4 forbids and ``contributions.py`` warns
-#: against — a number a person could believe they are owed.
+#: The reference class. **1 ZC = $1 and buys one hour of ``gpu-24gb``** under
+#: the active testing-credit policy. The fixed USD conversion denominates
+#: requests and approvals; credits remain closed-loop and non-withdrawable.
 REFERENCE_CLASS = "gpu-24gb"
 
-#: **250 ZC, one time per account** (M10, design §2.5.3), in millicredits.
-#:
-#: Sized against what work costs: a 40-trial HPO sweep at six minutes each on
-#: ``gpu-24gb`` is 4 ZC, and a 200-trial sweep on Hopper-class capacity is
-#: 330 ZC — more than the whole grant. That is the design test a grant has to
-#: pass: large enough that ordinary work is never blocked, small enough that
-#: ambitious work forces a choice.
+#: **10 ZC, one time per account**, in millicredits. This is testing capacity,
+#: not a refilling allowance; additional testing credits use the reviewable
+#: request ledger below.
 #:
 #: One-time is ENFORCED, not advised: the expression unique index in migration
 #: 0018 makes a second ``grant`` row for one account impossible at the schema
 #: level. A refilling allowance would remove every reason to care what
 #: anything costs, and scarcity is the only thing that makes a price mean
 #: something.
-STARTING_GRANT_ZC = 250_000
+STARTING_GRANT_ZC = 10_000
+
+#: The testing-credit request surface displays one ZC as one USD. Decimal is
+#: deliberate: a binary float cannot represent exact currency arithmetic.
+USD_PER_ZC = Decimal("1")
 
 # ---------------------------------------------------------------------------
 # The capability ladder (design §2.5.2)
@@ -359,8 +360,8 @@ REASONS: frozenset[str] = frozenset(
 
 #: The reasons that MINT — a movement whose legs are allowed not to sum to
 #: zero. ``grant`` creates the credits that seed the economy; ``adjustment``
-#: is reserved for a manual correction and nothing in this module writes one,
-#: the same way ``abandoned`` is reserved and unwritten in ``attempts.outcome``.
+#: is written by :func:`approve_credit_request` for a reviewed request and is
+#: idempotently keyed by that request's id.
 #: Credits are conserved everywhere else, and :func:`post` enforces it.
 MINTING_REASONS: frozenset[str] = frozenset({"grant", "adjustment"})
 
@@ -455,6 +456,18 @@ class InsufficientCredits(ValueError):
     migration 0018 is what refuses it, so there is no window between reading a
     balance and spending it in which two claims could both be affordable.
     """
+
+
+class PendingCreditRequestExists(ValueError):
+    """The requester already has a pending credit request."""
+
+
+class CreditRequestNotPending(ValueError):
+    """The request does not exist or has already been decided."""
+
+
+class InvalidCreditRequest(ValueError):
+    """A requested amount, approved amount, purpose, or status is invalid."""
 
 
 class UnknownAccount(LookupError):
@@ -905,6 +918,211 @@ def balances(db: psycopg.Connection, owner_id: str) -> dict[str, int]:
     return {kind: found.get(kind, 0) for kind in ACCOUNT_KINDS}
 
 
+def credit_balances(db: psycopg.Connection, owner_id: str) -> dict[str, int]:
+    """Current spendable and escrow balances with API-facing field names."""
+    current = balances(db, owner_id)
+    return {
+        "spendable_zc": current["spendable"],
+        "escrow_zc": current["escrow"],
+    }
+
+
+_CREDIT_REQUEST_COLUMNS = (
+    "id, user_id, requested_zc, approved_zc, purpose, status, requested_at, "
+    "decided_at, decided_by"
+)
+_CREDIT_REQUEST_STATUSES = frozenset({"pending", "approved", "declined"})
+_MAX_BIGINT = 9_223_372_036_854_775_807
+
+
+def _positive_credit_amount(value: Any, *, field: str) -> int:
+    if type(value) is not int or not 0 < value <= _MAX_BIGINT:
+        raise InvalidCreditRequest(f"{field} must be a positive bigint")
+    return value
+
+
+def _credit_request_purpose(value: Any) -> str:
+    if not isinstance(value, str):
+        raise InvalidCreditRequest("purpose must be text")
+    purpose = value.strip()
+    if not 1 <= len(purpose) <= 2_000:
+        raise InvalidCreditRequest("purpose must contain 1 to 2,000 characters")
+    return purpose
+
+
+def _credit_request_id(value: Any) -> str:
+    try:
+        return str(UUID(str(value)))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise CreditRequestNotPending(
+            "the credit request does not exist or is no longer pending"
+        ) from exc
+
+
+def create_credit_request(
+    db: psycopg.Connection,
+    owner_id: str,
+    *,
+    requested_zc: int,
+    purpose: str,
+) -> Mapping[str, Any]:
+    """Create one pending request, preserving every previously decided row."""
+    amount = _positive_credit_amount(requested_zc, field="requested_zc")
+    trimmed_purpose = _credit_request_purpose(purpose)
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                f"""
+                insert into public.credit_requests
+                    (user_id, requested_zc, purpose)
+                values (%s::uuid, %s, %s)
+                returning {_CREDIT_REQUEST_COLUMNS}
+                """,
+                (owner_id, amount, trimmed_purpose),
+            )
+            row = cur.fetchone()
+    except psycopg.errors.UniqueViolation as exc:
+        if exc.diag.constraint_name == "credit_requests_one_pending_per_user_idx":
+            raise PendingCreditRequestExists(
+                "the requester already has a pending credit request"
+            ) from exc
+        raise
+    assert row is not None
+    return row
+
+
+def list_credit_requests(
+    db: psycopg.Connection, owner_id: str
+) -> list[Mapping[str, Any]]:
+    """The requester's complete history, newest first."""
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {_CREDIT_REQUEST_COLUMNS}
+              from public.credit_requests
+             where user_id = %s::uuid
+             order by requested_at desc, id desc
+            """,
+            (owner_id,),
+        )
+        return list(cur.fetchall())
+
+
+def list_admin_credit_requests(
+    db: psycopg.Connection, *, status: str
+) -> list[Mapping[str, Any]]:
+    """One review queue enriched with requester profile and live balances."""
+    if status not in _CREDIT_REQUEST_STATUSES:
+        raise InvalidCreditRequest(f"unknown credit request status: {status!r}")
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select cr.id, cr.user_id, cr.requested_zc, cr.approved_zc,
+                   cr.purpose, cr.status, cr.requested_at, cr.decided_at,
+                   cr.decided_by,
+                   p.display_name, p.first_name, p.last_name, p.company_name,
+                   p.role, p.team_size,
+                   coalesce(spendable.balance_zc, 0) as spendable_zc,
+                   coalesce(escrow.balance_zc, 0) as escrow_zc
+              from public.credit_requests cr
+              join public.profiles p on p.id = cr.user_id
+              left join public.credit_accounts spendable
+                on spendable.owner_id = cr.user_id
+               and spendable.kind = 'spendable'
+              left join public.credit_accounts escrow
+                on escrow.owner_id = cr.user_id
+               and escrow.kind = 'escrow'
+             where cr.status = %s
+             order by cr.requested_at, cr.id
+            """,
+            (status,),
+        )
+        return list(cur.fetchall())
+
+
+def _lock_pending_credit_request(
+    cur: psycopg.Cursor, request_id: str
+) -> Mapping[str, Any]:
+    cur.execute(
+        f"""
+        select {_CREDIT_REQUEST_COLUMNS}
+          from public.credit_requests
+         where id = %s::uuid
+           for update
+        """,
+        (request_id,),
+    )
+    row = cur.fetchone()
+    if row is None or row["status"] != "pending":
+        raise CreditRequestNotPending(
+            "the credit request does not exist or is no longer pending"
+        )
+    return row
+
+
+def approve_credit_request(
+    db: psycopg.Connection,
+    request_id: str,
+    *,
+    admin_id: str,
+    approved_zc: int,
+) -> Mapping[str, Any]:
+    """Mint one reviewed adjustment and approve the locked request atomically."""
+    amount = _positive_credit_amount(approved_zc, field="approved_zc")
+    request_id = _credit_request_id(request_id)
+    with db.transaction():
+        with db.cursor() as cur:
+            request = _lock_pending_credit_request(cur, request_id)
+            accounts = ensure_accounts(db, str(request["user_id"]))
+            spendable = accounts["spendable"]
+            written = post(
+                db,
+                ref_type="credit_request",
+                ref_id=str(request["id"]),
+                legs=[Leg(str(spendable["id"]), amount, "adjustment")],
+            )
+            if written != 1:
+                raise LedgerReplayConflict(
+                    f"credit request {request_id} already has an adjustment"
+                )
+            cur.execute(
+                f"""
+                update public.credit_requests
+                   set status = 'approved', approved_zc = %s,
+                       decided_at = now(), decided_by = %s::uuid
+                 where id = %s::uuid
+                returning {_CREDIT_REQUEST_COLUMNS}
+                """,
+                (amount, admin_id, request_id),
+            )
+            decided = cur.fetchone()
+    assert decided is not None
+    return decided
+
+
+def decline_credit_request(
+    db: psycopg.Connection, request_id: str, *, admin_id: str
+) -> Mapping[str, Any]:
+    """Decline the locked request without touching the credit ledger."""
+    request_id = _credit_request_id(request_id)
+    with db.transaction():
+        with db.cursor() as cur:
+            _lock_pending_credit_request(cur, request_id)
+            cur.execute(
+                f"""
+                update public.credit_requests
+                   set status = 'declined', decided_at = now(),
+                       decided_by = %s::uuid
+                 where id = %s::uuid
+                returning {_CREDIT_REQUEST_COLUMNS}
+                """,
+                (admin_id, request_id),
+            )
+            decided = cur.fetchone()
+    assert decided is not None
+    return decided
+
+
 def post(
     db: psycopg.Connection,
     *,
@@ -1026,12 +1244,14 @@ def post(
 
 
 def grant_starting_credits(db: psycopg.Connection, owner_id: str) -> int:
-    """The one-time 250 ZC grant (M10). Returns what was granted, or 0.
+    """The one-time testing grant. Returns what was granted, or 0.
 
-    **0 means "already granted", and it is not an error.** Every caller may
-    call this on every sign-in; the unique index is what makes the second call
-    a no-op, so "have they had it?" never has to be asked as a separate
-    question whose answer could be stale by the time it is used.
+    **0 means "ineligible or already granted", and it is not an error.**
+    Migration 0021 marks every profile that existed at launch ineligible, then
+    defaults only later profiles to eligible. That boundary prevents an older
+    account that never visited the wallet from receiving the new-account grant.
+    Eligible callers may still invoke this on every sign-in; the ledger's
+    unique index makes every call after the first a no-op.
 
     Referenced as ``('account', <spendable account id>)`` so the row says what
     it is about, but the index would hold the line even if it said nothing:
@@ -1041,6 +1261,16 @@ def grant_starting_credits(db: psycopg.Connection, owner_id: str) -> int:
     here — the grant is the one reason with no natural ref and the one reason
     that must never be written twice.
     """
+    with db.cursor() as cur:
+        cur.execute(
+            "select starter_grant_eligible from public.profiles"
+            " where id = %s::uuid",
+            (owner_id,),
+        )
+        profile = cur.fetchone()
+    if profile is None or not bool(profile["starter_grant_eligible"]):
+        return 0
+
     accounts = ensure_accounts(db, owner_id)
     spendable = accounts["spendable"]
     written = post(
@@ -1157,7 +1387,8 @@ def ledger_totals(db: psycopg.Connection) -> dict[str, int]:
         held = int(cur.fetchone()["t"])
         cur.execute(
             "select coalesce(sum(delta_zc), 0) as t from public.credit_entries"
-            " where reason = 'grant'"
+            " where reason = any(%s)",
+            (sorted(MINTING_REASONS),),
         )
         minted = int(cur.fetchone()["t"])
     return {"minted_zc": minted, "held_zc": held}

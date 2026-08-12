@@ -32,6 +32,7 @@ import re
 import pathlib
 import threading
 import uuid
+from decimal import Decimal
 
 import psycopg
 import pytest
@@ -64,14 +65,13 @@ H100 = {"index": 0, "name": "NVIDIA H100 PCIe", "memory_total_mb": 81559,
 # ---------------------------------------------------------------------------
 
 
-def test_the_grant_is_250_zc_in_millicredits_and_the_unit_is_compute():
-    """M10 and design §2.5.3. The number is not decoration: it funds roughly
-    fifty small sweeps, and a 200-trial sweep on Hopper-class capacity costs
-    more than all of it — which is the moment a price stops being decoration
-    and starts being information."""
-    assert mk.STARTING_GRANT_ZC == 250_000
+def test_the_testing_grant_and_usd_conversion_are_exact():
+    """A wrong testing grant overfunds every new account, while a float
+    conversion makes exact display and billing arithmetic impossible."""
+    assert mk.STARTING_GRANT_ZC == 10_000
+    assert mk.USD_PER_ZC == Decimal("1")
     assert mk.MILLICREDITS_PER_CREDIT == 1_000
-    assert mk.STARTING_GRANT_ZC // mk.MILLICREDITS_PER_CREDIT == 250
+    assert mk.STARTING_GRANT_ZC // mk.MILLICREDITS_PER_CREDIT == 10
 
     # The unit is an hour of compute, never a dollar. `gpu-24gb` is 1 ZC by
     # definition and everything else is a ratio against it.
@@ -484,20 +484,277 @@ def entries_sum(db, owner_id, kind) -> int:
 # ---------------------------------------------------------------------------
 
 
+def test_a_credit_request_trims_and_preserves_history(db):
+    """Purpose whitespace is presentation noise, while decided requests must
+    remain as an audit trail when a user submits a later request."""
+    owner = make_user(db)
+
+    first = mk.create_credit_request(
+        db, owner, requested_zc=50_000, purpose="  Test a multi-GPU sweep  "
+    )
+    assert first["requested_zc"] == 50_000
+    assert first["purpose"] == "Test a multi-GPU sweep"
+    assert first["status"] == "pending"
+
+    mk.decline_credit_request(db, str(first["id"]), admin_id=make_user(db))
+    second = mk.create_credit_request(
+        db, owner, requested_zc=25_000, purpose="Retry with a smaller sweep"
+    )
+
+    history = mk.list_credit_requests(db, owner)
+    assert [str(row["id"]) for row in history] == [str(second["id"]), str(first["id"])]
+    assert [row["status"] for row in history] == ["pending", "declined"]
+
+
+@pytest.mark.parametrize("requested_zc", [0, -1, 1.5, "1", True, 2**63])
+def test_a_credit_request_amount_must_be_a_positive_bigint(db, requested_zc):
+    owner = make_user(db)
+
+    with pytest.raises(mk.InvalidCreditRequest):
+        mk.create_credit_request(
+            db, owner, requested_zc=requested_zc, purpose="Run a test"
+        )
+
+
+@pytest.mark.parametrize("purpose", ["", "   ", "x" * 2_001])
+def test_a_credit_request_purpose_must_trim_to_one_through_two_thousand_chars(
+    db, purpose
+):
+    owner = make_user(db)
+
+    with pytest.raises(mk.InvalidCreditRequest):
+        mk.create_credit_request(db, owner, requested_zc=1, purpose=purpose)
+
+
+def test_only_one_pending_credit_request_exists_per_user(db):
+    owner = make_user(db)
+    mk.create_credit_request(db, owner, requested_zc=10_000, purpose="First test")
+
+    with pytest.raises(mk.PendingCreditRequestExists):
+        mk.create_credit_request(db, owner, requested_zc=20_000, purpose="Second test")
+
+    assert len(mk.list_credit_requests(db, owner)) == 1
+
+
+def test_admin_credit_requests_include_profile_and_current_balances(db):
+    owner = make_user(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles"
+            "   set display_name = 'Ada', first_name = 'Ada', last_name = 'Lovelace',"
+            "       company_name = 'Analytical Engines'"
+            " where id = %s::uuid",
+            (owner,),
+        )
+    mk.grant_starting_credits(db, owner)
+    request = mk.create_credit_request(
+        db, owner, requested_zc=30_000, purpose="Test compiler workloads"
+    )
+
+    rows = mk.list_admin_credit_requests(db, status="pending")
+    row = next(item for item in rows if str(item["id"]) == str(request["id"]))
+
+    assert row["display_name"] == "Ada"
+    assert row["first_name"] == "Ada"
+    assert row["last_name"] == "Lovelace"
+    assert row["company_name"] == "Analytical Engines"
+    assert row["spendable_zc"] == 10_000
+    assert row["escrow_zc"] == 0
+
+
+def test_admin_may_approve_less_than_requested(db):
+    owner, admin = make_user(db), make_user(db)
+    request = mk.create_credit_request(
+        db, owner, requested_zc=50_000, purpose="Test a multi-GPU sweep"
+    )
+
+    decided = mk.approve_credit_request(
+        db, str(request["id"]), admin_id=admin, approved_zc=20_000
+    )
+
+    assert decided["requested_zc"] == 50_000
+    assert decided["approved_zc"] == 20_000
+    assert decided["status"] == "approved"
+    assert str(decided["decided_by"]) == admin
+    assert mk.credit_balances(db, owner)["spendable_zc"] == 20_000
+    with db.cursor() as cur:
+        cur.execute(
+            "select reason, ref_type, ref_id, delta_zc"
+            "  from public.credit_entries where ref_type = 'credit_request'"
+            "   and ref_id = %s",
+            (str(request["id"]),),
+        )
+        entries = cur.fetchall()
+    assert entries == [
+        {
+            "reason": "adjustment",
+            "ref_type": "credit_request",
+            "ref_id": str(request["id"]),
+            "delta_zc": 20_000,
+        }
+    ]
+
+
+@pytest.mark.parametrize("approved_zc", [0, -1, 1.5, "1", True, 2**63])
+def test_approved_credit_amount_must_be_a_positive_bigint(db, approved_zc):
+    owner, admin = make_user(db), make_user(db)
+    request = mk.create_credit_request(
+        db, owner, requested_zc=50_000, purpose="Test a multi-GPU sweep"
+    )
+
+    with pytest.raises(mk.InvalidCreditRequest):
+        mk.approve_credit_request(
+            db, str(request["id"]), admin_id=admin, approved_zc=approved_zc
+        )
+
+    assert mk.list_credit_requests(db, owner)[0]["status"] == "pending"
+    assert mk.credit_balances(db, owner)["spendable_zc"] == 0
+
+
+@pytest.mark.parametrize("decision", ["approve", "decline"])
+def test_a_malformed_credit_request_id_uses_the_domain_error(db, decision):
+    owner, admin = make_user(db), make_user(db)
+    mk.create_credit_request(db, owner, requested_zc=10_000, purpose="Run a test")
+
+    with pytest.raises(mk.CreditRequestNotPending):
+        if decision == "approve":
+            mk.approve_credit_request(
+                db, "not-a-uuid", admin_id=admin, approved_zc=5_000
+            )
+        else:
+            mk.decline_credit_request(db, "not-a-uuid", admin_id=admin)
+
+    assert mk.list_credit_requests(db, owner)[0]["status"] == "pending"
+    assert mk.credit_balances(db, owner)["spendable_zc"] == 0
+
+
+def test_approval_rolls_back_adjustment_when_decision_update_fails(db):
+    owner = make_user(db)
+    request = mk.create_credit_request(
+        db, owner, requested_zc=20_000, purpose="Test atomic approval"
+    )
+    request_id = str(request["id"])
+
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        mk.approve_credit_request(
+            db,
+            request_id,
+            admin_id=str(uuid.uuid4()),
+            approved_zc=12_000,
+        )
+
+    assert mk.list_credit_requests(db, owner)[0]["status"] == "pending"
+    assert mk.credit_balances(db, owner) == {"spendable_zc": 0, "escrow_zc": 0}
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.credit_entries"
+            " where reason = 'adjustment' and ref_type = 'credit_request'"
+            "   and ref_id = %s",
+            (request_id,),
+        )
+        assert cur.fetchone()["n"] == 0
+
+
+def test_a_credit_request_cannot_be_decided_twice(db):
+    owner, admin = make_user(db), make_user(db)
+    request = mk.create_credit_request(
+        db, owner, requested_zc=40_000, purpose="Test a retry"
+    )
+    request_id = str(request["id"])
+    mk.approve_credit_request(db, request_id, admin_id=admin, approved_zc=15_000)
+
+    with pytest.raises(mk.CreditRequestNotPending):
+        mk.approve_credit_request(db, request_id, admin_id=admin, approved_zc=15_000)
+    with pytest.raises(mk.CreditRequestNotPending):
+        mk.decline_credit_request(db, request_id, admin_id=admin)
+
+    assert mk.credit_balances(db, owner)["spendable_zc"] == 15_000
+
+
+def test_concurrent_credit_request_decisions_mint_once(postgres_dsn, db):
+    owner, first_admin, second_admin = make_user(db), make_user(db), make_user(db)
+    request = mk.create_credit_request(
+        db, owner, requested_zc=40_000, purpose="Test concurrent review"
+    )
+    request_id = str(request["id"])
+    barrier = threading.Barrier(2)
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def approve(admin_id: str) -> None:
+        conn = psycopg.connect(postgres_dsn, row_factory=dict_row, connect_timeout=5)
+        conn.autocommit = True
+        try:
+            barrier.wait()
+            results.append(
+                dict(
+                    mk.approve_credit_request(
+                        conn, request_id, admin_id=admin_id, approved_zc=12_000
+                    )
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [
+        threading.Thread(target=approve, args=(first_admin,)),
+        threading.Thread(target=approve, args=(second_admin,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], mk.CreditRequestNotPending)
+    assert mk.credit_balances(db, owner)["spendable_zc"] == 12_000
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.credit_entries"
+            " where reason = 'adjustment' and ref_type = 'credit_request'"
+            "   and ref_id = %s",
+            (request_id,),
+        )
+        assert cur.fetchone()["n"] == 1
+
+
+def test_declining_a_credit_request_moves_no_credits(db):
+    owner, admin = make_user(db), make_user(db)
+    request = mk.create_credit_request(
+        db, owner, requested_zc=25_000, purpose="Test an optional experiment"
+    )
+
+    decided = mk.decline_credit_request(db, str(request["id"]), admin_id=admin)
+
+    assert decided["status"] == "declined"
+    assert decided["approved_zc"] is None
+    assert mk.credit_balances(db, owner) == {"spendable_zc": 0, "escrow_zc": 0}
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.credit_entries"
+            " where ref_type = 'credit_request' and ref_id = %s",
+            (str(request["id"]),),
+        )
+        assert cur.fetchone()["n"] == 0
+
+
 def test_the_grant_is_one_time_and_the_index_is_what_makes_it_so(db):
     """M10: no refill. A refilling allowance would remove every reason to care
     what anything costs, so "one time" has to be a property of the table
     rather than a check the caller remembers to make."""
     owner = make_user(db)
 
-    assert mk.grant_starting_credits(db, owner) == 250_000
-    assert mk.balances(db, owner)["spendable"] == 250_000
+    assert mk.grant_starting_credits(db, owner) == 10_000
+    assert mk.balances(db, owner)["spendable"] == 10_000
 
     # Called again on every sign-in, deliberately: 0 means "already granted"
     # and is not an error.
     for _ in range(3):
         assert mk.grant_starting_credits(db, owner) == 0
-    assert mk.balances(db, owner)["spendable"] == 250_000
+    assert mk.balances(db, owner)["spendable"] == 10_000
 
     with db.cursor() as cur:
         cur.execute(
@@ -507,6 +764,49 @@ def test_the_grant_is_one_time_and_the_index_is_what_makes_it_so(db):
             (owner,),
         )
         assert cur.fetchone()["n"] == 1
+
+
+def test_a_legacy_250_zc_grant_remains_untouched(db):
+    """Changing the grant for new testers must not rewrite an append-only
+    ledger entry already issued under the previous policy."""
+    owner = make_user(db)
+    account = mk.ensure_accounts(db, owner)["spendable"]
+    assert mk.post(
+        db,
+        ref_type="account",
+        ref_id=str(account["id"]),
+        legs=[mk.Leg(str(account["id"]), 250_000, "grant")],
+    ) == 1
+
+    assert mk.grant_starting_credits(db, owner) == 0
+    assert mk.credit_balances(db, owner)["spendable_zc"] == 250_000
+
+
+def test_an_existing_ungranted_profile_does_not_receive_the_new_grant(db):
+    """The launch boundary is profile creation, not first wallet visit.
+
+    An older tester may never have opened the credits page and therefore may
+    have no historical grant entry. That absence must not make the account look
+    new after the policy launches.
+    """
+    owner = make_user(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.profiles set starter_grant_eligible = false"
+            " where id = %s::uuid",
+            (owner,),
+        )
+
+    assert mk.grant_starting_credits(db, owner) == 0
+    assert mk.credit_balances(db, owner) == {"spendable_zc": 0, "escrow_zc": 0}
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.credit_entries e"
+            " join public.credit_accounts a on a.id = e.account_id"
+            " where a.owner_id = %s::uuid and e.reason = 'grant'",
+            (owner,),
+        )
+        assert cur.fetchone()["n"] == 0
 
 
 def test_a_stranger_has_a_zero_balance_and_not_an_error(db):
@@ -536,7 +836,7 @@ def test_an_unbalanced_movement_is_refused_before_anything_is_written(db):
                 mk.Leg(str(accounts["escrow"]["id"]), -100, "escrow_hold"),
             ],
         )
-    assert mk.balances(db, owner)["spendable"] == 250_000
+    assert mk.balances(db, owner)["spendable"] == 10_000
     assert mk.verify_ledger(db) == []
 
 
@@ -636,7 +936,7 @@ def test_a_replayed_settlement_pays_exactly_once(db):
     assert first["charged_zc"] == 1_000
     assert again["charged_zc"] == 0 and again["already_settled"]
     assert mk.balances(db, host)["spendable"] == 1_000
-    assert mk.balances(db, buyer) == {"spendable": 249_000, "escrow": 0}
+    assert mk.balances(db, buyer) == {"spendable": 9_000, "escrow": 0}
 
 
 def test_escrow_is_held_on_claimed_and_never_on_granted(db):
@@ -656,10 +956,10 @@ def test_escrow_is_held_on_claimed_and_never_on_granted(db):
     match = mk.grant_matches(db, bid_id=str(bid["id"]), plan=plan)[0]
 
     assert match["state"] == "granted"
-    assert mk.balances(db, buyer) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, buyer) == {"spendable": 10_000, "escrow": 0}
 
     mk.hold_escrow_on_claim(db, match_id=str(match["id"]), lease_id="lease-3")
-    assert mk.balances(db, buyer) == {"spendable": 249_600, "escrow": 400}
+    assert mk.balances(db, buyer) == {"spendable": 9_600, "escrow": 400}
     with db.cursor() as cur:
         cur.execute("select state, claimed_at from public.matches where id = %s",
                     (match["id"],))
@@ -687,7 +987,7 @@ def test_a_match_nobody_claims_costs_nobody_anything(db):
     assert mk.close_match(
         db, match_id=str(match["id"]), from_state="granted", to_state="expired"
     )
-    assert mk.balances(db, buyer) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, buyer) == {"spendable": 10_000, "escrow": 0}
     assert mk.balances(db, host) == {"spendable": 0, "escrow": 0}
 
 
@@ -715,7 +1015,7 @@ def test_a_failed_attempt_refunds_the_buyer_and_earns_the_host_nothing(db):
         db, match_id=str(match["id"]), lease_id="lease-5"
     )
     assert refund["refunded_zc"] == 1_000
-    assert mk.balances(db, buyer) == {"spendable": 250_000, "escrow": 0}
+    assert mk.balances(db, buyer) == {"spendable": 10_000, "escrow": 0}
     assert mk.balances(db, host) == {"spendable": 0, "escrow": 0}
     assert mk.held_for_lease(db, owner_id=buyer, lease_id="lease-5") == 0
     assert mk.verify_ledger(db) == []
@@ -741,7 +1041,7 @@ def test_work_shorter_than_its_estimate_releases_the_remainder(db):
         db, match_id=str(match["id"]), lease_id="lease-6", accepted_seconds=360
     )
     assert result == {"charged_zc": 100, "released_zc": 900, "already_settled": False}
-    assert mk.balances(db, buyer) == {"spendable": 249_900, "escrow": 0}
+    assert mk.balances(db, buyer) == {"spendable": 9_900, "escrow": 0}
     assert mk.balances(db, host)["spendable"] == 100
 
     # The audit answer to "why was I charged this?", straight from the entries.
@@ -826,7 +1126,7 @@ def test_the_invariant_survives_writes_racing_on_one_account(postgres_dsn, db):
     # Eight tasks, six minutes each, at 1 ZC/hour: 800 millicredits, and every
     # over-held millicredit back where it came from.
     assert mk.balances(db, host)["spendable"] == 800
-    assert mk.balances(db, buyer) == {"spendable": 249_200, "escrow": 0}
+    assert mk.balances(db, buyer) == {"spendable": 9_200, "escrow": 0}
 
 
 # ---------------------------------------------------------------------------

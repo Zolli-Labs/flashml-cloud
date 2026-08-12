@@ -9,9 +9,9 @@ import { NotAuthenticated, getPrices, type PricesView } from "@/lib/cloud-api";
 /** The compute board. Every number on the page comes from
  * `GET /v1alpha1/prices`: the capability classes as tickers (last live ask,
  * 24h movement, depth, observations) and the external venues' own quotes
- * beside them. ZC and vendor currencies are shown side by side and never
- * summed or converted — there is no exchange rate and no cell may imply
- * one. Not signed in goes to /sign-in; any other failed read is
+ * beside them. Source amounts remain distinct; fixed-parity equivalents
+ * appear only where the API supplies them, and nothing is summed. Not signed
+ * in goes to /sign-in; any other failed read is
  * unreadable, never an empty board. */
 export default function PricesPage() {
   const router = useRouter();
@@ -54,8 +54,8 @@ export default function PricesPage() {
       <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
         Compute, read like a market: each capability class is a ticker with
         its last live ask in Zolli Credits, its 24-hour movement, and the
-        observations behind it — external venues quoted beside the board in
-        their own currencies, never converted.
+        observations behind it — external venues retain their own currencies,
+        with ZC equivalents where the API reports them.
       </p>
 
       <div className="mt-6">

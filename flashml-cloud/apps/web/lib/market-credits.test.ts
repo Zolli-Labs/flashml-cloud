@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { LedgerMovement } from "./cloud-api";
+import type { CreditsBalance, LedgerMovement } from "./cloud-api";
 import {
   amountTone,
   formatZc,
@@ -10,6 +10,7 @@ import {
   movementCounterparty,
   movementIcon,
   movementLabel,
+  walletTiles,
 } from "./market-credits";
 
 function movement(
@@ -47,6 +48,29 @@ describe("formatZc — integer arithmetic only", () => {
 
   it("answers an em dash for a non-number, never NaN", () => {
     expect(formatZc(Number.NaN)).toBe("—");
+  });
+});
+
+describe("walletTiles", () => {
+  it("keeps API-provided USD values beside spendable and escrow ZC", () => {
+    const balance: CreditsBalance = {
+      spendable_zc: 10_125,
+      held_zc: 2_500,
+      spendable_usd: "10.13",
+      held_usd: "2.50",
+      usd_per_zc: "1.00",
+      lifetime: {
+        earned_zc: 0,
+        spent_zc: 0,
+        granted_zc: 0,
+        refunded_zc: 0,
+      },
+    };
+
+    const tiles = walletTiles(balance);
+    expect(tiles[0]).toMatchObject({ valueText: "10.125 ZC" });
+    expect(tiles[0].sub).toContain("$10.13");
+    expect(tiles[1].sub).toContain("$2.50");
   });
 });
 

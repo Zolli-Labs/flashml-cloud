@@ -198,16 +198,16 @@ function SignInCardContent() {
   // request that had no session on it — the same reason the sign-in path
   // above uses it.
   if (step === "details") {
+    // Same split layout as the credentials step, `bare`: the form brings its
+    // own card, and the brand panel stays so step 2 reads as the second half
+    // of one flow instead of a lone form on an empty page.
     return (
-      <main
-        id="content"
-        className="flex min-h-dvh items-center justify-center bg-cream px-4 py-12"
-      >
+      <AuthShell mode="signup" bare>
         <OnboardingForm
           stepLabel="Step 2 of 2"
           onSubmitted={() => window.location.assign(next)}
         />
-      </main>
+      </AuthShell>
     );
   }
 

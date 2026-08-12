@@ -41,7 +41,7 @@ function plan(over: Partial<PreviewPlan> & { name: string }): PreviewPlan {
     recommended: false,
     tasks_placed: 0,
     tasks_unplaced: 0,
-    cost: { zc: 0, usd: 0 },
+    cost: { zc: 0, usd: 0, total_usd_value: 0 },
     within_budget: { zc: null, usd: null },
     makespan_seconds: null,
     deadline_seconds: null,
@@ -241,7 +241,7 @@ describe("summariseRouting — an HPO sweep", () => {
           name: "cheapest",
           recommended: true,
           tasks_placed: 40,
-          cost: { zc: 12, usd: 3.5 },
+          cost: { zc: 12, usd: 3.5, total_usd_value: 15.5 },
           makespan_seconds: 1840,
           basis: "measured",
           n: 6,
@@ -250,7 +250,7 @@ describe("summariseRouting — an HPO sweep", () => {
         plan({
           name: "fastest",
           tasks_placed: 40,
-          cost: { zc: 30, usd: 9.25 },
+          cost: { zc: 30, usd: 9.25, total_usd_value: 39.25 },
           makespan_seconds: 420,
           basis: "projected",
           n: 2,
@@ -284,10 +284,7 @@ describe("summariseRouting — an HPO sweep", () => {
   });
 });
 
-describe("summariseRouting — ZC and USD are never combined", () => {
-  // 12 ZC and 3.5 USD. There is no exchange rate between them, so 15.5 is a
-  // number with no meaning; it must not be derivable from anything this
-  // module produces.
+describe("summariseRouting — settlement totals plus normalized USD value", () => {
   const panel = summariseRouting(
     previewed({
       kind: "hpo",
@@ -295,7 +292,7 @@ describe("summariseRouting — ZC and USD are never combined", () => {
         plan({
           name: "cheapest",
           tasks_placed: 40,
-          cost: { zc: 12, usd: 3.5 },
+          cost: { zc: 12, usd: 3.5, total_usd_value: 15.5 },
         }),
       ],
     })
@@ -309,23 +306,24 @@ describe("summariseRouting — ZC and USD are never combined", () => {
     ]);
   });
 
-  it("produces no number anywhere that is the two added together", () => {
-    const numbers = JSON.stringify(panel).match(/-?\d+(?:\.\d+)?/g) ?? [];
-    expect(numbers).not.toContain("15.5");
-  });
-
-  it("exposes no total, converted or combined field to render", () => {
-    const keys = Object.keys(row);
-    expect(keys).not.toContain("total");
-    expect(keys).not.toContain("cost");
-    expect(JSON.stringify(row)).not.toMatch(/total|converted|combined|exchange/i);
+  it("carries the API's normalized total without rewriting either source", () => {
+    expect(row.totalUsdValue).toBe(15.5);
+    expect(row.costs).toEqual([
+      { currency: "ZC", amount: 12 },
+      { currency: "USD", amount: 3.5 },
+    ]);
   });
 
   it("keeps a zero in one currency, because zero spent is a measurement", () => {
     const free = summariseRouting(
       previewed({
         kind: "hpo",
-        plans: [plan({ name: "cheapest", cost: { zc: 0, usd: 0 } })],
+        plans: [
+          plan({
+            name: "cheapest",
+            cost: { zc: 0, usd: 0, total_usd_value: 0 },
+          }),
+        ],
       })
     );
     expect(free.plans[0].costs).toEqual([
@@ -476,7 +474,7 @@ describe("RoutingCard — the rendered page", () => {
             name: "cheapest",
             recommended: true,
             tasks_placed: 1,
-            cost: { zc: 12, usd: 3.5 },
+            cost: { zc: 12, usd: 3.5, total_usd_value: 15.5 },
             makespan_seconds: null,
             basis: null,
             n: null,
@@ -513,10 +511,28 @@ describe("RoutingCard — the rendered page", () => {
     expect(markup).not.toContain(">0s<");
   });
 
-  it("puts ZC and USD in their own cells and never adds them", () => {
-    expect(markup).toContain(">12.00<");
-    expect(markup).toContain(">3.50<");
-    expect(markup).not.toContain("15.50");
+  it("keeps the plan table to six source-settlement cells", () => {
+    const table = markup.match(/<table[\s\S]*?<\/table>/)?.[0] ?? "";
+    const headerLabels = Array.from(
+      table.matchAll(/<th\b[^>]*>(.*?)<\/th>/g),
+      ([, label]) => label
+    );
+    const body = table.match(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/)?.[1] ?? "";
+    const planRows = Array.from(body.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g));
+
+    expect(table).not.toBe("");
+    expect(headerLabels).toEqual([
+      "Plan",
+      "ZC",
+      "USD",
+      "Finishes in",
+      "Machines",
+      "Evidence",
+    ]);
+    expect(planRows).toHaveLength(1);
+    expect(planRows[0][1].match(/<td\b/g)).toHaveLength(6);
+    expect(headerLabels.join(" ")).not.toMatch(/\b(cash|equivalent|total)\b/i);
+    expect(table).not.toContain("$");
   });
 
   it("says a failed read failed, in the API's own words", () => {
@@ -539,7 +555,12 @@ describe("job-routing stays pure", () => {
     const read = previewed({
       kind: "hpo",
       venues: GPU_FINETUNE_VENUES,
-      plans: [plan({ name: "cheapest", cost: { zc: 1, usd: 2 } })],
+      plans: [
+        plan({
+          name: "cheapest",
+          cost: { zc: 1, usd: 2, total_usd_value: 3 },
+        }),
+      ],
     });
     expect(summariseRouting(read)).toEqual(summariseRouting(read));
   });
