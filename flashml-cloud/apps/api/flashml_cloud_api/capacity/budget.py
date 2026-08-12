@@ -22,10 +22,25 @@ class BudgetRefused(RuntimeError):
 def window_spend_usd(db: psycopg.Connection, *, hours: float) -> float:
     """Committed hourly rate across acquisitions opened in the window.
 
-    Deliberately counts REQUESTED as well as ACTIVE and RELEASED: a row in
-    REQUESTED may already have created something at the venue that we have
-    not yet learned the handle for, and pretending it costs nothing is how
-    a retry loop spends without ever being counted.
+    **There is no state filter, and adding one would reopen the hole this
+    ceiling exists to close.** Every row created inside the window counts —
+    REQUESTED, ACTIVE, RELEASED and FAILED alike:
+
+    * REQUESTED may already have created something at the venue whose handle
+      we have not learned yet. Pretending it costs nothing is how a retry
+      loop spends without ever being counted.
+    * RELEASED already spent its money; a window ceiling that forgets it the
+      moment the machine goes away is not a ceiling on spend, only on
+      concurrency.
+    * FAILED cannot be *proven* to have cost nothing — we may have failed
+      after the venue billed us, or before it told us anything. And a retry
+      storm against a broken venue, every attempt landing in FAILED, is
+      precisely the runaway a rolling window is here to catch. Filtering
+      FAILED out would make the fastest way to spend the account also the
+      one way to spend it invisibly.
+
+    Nor is there a venue, owner or job filter: this is ONE global ceiling on
+    what the control plane may commit, not a per-tenant allowance.
     """
     with db.cursor() as cur:
         cur.execute(
