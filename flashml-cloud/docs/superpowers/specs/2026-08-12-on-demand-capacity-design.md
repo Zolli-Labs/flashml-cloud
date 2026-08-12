@@ -11,7 +11,7 @@ survives:
 
 | Where | Now false |
 |---|---|
-| §6 out-of-scope | "Relaxing `assert_pool_isolated`. Not required" — **it is required.** `provision_sandbox_machine` asserts isolation *internally* (`sandbox_identity.py:266`), so renting into a user's own populated pool is refused today. This blocks the feature's stated purpose and awaits an owner decision. |
+| §6 out-of-scope | "Relaxing `assert_pool_isolated`. Not required" — **it is required, and the owner has now overruled this line.** See D6 below. |
 | §2.2 | "Ephemeral machine identity … already revoke and unbind rentals" — **declined during implementation, correctly.** That sweep measures from `coalesce(last_seen_at, created_at)` with a 15-minute default, and a rented host has no `last_seen_at` until it has booted and pulled a multi-gigabyte image; it would revoke machines that are still starting. |
 | §2.1 | `CapacityRequest` "carries … a deadline" — **no such field was built.** That dropped field is close to the cost backstop the wiring is now blocked on. |
 | §2.3 | "job settles → `provider.release()` [best effort]" — **no settle path exists.** `release_capacity` has zero callers. |
@@ -171,6 +171,78 @@ in the public repo, and is correctly out of reach before Friday.
 **What this costs:** no open marketplace where anyone's job lands on any
 machine. Renting *for a user* works; renting *into a public pool* does not.
 That is the upgrade the upstream change buys, later.
+
+### D6 — A rental gets its own identity path, and that identity is a lease, not a deed. *(owner decision, 2026-08-12)*
+
+**The problem.** `provision_sandbox_machine` asserts pool isolation *inside
+itself* (`sandbox_identity.py:266`), so minting an identity for a rented GPU
+into the user's own workspace is refused — the workspace already holds their
+laptop. Today renting works only into an empty pool, one machine at a time.
+That forbids the thing this feature exists to do, and it also blocks
+`gpu_count > 1`, which the trade-off curve already offers.
+
+**The decision.** A **sibling** minting function for rented capacity, sharing
+the authorise-and-lock sequence but without the isolation assertion.
+`provision_sandbox_machine` and its invariant are untouched: that rule protects
+an evaluation sandbox holding a credential and running code the submitter
+wrote, where a second machine in the pool could claim the session's tasks. A
+GPU the operator rented into a user's own pool has neither property — being an
+eligible claimant is the entire point, and no session credential is present.
+
+**And the identity must expire with the rental.** From the owner, and it is the
+part that matters most:
+
+> *"When we give an identity it just stays in our account after we're done with
+> the job. So if other people accidentally rent the same RunPod, it will appear
+> already linked to another account — however it's only linked at that point,
+> not for ever like the local machines."*
+
+A laptop's binding is a **deed**: it says whose machine this is, permanently. A
+rental's binding is a **lease**: it is true for the hours we hold the hardware
+and false the moment we give it back. The current code makes no such
+distinction — rentals are minted `lifecycle = 'persistent'`, so nothing ever
+expires them, and the same physical pod re-rented later can surface still
+carrying the last tenant's link.
+
+That is why `release_capacity` revokes the credential independently of the
+destroy (2026-08-12): before it did, **renting once poisoned the pool
+permanently** — the leftover binding made the next rental into that pool fail
+the isolation check. The revoke was the right instinct; this decision names the
+principle behind it.
+
+Note `lifecycle = 'ephemeral'` was evaluated as the mechanism and **declined**:
+that sweep measures from `coalesce(last_seen_at, created_at)` on a 15-minute
+default, and a rented host has no `last_seen_at` until it has booted and pulled
+a multi-gigabyte image, so it would revoke machines that are still starting.
+The lease property must come from the rental lifecycle, not from a heartbeat
+timer.
+
+### D7 — Serverless is a second execution model, deliberately deferred. *(owner decision, 2026-08-12)*
+
+FC GPU is disqualified because FlashML's runtime is **pull-based** — machines
+claim work, the coordinator never assigns it — while FC is **push-based** and
+freezes its instances the moment no request is in flight. That is a shape
+mismatch, not a missing feature.
+
+Two different seams follow, and only one exists:
+
+| Seam | Abstracts | Status |
+|---|---|---|
+| `ResourceProvider` | getting a machine — create, destroy, observe | **built**, already provider-agnostic |
+| a task-execution adapter | how work reaches the compute: pull vs push | does not exist |
+
+**AWS and GCP do not need the second one.** EC2 and Compute Engine are ordinary
+VMs and run flashnode exactly as RunPod does; the existing interface covers
+them. Only *serverless* — FC, Lambda, Cloud Run — needs a dispatcher that
+claims a lease on the fleet's behalf, invokes a function with the task payload,
+and commits the result.
+
+Deferred because such a dispatcher must reimplement what flashnode provides for
+free: the checkpoint relay (the agent is the courier precisely because tasks
+are network-isolated), lease expiry and resume, and the environment scrubbing
+that keeps task code away from cloud credentials. A new node type also touches
+`flashruntime.protocol`, which is a public-repo release plus a four-site pin
+bump.
 
 ### D3 — The rented instance is the isolation boundary. Three requirements.
 
