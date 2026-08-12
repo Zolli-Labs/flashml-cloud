@@ -34,3 +34,6 @@ build/
 dist/
 .gstack/
 **/.artifacts/
+
+# smoke-test / competition evidence bundles (sandbox ids, account state)
+.evidence/

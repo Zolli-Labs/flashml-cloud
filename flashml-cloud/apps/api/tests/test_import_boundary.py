@@ -52,6 +52,22 @@ SANCTIONED_EXCEPTIONS = {
     # one door (``test_the_driver_import_lives_in_exactly_one_module``).
     "fedavg.py": {"flashml_workloads.fedavg_driver", "flashml_workloads.chunks"},
     "compile.py": {"flashruntime.images"},
+    # The compute router must answer "which machines could legally run this
+    # job?" before it can price anything, and that question already has one
+    # correct answer: the seven fail-closed gates in
+    # ``IsolationAwarePlacement.eligible``. Same argument as ``fedavg.py``
+    # above — the alternative is not a narrower boundary, it is a hand-copied
+    # predicate that agrees today and diverges silently, producing plans that
+    # never fill or that recommend machines the coordinator will refuse.
+    #
+    # ``expand_tasks`` joins it because the router prices TASKS, and how a spec
+    # becomes a task list (HPO sweep, sharded command, federated round) is the
+    # coordinator's rule.
+    #
+    # One door on purpose: ``router/`` takes ``eligible`` as an injected
+    # callable and contains no eligibility rule of its own, so there is nothing
+    # there to drift. Owner decision, 2026-08-11.
+    "placement.py": {"flashruntime.scheduler", "flashruntime.service.modea"},
 }
 
 #: Top-level packages that live in the sibling public repo.

@@ -11,6 +11,7 @@ function metrics(over: Partial<PlatformMetrics>): PlatformMetrics {
     jobs_partial: 0,
     jobs_failed: 0,
     tasks_attempted: 0,
+    tasks_resolved: 0,
     tasks_accepted: 0,
     goodput_ratio: null,
     lost_task_seconds: null,
@@ -37,6 +38,7 @@ describe("summariseMetrics", () => {
     ]);
     expect(summary.taskCounts).toEqual([
       { label: "Attempted", value: 0 },
+      { label: "Resolved", value: 0 },
       { label: "Accepted", value: 0 },
     ]);
     expect(summary.machinesContributing).toBe(0);
@@ -50,6 +52,7 @@ describe("summariseMetrics", () => {
         jobs_partial: 1,
         jobs_failed: 2,
         tasks_attempted: 140,
+        tasks_resolved: 136,
         tasks_accepted: 128,
         machines_contributing: 5,
       })
@@ -63,6 +66,10 @@ describe("summariseMetrics", () => {
     ]);
     expect(summary.taskCounts).toEqual([
       { label: "Attempted", value: 140 },
+      // The goodput denominator, shown next to the pair a reader would
+      // otherwise divide themselves. 140 attempted with 136 resolved means
+      // four are still in flight and in neither reliability number.
+      { label: "Resolved", value: 136 },
       { label: "Accepted", value: 128 },
     ]);
     expect(summary.machinesContributing).toBe(5);
@@ -74,31 +81,78 @@ describe("summariseMetrics", () => {
     expect(summary.lostTaskTime.measured).toBe(false);
     expect(summary.mttr.measured).toBe(false);
     expect(summary.mttd.measured).toBe(false);
-    // The display text says plainly that it is not measured — never a bare
-    // "—" that could be mistaken for "no data" without an explanation.
-    expect(summary.lostTaskTime.display).toBe(NOT_MEASURED);
+    // The display text says plainly why it is absent — never a bare "—"
+    // that could be mistaken for "no data" without an explanation.
+    //
+    // Goodput and lost task time share the more specific reason: this
+    // fixture has nothing resolved, and both fields are null for exactly
+    // that arithmetic. MTTR and MTTD are null for their own reasons and get
+    // the generic sentence.
+    expect(summary.goodput.display).toBe(summary.lostTaskTime.display);
+    expect(summary.lostTaskTime.display.toLowerCase()).toContain("resolved");
     expect(summary.mttr.display).toBe(NOT_MEASURED);
     expect(summary.mttd.display).toBe(NOT_MEASURED);
   });
 
-  it("explains goodput's null as 'no attempts' when tasks_attempted is 0, not as a generic unmeasured", () => {
+  it("explains goodput's null as 'nothing resolved' when tasks_resolved is 0, not as a generic unmeasured", () => {
     // The API's own contract: goodput_ratio is null specifically when
-    // attempted is 0 — there is nothing to divide, which is a different
+    // RESOLVED is 0 — there is nothing to divide, which is a different
     // (and more informative) reason than "not instrumented yet".
     const summary = summariseMetrics(
-      metrics({ tasks_attempted: 0, goodput_ratio: null })
+      metrics({ tasks_resolved: 0, goodput_ratio: null })
     );
     expect(summary.goodput.measured).toBe(false);
     expect(summary.goodput.display).not.toBe(NOT_MEASURED);
     expect(summary.goodput.display.toLowerCase()).toContain("no");
   });
 
-  it("still calls goodput unmeasured (not 'no attempts') when attempts happened but the ratio is null anyway", () => {
+  it("keys the reason off tasks_resolved, not tasks_attempted", () => {
+    // The live shape of the bug this fixes. Migration 0015 split the two
+    // counts: `tasks_attempted` is every lease claimed, `tasks_resolved` is
+    // what goodput divides by. An account whose only attempts are still in
+    // flight has attempted > 0 and resolved == 0 — and used to read "Not
+    // measured yet", blaming our instrumentation for arithmetic that has no
+    // denominator.
+    const inFlightOnly = summariseMetrics(
+      metrics({ tasks_attempted: 12, tasks_resolved: 0, goodput_ratio: null })
+    );
+    expect(inFlightOnly.goodput.measured).toBe(false);
+    expect(inFlightOnly.goodput.display).not.toBe(NOT_MEASURED);
+    // And it must not claim there were no attempts either — there were 12.
+    expect(inFlightOnly.goodput.display.toLowerCase()).toContain("resolved");
+  });
+
+  it("gives lost task time the same reason, because it has the same null guard", () => {
+    // The sibling copy with the identical bug. `lost_task_seconds` is null
+    // under exactly the same condition as `goodput_ratio` (`resolved <= 0`,
+    // and for the same reason: 0.0 is the flattering claim "no work was
+    // wasted"). It used to say "Not measured yet" for all of them.
     const summary = summariseMetrics(
-      metrics({ tasks_attempted: 140, goodput_ratio: null })
+      metrics({
+        tasks_attempted: 12,
+        tasks_resolved: 0,
+        lost_task_seconds: null,
+      })
+    );
+    expect(summary.lostTaskTime.measured).toBe(false);
+    expect(summary.lostTaskTime.display).toBe(summary.goodput.display);
+    expect(summary.lostTaskTime.display).not.toBe(NOT_MEASURED);
+  });
+
+  it("still calls goodput unmeasured when work resolved but the ratio is null anyway", () => {
+    const summary = summariseMetrics(
+      metrics({ tasks_attempted: 140, tasks_resolved: 140, goodput_ratio: null })
     );
     expect(summary.goodput.measured).toBe(false);
     expect(summary.goodput.display).toBe(NOT_MEASURED);
+  });
+
+  it("still calls lost task time unmeasured once something has resolved", () => {
+    const summary = summariseMetrics(
+      metrics({ tasks_resolved: 140, lost_task_seconds: null })
+    );
+    expect(summary.lostTaskTime.measured).toBe(false);
+    expect(summary.lostTaskTime.display).toBe(NOT_MEASURED);
   });
 
   it("formats a measured goodput ratio as a percentage, not a fraction", () => {
@@ -169,6 +223,7 @@ describe("job outcome counts", () => {
       jobs_partial: 1,
       jobs_failed: 2,
       tasks_attempted: 0,
+      tasks_resolved: 0,
       tasks_accepted: 0,
       goodput_ratio: null,
       lost_task_seconds: null,
@@ -196,6 +251,7 @@ describe("job outcome counts", () => {
       jobs_partial: 0,
       jobs_failed: 0,
       tasks_attempted: 0,
+      tasks_resolved: 0,
       tasks_accepted: 0,
       goodput_ratio: null,
       lost_task_seconds: null,

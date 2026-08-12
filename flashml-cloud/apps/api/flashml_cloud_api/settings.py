@@ -15,7 +15,7 @@ import base64
 import binascii
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dc_field
 
 
 def _decode_pem(value: str) -> str:
@@ -46,6 +46,26 @@ def _decode_pem(value: str) -> str:
     except (binascii.Error, UnicodeDecodeError, ValueError):
         return value
     return decoded if "-----BEGIN" in decoded else value
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read an integer env var, falling back on anything unparseable.
+
+    A typo in a timeout must not take the API down at startup — but it must
+    also not silently become zero, which for `FC_SANDBOX_TIMEOUT_MS` would
+    mean a sandbox that expires the moment it is created.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not an integer; using %d", name, raw, default
+        )
+        return default
+    return value if value > 0 else default
 
 
 def _with_default_scheme(url: str, scheme: str) -> str:
@@ -97,6 +117,27 @@ class Settings:
     #: know which host to put in front of it. Unset is a real, if
     #: non-fatal, defect — hence the startup warning in `from_env`.
     console_url: str = ""
+    #: THIS API's own public base URL — the one a machine outside our network
+    #: can reach. Distinct from `console_url` (the web app) and, critically,
+    #: from `coordinator_url`.
+    #:
+    #: A FlashNode running inside an Alibaba FC Sandbox must enrol against
+    #: *this* API, not the coordinator, for two independent reasons and either
+    #: alone is fatal:
+    #:
+    #:   1. It authenticates with a MACHINE TOKEN, which is a cloud-API
+    #:      concept. The coordinator has no notion of one and would refuse it.
+    #:   2. On Render the coordinator is `type: pserv` — a PRIVATE service on
+    #:      the internal network. A sandbox in Singapore cannot route to it at
+    #:      all. The whole point of `pserv` is that nothing outside can.
+    #:
+    #: Unset, `sandbox_orchestrator.start_session` falls back to
+    #: `coordinator_url`, which is correct only for a local dev loop where both
+    #: happen to be reachable. In any deployed environment that fallback
+    #: produces a sandbox whose worker can never enrol — and the failure looks
+    #: like a bootstrap timeout, not a configuration error, which is why this
+    #: field exists rather than a bare `os.environ` read at the call site.
+    public_api_url: str = ""
     #: Resend API key. Optional: an unconfigured deploy must still boot and
     #: serve — the failure mode of a missing mail provider is a silent
     #: product, not a dead API, so this is deliberately NOT in the
@@ -122,6 +163,128 @@ class Settings:
     #: The App's RSA private key, PEM. Accepted base64-encoded as well —
     #: see `_decode_pem`.
     github_app_private_key: str = ""
+
+    # --- Alibaba FC Agent Sandbox --------------------------------------
+    #
+    # The hibernatable evaluation worker. Optional for the same reason as
+    # `resend_api_key`: a deploy without it must still boot and serve, and
+    # every existing pool keeps working — the sandbox is one more machine,
+    # not a dependency of the product.
+    #
+    # REGION IS NOT A PREFERENCE. Deep hibernation (`sandbox.pause()`) is
+    # enabled only in `ap-southeast-1`. Measured 2026-08-11: `us-west-1`
+    # returns `403 PauseSessionForbidden — pauseSession is not enabled for
+    # this function` while Singapore pauses in 2.7 s and wakes in 0.95 s.
+    # Pointing this at any other region silently costs the entire
+    # hibernation capability, so it is configuration, not a default.
+    fc_sandbox_api_key: str = dc_field(default="", repr=False)
+    #: `https://api.<region>.e2b.fc.aliyuncs.com`
+    fc_sandbox_api_url: str = ""
+    #: `<region>.e2b.fc.aliyuncs.com`
+    fc_sandbox_domain: str = ""
+    fc_sandbox_region: str = "ap-southeast-1"
+    #: Alibaba's built-in template. A custom one needs an ACR tier that
+    #: can process images — Economy cannot, and upgrading is four figures.
+    fc_sandbox_template: str = "code-interpreter-v1"
+    #: The pool that contains ONLY the managed sandbox machine.
+    #:
+    #: CORRECTED 2026-08-11 — the earlier comment here claimed this "stops a
+    #: public job claiming the sandbox". It does not, and believing it would
+    #: be a security hole. The pool gate (the seventh) only runs for tasks
+    #: whose payload NAMES a pool. A public job compiles to
+    #: `placement.pool = "any"`, which expands to a payload with no `pool`
+    #: key at all, so the gate never fires for it.
+    #:
+    #: What this pool DOES guarantee, both of which matter:
+    #:   - the evaluation task cannot be claimed by anything else;
+    #:   - another team's pool-scoped job cannot claim this machine.
+    #:
+    #: What keeps PUBLIC work off the sandbox is a different gate entirely:
+    #: a public job is `tier: sandboxed, allowFallback: false` and is
+    #: placeable only on a node advertising `sandbox_capable`. An FC Agent
+    #: Sandbox cannot nest a container runtime, so the worker must run a
+    #: no-container tier and must not claim that capability. That is a
+    #: property of HOW `flashnode` is launched (`sandbox_bootstrap.py`), not
+    #: of this setting — the stamp the coordinator judges comes from the
+    #: agent's own registration, and `machines.sandbox_capable` is a
+    #: display-only snapshot with no authority over placement.
+    fc_sandbox_pool_id: str = ""
+    #: The sandbox's own lifetime.
+    #:
+    #: THERE ARE PROBABLY TWO CLOCKS HERE, and they disagree. Measured
+    #: 2026-08-11 (n=1, 150 s pause): the E2B sandbox TTL **stops** while
+    #: paused — a 90 s-TTL sandbox reconnected 64 s past its own expiry was
+    #: intact, and `end_at` read while paused was byte-identical to `end_at`
+    #: at create. But Alibaba doc 3028695 says the FC **Session** TTL keeps
+    #: accruing from creation ("仍从原始创建时间累计"). Those describe
+    #: different objects — the E2B-compatible sandbox lifetime and the
+    #: underlying FC session — so both can be true, and only the first has
+    #: been measured.
+    #:
+    #: Therefore: size this to exceed the WHOLE train→wait→evaluate span, as
+    #: if nothing stopped. That advice is correct under either clock, and it
+    #: is the only advice that is. Do not build anything that REQUIRES the
+    #: clock to stop until a multi-hour hibernation has actually been
+    #: observed to survive — the longest pause measured so far is 150 s.
+    #:
+    #: A sandbox that expires mid-hibernation is gone, and takes the prepared
+    #: environment with it. Default 1 hour.
+    fc_sandbox_timeout_ms: int = 3_600_000
+
+    # --- Alibaba OSS (artifacts) ---------------------------------------
+    #
+    # Where committed artifacts live, replacing the coordinator's local
+    # disk (`FLASHML_LOCAL_ARTIFACTS_DIR`) — 5 GB on prod, and nothing at
+    # all on dev, where `/tmp` loses every artifact on redeploy.
+    #
+    # The sandbox never receives these credentials. It is handed presigned
+    # URLs, which carry no identity and expire on their own. See
+    # `alibaba_oss.sign_get`.
+    oss_bucket: str = ""
+    #: Host only, no scheme: `oss-ap-southeast-1.aliyuncs.com`.
+    oss_endpoint: str = ""
+    oss_region: str = "ap-southeast-1"
+    oss_access_key_id: str = ""
+    oss_access_key_secret: str = dc_field(default="", repr=False)
+
+    @property
+    def fc_sandbox_configured(self) -> bool:
+        """All four present. All-or-nothing, like the GitHub App.
+
+        A half-configured sandbox cannot create anything, so reporting it
+        as available would let the console offer an evaluation button that
+        fails after the user has already submitted a training job.
+        """
+        return bool(
+            self.fc_sandbox_api_key
+            and self.fc_sandbox_api_url
+            and self.fc_sandbox_domain
+            and self.fc_sandbox_pool_id
+        )
+
+    @property
+    def oss_configured(self) -> bool:
+        """All four present, same reasoning.
+
+        Unconfigured is not an error: artifacts fall back to the
+        coordinator's local store and the whole loop still runs.
+        """
+        return bool(
+            self.oss_bucket
+            and self.oss_endpoint
+            and self.oss_access_key_id
+            and self.oss_access_key_secret
+        )
+
+    @property
+    def fc_sandbox_hibernation_region(self) -> bool:
+        """Whether the configured region can actually pause.
+
+        Read this before promising hibernation in a UI or a claim. It is a
+        allowlist of one today; when Alibaba enables another region, add it
+        here and nowhere else.
+        """
+        return self.fc_sandbox_region == "ap-southeast-1"
 
     @property
     def github_app_configured(self) -> bool:
@@ -167,6 +330,13 @@ class Settings:
         # is absent and a connection is actually requested.
         database_url = os.environ.get("DATABASE_URL", "")
         console_url = os.environ.get("FLASHML_CONSOLE_URL", "")
+        # Normalised the same way COORDINATOR_URL is, and https by default:
+        # this one is reached from OUTSIDE our network, so plain http would be
+        # a downgrade rather than the internal-network shortcut that makes
+        # http correct for the coordinator.
+        public_api_url = _with_default_scheme(
+            os.environ.get("FLASHML_PUBLIC_API_URL", "").strip().rstrip("/"), "https"
+        )
         resend_api_key = os.environ.get("RESEND_API_KEY", "")
         email_from = os.environ.get("EMAIL_FROM", "")
         email_reply_to = os.environ.get("EMAIL_REPLY_TO", "")
@@ -178,6 +348,36 @@ class Settings:
             os.environ.get("GITHUB_APP_PRIVATE_KEY", "")
         )
 
+        # Alibaba FC Agent Sandbox. The region defaults to the only one that
+        # can hibernate; api_url/domain are DERIVED from it when unset so a
+        # deploy cannot end up with a Singapore key pointed at a Virginia
+        # endpoint — a mismatch Alibaba's own docs warn produces failures in
+        # authentication, template lookup, creation and connection alike.
+        fc_sandbox_region = (
+            os.environ.get("E2B_REGION") or "ap-southeast-1"
+        ).strip()
+        fc_sandbox_api_key = os.environ.get("E2B_API_KEY", "").strip()
+        fc_sandbox_api_url = (
+            os.environ.get("E2B_API_URL", "").strip()
+            or f"https://api.{fc_sandbox_region}.e2b.fc.aliyuncs.com"
+        )
+        fc_sandbox_domain = (
+            os.environ.get("E2B_DOMAIN", "").strip()
+            or f"{fc_sandbox_region}.e2b.fc.aliyuncs.com"
+        )
+        fc_sandbox_template = (
+            os.environ.get("FC_SANDBOX_TEMPLATE", "").strip() or "code-interpreter-v1"
+        )
+        fc_sandbox_pool_id = os.environ.get("FC_SANDBOX_POOL_ID", "").strip()
+        fc_sandbox_timeout_ms = _int_env("FC_SANDBOX_TIMEOUT_MS", 3_600_000)
+
+        # Alibaba OSS.
+        oss_bucket = os.environ.get("OSS_BUCKET", "").strip()
+        oss_endpoint = os.environ.get("OSS_ENDPOINT", "").strip()
+        oss_region = (os.environ.get("OSS_REGION") or fc_sandbox_region).strip()
+        oss_access_key_id = os.environ.get("OSS_ACCESS_KEY_ID", "").strip()
+        oss_access_key_secret = os.environ.get("OSS_ACCESS_KEY_SECRET", "").strip()
+
         settings = cls(
             supabase_url=supabase_url,
             supabase_jwt_secret=supabase_jwt_secret,
@@ -187,12 +387,25 @@ class Settings:
             require_auth=require_auth,
             database_url=database_url,
             console_url=console_url,
+            public_api_url=public_api_url,
             resend_api_key=resend_api_key,
             email_from=email_from,
             email_reply_to=email_reply_to,
             github_app_id=github_app_id,
             github_app_slug=github_app_slug,
             github_app_private_key=github_app_private_key,
+            fc_sandbox_api_key=fc_sandbox_api_key,
+            fc_sandbox_api_url=fc_sandbox_api_url,
+            fc_sandbox_domain=fc_sandbox_domain,
+            fc_sandbox_region=fc_sandbox_region,
+            fc_sandbox_template=fc_sandbox_template,
+            fc_sandbox_pool_id=fc_sandbox_pool_id,
+            fc_sandbox_timeout_ms=fc_sandbox_timeout_ms,
+            oss_bucket=oss_bucket,
+            oss_endpoint=oss_endpoint,
+            oss_region=oss_region,
+            oss_access_key_id=oss_access_key_id,
+            oss_access_key_secret=oss_access_key_secret,
         )
 
         if require_auth:

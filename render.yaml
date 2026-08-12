@@ -212,6 +212,26 @@ services:
       # volunteer is told to open has to be a host that answers.
       - key: FLASHML_CONSOLE_URL
         value: https://zolliai.com
+      # THIS API's own public address, as reached from OUTSIDE our network.
+      #
+      # The FlashNode running inside an Alibaba FC Sandbox enrols against it.
+      # It cannot be COORDINATOR_URL, for two separate reasons and either one
+      # alone is fatal: the sandbox authenticates with a MACHINE TOKEN, which
+      # is a cloud-API concept the coordinator has no notion of; and the
+      # coordinator is `type: pserv`, a PRIVATE service whose whole purpose is
+      # that nothing outside this network can reach it. A sandbox in Singapore
+      # cannot route to it at all.
+      #
+      # Unset, `sandbox_orchestrator.start_session` falls back to
+      # COORDINATOR_URL — correct for a single-host dev loop, wrong here. The
+      # failure then looks like a bootstrap timeout rather than a
+      # misconfiguration, which is the expensive kind of wrong.
+      #
+      # An explicit URL, not `fromService`, matching FLASHML_CONSOLE_URL above
+      # and NEXT_PUBLIC_CLOUD_API on the web service — all three name the same
+      # public hosts and are read together.
+      - key: FLASHML_PUBLIC_API_URL
+        value: https://api.zolliai.com
       - key: PYTHON_VERSION
         value: "3.11"
       # Mail. The API sends two product emails — access approved and access
@@ -274,6 +294,122 @@ services:
       # every connected organisation's private source is readable.
       - key: GITHUB_APP_PRIVATE_KEY
         sync: false
+
+      # -- Alibaba OSS: the artifact mirror ---------------------------------
+      #
+      # All five or none. `Settings.oss_configured` is all-or-nothing for the
+      # same reason the GitHub App above is, and unset is a supported, safe
+      # configuration: the mirror does nothing, the coordinator's disk stays
+      # the only store, and every path behaves byte for byte as before. So
+      # these are NOT in settings.from_env's required list.
+      #
+      # WHAT THIS BUYS. A committed artifact lives in exactly one place
+      # today: the coordinator's own filesystem
+      # (FLASHML_LOCAL_ARTIFACTS_DIR), which is the 5 GB disk declared above
+      # on prod and NOTHING AT ALL on dev, where it is /tmp on a free
+      # instance with no disk — every redeploy destroys every artifact the
+      # product has ever produced there. `artifact_mirror.py` copies a
+      # finished job's ACCEPTED artifacts to OSS after the fact, on the
+      # observation that the job is terminal. It is a second copy, never a
+      # replacement: nothing about where the coordinator writes changes, and
+      # setting FLASHML_ARTIFACT_BACKEND on the coordinator would not change
+      # it either (the runtime's Mode A path never calls store_from_env).
+      #
+      # THE NAMES MATTER. settings.from_env reads exactly these five —
+      # OSS_BUCKET, not FLASHML_OSS_BUCKET. The integration panel used to
+      # display the FLASHML_-prefixed name, which meant a fully configured
+      # deployment reported an empty bucket and an unconfigured one could be
+      # made to look configured by exporting a variable nothing consumed.
+      #
+      # OSS_REGION is optional and defaults to E2B_REGION / ap-southeast-1;
+      # it is declared here so the two Alibaba services cannot silently end
+      # up in different regions. Endpoint is HOST ONLY, no scheme:
+      # `oss-ap-southeast-1.aliyuncs.com` (alibaba_oss adds https://).
+      #
+      # THE KEY PAIR IS HELD BY THIS PROCESS AND NOTHING ELSE. A sandbox
+      # running user ML code never receives it — it gets presigned, expiring,
+      # single-object URLs minted here. Scope the RAM policy to this one
+      # bucket; a key that can reach more than the bucket is a key whose leak
+      # costs more than the artifacts.
+      - key: OSS_BUCKET
+        sync: false
+      - key: OSS_ENDPOINT
+        value: oss-ap-southeast-1.aliyuncs.com
+      - key: OSS_REGION
+        value: ap-southeast-1
+      - key: OSS_ACCESS_KEY_ID
+        sync: false
+      # sync: false, like every other credential here. Never a value in this
+      # file — see the workspace rule that publishable keys are secrets too.
+      - key: OSS_ACCESS_KEY_SECRET
+        sync: false
+
+      # -- Alibaba FC Agent Sandbox: the evaluation session -----------------
+      #
+      # All of E2B_API_KEY, FC_SANDBOX_POOL_ID and a region or none.
+      # `Settings.fc_sandbox_configured` is all-or-nothing like the two blocks
+      # above, and unset is a supported configuration: the sandbox routes
+      # answer 404, the reconciler never starts, and nothing else in the API
+      # changes shape. So these are NOT in settings.from_env's required list.
+      #
+      # WHAT THIS BUYS. A sandbox is created, bootstrapped into an enrolled
+      # FlashNode, deep-hibernated for however long training takes somewhere
+      # else, then woken to evaluate the trained model and killed. The
+      # hibernation is the point: its instance is destroyed and its filesystem
+      # snapshotted, so the wait costs nothing while the model is being
+      # trained on somebody else's machine.
+      #
+      # E2B_REGION MUST BE ap-southeast-1 AND THERE IS NO SECOND OPTION.
+      # Deep hibernation — `pause()` — is enabled in that region and no other;
+      # anywhere else the API answers 403 PauseSessionForbidden, forever. A
+      # wrong value here does not fail loudly at deploy: sessions are created
+      # and bootstrapped normally and then cannot hibernate, which turns a
+      # sandbox that should cost nothing during training into one billing by
+      # the second for the whole run. `sandbox_orchestrator.start_session`
+      # refuses before it creates anything for exactly this reason, so the
+      # visible symptom is every session failing at step 2 — but the variable
+      # is what decides it. E2B_API_URL and E2B_DOMAIN are DERIVED from this
+      # when unset, so a region typo also silently retargets both.
+      #
+      # FC_SANDBOX_POOL_ID is an ISOLATION pool and it is not advisory. The
+      # session mints exactly one machine credential into it, and the
+      # coordinator's seventh placement gate refuses a pool-scoped task to any
+      # node whose stamp does not list that pool. Point it at a pool that is
+      # EMPTY and stays empty — `start_session` refuses to open a session into
+      # a pool that already holds a machine, because a second machine in there
+      # is a stranger's laptop eligible to claim the evaluation.
+      #
+      # THE API KEY REACHES ALIBABA, NOT THE SANDBOX. Nothing running user ML
+      # code ever receives it; the sandbox gets a one-session machine token
+      # and per-object presigned OSS URLs, both revoked by cleanup.
+      - key: E2B_API_KEY
+        sync: false
+      # A LITERAL, deliberately — and this was reversed on 2026-08-11.
+      #
+      # It was `sync: false` on the reasoning that the region "cannot drift
+      # without somebody typing it". That has it exactly backwards: sync:false
+      # means somebody MUST type it, once per environment, from memory, into a
+      # dashboard field with no validation — and a typo does not fail the
+      # deploy. It fails much later, as `403 PauseSessionForbidden`, and the
+      # sandbox that should have cost nothing during training bills by the
+      # second instead. The value is not a secret and there is exactly one
+      # correct answer, so version control is the right place for it.
+      - key: E2B_REGION
+        value: ap-southeast-1
+      - key: FC_SANDBOX_POOL_ID
+        sync: false
+      # The sandbox image. `code-interpreter-v1` is the default in Settings;
+      # declared here so a deployment that needs a different base does not
+      # have to change code.
+      - key: FC_SANDBOX_TEMPLATE
+        value: code-interpreter-v1
+      # The sandbox's own lifetime in milliseconds (default 3600000). It is a
+      # BUDGET, not a timeout to tune away: `start_session` asserts the
+      # remaining budget exceeds the whole expected training wait before it
+      # pauses, so a value shorter than a training run makes every session
+      # refuse at step 7 rather than expire silently mid-hibernation.
+      - key: FC_SANDBOX_TIMEOUT_MS
+        value: 3600000
 
   # -------------------------------------------------------------------------
   # 3. The web app — public. Talks only to the API, never to Postgres.
@@ -454,6 +590,12 @@ services:
       # An explicit URL, for the same reason COORDINATOR_URL above is one.
       - key: FLASHML_CONSOLE_URL
         value: https://flashml-dev-web.onrender.com
+      # See the long note on the prod service. Dev needs this MORE, not less:
+      # its coordinator is `type: web` rather than `pserv`, so a sandbox could
+      # technically reach it — and then fail on the machine token instead,
+      # which is the more confusing of the two failures.
+      - key: FLASHML_PUBLIC_API_URL
+        value: https://flashml-dev-api.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
       # Mail. The API sends two product emails — access approved and access
@@ -516,6 +658,70 @@ services:
       # every connected organisation's private source is readable.
       - key: GITHUB_APP_PRIVATE_KEY
         sync: false
+
+      # -- Alibaba OSS: the artifact mirror ---------------------------------
+      #
+      # All five or none, exactly as on the production API above — read that
+      # block for what the mirror is and why the names are load-bearing.
+      #
+      # DEV IS WHERE THIS MATTERS MOST, not least. The prod coordinator has a
+      # 5 GB disk; this environment's coordinator has NO DISK AT ALL (free
+      # tier), so `FLASHML_LOCAL_ARTIFACTS_DIR` points at /tmp and every
+      # committed artifact is destroyed on every spin-down and redeploy. A
+      # model that survives an hour of hibernation and then does not survive
+      # a deploy is not stored, it is cached. Left unset, dev keeps exactly
+      # that behaviour and nothing else changes.
+      #
+      # Point these at a DIFFERENT bucket from production, and at a RAM key
+      # scoped to it. Dev's coordinator is a PUBLIC service holding an
+      # unscoped operator token (see the environment's header comment); a
+      # credential shared with prod would put production artifacts behind it.
+      - key: OSS_BUCKET
+        sync: false
+      - key: OSS_ENDPOINT
+        value: oss-ap-southeast-1.aliyuncs.com
+      - key: OSS_REGION
+        value: ap-southeast-1
+      - key: OSS_ACCESS_KEY_ID
+        sync: false
+      - key: OSS_ACCESS_KEY_SECRET
+        sync: false
+
+      # -- Alibaba FC Agent Sandbox: the evaluation session -----------------
+      #
+      # Read the production API's block above for what this is and why the
+      # region is an allowlist of one. The same rules apply here with two
+      # differences, and both cost money rather than correctness:
+      #
+      # POINT THIS AT A DIFFERENT POOL AND A DIFFERENT KEY FROM PRODUCTION.
+      # `FC_SANDBOX_POOL_ID` names a pool the session requires to be EMPTY;
+      # sharing one with prod means whichever environment opens a session
+      # second is refused, and sharing the API key puts both environments'
+      # sandboxes behind one credential.
+      #
+      # AN UNCONFIGURED DEV IS THE SAFE DEFAULT. Leaving these blank is not a
+      # degraded mode — the routes 404, the reconciler does not start, and
+      # nothing else differs. Setting them on a free instance that spins down
+      # is the arrangement worth thinking about: the reconciler is what kills
+      # a sandbox whose controller died, and a service that is asleep is a
+      # service not reconciling. It sweeps at startup for that reason, so a
+      # spun-down dev API settles its leaks on the next request that wakes it
+      # — but a sandbox created here and then abandoned bills against a real
+      # Alibaba account until then.
+      - key: E2B_API_KEY
+        sync: false
+      # A literal, for the reason spelled out on the prod service: a typed
+      # region does not fail the deploy, it fails as 403 PauseSessionForbidden
+      # long afterwards, with a sandbox billing by the second. Not a secret,
+      # one correct answer, so it lives in version control.
+      - key: E2B_REGION
+        value: ap-southeast-1
+      - key: FC_SANDBOX_POOL_ID
+        sync: false
+      - key: FC_SANDBOX_TEMPLATE
+        value: code-interpreter-v1
+      - key: FC_SANDBOX_TIMEOUT_MS
+        value: 3600000
 
   - type: web
     name: flashml-dev-web

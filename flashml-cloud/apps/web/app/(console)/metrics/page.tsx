@@ -98,7 +98,7 @@ export default function MetricsPage() {
 
           <section className="mt-6">
             <h2 className="label-caps">Tasks</h2>
-            <div className="mt-2 grid gap-3 sm:grid-cols-3">
+            <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               {summary.taskCounts.map((c) => (
                 <CountTile key={c.label} stat={c} />
               ))}
@@ -114,8 +114,11 @@ export default function MetricsPage() {
           <section className="mt-8">
             <h2 className="label-caps">What unreliable machines cost</h2>
             <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
-              Goodput is accepted work over attempted work &mdash; the gap
-              is what retries and dead machines spent. Recovery timing says
+              Goodput is accepted work over <em>resolved</em> work &mdash;
+              attempts that actually reached an end &mdash; and the gap is
+              what retries and dead machines spent. Work still in flight is
+              in neither number: counting it as a failure would drag the
+              figure down for being busy. Recovery timing says
               how fast the coordinator noticed and replaced a lost machine.
               Below, an unfilled card means exactly what it says: FlashML
               has not measured that number for this account yet, not that

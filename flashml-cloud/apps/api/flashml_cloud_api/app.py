@@ -26,8 +26,16 @@ Environment (legacy):
   FLASHML_NODE_OFFLINE_SECONDS  heartbeat-loss threshold (default 30)
   FLASHML_PROFILE          local | alibaba-ack (display only)
   Alibaba panel display:   FLASHML_ACK_CONNECTED, FLASHML_ACR_IMAGE,
-                           FLASHML_OSS_BUCKET, FLASHML_SLS_ENABLED,
-                           FLASHML_PROMETHEUS_ENABLED, FLASHML_SANDBOX_POOL
+                           FLASHML_SLS_ENABLED, FLASHML_PROMETHEUS_ENABLED,
+                           FLASHML_SANDBOX_POOL
+
+  FLASHML_ARTIFACT_BACKEND and FLASHML_OSS_BUCKET were listed here and are
+  gone: no code in this repo or in the pinned runtime's managed path reads
+  either, and the integration panel that displayed them was reporting a
+  storage arrangement anybody could fabricate by exporting a variable. The
+  panel now reports where the coordinator actually writes and what
+  ``settings`` (``OSS_BUCKET``, not ``FLASHML_OSS_BUCKET``) says about the
+  mirror.
 
 Environment (cloud): see ``settings.Settings.from_env``.
 """
@@ -38,9 +46,13 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
+import time
+from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
@@ -71,9 +83,27 @@ from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api import metrics as metricsmod
+from flashml_cloud_api import marketplace as marketplacemod
 from flashml_cloud_api import repo as repomod
+from flashml_cloud_api import placement as placementmod
+from flashml_cloud_api import router as routermod
+from flashml_cloud_api import sandbox_orchestrator as orchmod
+from flashml_cloud_api import sandbox_sessions as ssmod
 from flashml_cloud_api import storage as storagemod
 from flashml_cloud_api import verify as verifymod
+from flashml_cloud_api.alibaba_oss import OSSArtifacts, OSSUnavailable
+from flashml_cloud_api.alibaba_sandbox import (
+    E2BSandboxGateway,
+    SandboxGateway,
+    SandboxUnavailable,
+)
+from flashml_cloud_api.artifact_mirror import (
+    CoordinatorArtifactSource,
+    MirrorError,
+    job_prefix,
+    mirror_job,
+    unmirror_job,
+)
 from flashml_cloud_api.auth import (
     MACHINE_TOKEN_PREFIX,
     AuthError,
@@ -87,6 +117,7 @@ from flashml_cloud_api.compile import (
     CompileError,
     compile_federated_round,
     compile_to_jobspec,
+    sanitize_job_name,
 )
 from flashml_cloud_api.db import Machine
 from flashml_cloud_api.elastic import (
@@ -761,6 +792,83 @@ async def _record_artifact_footprint(
         )
 
 
+async def _mirror_job_artifacts(
+    coordinator: CoordinatorClient,
+    db: psycopg.Connection,
+    job_id: str,
+    settings: Settings,
+) -> None:
+    """Copy a finished job's accepted artifacts to OSS, once, and write it down.
+
+    THE SAME SHAPE AS ``_record_artifact_footprint`` ABOVE, and for the same
+    reasons — which is why it sits beside it rather than inside the route.
+    The caller's guard is ``jobs.artifacts_mirrored_at`` (migration 0016),
+    read off the row it already fetched for the visibility check, so a page
+    left polling a finished job re-enters this at most once.
+
+    NEVER FATAL, AND NOTHING STAMPED ON FAILURE. A mirror is best-effort in
+    exactly the way usage accounting is: the coordinator accepted the commit
+    with no knowledge of this API, and the artifacts are on its disk whether
+    or not the copy succeeds. A job page that 500s — or worse, a job reported
+    FAILED — because a bucket in Singapore was slow would be strictly worse
+    than a mirror that lands one poll later. ``MirrorError`` is the module's
+    only exit for every cause, and the correct response to all of them is the
+    same: log it, leave the marker null, let the next observation retry.
+
+    ``NOT_CONFIGURED`` IS NOT SUCCESS AND IS NOT STAMPED. On a deployment
+    with no OSS this returns having made no coordinator call and opened no
+    socket (``mirror_job`` gates on ``settings.oss_configured`` before
+    anything else), so re-entering it on every poll costs a property read —
+    and leaving the marker null is what lets those jobs be mirrored the day
+    OSS is configured rather than being excluded for ever.
+
+    Non-federated jobs only, like the footprint hook: a federated run is N
+    coordinator jobs under a parent id the coordinator has never heard of,
+    and mirroring it means ``mirror_jobs`` over the round jobs from the
+    driver that observes the run ending.
+    """
+    try:
+        result = await mirror_job(
+            job_id, CoordinatorArtifactSource(coordinator), settings
+        )
+    except MirrorError as exc:
+        # Logged rather than raised, and deliberately not stamped: the next
+        # observation of this terminal job runs the whole thing again, and
+        # `mirror_job` is idempotent, so a retry re-copies only what is
+        # missing. A mirror recorded as done is the one failure here that
+        # loses data silently.
+        log.warning(
+            json.dumps({"text": "could not mirror artifacts to OSS",
+                        "job_id": job_id, "error": str(exc)})
+        )
+        return
+    except Exception:  # noqa: BLE001 - a mirror must never fail the user's read
+        # `mirror_job` promises MirrorError for every failure it knows about.
+        # This catch is for the ones it does not — the caller's rule is
+        # "never fail the request", and that rule cannot depend on another
+        # module's exception discipline holding for ever.
+        log.warning(
+            json.dumps({"text": "could not mirror artifacts to OSS",
+                        "job_id": job_id, "error": "unexpected"})
+        )
+        return
+
+    if not result.mirrored:
+        # NOT_CONFIGURED. Nothing happened and nothing is claimed.
+        return
+    try:
+        dbmod.mark_job_artifacts_mirrored(db, job_id)
+    except Exception:  # noqa: BLE001 - same rule: never fail the user's read
+        # The objects and their manifest ARE in OSS; only the note saying so
+        # failed. The next poll re-enters, finds the current manifest, and
+        # answers ALREADY_MIRRORED without copying anything — so the cost of
+        # this is one HEAD, not a second transfer.
+        log.warning(
+            json.dumps({"text": "mirrored, but could not record it",
+                        "job_id": job_id})
+        )
+
+
 def _passthrough(r: httpx.Response) -> Response:
     """Return the coordinator's answer verbatim: status *and* body.
 
@@ -998,6 +1106,730 @@ async def _send_decision_email(
 
 
 # ---------------------------------------------------------------------------
+# FC Sandbox: the evaluation, and the public evidence view
+# ---------------------------------------------------------------------------
+#
+# `sandbox_orchestrator` deliberately holds no HTTP client and adds no routes.
+# Everything in this section is the half it left to `app`: the operator
+# credential lives here, so submitting the evaluation and reading its verdict
+# live here too, behind the `EvaluationDriver` protocol it takes injected.
+
+
+#: Prefix of the deterministic coordinator job name a session's evaluation is
+#: submitted under. See `evaluation_job_name` for why the name — and not a
+#: header — is what makes `submit` idempotent.
+EVALUATION_NAME_PREFIX = "fc-eval-"
+
+#: The workload input naming what is being evaluated. It is the training job's
+#: artifact prefix, not one file: the sandbox reads the model through the
+#: presigned URLs `sandbox_orchestrator` writes into `artifacts.json`, and this
+#: names the same key space those URLs cover (`artifact_mirror.job_prefix`
+#: produces the coordinator's own layout, so a mirrored key IS the coordinator
+#: key and nothing has to translate).
+EVALUATION_MODEL_INPUT = "model"
+
+#: How much of `marker_sha256` the PUBLIC page shows. A hash prefix is enough
+#: to eyeball two renderings of the same session against each other and short
+#: enough not to be the value itself.
+PUBLIC_HASH_CHARS = 12
+
+#: How much of a session id the PUBLIC page shows. `SESSION_SHARE_COLUMNS`
+#: keeps `id` because the route needs it to read the session's events, with the
+#: explicit instruction that the route renders a SUFFIX and never the whole
+#: value — so the key is named for what it is and the full uuid never leaves.
+PUBLIC_ID_SUFFIX_CHARS = 12
+
+#: Public-view rate limit: requests per window, per client address. Overridable
+#: with FLASHML_PUBLIC_RATE_LIMIT / FLASHML_PUBLIC_RATE_WINDOW_S.
+DEFAULT_PUBLIC_RATE_LIMIT = 60
+DEFAULT_PUBLIC_RATE_WINDOW_S = 60.0
+
+#: How often the reconciler sweeps. The thing it is racing is money: an
+#: abandoned sandbox bills by the second, so this is minutes and not hours.
+#: Overridable with FLASHML_SANDBOX_RECONCILE_S; <= 0 runs the startup sweep
+#: and no loop.
+DEFAULT_RECONCILE_INTERVAL_S = 300.0
+
+
+class EvaluationSpecError(ValueError):
+    """The stored ``evaluation_spec`` cannot be compiled into a JobSpec.
+
+    Raised by :func:`build_evaluation_jobspec`, which the CREATE route calls
+    **before** anything is provisioned precisely so this surfaces as a 400 on a
+    request that cost nothing, rather than as a session that spends ten seconds
+    and a real sandbox to discover it on the far side of a hibernation.
+    """
+
+
+def evaluation_job_name(session_id: str) -> str:
+    """The coordinator job name this session's evaluation is submitted under.
+
+    **This is the idempotency mechanism**, and it is a fallback rather than a
+    preference: the coordinator's ``POST /v1alpha1/jobs`` takes a bare
+    ``JobSpec`` and mints ``uuid.uuid4().hex[:12]`` — it reads no
+    ``Idempotency-Key``, and there is no key on the spec either. So there is no
+    server-side dedupe to ask for, and the only thing a resubmission can be
+    recognised by is something the submitter chose deterministically. A name
+    derived from the session id is that thing: :meth:`EvaluationDriver.submit`
+    lists the coordinator's jobs and returns the existing id when this name is
+    already present.
+
+    Derived, never random, for ``sandbox_orchestrator.node_id_for``'s reason —
+    a controller that died between the coordinator accepting the job and the
+    ledger append landing has no record of the id, and must be able to
+    recognise its own submission on the way back up.
+
+    A session id is a uuid: 36 lowercase hex-and-hyphen characters, which with
+    the prefix is 44 — inside ``JobMetadata``'s DNS-1123 limit of 63, and
+    already a legal label. ``sanitize_job_name`` is applied anyway so the
+    invariant is enforced here rather than assumed.
+    """
+    return sanitize_job_name(f"{EVALUATION_NAME_PREFIX}{session_id}")
+
+
+def build_evaluation_jobspec(
+    *,
+    session_id: str,
+    pool_id: str,
+    training_job_id: str,
+    spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compile a session's ``evaluation_spec`` into a lease-mode JobSpec.
+
+    The submitter chooses **what to run** — image and command, plus the
+    ordinary workload parameters ``compile_to_jobspec`` also forwards verbatim.
+    This function chooses everything that is not theirs to choose, and every
+    one of those is load-bearing:
+
+    * ``metadata.name`` is derived from the session id, because it is the
+      idempotency anchor (:func:`evaluation_job_name`).
+    * ``execution.backend`` is ``leases``. A sandbox session is one worker
+      pulling one task; there is no cluster here to select.
+    * ``placement.pool`` is the isolation pool, and ``isolation.allowFallback``
+      is true because the two move together — ``CommandRecipe.expand`` enforces
+      allowFallback-iff-pool, and ``compile_to_jobspec`` pins the same rule.
+      Dropping the pool would offer this task to any volunteer laptop online,
+      which is the seventh placement gate's whole job.
+    * ``resources`` is one worker. The pool contains exactly one machine; a
+      spec asking for two would never place.
+    * ``inputs`` names the model artifact (:data:`EVALUATION_MODEL_INPUT`).
+
+    A spec that supplies neither image nor command is refused rather than
+    defaulted: a default image would run somebody's evaluation against a
+    container they did not pick and could not see.
+    """
+    if not isinstance(spec, Mapping):
+        raise EvaluationSpecError("evaluation_spec must be a JSON object")
+
+    image = spec.get("image")
+    if isinstance(image, str):
+        repository, _, tag = image.rpartition(":")
+        if not repository or not tag:
+            raise EvaluationSpecError(
+                "evaluation_spec.image must be 'repository:tag' with a pinned "
+                "tag, or an object with 'repository' and 'tag'"
+            )
+    elif isinstance(image, Mapping):
+        repository = str(image.get("repository") or "")
+        tag = str(image.get("tag") or "")
+    else:
+        raise EvaluationSpecError("evaluation_spec.image is required")
+    if not repository or not tag:
+        raise EvaluationSpecError(
+            "evaluation_spec.image needs both a repository and a pinned tag"
+        )
+
+    command = spec.get("command")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(token, str) for token in command)
+    ):
+        raise EvaluationSpecError(
+            "evaluation_spec.command must be a non-empty list of strings"
+        )
+
+    env = spec.get("env") or {}
+    if not isinstance(env, Mapping):
+        raise EvaluationSpecError("evaluation_spec.env must be an object")
+
+    parameters: dict[str, Any] = {
+        "command": list(command),
+        "inputs": {
+            EVALUATION_MODEL_INPUT: f"artifact://{job_prefix(training_job_id)}"
+        },
+        "env": {str(k): str(v) for k, v in env.items()},
+    }
+    timeout_seconds = spec.get("timeout_seconds")
+    if timeout_seconds is not None:
+        try:
+            parameters["timeout_seconds"] = int(timeout_seconds)
+        except (TypeError, ValueError):
+            raise EvaluationSpecError(
+                "evaluation_spec.timeout_seconds must be an integer"
+            ) from None
+    # Forwarded verbatim, exactly as `compile_to_jobspec` forwards them: the
+    # coordinator owns their semantics and a second copy of those rules here
+    # would be a second thing to keep aligned. Absent stays absent.
+    for passthrough in ("dependencies", "extra_dependencies", "validators",
+                        "reduce", "retention"):
+        if spec.get(passthrough):
+            parameters[passthrough] = spec[passthrough]
+
+    jobspec: dict[str, Any] = {
+        "apiVersion": "flashml.dev/v1alpha1",
+        "kind": "Job",
+        "metadata": {
+            "name": evaluation_job_name(session_id),
+            "labels": {"flashml.dev/source": "fc-sandbox-evaluation"},
+        },
+        "spec": {
+            "execution": {"backend": "leases", "environment": "auto"},
+            "image": {"repository": repository, "tag": tag},
+            "workload": {"type": "command", "parameters": parameters},
+            "resources": {"minimumWorkers": 1, "maximumWorkers": 1},
+            "isolation": {"tier": "sandboxed", "allowFallback": True},
+            "placement": {"pool": pool_id},
+            "artifacts": {"outputPrefix": "artifact://jobs/{job_id}/"},
+        },
+    }
+    try:
+        validated = JobSpec.model_validate(jobspec)
+    except Exception as exc:  # pydantic ValidationError and anything under it
+        raise EvaluationSpecError(
+            f"the compiled evaluation JobSpec is invalid: {exc}"
+        ) from None
+    return json.loads(validated.model_dump_json())
+
+
+class CoordinatorEvaluationDriver:
+    """``sandbox_orchestrator.EvaluationDriver`` over :class:`CoordinatorClient`.
+
+    Injected rather than imported by the orchestrator, for the two reasons
+    ``artifact_mirror.ArtifactSource`` gives: this module imports the
+    orchestrator, so importing back would close a cycle; and every ordering
+    rule over there stays testable with a dictionary.
+
+    **Idempotency: a deterministic job NAME, looked up before submitting.**
+    The coordinator exposes no idempotency key — ``POST /v1alpha1/jobs`` takes
+    a bare ``JobSpec`` and mints its own id — so there is nothing to send. What
+    there is instead is ``GET /v1alpha1/jobs``, which returns each record with
+    the spec it was submitted with; :func:`evaluation_job_name` derives a name
+    from the session id, and a job already carrying that name IS this session's
+    evaluation. That closes the window the orchestrator cannot: between the
+    coordinator accepting a submission and the ``evaluation.submitted`` append
+    landing, a restarted controller finds the job by name rather than placing a
+    second one on a pool that holds a single machine.
+
+    The lookup is not free (one listing per submission) and it is only paid on
+    the path where the orchestrator has already failed to find a recorded id —
+    which is a resume, not the ordinary case.
+    """
+
+    def __init__(self, coordinator: CoordinatorClient) -> None:
+        self._coordinator = coordinator
+
+    async def submit(self, request: Any) -> str:
+        name = evaluation_job_name(request.session_id)
+        existing = await self._job_id_named(name)
+        if existing:
+            log.info(json.dumps({
+                "text": "evaluation already submitted for this session",
+                "session_id": request.session_id, "evaluation_job_id": existing,
+            }))
+            return existing
+
+        spec = build_evaluation_jobspec(
+            session_id=request.session_id,
+            pool_id=request.pool_id,
+            training_job_id=request.training_job_id,
+            spec=request.spec,
+        )
+        r = await self._coordinator.forward(
+            "POST", "/v1alpha1/jobs",
+            content=json.dumps(spec).encode(),
+            media_type="application/json",
+        )
+        if r.status_code >= 300:
+            # Re-check by name before giving up: a 5xx from a coordinator that
+            # had already accepted the job is exactly the transport failure
+            # whose call succeeded, and resubmitting on it is how one session
+            # ends up with two evaluations.
+            recovered = await self._job_id_named(name)
+            if recovered:
+                return recovered
+            raise RuntimeError(
+                f"the coordinator refused the evaluation ({r.status_code})"
+            )
+        try:
+            job = r.json()
+        except ValueError:
+            raise RuntimeError(
+                "the coordinator accepted the evaluation with an unreadable body"
+            ) from None
+        job_id = job.get("job_id") if isinstance(job, dict) else None
+        if not job_id:
+            raise RuntimeError(
+                "the evaluation was accepted with no job id to own it by"
+            )
+        return str(job_id)
+
+    async def poll(self, evaluation_job_id: str) -> Any:
+        """The settled outcome, or ``None`` while the job is still running.
+
+        ``None`` means *not yet* and never *failed* — a job that ended badly is
+        an outcome with ``accepted=False``. A coordinator that cannot be read
+        at all is also ``None``: it is not evidence the job is over, and the
+        orchestrator's own deadline is what stops the wait.
+
+        ``accepted`` is ``state == SUCCEEDED`` and nothing looser. PARTIAL is
+        specifically NOT accepted: it means some tasks exhausted their attempts
+        under ``allowPartial``, and an evaluation that lost shards has not
+        produced the verdict somebody asked for (repo hard rule 4).
+        """
+        r = await self._coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(evaluation_job_id)}"
+        )
+        if r.status_code >= 300:
+            return None
+        try:
+            job = r.json()
+        except ValueError:
+            return None
+        if not isinstance(job, dict):
+            return None
+        state = str(job.get("state") or "")
+        try:
+            terminal = JobState(state).terminal
+        except ValueError:
+            # An unrecognised state is not terminal. That direction cannot
+            # publish an unfinished run as a result.
+            return None
+        if not terminal:
+            return None
+
+        data: dict[str, Any] = {"state": state}
+        claim_ms = await self._submit_to_claim_ms(evaluation_job_id)
+        if claim_ms is not None:
+            data["submit_to_claim_ms"] = claim_ms
+        return orchmod.EvaluationOutcome(
+            evaluation_job_id=evaluation_job_id,
+            accepted=state == JobState.SUCCEEDED.value,
+            detail=state,
+            data=data,
+        )
+
+    async def _job_id_named(self, name: str) -> str | None:
+        """The coordinator job carrying this exact ``metadata.name``, if any.
+
+        Read from the listing rather than from a search endpoint because there
+        is no search endpoint. Failure answers ``None``, which makes the caller
+        submit — the alternative, treating an unreadable listing as "already
+        submitted", would strand a session waiting on a job that was never
+        placed.
+        """
+        try:
+            r = await self._coordinator.forward("GET", "/v1alpha1/jobs")
+        except HTTPException:
+            return None
+        if r.status_code >= 300:
+            return None
+        try:
+            jobs = r.json()
+        except ValueError:
+            return None
+        if not isinstance(jobs, list):
+            return None
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            spec = job.get("spec")
+            metadata = spec.get("metadata") if isinstance(spec, dict) else None
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("name") == name and job.get("job_id"):
+                return str(job["job_id"])
+        return None
+
+    async def _submit_to_claim_ms(self, evaluation_job_id: str) -> float | None:
+        """Milliseconds from the coordinator accepting this job to the first
+        lease being claimed on it, read off the coordinator's own ledger.
+
+        **The only honest source for time-to-first-claim.** Both endpoints of
+        the interval are the coordinator's own timestamps (``JOB_ACCEPTED`` and
+        the first ``LEASE_CLAIMED``), so the number is not contaminated by this
+        API's clock, the hop to it, or the wake that preceded it — which is
+        measured separately, on ``sandbox.woken``. Absent when the ledger does
+        not carry both, rather than estimated from anything here.
+        """
+        r = await self._coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(evaluation_job_id)}/events"
+        )
+        if r.status_code >= 300:
+            return None
+        try:
+            events = r.json()
+        except ValueError:
+            return None
+        if not isinstance(events, list):
+            return None
+        accepted_at: datetime | None = None
+        claimed_at: datetime | None = None
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            stamp = _parse_timestamp(event.get("timestamp"))
+            if stamp is None:
+                continue
+            type_ = event.get("type")
+            if type_ == "JOB_ACCEPTED" and accepted_at is None:
+                accepted_at = stamp
+            elif type_ == "LEASE_CLAIMED" and claimed_at is None:
+                claimed_at = stamp
+        if accepted_at is None or claimed_at is None:
+            return None
+        return round((claimed_at - accepted_at).total_seconds() * 1000, 3)
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def public_session_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One session as the UNAUTHENTICATED evidence page may see it.
+
+    ``fetch_session_by_share_token`` has already narrowed the columns in SQL —
+    owner, pool, machine, sandbox id, evaluation spec and the share token
+    itself never leave the database. This narrows twice more, on the two
+    columns that survive that cut but must not be rendered whole:
+
+    * ``id`` is kept by :data:`sandbox_sessions.SESSION_SHARE_COLUMNS` only so
+      the route can read the session's events, with the explicit instruction
+      that a SUFFIX is rendered and never the value. So the key is called
+      ``id_suffix`` and there is no ``id`` — a field named ``id`` holding half
+      a uuid is the kind of thing a later refactor "fixes" by putting the whole
+      one back.
+    * ``error_message`` is dropped entirely. It is redacted on the way into the
+      ledger, but redaction is a key-name matcher over provider exceptions and
+      this page has no login in front of it; the sanitized ``error_code`` is
+      what the console links to the evidence page for, and it is enough.
+
+    ``marker_sha256`` is truncated to :data:`PUBLIC_HASH_CHARS`.
+    """
+    marker = row.get("marker_sha256")
+    return {
+        "id_suffix": str(row["id"])[-PUBLIC_ID_SUFFIX_CHARS:],
+        "training_job_id": row.get("training_job_id"),
+        "evaluation_job_id": row.get("evaluation_job_id"),
+        "provider": row.get("provider"),
+        "region": row.get("region"),
+        "template": row.get("template"),
+        "state": row.get("state"),
+        "marker_sha256_prefix": (
+            str(marker)[:PUBLIC_HASH_CHARS] if marker else None
+        ),
+        "created_at": _isoformat(row.get("created_at")),
+        "updated_at": _isoformat(row.get("updated_at")),
+        "terminated_at": _isoformat(row.get("terminated_at")),
+        "error_code": row.get("error_code"),
+    }
+
+
+def public_event_view(event: Mapping[str, Any]) -> dict[str, Any]:
+    """One ledger event as the public page may see it.
+
+    ``data`` is passed through because ``sandbox_sessions.redact_data`` already
+    scrubbed it on the way in — that is the module's third property and the
+    reason there is no second sanitiser here to drift from it. The event's own
+    ``id`` and its ``session_id`` are dropped for the reason the session's id
+    is: they are full identifiers, and nothing on this page needs them.
+    """
+    return {
+        "sequence": event.get("sequence"),
+        "type": event.get("type"),
+        "source": event.get("source"),
+        "observed_at": _isoformat(event.get("observed_at")),
+        "latency_ms": event.get("latency_ms"),
+        "data": event.get("data") or {},
+    }
+
+
+def _isoformat(value: Any) -> Any:
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
+class FixedWindowLimiter:
+    """A per-key fixed-window counter. **In-process, and that is the whole of
+    what it claims.**
+
+    There is no rate limiter anywhere in this deployment and no library for one
+    in the dependency set, so this is what could be added cheaply rather than
+    what a public endpoint deserves. Its limits are honest about that:
+
+    * it counts inside ONE process, so N API instances allow N x the limit, and
+      a restart forgets everything;
+    * it keys on the client address, which behind Render's proxy is whatever
+      Starlette resolved — good enough to stop a loop, useless against a
+      distributed source.
+
+    What it does buy is real: the public evidence route is the only
+    unauthenticated route in this API that reads the database, and without this
+    a single `while true; do curl` opens a Postgres round trip per iteration.
+    A shared limiter (Redis, or Render's own edge) is the correct fix and this
+    is not it.
+    """
+
+    def __init__(self, limit: int, window_s: float) -> None:
+        self.limit = int(limit)
+        self.window_s = float(window_s)
+        self._hits: dict[str, tuple[float, int]] = {}
+
+    def allow(self, key: str, *, now: float | None = None) -> bool:
+        if self.limit <= 0 or self.window_s <= 0:
+            return True
+        current = time.monotonic() if now is None else now
+        window = int(current // self.window_s)
+        seen, count = self._hits.get(key, (window, 0))
+        if seen != window:
+            seen, count = window, 0
+        count += 1
+        self._hits[key] = (seen, count)
+        if len(self._hits) > 4096:
+            # Bounded, because the key is attacker-chosen: a source cycling
+            # addresses must not be able to grow this dict without limit. The
+            # cheapest correct answer is to drop everything and start the
+            # window again — worst case one window is under-counted, which is
+            # strictly better than an unbounded map in a web process.
+            self._hits = {key: (seen, count)}
+        return count <= self.limit
+
+
+# ---------------------------------------------------------------------------
+# the plan preview, as JSON
+#
+# Read-only all the way down. Nothing below writes a row, matches a listing,
+# holds a credit or submits anything — the comparison view proves routing
+# without touching money, which is the whole reason it can be shown to
+# somebody before they have decided anything.
+#
+# Two rules run through every function here:
+#
+# **ZC and USD are never summed.** `router.plan.Cost` has no total, no
+# `__float__` and no `amount`, deliberately (decision M4: there is no exchange
+# rate and inventing one is what `contributions.py` forbids in the strongest
+# terms it has). The JSON keeps them as two keys and adds nothing that
+# combines them, including a budget verdict — those are per currency too.
+#
+# **Every figure carries its basis and its n, or it is null.** `null` renders
+# as *not observed*; 0 is a claim, and on this surface it is usually a
+# flattering one.
+# ---------------------------------------------------------------------------
+
+#: Strongest first. Used only to take the WEAKEST basis behind a plan: a plan
+#: is never better founded than the thinnest evidence it rests on.
+_BASIS_STRENGTH = {
+    routermod.BASIS_MEASURED: 2,
+    routermod.BASIS_ESTIMATED: 1,
+    routermod.BASIS_PROJECTED: 0,
+}
+
+#: Most tasks a preview will expand and plan. A sweep past this is planned
+#: from its first `_PREVIEW_MAX_TASKS` tasks and says so, rather than
+#: spending a request body's worth of CPU inside a page load.
+_PREVIEW_MAX_TASKS = 5000
+
+
+def _preview_cost(cost: routermod.Cost) -> dict[str, float]:
+    """A cost vector as JSON. Two keys, and never a third that adds them."""
+    rounded = cost.rounded()
+    return {"zc": rounded.zc, "usd": rounded.usd}
+
+
+def _within_budget(spent: float, budget: float | None) -> bool | None:
+    """Whether one currency's spend fits one currency's budget.
+
+    ``None`` when no budget was given for that currency — a fact about a
+    question nobody asked, not a pass. Compared within a currency only: a ZC
+    plan is never measured against a USD budget, because that comparison is
+    the exchange rate by another name.
+    """
+    if budget is None:
+        return None
+    return float(spent) <= float(budget)
+
+
+def _weakest_basis(
+    estimates: Sequence[routermod.Estimate],
+) -> tuple[str | None, int | None]:
+    """The basis and sample size a plan may honestly claim.
+
+    The weakest basis among the machines it actually allocates to, and the
+    SMALLEST n behind them. A plan that places thirty tasks on measured
+    machines and ten on a projected one is a projected plan: the number a
+    reader acts on is the total, and the total is only as good as its worst
+    input. ``(None, None)`` when nothing was placed — never ``("measured", 0)``.
+    """
+    if not estimates:
+        return (None, None)
+    weakest = min(
+        estimates, key=lambda e: (_BASIS_STRENGTH.get(e.basis, -1), e.n)
+    )
+    return (weakest.basis, min(int(e.n) for e in estimates))
+
+
+def _preview_plan(
+    plan: routermod.Plan,
+    *,
+    estimates_by_machine: Mapping[str, routermod.Estimate],
+    recommended: str | None,
+    budget_zc: float | None,
+    budget_usd: float | None,
+) -> dict[str, Any]:
+    """One plan as the console renders it, bases and all."""
+    used = [
+        estimates_by_machine[allocation.machine_id]
+        for allocation in plan.allocations
+        if allocation.machine_id in estimates_by_machine
+    ]
+    basis, n = _weakest_basis(used)
+    return {
+        "name": plan.name,
+        "recommended": plan.name == recommended,
+        "tasks_placed": plan.tasks_placed,
+        "tasks_unplaced": plan.tasks_unplaced,
+        "cost": _preview_cost(plan.cost),
+        "within_budget": {
+            "zc": _within_budget(plan.cost.zc, budget_zc),
+            "usd": _within_budget(plan.cost.usd, budget_usd),
+        },
+        "makespan_seconds": plan.makespan_seconds,
+        "deadline_seconds": plan.deadline_seconds,
+        "deadline_met": plan.deadline_met,
+        "achievable_deadline_seconds": plan.achievable_deadline_seconds,
+        "basis": basis,
+        "n": n,
+        "duration_basis": plan.duration_basis,
+        "dominated_by": plan.dominated_by,
+        "allocations": [
+            {
+                "machine_id": allocation.machine_id,
+                "tasks": allocation.tasks,
+                "finish_seconds": allocation.finish_seconds,
+                "cost": _preview_cost(allocation.cost),
+                "venue": allocation.venue,
+                "currency": allocation.currency,
+                "reliability_tier": allocation.reliability_tier,
+                "basis": (
+                    estimates_by_machine[allocation.machine_id].basis
+                    if allocation.machine_id in estimates_by_machine
+                    else None
+                ),
+                "n": (
+                    estimates_by_machine[allocation.machine_id].n
+                    if allocation.machine_id in estimates_by_machine
+                    else None
+                ),
+            }
+            for allocation in plan.allocations
+        ],
+        "notes": list(plan.notes),
+    }
+
+
+def _preview_estimate(estimate: routermod.Estimate | None) -> dict[str, Any] | None:
+    if estimate is None:
+        return None
+    return {
+        "low_seconds": estimate.low,
+        "high_seconds": estimate.high,
+        "basis": estimate.basis,
+        "n": estimate.n,
+        "note": estimate.note,
+    }
+
+
+def _preview_canary(canary: routermod.Canary | None) -> dict[str, Any] | None:
+    if canary is None:
+        return None
+    return {
+        "machine_id": canary.machine_id,
+        "tasks_to_calibrate": canary.tasks_to_calibrate,
+        "reason": canary.reason,
+        "current_basis": canary.current_basis,
+    }
+
+
+def _preview_node_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The node view the placement predicate reads, from a registry row.
+
+    ``capabilities.pools`` is stamped from the machine's bindings intersected
+    with its owner's live memberships — the same value the register proxy
+    stamps onto the registration the coordinator gates against, computed the
+    same way, so the seventh gate answers here what it will answer there.
+
+    **Two capabilities this deployment does not record**, and both fail
+    closed: ``local_datasets`` (the fourth gate) and
+    ``can_install_dependencies`` (the eighth). A task that needs either shows
+    an empty fleet in the preview even where the coordinator would place it.
+    Under-claiming is the only safe direction for a gate, and the route says
+    so in a note rather than defaulting either to something permissive.
+    """
+    capabilities = dict(row.get("capabilities") or {})
+    capabilities["pools"] = list(row.get("pool_ids") or [])
+    return {
+        "node_id": row.get("node_id"),
+        "capabilities": capabilities,
+        "sandbox_capable": row.get("sandbox_capable"),
+        "argv_capable": row.get("argv_capable"),
+        "unsandboxed_argv_capable": row.get("unsandboxed_argv_capable"),
+        "module_capable": row.get("module_capable"),
+    }
+
+
+def _preview_deadline(payload: Mapping[str, Any]) -> float | None:
+    """``deadline`` in SECONDS from now, or None. 400 on anything else.
+
+    Seconds rather than a timestamp because that is what the planner takes
+    and because a clock skew between a browser and this process would
+    otherwise silently move a deadline. Refused rather than clamped: a
+    negative or non-numeric deadline is a caller bug, and answering a
+    different question than the one asked produces a page whose label and
+    contents disagree.
+    """
+    raw = payload.get("deadline_seconds", payload.get("deadline"))
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise HTTPException(
+            status_code=400, detail="deadline must be a number of seconds"
+        )
+    if not math.isfinite(raw) or raw <= 0:
+        raise HTTPException(
+            status_code=400, detail="deadline must be a positive number of seconds"
+        )
+    return float(raw)
+
+
+def _preview_budget(payload: Mapping[str, Any], key: str) -> float | None:
+    raw = payload.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise HTTPException(status_code=400, detail=f"{key} must be a number")
+    if not math.isfinite(raw) or raw < 0:
+        raise HTTPException(status_code=400, detail=f"{key} must not be negative")
+    return float(raw)
+
+
+# ---------------------------------------------------------------------------
 # the cloud app
 # ---------------------------------------------------------------------------
 
@@ -1010,6 +1842,10 @@ def create_cloud_app(
     start_federated_job: Callable[..., Any] | None = None,
     mailer: Mailer | None = None,
     github_app: GitHubApp | None = None,
+    sandbox_gateway: SandboxGateway | None = None,
+    evaluation_driver: Any | None = None,
+    placement_eligible: routermod.EligibilityPredicate | None = None,
+    expand_tasks: Callable[[str, JobSpec], list[Any]] | None = None,
 ) -> FastAPI:
     """The public door. Agents and browsers both arrive here; nothing else
     is exposed to the internet.
@@ -1023,7 +1859,26 @@ def create_cloud_app(
     never reach codeload. ``start_federated_job`` launches the in-API
     federated-averaging driver (``fedavg.start_federated_job``), injected so
     a test can run the driver against a stubbed coordinator — or observe
-    that it was started — without a live one.
+    that it was started — without a live one. ``sandbox_gateway`` and
+    ``evaluation_driver`` are the FC Sandbox pair: the gateway is built lazily
+    from ``Settings`` on first use (so a deployment with no sandbox configured
+    never needs the SDK), and the driver defaults to
+    :class:`CoordinatorEvaluationDriver` over the same operator credential
+    every other coordinator call uses.
+
+    ``placement_eligible`` and ``expand_tasks`` are the ROUTING seam, and
+    they are injected for a reason that is not testability. Both real
+    implementations live in ``flashruntime.scheduler`` and
+    ``flashruntime.service.modea``, and this repo may import
+    ``flashruntime.protocol`` and nothing else — ``tests/test_import_boundary``
+    enforces it by name, over function bodies too, so a deferred import would
+    not dodge it. Widening that boundary is a decision to record in a commit
+    of its own, not one to take inside a route, so this module does not take
+    it: with neither injected, ``POST /v1alpha1/jobs/preview-plans`` reports
+    that routing is unconfigured and quotes nothing. There is deliberately no
+    fallback predicate — a permissive default would be a second, absent copy
+    of seven fail-closed placement gates, and a preview built on it would
+    show a submitter machines the real scheduler will refuse.
 
     On ``settings.require_auth``: it governs *startup validation of the
     environment*, not whether requests are authenticated. There is no open
@@ -1031,6 +1886,23 @@ def create_cloud_app(
     exists, so an "auth off" switch would be a single env var that turns the
     security model off in production.
     """
+    # The routing seam, resolved through the ONE module allowed to reach into
+    # `flashruntime.scheduler` — see `placement.py` and the `SANCTIONED_
+    # EXCEPTIONS` entry that permits it (owner decision, 2026-08-11).
+    #
+    # Injected wins, so a test can still drive the planner with a stub. But an
+    # un-injected PRODUCTION app now gets the real seven gates instead of
+    # silently degrading to "no plans" — which is what happened before this
+    # line existed, and which looked identical to an empty fleet.
+    #
+    # `placement.py` returns None when the runtime is not importable at all.
+    # That stays None here on purpose: the preview route reports it, and
+    # nothing substitutes a permissive predicate, because a stand-in that
+    # answers True is seven absent safety gates wearing the name of seven
+    # present ones.
+    placement_eligible = placement_eligible or placementmod.placement_predicate()
+    expand_tasks = expand_tasks or placementmod.task_expander()
+
     connect = connect or (lambda: dbmod.connect(settings))
     coordinator = CoordinatorClient(settings, transport=transport)
     # Its own transport, not the coordinator's: these are two unrelated
@@ -1047,7 +1919,132 @@ def create_cloud_app(
         os.environ.get("FLASHML_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)
     )
 
-    app = FastAPI(title="FlashML Cloud API", version="0.2.0")
+    # -- FC Sandbox --------------------------------------------------------
+    #
+    # The gateway is built on FIRST USE, not here. `E2BSandboxGateway` imports
+    # the e2b SDK lazily and raises `SandboxUnavailable` when the deployment
+    # is unconfigured — building it eagerly would make an unconfigured deploy
+    # fail at import of a module it does not use, which is exactly the
+    # "unconfigured changes nothing" rule this feature is held to. One
+    # instance per process, cached: the gateway keeps a connection cache whose
+    # whole point is that a second `connect` is not paid.
+    _gateway_cache: dict[str, SandboxGateway] = {}
+    if sandbox_gateway is not None:
+        _gateway_cache["gateway"] = sandbox_gateway
+
+    def sandbox() -> SandboxGateway:
+        cached = _gateway_cache.get("gateway")
+        if cached is None:
+            cached = E2BSandboxGateway.from_settings(settings)
+            _gateway_cache["gateway"] = cached
+        return cached
+
+    driver = evaluation_driver or CoordinatorEvaluationDriver(coordinator)
+
+    #: Strong references to in-flight background evaluations. `asyncio` keeps
+    #: only a weak reference to a task, so one that nothing holds can be
+    #: garbage-collected mid-await — a fifteen-minute evaluation silently
+    #: cancelled while its sandbox keeps billing. Discarded on completion.
+    _background_tasks: set[asyncio.Task] = set()
+
+    # The base URL the sandbox's flashnode enrols against. It is THIS API — a
+    # machine token means nothing to the coordinator, and on Render the
+    # coordinator is a private service an Alibaba sandbox cannot route to at
+    # all. `sandbox_orchestrator.start_session` defaults the argument to
+    # `settings.coordinator_url`, which is right for a single-host dev run and
+    # wrong for every deployed one, so it is passed explicitly here.
+    #
+    # Now a real `Settings` field (2026-08-11) rather than a bare environment
+    # read: the value is normalised in exactly one place, and the reason it
+    # cannot be `coordinator_url` is written down where the next person
+    # configuring a deploy will meet it. The fallback is unchanged, so an
+    # unset deployment behaves byte-identically to before.
+    sandbox_enrolment_url = settings.public_api_url or settings.coordinator_url
+
+    public_limiter = FixedWindowLimiter(
+        int(os.environ.get("FLASHML_PUBLIC_RATE_LIMIT", DEFAULT_PUBLIC_RATE_LIMIT)),
+        float(
+            os.environ.get(
+                "FLASHML_PUBLIC_RATE_WINDOW_S", DEFAULT_PUBLIC_RATE_WINDOW_S
+            )
+        ),
+    )
+    reconcile_interval_s = float(
+        os.environ.get("FLASHML_SANDBOX_RECONCILE_S", DEFAULT_RECONCILE_INTERVAL_S)
+    )
+
+    async def _reconcile_once() -> list[str]:
+        """One sweep, on its own connection, never fatal.
+
+        Its own connection because it does not belong to a request: the
+        request-scoped one from ``db_conn`` is closed the moment the response
+        is sent, and a sweep holding it would be reading a closed socket the
+        first time the timer fired between requests.
+        """
+        conn = await run_in_threadpool(app.state.connect)
+        try:
+            return await orchmod.reconcile(conn, sandbox(), settings)
+        finally:
+            await run_in_threadpool(conn.close)
+
+    async def _reconcile_loop() -> None:
+        """Sweep at startup and then on a timer, for ever.
+
+        **This is the only backstop against a sandbox billing after a crashed
+        controller**, so it runs on BOTH edges: once at startup, because a
+        redeploy is exactly the event that abandons a session mid-hibernation
+        and the surviving evidence is a database row; and then periodically,
+        because a controller can also die between deploys.
+
+        An asyncio task rather than ``fedavg``'s daemon thread — the two are
+        different shapes of work. A federated run blocks for hours and would
+        occupy an event-loop slot the whole time, so it gets a thread;
+        ``reconcile`` is short, already async, and does its blocking database
+        work in ``asyncio.to_thread`` internally. There is no scheduler in this
+        deployment to hand it to.
+
+        Every failure is swallowed and logged. A sweep that raised would kill
+        the task and silently remove the backstop for the life of the process,
+        which is worse than any single failed sweep.
+        """
+        while True:
+            try:
+                touched = await _reconcile_once()
+                if touched:
+                    log.info(json.dumps({
+                        "text": "sandbox reconciler settled sessions",
+                        "sessions": touched,
+                    }))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a failed sweep must not end them
+                log.warning(
+                    json.dumps({"text": "sandbox reconcile sweep failed"}),
+                    exc_info=True,
+                )
+            if reconcile_interval_s <= 0:
+                return
+            await asyncio.sleep(reconcile_interval_s)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        task: asyncio.Task | None = None
+        # Gated on the deployment being configured for sandboxes at all, which
+        # is what keeps "unconfigured changes nothing" true of startup as well
+        # as of the routes: with no FC configuration there is no sandbox that
+        # could be billing, and no gateway to ask.
+        if settings.fc_sandbox_configured:
+            task = asyncio.create_task(_reconcile_loop(), name="fc-sandbox-reconcile")
+            _app.state.sandbox_reconciler = task
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+    app = FastAPI(title="FlashML Cloud API", version="0.2.0", lifespan=lifespan)
 
     # ORDER MATTERS HERE, and it is not cosmetic.
     #
@@ -2141,6 +3138,317 @@ def create_cloud_app(
         )
         return _passthrough(r)
 
+    @app.post("/v1alpha1/jobs/preview-plans", tags=["browser"])
+    async def preview_plans(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Three ways to run this job, priced and timed. **Nothing is
+        submitted, matched, held or charged.**
+
+        This is the comparison view — the surface where owned capacity, a
+        teammate's idle machine and the open market appear on one page in
+        their own currencies. It is read-only by construction, not by
+        convention: the only writes reachable from here are none, and that is
+        what makes it safe to show somebody before they have decided anything.
+
+        **Body.** ``{"job_id": "..."}`` for a job this account already
+        submitted, or ``{"spec": {...}}`` for a JobSpec it has not. Optional:
+        ``deadline`` (seconds from now), ``budget_zc``, ``budget_usd``.
+
+        **Response.** ``plans`` (cheapest / balanced / fastest — balanced only
+        when a deadline was given, because with nothing to balance against it
+        would be "cheapest" shown twice), ``candidates`` (the fleet, each with
+        its venue, price, class and record), and ``canary`` (the probe that
+        converts "we cannot predict this" into a measurement, or null).
+
+        **Every figure carries its ``basis`` and its ``n``**, and anything not
+        derivable is ``null`` — *not observed*, never 0. A plan's basis is the
+        WEAKEST behind any machine it allocates to.
+
+        **ZC and USD are reported side by side and never summed.** There is
+        no exchange rate between them (M4) and no field here implies one,
+        including ``within_budget``, which is answered per currency.
+
+        **Gates before price, always**, and the gate is the runtime's own —
+        injected, never reimplemented (see ``create_cloud_app``). With no
+        predicate configured this route quotes nothing and says so rather
+        than falling back to a permissive one: a preview that shows machines
+        the scheduler will refuse is worse than no preview.
+
+        Evidence is rung 1 only — other machines' recorded durations on THIS
+        job. Rungs 2 and 3 (the same task SHAPE elsewhere) have no producer in
+        this schema: nothing records what shape a task was, so there is no key
+        to group by, and inventing one from a job name would pool unrelated
+        work. A job with no peer durations yet is therefore ``not observed``
+        and answered with a canary, which is the honest answer at 29 credited
+        tasks in the whole ledger.
+        """
+        payload = await _json_object(request)
+        deadline_seconds = _preview_deadline(payload)
+        budget_zc = _preview_budget(payload, "budget_zc")
+        budget_usd = _preview_budget(payload, "budget_usd")
+
+        job_id = payload.get("job_id")
+        raw_spec = payload.get("spec")
+        if job_id is not None:
+            if not isinstance(job_id, str) or not job_id:
+                raise HTTPException(status_code=400, detail="job_id must be a string")
+            row = dbmod.fetch_job_for_owner(db, job_id, user_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="unknown job")
+            raw_spec = row.get("spec")
+            if not isinstance(raw_spec, dict):
+                raise HTTPException(
+                    status_code=409,
+                    detail="this job has no stored spec to plan against",
+                )
+        elif not isinstance(raw_spec, dict):
+            raise HTTPException(
+                status_code=400, detail="pass either job_id or spec"
+            )
+
+        notes: list[str] = []
+
+        def _degraded(reason: str) -> dict[str, Any]:
+            """Answer the question that can be answered, and say which one
+            could not. A 200 with empty plans and a reason, rather than a 500
+            or a silent empty page: "nothing is quotable here, and here is
+            why" is actionable; a stack trace on a comparison view is not."""
+            return {
+                "job_id": job_id,
+                "tasks": None,
+                "duration": None,
+                "plans": [],
+                "candidates": [],
+                "canary": None,
+                "recommended": None,
+                "eligible_machines": 0,
+                "excluded_machines": 0,
+                "unplannable_machines": 0,
+                "notes": notes + [reason],
+            }
+
+        if placement_eligible is None or expand_tasks is None:
+            return _degraded(
+                "routing is not configured on this deployment: the placement "
+                "gates and the task expansion both live in the runtime, and "
+                "this API imports only its protocol package. Nothing is "
+                "quoted rather than quoting a fleet a permissive stand-in "
+                "would have approved."
+            )
+
+        try:
+            spec = JobSpec.model_validate(raw_spec)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid job spec") from None
+
+        try:
+            tasks = list(expand_tasks(job_id or "preview", spec))
+        except Exception:
+            log.warning("could not expand a spec for preview by %s", user_id)
+            return _degraded(
+                "this spec could not be expanded into tasks, so there is "
+                "nothing to plan"
+            )
+        if not tasks:
+            return _degraded("this spec expands to no tasks")
+        if len(tasks) > _PREVIEW_MAX_TASKS:
+            notes.append(
+                f"planned from the first {_PREVIEW_MAX_TASKS} of "
+                f"{len(tasks)} tasks"
+            )
+            tasks = tasks[:_PREVIEW_MAX_TASKS]
+
+        # The gates are per task, and the tasks of one job differ only in
+        # their payload's trial parameters — except for a verification pair's
+        # `exclude_nodes`, which narrows the fleet for one task and not the
+        # job. The first task is the representative and the fleet below is
+        # the job's, not that task's.
+        task = tasks[0]
+
+        rows = dbmod.router_candidates_for_owner(db, user_id)
+        if not rows:
+            return _degraded(
+                "no active machine is available to this account: nothing is "
+                "enrolled, nothing is shared by a workspace, and nothing is "
+                "listed on the open market"
+            )
+
+        machine_ids = [row["machine_id"] for row in rows]
+        rates = metricsmod.acceptance_rates(
+            dbmod.acceptance_rate_rows(db, machine_ids=machine_ids)
+        )
+
+        # Rung 1: other machines' recorded durations on this job, each
+        # labelled with the class of the machine that produced it. Passed
+        # whole to the estimator, which drops every observation from a class
+        # other than the one it is asked about — the filtering rule stays in
+        # one place rather than being re-implemented per class here.
+        observations = tuple(
+            routermod.Observation(
+                seconds=item["duration_s"],
+                capability_class=item["capability_class"],
+                federated=item["federated"],
+            )
+            for item in (
+                dbmod.peer_task_observations(db, job_id=job_id) if job_id else []
+            )
+        )
+        evidence = [
+            routermod.Evidence(rung=routermod.RUNG_SAME_JOB, observations=observations)
+        ]
+
+        estimates: dict[str, routermod.Estimate] = {}
+        for capability_class in {
+            routermod.hardware_class(row["capabilities"]) for row in rows
+        }:
+            if capability_class is None:
+                continue
+            estimate = routermod.estimate_task_seconds(
+                evidence, capability_class=capability_class
+            )
+            if estimate is not None:
+                estimates[capability_class] = estimate
+
+        candidates: list[routermod.Candidate] = []
+        estimates_by_machine: dict[str, routermod.Estimate] = {}
+        classes_present: set[str | None] = set()
+        for row in rows:
+            capability_class = routermod.hardware_class(row["capabilities"])
+            classes_present.add(capability_class)
+            estimate = estimates.get(capability_class) if capability_class else None
+            if estimate is not None:
+                estimates_by_machine[row["machine_id"]] = estimate
+            candidates.append(
+                routermod.Candidate(
+                    machine_id=row["machine_id"],
+                    node=_preview_node_view(row),
+                    venue=row["venue"],
+                    currency=routermod.CURRENCY_ZC,
+                    # Millicredits on the wire, credits in a quote: the ledger
+                    # settles in integers so it can never round, and a page
+                    # showing "14200" where the design says "14.2 ZC" is the
+                    # same number in a unit nobody reads.
+                    price_per_hour=(
+                        row["ask_zc_per_hour"]
+                        / marketplacemod.MILLICREDITS_PER_CREDIT
+                    ),
+                    max_concurrent_tasks=row["max_concurrent_tasks"],
+                    seconds_per_task=(
+                        routermod.planning_seconds(estimate)
+                        if estimate is not None
+                        else None
+                    ),
+                    reliability_tier=routermod.reliability_tier(
+                        routermod.select_acceptance(
+                            rates,
+                            machine_id=row["machine_id"],
+                            capability_class=capability_class,
+                        )
+                    ),
+                    capability_class=capability_class,
+                )
+            )
+
+        # The job-wide fallback duration is offered ONLY when every candidate
+        # sits in the one class that has evidence. Otherwise it is None, and
+        # each machine is quoted from its own class or not at all: a fallback
+        # applied across classes is exactly the pooling the estimator refuses
+        # everywhere else, arriving through the back door of a default.
+        duration: routermod.Estimate | None = None
+        if len(classes_present) == 1:
+            only = next(iter(classes_present))
+            duration = estimates.get(only) if only is not None else None
+
+        eligible_ids = {
+            candidate.machine_id
+            for candidate in routermod.eligible_fleet(
+                task, candidates, eligible=placement_eligible
+            )
+        }
+        plan_set = routermod.plan_job(
+            routermod.PlanRequest(
+                task=task,
+                tasks=len(tasks),
+                candidates=tuple(candidates),
+                duration=duration,
+                deadline_seconds=deadline_seconds,
+            ),
+            eligible=placement_eligible,
+        )
+
+        if task.payload.get("local_inputs"):
+            notes.append(
+                "this job wants host-local datasets, and this API does not "
+                "record which datasets a machine holds — that gate fails "
+                "closed here, so the fleet below is narrower than the "
+                "coordinator's will be"
+            )
+        if task.payload.get("extra_dependencies"):
+            notes.append(
+                "this job declares extra dependencies, and this API does not "
+                "record which machines can install them — that gate fails "
+                "closed here, so the fleet below is narrower than the "
+                "coordinator's will be"
+            )
+
+        return {
+            "job_id": job_id,
+            "tasks": len(tasks),
+            "duration": _preview_estimate(plan_set.duration),
+            "plans": [
+                _preview_plan(
+                    plan,
+                    estimates_by_machine=estimates_by_machine,
+                    recommended=plan_set.recommended,
+                    budget_zc=budget_zc,
+                    budget_usd=budget_usd,
+                )
+                for plan in plan_set.plans()
+            ],
+            "candidates": [
+                {
+                    "machine_id": candidate.machine_id,
+                    "name": row["name"],
+                    "venue": candidate.venue,
+                    "currency": candidate.currency,
+                    "price_zc_per_hour": candidate.price_per_hour,
+                    "price_label": marketplacemod.price_label(
+                        row["ask_zc_per_hour"]
+                    ),
+                    "listing_id": row["listing_id"],
+                    "capability_class": candidate.capability_class,
+                    "reliability_tier": candidate.reliability_tier,
+                    "acceptance_rate": (rate or {}).get("acceptance_rate"),
+                    "n": (rate or {}).get("resolved"),
+                    "max_concurrent_tasks": candidate.max_concurrent_tasks,
+                    "seconds_per_task": candidate.seconds_per_task,
+                    "basis": (
+                        estimates_by_machine[candidate.machine_id].basis
+                        if candidate.machine_id in estimates_by_machine
+                        else None
+                    ),
+                    "eligible": candidate.machine_id in eligible_ids,
+                }
+                for candidate, row in zip(candidates, rows)
+                for rate in (
+                    routermod.select_acceptance(
+                        rates,
+                        machine_id=candidate.machine_id,
+                        capability_class=candidate.capability_class,
+                    ),
+                )
+            ],
+            "canary": _preview_canary(plan_set.canary),
+            "recommended": plan_set.recommended,
+            "eligible_machines": plan_set.eligible_machines,
+            "excluded_machines": plan_set.excluded_machines,
+            "unplannable_machines": plan_set.unplannable_machines,
+            "notes": notes + list(plan_set.notes),
+        }
+
     # -- GitHub App: connecting an installation ------------------------------
     #
     # The whole security argument sits in `POST /installations`. Read its
@@ -2781,17 +4089,34 @@ def create_cloud_app(
         # fetched for the visibility check above, so a page left polling a
         # finished job re-runs neither.
         #
-        # The two are separate on purpose. Recording the STATE is a cheap
+        # The three are separate on purpose. Recording the STATE is a cheap
         # local write and is what `GET /me/metrics` counts outcomes from,
         # so it happens on every terminal observation and does not care
         # whether the measurement succeeded. Recording the FOOTPRINT costs a
         # coordinator round trip and is guarded by its own marker, so a
         # listing that failed is retried on the next poll instead of being
-        # remembered as a measurement.
+        # remembered as a measurement. MIRRORING the artifacts to OSS costs
+        # a copy of every accepted object and is guarded by a THIRD marker
+        # (`artifacts_mirrored_at`, migration 0016) for the same reason
+        # squared: it is the one of the three that writes to a system
+        # outside this deployment, so it is the one most able to fail after
+        # its neighbours have succeeded. Sharing 0011's marker would leave
+        # such a failure permanently unretried — 0016's comment is the long
+        # version.
+        #
+        # THIS IS THE ONLY PLACE A NON-FEDERATED JOB IS EVER OBSERVED TO
+        # HAVE STOPPED, which is exactly why the mirror hangs here and not
+        # on the commit path: a volunteer's commit is accepted by the
+        # coordinator with no knowledge of this API, and that is the
+        # property that keeps running leases alive when this process dies.
+        # The copy happens after the fact, on an observation, and cannot
+        # turn a finished job into a failed one.
         if is_terminal_state(job.get("state")):
             dbmod.sync_observed_job_states(db, [(job_id, str(job["state"]))])
             if row.get("artifact_bytes_recorded_at") is None:
                 await _record_artifact_footprint(coordinator, db, job_id)
+            if row.get("artifacts_mirrored_at") is None:
+                await _mirror_job_artifacts(coordinator, db, job_id, settings)
         return job
 
     @app.get("/v1alpha1/jobs/{job_id}/rounds", tags=["browser"])
@@ -3021,14 +4346,37 @@ def create_cloud_app(
         question than the one asked produces a page whose label and contents
         disagree. 422 says which.
 
-        **Three of the fields are always null**, and that is the most
-        important thing about this route. ``lost_task_seconds``,
-        ``mttd_seconds`` and ``mttr_seconds`` need events nothing in this
-        deployment records; ``metrics.report`` documents exactly which event
-        each one is waiting for. They are null rather than 0 because this
-        page's entire purpose is to prove a claim about reliability, and a
-        fabricated MTTR is indistinguishable from a measured one.
+        **One field is still always null**, and that is the most important
+        thing about this route. ``mttd_seconds`` needs the instant a machine
+        actually stopped, which nothing in this deployment records;
+        ``metrics.report`` documents exactly which event it is waiting for.
+        It is null rather than 0 because this page's entire purpose is to
+        prove a claim about reliability, and a fabricated MTTD is
+        indistinguishable from a measured one. ``lost_task_seconds`` and
+        ``mttr_seconds`` became real on 2026-08-11, when migration 0015 gave
+        an attempt a terminal outcome — not by relaxing that standard but by
+        recording the events it named.
+
+        **The expiry reconciliation runs first, and it is a write on a read
+        route.** Lease expiry is decided by the coordinator's sweeper, which
+        never calls this API, so an attempt whose machine simply vanished is
+        resolved here or nowhere. The same shape as
+        ``sync_observed_job_states`` on the jobs list, for the same reason and
+        with the same guard: it is one statement over a partial index of
+        UNRESOLVED attempts, so after the first pass a polling console costs a
+        statement that matches no rows. Best-effort — a reconciliation that
+        fails must not take the page down with it, it only means the numbers
+        below still carry those attempts as unresolved, which is the honest
+        reading of a row nothing has classified.
+
+        Unscoped by owner, deliberately: expiry is a fact about a lease, not
+        about whose console is open, and scoping it would make one account's
+        numbers depend on another account visiting the site.
         """
+        try:
+            dbmod.reconcile_expired_attempts(db)
+        except Exception:
+            log.warning("could not reconcile expired attempts for %s", user_id)
         return metricsmod.report(
             window_days=window_days,
             counts=dbmod.metrics_counts_for_owner(db, user_id, window_days),
@@ -3286,6 +4634,17 @@ def create_cloud_app(
         answers 404 (not an error), so only the round that failed has to
         succeed once.
 
+        **THE OSS MIRROR GOES WITH THEM.** Freeing the coordinator's disk is
+        only half of deleting a job's artifacts once a mirror exists: the
+        other copy is in a bucket, it is still listed by a manifest that
+        certifies it complete, and ``presign_job_artifacts`` would keep
+        minting readable URLs for it after its owner deleted it. That is a
+        data-deletion correctness problem, not a tidiness one, so
+        ``unmirror_job`` runs for every target below and a bucket that
+        refuses answers 502 exactly as a coordinator that refuses does —
+        telling someone their data is gone when it is not is the one answer
+        this route may never give.
+
         **IDEMPOTENT.** Deleting twice answers 200 with zeros. Browsers
         double-submit, people re-click, and an error on the second click
         would send someone hunting for a problem that does not exist.
@@ -3344,6 +4703,45 @@ def create_cloud_app(
             deleted_files += files
             freed_bytes += bytes_
 
+        # THE OTHER COPY. Reached only when every target's coordinator-side
+        # delete answered, so the disk is already free by here; what is left
+        # is the OSS mirror of the same bytes, which nothing else in this
+        # system ever deletes.
+        #
+        # A SECOND LOOP, NOT A LINE INSIDE THE FIRST ONE, and the difference
+        # is the retry. The loop above `continue`s on 404 — "the coordinator
+        # has no artifacts for this job", which is the second click and,
+        # crucially, the round that a PREVIOUS attempt at this route already
+        # freed before failing on a later round. Those targets are precisely
+        # the ones whose mirror is still there, so an unmirror hung off the
+        # success branch would skip exactly the case it exists to fix and
+        # orphan a round's copy for ever. Mirror deletion is idempotent (a
+        # prefix that is already gone deletes 0 objects, not an error), so
+        # running it for every target is free where skipping one is not.
+        for coordinator_job_id in targets:
+            try:
+                await unmirror_job(coordinator_job_id, settings)
+            except MirrorError as exc:
+                # NOT swallowed, unlike every other mirror call in this file.
+                # Everywhere else a failed mirror costs a retry and the bytes
+                # are safe on the coordinator's disk meanwhile; here the
+                # coordinator's copy is ALREADY GONE, so reporting success
+                # would tell an owner their artifacts are deleted while a
+                # presignable copy of them sits in a bucket. Nothing is
+                # recorded, matching the partial-failure rule above: the
+                # usage stays over-stated and the whole call is safe to retry.
+                log.warning(
+                    json.dumps({"text": "could not delete the OSS mirror",
+                                "job_id": coordinator_job_id,
+                                "error": str(exc)})
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="this job's files were deleted but its mirrored "
+                           "copy could not be, so its recorded usage is "
+                           "unchanged — try again",
+                )
+
         # THE MEASUREMENT, not a decrement. `record_job_artifact_bytes` SETS
         # (its docstring says why), and what it is set to here is 0 because
         # every artifact of this job is what was just deleted — a fact, not
@@ -3359,6 +4757,375 @@ def create_cloud_app(
         # target answered — see the loop above.
         dbmod.record_job_artifact_bytes(db, job_id, 0)
         return {"deleted_files": deleted_files, "freed_bytes": freed_bytes}
+
+    # -- FC Sandbox sessions ------------------------------------------------
+    #
+    # `sandbox_orchestrator` is the reducer; these are the six authenticated
+    # doors onto it plus one unauthenticated evidence page.
+    #
+    # TWO RULES GOVERN EVERY ROUTE BELOW.
+    #
+    # 1. OWNER SCOPING IS DONE HERE, FIRST, ALWAYS. `on_model_ready` and
+    #    `cleanup_session` take a BARE session id — deliberately, because the
+    #    reconciler acts for the deployment rather than for a person, and
+    #    `unfinished_sessions` is not owner-scoped either. That means the
+    #    orchestrator cannot tell whose session it is being handed, and the
+    #    only thing standing between two accounts is that every route here
+    #    calls `fetch_session_for_owner` and 404s on None BEFORE the
+    #    orchestrator is touched. A route that skipped it would let anyone
+    #    holding a session id kill or resume somebody else's sandbox.
+    #
+    # 2. UNCONFIGURED IS 404, IN THE GITHUB-APP SHAPE. On a deployment with no
+    #    FC configuration this capability does not exist, so it answers as
+    #    though the routes do not — same reasoning as `github_install_url`.
+    #    Nothing else in the API changes shape.
+
+    def _sandbox_or_404() -> None:
+        if not settings.fc_sandbox_configured:
+            raise HTTPException(
+                status_code=404,
+                detail="the FC sandbox is not configured on this deployment",
+            )
+
+    def _sandbox_http_error(exc: Exception) -> HTTPException:
+        """The orchestrator's errors, mapped once.
+
+        `TrainingJobNotAuthorised` and `SessionNotFound` are both 404 and both
+        say nothing more: the first already folds "no such job" and "somebody
+        else's job" into one exception on purpose (the repo's 404-not-403
+        doctrine), and splitting them at the HTTP layer would undo that.
+
+        `SessionFailed` is 502 carrying `{"session_id", "code"}` rather than a
+        bare message, because the session it names has a row, a ledger and a
+        share link, and those are the evidence of what went wrong — the console
+        links straight to them. The sanitized `code` travels; the free-text
+        detail does not.
+        """
+        if isinstance(exc, orchmod.SandboxUnconfigured):
+            return HTTPException(
+                status_code=404,
+                detail="the FC sandbox is not configured on this deployment",
+            )
+        if isinstance(exc, (orchmod.TrainingJobNotAuthorised,
+                            orchmod.SessionNotFound)):
+            return HTTPException(status_code=404, detail="unknown session")
+        if isinstance(exc, OSSUnavailable):
+            return HTTPException(
+                status_code=503,
+                detail="the artifact store is unavailable, so the trained "
+                       "model cannot be reached",
+            )
+        if isinstance(exc, orchmod.SessionFailed):
+            return HTTPException(
+                status_code=502,
+                detail={"session_id": exc.session_id, "code": exc.code},
+            )
+        if isinstance(exc, orchmod.EvaluationUnavailable):
+            return HTTPException(
+                status_code=500, detail="no evaluation driver is configured"
+            )
+        if isinstance(exc, SandboxUnavailable):
+            return HTTPException(
+                status_code=404,
+                detail="the FC sandbox is not configured on this deployment",
+            )
+        raise exc
+
+    async def _session_for_owner_or_404(
+        db: psycopg.Connection, session_id: str, user_id: str
+    ) -> dict[str, Any]:
+        row = await run_in_threadpool(
+            ssmod.fetch_session_for_owner, db, session_id, user_id
+        )
+        if row is None:
+            # Not 403. These ids sit in shareable URLs, and "exists but not
+            # yours" confirms to a guesser that the id is real.
+            raise HTTPException(status_code=404, detail="unknown session")
+        return row
+
+    @app.post("/v1alpha1/sandbox-sessions", status_code=201, tags=["browser"])
+    async def create_sandbox_session(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Create, prepare and hibernate one evaluation sandbox.
+
+        **Inline, and it blocks for about ten seconds** (create ~0.9 s,
+        bootstrap, register, pause ~2.6 s — measured 2026-08-11 in
+        ap-southeast-1). That is acceptable here and nowhere else on this
+        feature: the session id does not exist until `create_session` has run,
+        so there is nothing to hand back early and nothing for a 202 to point
+        at. `model-ready`, whose wait is bounded by fifteen minutes rather than
+        ten seconds, is the opposite case and is backgrounded.
+
+        The evaluation spec is compiled to a JobSpec BEFORE anything is
+        provisioned. It is submitted on the far side of the hibernation, so an
+        unusable spec would otherwise cost a sandbox, a bootstrap and a
+        credential to discover — and would surface as a session that failed
+        after the model was already trained.
+        """
+        _sandbox_or_404()
+        payload = await _json_object(request)
+
+        training_job_id = payload.get("training_job_id")
+        if not isinstance(training_job_id, str) or not training_job_id:
+            raise HTTPException(
+                status_code=400, detail="training_job_id is required"
+            )
+        evaluation_spec = payload.get("evaluation_spec")
+        if not isinstance(evaluation_spec, dict):
+            raise HTTPException(
+                status_code=400, detail="evaluation_spec must be an object"
+            )
+        try:
+            build_evaluation_jobspec(
+                # Any well-formed id compiles the same spec; this one is
+                # thrown away. What is being checked is the SUBMITTER's half —
+                # image, command, parameters — and the session id contributes
+                # only the name.
+                session_id="00000000-0000-0000-0000-000000000000",
+                pool_id=settings.fc_sandbox_pool_id or "sandbox",
+                training_job_id=training_job_id,
+                spec=evaluation_spec,
+            )
+        except EvaluationSpecError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        try:
+            session_id = await orchmod.start_session(
+                db, sandbox(), settings,
+                owner_id=user_id,
+                training_job_id=training_job_id,
+                evaluation_spec=evaluation_spec,
+                coordinator_url=sandbox_enrolment_url,
+            )
+        except (orchmod.OrchestratorError, OSSUnavailable,
+                SandboxUnavailable) as exc:
+            raise _sandbox_http_error(exc) from None
+
+        row = await _session_for_owner_or_404(db, session_id, user_id)
+        return {
+            "session_id": session_id,
+            "state": row["state"],
+            "share_token": row["share_token"],
+        }
+
+    @app.post(
+        "/v1alpha1/sandbox-sessions/{session_id}/model-ready",
+        status_code=202, tags=["browser"],
+    )
+    async def sandbox_session_model_ready(
+        session_id: str,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The trained model exists — wake the sandbox and evaluate.
+
+        **Backgrounded, and that is not an optimisation.** `on_model_ready`
+        wakes the sandbox, verifies the worker, re-mints the presigned URLs,
+        submits the evaluation and then WAITS for an accepted result, bounded
+        by `evaluation_timeout_s` (900 s by default). No HTTP client, browser
+        or proxy holds a request open for fifteen minutes, and the ones that
+        try give up somewhere in the middle — leaving the caller unable to
+        tell a timed-out socket from a failed evaluation while the work
+        carries on regardless. So this returns 202 immediately and the
+        session's own ledger is where the answer appears.
+
+        Safe to call repeatedly, and safe to call concurrently: the first thing
+        the orchestrator does is compare-and-set HIBERNATED -> RESUMING, and a
+        loser returns having woken nothing.
+
+        The two failures that are knowable synchronously are answered
+        synchronously — an unknown-or-not-yours session (404) and an
+        unconfigured artifact store (503) — rather than being discovered by a
+        background task nobody is watching.
+        """
+        _sandbox_or_404()
+        row = await _session_for_owner_or_404(db, session_id, user_id)
+        if not settings.oss_configured:
+            raise _sandbox_http_error(
+                OSSUnavailable(
+                    "OSS is not configured, so there is no artifact to observe"
+                )
+            )
+
+        async def _evaluate() -> None:
+            conn = await run_in_threadpool(app.state.connect)
+            try:
+                await orchmod.on_model_ready(
+                    conn, sandbox(), settings,
+                    session_id=session_id, driver=driver,
+                )
+            except Exception:  # noqa: BLE001 - the ledger already says why
+                # `on_model_ready` records FAILED and runs cleanup before it
+                # raises, so by here the session's own evidence is already
+                # written and there is no caller left to tell. Logged and
+                # swallowed so the task does not also print an unstructured
+                # traceback into a JSON-per-line log stream.
+                log.warning(
+                    json.dumps({"text": "sandbox evaluation failed",
+                                "session_id": session_id}),
+                    exc_info=True,
+                )
+            finally:
+                await run_in_threadpool(conn.close)
+
+        # Its own connection, not the request's: `db_conn` closes on the way
+        # out of this response, and this task outlives it by up to fifteen
+        # minutes.
+        task = asyncio.create_task(_evaluate(), name=f"fc-eval-{session_id}")
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+        return {"session_id": session_id, "state": row["state"]}
+
+    @app.post(
+        "/v1alpha1/sandbox-sessions/{session_id}/cleanup", tags=["browser"]
+    )
+    async def cleanup_sandbox_session(
+        session_id: str,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Kill the sandbox and revoke the credential. Both, independently.
+
+        Inline: `cleanup_session` is two bounded calls (kill p50 210 ms plus a
+        local revocation) and it never raises — it is called from `finally`
+        blocks, where an exception would mask the failure that sent us in. So
+        the state that comes back is read from the row afterwards rather than
+        assumed from the call, which is the same rule the orchestrator applies
+        to the provider: TERMINATED appears only once the API confirmed the
+        sandbox is gone, and a cleanup that could not finish leaves the session
+        where it is for `reconcile` to pick up again.
+        """
+        _sandbox_or_404()
+        await _session_for_owner_or_404(db, session_id, user_id)
+        try:
+            await orchmod.cleanup_session(
+                db, sandbox(), settings, session_id=session_id
+            )
+        except (orchmod.OrchestratorError, SandboxUnavailable) as exc:
+            raise _sandbox_http_error(exc) from None
+        row = await _session_for_owner_or_404(db, session_id, user_id)
+        return {"session_id": session_id, "state": row["state"]}
+
+    @app.get("/v1alpha1/sandbox-sessions/{session_id}", tags=["browser"])
+    async def get_sandbox_session(
+        session_id: str,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """One session, owner-scoped. The full row — this caller owns it."""
+        _sandbox_or_404()
+        row = await _session_for_owner_or_404(db, session_id, user_id)
+        return _jsonable(dict(row))
+
+    @app.get("/v1alpha1/sandbox-sessions/{session_id}/events", tags=["browser"])
+    async def get_sandbox_session_events(
+        session_id: str,
+        after_sequence: int = Query(0, ge=0),
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """One session's ledger, owner-scoped in SQL.
+
+        The existence check comes first even though `events_for_owner` joins
+        the owner in itself: without it an unknown session and somebody else's
+        session both answer `[]`, which reads to a console as "nothing has
+        happened yet" rather than "this is not yours". Both still answer 404
+        and remain indistinguishable from each other.
+
+        `after_sequence` is what makes the console's poll cheap over a
+        hibernation that lasts hours.
+        """
+        _sandbox_or_404()
+        await _session_for_owner_or_404(db, session_id, user_id)
+        events = await run_in_threadpool(
+            lambda: ssmod.events_for_owner(
+                db, session_id, user_id, after_sequence=int(after_sequence)
+            )
+        )
+        return [_jsonable(dict(e)) for e in events]
+
+    @app.get("/v1alpha1/jobs/{job_id}/sandbox-sessions", tags=["browser"])
+    async def list_sandbox_sessions_for_job(
+        job_id: str,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Every session this account opened for one training job, newest first.
+
+        `[]` for a job with no session, and `[]` for a job that is not this
+        caller's — absence is a normal state here, not an error, and a job
+        page asks this before any session exists. A 404 would make "no
+        evaluation yet" indistinguishable from "this job is gone" on the one
+        screen where the difference matters.
+        """
+        _sandbox_or_404()
+        rows = await run_in_threadpool(
+            lambda: ssmod.list_sessions_for_owner(
+                db, user_id, training_job_id=job_id
+            )
+        )
+        return [_jsonable(dict(row)) for row in rows]
+
+    # -- the public evidence page: NO AUTHENTICATION ------------------------
+    #
+    # The only route in this API that reads the database with no credential at
+    # all, and it is deliberate: the submission needs a link that opens for
+    # somebody who has no account, and every console route redirects to
+    # sign-in. The token IS the authorization.
+    #
+    # Four things make that safe, and all four are load-bearing:
+    #
+    #   * `fetch_session_by_share_token` narrows the columns IN SQL. Five never
+    #     leave the database — owner, pool, machine, sandbox id, evaluation
+    #     spec — and neither does the token itself. Read the comment above
+    #     `SESSION_SHARE_COLUMNS` before touching that set.
+    #   * `public_session_view` narrows twice more: the session id is rendered
+    #     as a suffix, `marker_sha256` as a 12-character prefix, and
+    #     `error_message` is dropped entirely in favour of the sanitized
+    #     `error_code`.
+    #   * An unknown token, a withdrawn one (the column is nullable precisely
+    #     so a page can be revoked without a migration) and a wrong one all
+    #     answer the same 404.
+    #   * A rate limiter, such as it is — see `FixedWindowLimiter` for exactly
+    #     what it does and does not claim.
+
+    @app.get(
+        "/v1alpha1/public/sandbox-sessions/{share_token}", tags=["public"]
+    )
+    async def public_sandbox_session(
+        share_token: str,
+        request: Request,
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """One session and its ledger, for anybody holding the link.
+
+        The envelope is fixed at ``{"session", "events"}``. Not negotiable and
+        not conditional on there being events: a consumer that has to sniff
+        which of two shapes it received is a consumer with a branch that will
+        eventually be wrong.
+        """
+        _sandbox_or_404()
+        client = request.client.host if request.client else "unknown"
+        if not public_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many requests")
+
+        row = await run_in_threadpool(
+            ssmod.fetch_session_by_share_token, db, share_token
+        )
+        if row is None:
+            # Unknown, withdrawn and wrong are one answer. A 403 for
+            # "withdrawn" would confirm the token was once real.
+            raise HTTPException(status_code=404, detail="unknown session")
+        events = await run_in_threadpool(
+            ssmod.events_for_session, db, str(row["id"])
+        )
+        return {
+            "session": public_session_view(row),
+            "events": [public_event_view(e) for e in events],
+        }
 
     # -- agent-facing: machine token, forwarded with delegation ------------
     #
@@ -3422,6 +5189,21 @@ def create_cloud_app(
                             # for want of capacity nobody could advertise.
                             dataset_cache_bytes=(
                                 _advertised_dataset_cache_bytes(parsed)
+                            ),
+                            # The hardware description itself, allowlisted in
+                            # `db._REPORTED_CAPABILITY_FIELDS`. Until this was
+                            # passed, `machines.capabilities` held only the
+                            # dataset cache figure, so every classifier that
+                            # reads that column — the marketplace ladder and
+                            # the router's — saw a machine with no cores and
+                            # no GPUs and filed a 4090 rig as `cpu-small`.
+                            # Read off the RAW body for the same reason
+                            # `dataset_cache_bytes` is: the pinned protocol
+                            # model drops any field it does not yet know.
+                            reported=(
+                                parsed.get("capabilities")
+                                if isinstance(parsed.get("capabilities"), dict)
+                                else None
                             ),
                         )
                 except Exception:
@@ -3509,6 +5291,16 @@ def create_cloud_app(
                         machine_id=machine.id,
                         job_id=lease["job_id"],
                         task_id=lease["task_id"],
+                        # The coordinator's own deadline for this lease. It is
+                        # the ONLY instant that lets an attempt nobody ever
+                        # reports on be resolved at all: lease expiry happens
+                        # in the coordinator's sweeper, which never calls us,
+                        # so without this a machine unplugged mid-task leaves
+                        # an open row for ever and the reliability page counts
+                        # its work as neither accepted nor lost. `.get`, not
+                        # `[...]`: a lease body missing the field must still
+                        # record the mapping the credit path needs.
+                        deadline=lease.get("deadline"),
                     )
             except Exception:
                 log.warning("could not record attempt for machine %s", machine.id)
@@ -3518,9 +5310,36 @@ def create_cloud_app(
     async def attempt_heartbeat(
         lease_id: str, request: Request, machine: Machine = Depends(current_machine)
     ):
-        return await proxy(
+        response = await proxy(
             request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/heartbeat"
         )
+        # A heartbeat the coordinator ACCEPTS extends the lease, and its
+        # response is the renewed `Lease`. Carrying that forward is what keeps
+        # the expiry reconciler honest: without it the deadline recorded at
+        # claim time would stand for ever, and a healthy hour-long task would
+        # be resolved as expired sixty seconds in.
+        #
+        # Only on 200. A 410 means the lease is already dead — the one answer
+        # that must NOT push a deadline forward — and every other status is
+        # not a renewal either.
+        #
+        # Best-effort, exactly like the attempt row itself: an accounting
+        # column must never be the reason a working task is told to stop.
+        if response.status_code == 200:
+            try:
+                renewed = json.loads(response.body)
+                with contextlib.closing(app.state.connect()) as conn:
+                    dbmod.note_attempt_deadline(
+                        conn,
+                        lease_id=lease_id,
+                        machine_id=machine.id,
+                        deadline=renewed.get("deadline"),
+                    )
+            except Exception:
+                log.warning(
+                    "could not record a renewed deadline for machine %s", machine.id
+                )
+        return response
 
     @app.post("/v1alpha1/attempts/{lease_id}/complete", tags=["agent"])
     async def attempt_complete(
@@ -3625,9 +5444,39 @@ def create_cloud_app(
     async def attempt_fail(
         lease_id: str, request: Request, machine: Machine = Depends(current_machine)
     ):
-        return await proxy(
+        response = await proxy(
             request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/fail"
         )
+        # THE ONE MOMENT THIS API IS TOLD AN ATTEMPT FAILED. Until migration
+        # 0015 this route was a pure proxy and wrote nothing, so a failed
+        # attempt and an in-flight one were the same row (`accepted_at is
+        # null`) and `tasks_accepted / tasks_attempted` had a denominator that
+        # grew with every claim and shrank for nothing.
+        #
+        # AFTER the coordinator answers, and only for an answer it accepted.
+        # A fail it refused — unknown lease, already dead, wrong holder —
+        # describes nothing that happened; recording it would resolve an
+        # attempt on the strength of a rejected request, and for a lease that
+        # is still alive somewhere it would resolve one that is still running.
+        #
+        # Idempotent in the database rather than by a convention that this
+        # route is called once: `record_attempt_failure` will not move a
+        # terminal outcome that is already written, so an agent's retry
+        # describes one failure and not a second, longer one.
+        #
+        # Best-effort, exactly like the credit write next door: the agent's
+        # own error path must never fail because of an accounting row.
+        if 200 <= response.status_code < 300:
+            try:
+                with contextlib.closing(app.state.connect()) as conn:
+                    dbmod.record_attempt_failure(
+                        conn, lease_id=lease_id, machine_id=machine.id
+                    )
+            except Exception:
+                log.warning(
+                    "could not record a failed attempt for machine %s", machine.id
+                )
+        return response
 
     @app.put("/v1alpha1/artifacts/{key:path}", tags=["agent"])
     async def put_artifact(
@@ -3699,6 +5548,89 @@ def create_cloud_app(
 # ---------------------------------------------------------------------------
 # the legacy (pre-accounts) app
 # ---------------------------------------------------------------------------
+
+
+#: What the coordinator actually stores committed artifacts to, in every
+#: deployment this repo has.
+#:
+#: A CONSTANT, NOT AN ENVIRONMENT LOOKUP, and that is the fix rather than an
+#: oversight. The panel used to answer `FLASHML_ARTIFACT_BACKEND` (defaulting
+#: to "minio"), and NOTHING IN THE MANAGED PATH READS THAT VARIABLE.
+#: `flashruntime.artifacts.store_from_env()` has exactly one caller in the
+#: whole runtime — `service/app.py`'s `ingest_workload_artifacts`, which
+#: belongs to the optional KubeRay path and is disabled
+#: (`FLASHML_ENABLE_KUBERAY=0`) on both deployed coordinators. Every artifact
+#: this product produces travels `flashnode -> PUT /v1alpha1/artifacts/{key}
+#: -> the coordinator's own filesystem` under `FLASHML_LOCAL_ARTIFACTS_DIR`,
+#: whatever that variable says. Setting it to "oss" changed the panel and
+#: nothing else, which is worse than not having the panel: it let someone
+#: read "artifact_store: oss" off a dashboard and believe a redeploy could no
+#: longer destroy their models.
+#:
+#: The one thing that DOES put artifacts in OSS is this repo's own mirror
+#: (`artifact_mirror.py`), and it is reported separately below because it is
+#: a separate, additional copy — never a replacement for this one.
+COORDINATOR_ARTIFACT_STORE = "coordinator-local-disk"
+
+#: `artifact_mirror` panel values.
+MIRROR_NOT_OBSERVED = "not observed"
+MIRROR_NOT_CONFIGURED = "not configured"
+MIRROR_UNUSABLE = "configured-but-unusable"
+MIRROR_READY = "configured"
+
+
+def _artifact_mirror_panel() -> dict[str, Any]:
+    """What the OSS mirror's configuration actually is, for the panel.
+
+    READ OFF ``Settings``, NEVER OFF AN ENVIRONMENT VARIABLE, which is the
+    second half of this route's fix. The panel used to report
+    ``FLASHML_OSS_BUCKET`` — a name nothing in this process has ever read.
+    ``settings.from_env`` reads ``OSS_BUCKET``, so a fully configured
+    deployment reported an empty bucket, and a deployment that had set only
+    ``FLASHML_OSS_BUCKET`` reported a bucket while the mirror was off. Both
+    directions were wrong, and the second is the dangerous one: it is a
+    dashboard telling somebody their artifacts are being copied off a disk
+    that a redeploy erases, when nothing is copying them.
+
+    Four answers, and the distinction between the first two is the point:
+
+    ``not observed`` — the environment does not describe a deployment this
+      process can build ``Settings`` from at all, so the honest answer is
+      that nobody looked. This is the normal case for the legacy app, which
+      `create_app` only ever returns when SUPABASE_URL/COORDINATOR_URL are
+      absent — exactly the condition `Settings.from_env` refuses to build
+      under while auth is required. Reporting "not configured" here would be
+      a claim about the mirror derived from a fact about Supabase.
+    ``not configured`` — settings were read and the four OSS values are not
+      all present. The mirror is off; the coordinator's disk is the only
+      store. Not an error (``artifact_mirror``'s rule 1).
+    ``configured-but-unusable`` — the values are there and a client cannot be
+      built from them: ``oss2`` is not installed, or the endpoint/bucket pair
+      is malformed. This is the state that most needs a name, because
+      ``oss_configured`` alone would report it as working right up until the
+      first job finished.
+    ``configured`` — a bucket-scoped client constructs. NO NETWORK CALL is
+      made to prove more than that: ``OSSArtifacts.healthcheck`` writes,
+      reads and deletes a real object, which is not something a display route
+      may do on every request. What this claims is exactly what it checked.
+    """
+    try:
+        settings = Settings.from_env()
+    except RuntimeError:
+        # `from_env` refuses to build when auth is required and the
+        # Supabase/coordinator secrets are missing. Nothing about the mirror
+        # is knowable from here, so nothing about it is asserted.
+        return {"artifact_mirror": MIRROR_NOT_OBSERVED, "oss_bucket": None}
+
+    if not settings.oss_configured:
+        return {"artifact_mirror": MIRROR_NOT_CONFIGURED, "oss_bucket": None}
+    try:
+        OSSArtifacts.from_settings(settings)
+    except OSSUnavailable:
+        state = MIRROR_UNUSABLE
+    else:
+        state = MIRROR_READY
+    return {"artifact_mirror": state, "oss_bucket": settings.oss_bucket}
 
 
 def _create_legacy_app() -> FastAPI:
@@ -3787,16 +5719,38 @@ def _create_legacy_app() -> FastAPI:
 
     @app.get("/v1alpha1/integration")
     async def integration_status():
+        """What this deployment is actually wired to.
+
+        A panel is only worth having if every line of it is checkable, so
+        the two lines that were not are gone. ``artifact_store`` no longer
+        reads ``FLASHML_ARTIFACT_BACKEND`` and ``oss_bucket`` no longer reads
+        ``FLASHML_OSS_BUCKET``: nothing in this system consumes either
+        variable, so both reported a storage arrangement that could be set by
+        typing one env var and was never true. See
+        ``COORDINATOR_ARTIFACT_STORE`` and ``_artifact_mirror_panel`` for what
+        replaced them and why.
+
+        The remaining ``FLASHML_*`` lookups are unchanged and are honest as
+        display-only flags: they describe the Kind/ACK POC profile this
+        legacy app belongs to, and nothing reads them for behaviour either —
+        but they were never claims about where a model is stored.
+        """
         env = os.environ
         profile = env.get("FLASHML_PROFILE", "local")
         return {
             "profile": profile,
             "backend": "ray/kuberay",
             "environment": "Alibaba ACK" if profile == "alibaba-ack" else "Local Kind",
-            "artifact_store": env.get("FLASHML_ARTIFACT_BACKEND", "minio"),
+            # Where a committed artifact actually lands, in every deployment
+            # this repo has. Not a preference, not an env var: a fact about
+            # the runtime's Mode A path.
+            "artifact_store": COORDINATOR_ARTIFACT_STORE,
             "image_registry": env.get("FLASHML_ACR_IMAGE", "local"),
             "ack_connected": profile == "alibaba-ack",
-            "oss_bucket": env.get("FLASHML_OSS_BUCKET", ""),
+            # `artifact_mirror` + `oss_bucket`, from Settings. The mirror is
+            # an ADDITIONAL copy of accepted artifacts, never a replacement
+            # for the coordinator's disk above.
+            **_artifact_mirror_panel(),
             "sls_enabled": env.get("FLASHML_SLS_ENABLED", "false") == "true",
             "prometheus_enabled": env.get("FLASHML_PROMETHEUS_ENABLED", "false") == "true",
             "sandbox_pool_available": env.get("FLASHML_SANDBOX_POOL", "") != "",

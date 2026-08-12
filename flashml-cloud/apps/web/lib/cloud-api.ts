@@ -26,6 +26,7 @@
 // token.
 
 import { createBrowserSupabaseClient } from "./supabase";
+import type { SandboxEvent, SandboxSession } from "./sandbox-session";
 
 /** Prepends `https://` when `url` has no scheme. Render's Blueprint
  * (`render.yaml`) resolves `NEXT_PUBLIC_CLOUD_API` via
@@ -403,7 +404,17 @@ export interface PlatformMetrics {
   jobs_succeeded: number;
   jobs_partial: number;
   jobs_failed: number;
+  /** Every lease claimed — the honest answer to "how much work was handed
+   * out". **Not the goodput denominator**, and it stopped being one on
+   * 2026-08-11 (migration 0015). See `tasks_resolved`. */
   tasks_attempted: number;
+  /** Attempts that reached a terminal state, and the number `goodput_ratio`
+   * divides by. Before 0015 one column did both jobs, so an attempt still in
+   * flight and an attempt that had failed were the same row: the ratio fell
+   * the moment work was handed out and recovered only if that exact attempt
+   * was accepted. An UNRESOLVED attempt is in flight or predates 0015, and in
+   * neither case is it evidence of anything. */
+  tasks_resolved: number;
   tasks_accepted: number;
   goodput_ratio: number | null;
   lost_task_seconds: number | null;
@@ -1051,6 +1062,35 @@ export function listJobTasks(jobId: string): Promise<JobTask[]> {
 export function listJobContributions(jobId: string): Promise<JobContribution[]> {
   return request<JobContribution[]>(
     `/v1alpha1/jobs/${encodeURIComponent(jobId)}/contributions`
+  );
+}
+
+/** `GET /v1alpha1/sandbox-sessions/{id}` — owner-scoped, 404 for a session
+ * that is not yours, same doctrine as `getJob`.
+ *
+ * The response types live in `lib/sandbox-session.ts` rather than here, which
+ * is the one exception to this file's "single source of the API's response
+ * types" rule and has a concrete reason: the PUBLIC share page renders those
+ * same shapes on the server for a visitor with no account, and this module
+ * imports the Supabase auth client. Defining them there and importing them
+ * here keeps one definition without dragging an auth client into a page that
+ * must work without one. */
+export function getSandboxSession(sessionId: string): Promise<SandboxSession> {
+  return request<SandboxSession>(
+    `/v1alpha1/sandbox-sessions/${encodeURIComponent(sessionId)}`
+  );
+}
+
+/** `GET /v1alpha1/sandbox-sessions/{id}/events` — owner-scoped.
+ *
+ * Returns the whole ledger every time. There is no `since` cursor here (the
+ * job ledger has one) and none is needed: a session's event count is tens,
+ * not thousands, and `normaliseEvents` in `lib/sandbox-session.ts` dedupes on
+ * `sequence` anyway — so a caller merging overlapping polls gets the same
+ * answer whether or not the API ever grows one. */
+export function listSandboxEvents(sessionId: string): Promise<SandboxEvent[]> {
+  return request<SandboxEvent[]>(
+    `/v1alpha1/sandbox-sessions/${encodeURIComponent(sessionId)}/events`
   );
 }
 

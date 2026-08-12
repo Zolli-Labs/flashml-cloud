@@ -51,6 +51,14 @@ dependencies = [
     "pyjwt[crypto]>=2.8",
     "psycopg[binary]>=3.1",
     "pyyaml>=6.0",
+    # Alibaba OSS, for the artifact mirror (`alibaba_oss.py`,
+    # `artifact_mirror.py`). A hard dependency rather than an extra: it is
+    # imported lazily and every OSS path is gated on `settings.oss_configured`,
+    # so an unconfigured deploy neither imports it nor behaves differently —
+    # but a CONFIGURED deploy that is merely missing the wheel would fail at
+    # the first accepted commit rather than at startup, which is the worst
+    # possible time to discover a packaging gap.
+    "oss2>=2.18",
 ]
 
 [project.optional-dependencies]

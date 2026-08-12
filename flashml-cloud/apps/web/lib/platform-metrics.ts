@@ -29,12 +29,24 @@ import type { PlatformMetrics } from "./cloud-api";
  * page cannot afford. */
 export const NOT_MEASURED = "Not measured yet";
 
-/** Goodput's more specific null reason: the API's own contract for
- * `goodput_ratio` is "null when attempted is 0" — there is nothing to
- * divide, which is a real and different situation from "not instrumented
- * yet", and worth saying so rather than flattening both into the same
- * generic sentence. */
-const NO_ATTEMPTS = "No task attempts in this window";
+/** The more specific null reason shared by goodput and lost task time:
+ * there is nothing to divide yet. A real and different situation from "not
+ * instrumented yet", and worth saying so rather than flattening both into
+ * the same generic sentence.
+ *
+ * **Keyed off `tasks_resolved`, not `tasks_attempted`, since migration
+ * 0015.** The API's contract used to be "null when attempted is 0"; it is
+ * now "null when RESOLVED is 0" for both fields — `metrics.goodput_ratio`
+ * and `metrics.lost_task_seconds` both guard on `resolved <= 0`. Keying the
+ * copy off the old field silently inverted it for the commonest live case:
+ * an account whose only attempts are still in flight has `attempted > 0` and
+ * `resolved == 0`, so it read "Not measured yet" — blaming our
+ * instrumentation for arithmetic that simply has no denominator yet.
+ *
+ * "Resolved", not "attempted", in the words too. An account with attempts in
+ * flight HAS attempted work, and telling it otherwise would be a second
+ * wrong sentence in place of the first. */
+const NO_RESOLVED_ATTEMPTS = "No resolved task attempts in this window";
 
 export interface CountStat {
   label: string;
@@ -142,6 +154,11 @@ export function summariseMetrics(payload: PlatformMetrics): MetricsSummary {
     ],
     taskCounts: [
       { label: "Attempted", value: payload.tasks_attempted },
+      // Between the two on purpose: it is the denominator of the goodput
+      // figure below, and a page that showed only Attempted and Accepted
+      // invites the reader to divide the wrong pair and conclude the
+      // percentage is wrong.
+      { label: "Resolved", value: payload.tasks_resolved },
       { label: "Accepted", value: payload.tasks_accepted },
     ],
     machinesContributing: payload.machines_contributing,
@@ -149,20 +166,34 @@ export function summariseMetrics(payload: PlatformMetrics): MetricsSummary {
       "Goodput",
       payload.goodput_ratio,
       formatPercent,
-      // See NO_ATTEMPTS above: a null ratio with zero attempts is math,
-      // not a gap in instrumentation, so it earns its own sentence.
-      payload.tasks_attempted === 0 ? NO_ATTEMPTS : NOT_MEASURED
+      // See NO_RESOLVED_ATTEMPTS above: a null ratio with nothing resolved
+      // is math, not a gap in instrumentation, so it earns its own
+      // sentence.
+      payload.tasks_resolved === 0 ? NO_RESOLVED_ATTEMPTS : NOT_MEASURED
     ),
     lostTaskTime: reliabilityStat(
       "Lost task time",
       payload.lost_task_seconds,
       formatDurationSeconds,
-      NOT_MEASURED
+      // The same bug lived here, silently: `lost_task_seconds` is null under
+      // the IDENTICAL guard (`resolved <= 0`, and for the identical reason —
+      // 0.0 is the flattering claim "no work was wasted", which an account
+      // whose reliability has never been tested must not be shown). So this
+      // stat has exactly one null cause today, and it is not "not measured
+      // yet".
+      payload.tasks_resolved === 0 ? NO_RESOLVED_ATTEMPTS : NOT_MEASURED
     ),
     mttr: reliabilityStat(
       "Mean time to recovery",
       payload.mttr_seconds,
       formatDurationSeconds,
+      // NOT the same fix, and deliberately left generic. `mean_time_to_
+      // recovery` is null when `recoveries <= 0` — "no recovery has been
+      // observed", which is neither "nothing resolved" nor "not
+      // instrumented", and since 0015 it is a real derived figure rather
+      // than a permanent null. Saying so would need a `recoveries_observed`
+      // count in the payload, which the route does not send. Until it does,
+      // the generic sentence is the only one that is certainly true.
       NOT_MEASURED
     ),
     mttd: reliabilityStat(

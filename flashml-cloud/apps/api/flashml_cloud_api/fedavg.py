@@ -585,6 +585,28 @@ def _finish(
     stop changing. The status write comes first: it is what the console and
     ``GET /me/metrics`` read, it cannot fail for a reason the measurement
     could cause, and the measurement's own failure must not cost it.
+
+    **THE OSS MIRROR IS DELIBERATELY NOT CALLED HERE (2026-08-11).** This is
+    structurally the right seam — it is the moment the last round's weights
+    are known written, and ``record_run_footprint`` already hangs off it for
+    exactly that reason — and ``artifact_mirror.mirror_jobs`` exists to take
+    the round job ids ``list_round_job_ids`` returns. What is missing is a
+    way to READ THE BYTES. ``mirror_job`` needs an ``ArtifactSource`` whose
+    ``read(key)`` returns ``bytes``: it hashes them to build the manifest,
+    and that sha256 is the artifact's identity. The only artifact read a
+    driver has is ``Coordinator.get_artifact``, and ``HttpCoordinator``
+    implements it as ``json.loads(response)`` — so a checkpoint, a model or
+    the staged ``application/gzip`` code tarball raises inside the client,
+    and even a JSON artifact comes back re-serialised rather than byte-exact.
+
+    Wiring it anyway would mean a second, parallel coordinator HTTP client
+    inside this module (its own operator header, its own quoting, its own
+    error normalisation) plus an ``asyncio.run`` on the driver thread — a
+    new failure surface on the path whose job is to not lose an aggregation
+    that already succeeded. A federated run's artifacts therefore stay
+    unmirrored until either the runtime's ``get_artifact`` can return raw
+    bytes or ``CoordinatorClient`` is reachable from here without a cycle.
+    Non-federated jobs ARE mirrored, from ``app._mirror_job_artifacts``.
     """
     try:
         db = connect()

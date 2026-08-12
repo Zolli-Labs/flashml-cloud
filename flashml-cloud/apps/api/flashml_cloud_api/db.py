@@ -14,6 +14,8 @@ remember a ``commit()``.
 """
 from __future__ import annotations
 
+import logging
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +25,14 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from flashml_cloud_api import marketplace as marketplacemod
+from flashml_cloud_api.router.estimator import hardware_class
 from flashml_cloud_api.settings import Settings
+
+#: Same logger as the app. Everything logged from this module is a
+#: BEST-EFFORT accounting hop that was allowed to fail — never a request the
+#: caller is still waiting on, and never a failure the caller could act on.
+log = logging.getLogger("flashml-cloud-api")
 
 if TYPE_CHECKING:
     # Type-only: this data layer writes what the validator already accepted
@@ -642,6 +651,61 @@ def set_machine_token(
         )
 
 
+#: Fields of ``NodeCapabilities`` this API keeps a copy of, and the type each
+#: has to arrive as to be kept.
+#:
+#: **The allowlist is the point, and ``pools`` is the reason it is one.** A
+#: node's pools are stamped SERVER-SIDE by the register proxy from the
+#: owner's live memberships precisely because an agent may not name its own;
+#: copying the agent's claim into the same jsonb would put an unauthorised
+#: value one careless read away from being believed. Everything here is a
+#: statement about the host's own hardware, which is the one subject an agent
+#: is the authority on.
+#:
+#: ``cpu_cores`` and ``gpus`` are what ``router.estimator.hardware_class``
+#: and ``marketplace.capability_class`` read, and until 2026-08-11 nothing
+#: wrote them: the column held ``{"dataset_cache_bytes": n}`` and nothing
+#: else, so every machine in the deployment classed as ``cpu-small`` — a
+#: 4090 rig included — and no acceptance rate could be keyed by class at all.
+_REPORTED_CAPABILITY_FIELDS: tuple[tuple[str, tuple[type, ...]], ...] = (
+    ("cpu_cores", (int, float)),
+    ("memory_bytes", (int, float)),
+    ("gpus", (list,)),
+    ("os", (str,)),
+    ("architecture", (str,)),
+)
+
+
+def _reported_capabilities(reported: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The allowlisted hardware snapshot, with every key always present.
+
+    Always present, including as ``None``: a machine that re-registers
+    without a field must RETRACT what it advertised before, and a merge that
+    only writes the keys it was given cannot do that. A driver that broke
+    between two registrations would otherwise keep selling the GPU it can no
+    longer see.
+
+    ``bool`` is refused where a number is expected for the reason
+    ``verify._as_finite_float`` refuses it: ``cpu_cores: true`` would arrive
+    as one core, a plausible number derived from something that was never a
+    measurement.
+    """
+    source = reported if isinstance(reported, Mapping) else {}
+    snapshot: dict[str, Any] = {}
+    for name, types in _REPORTED_CAPABILITY_FIELDS:
+        value = source.get(name)
+        if isinstance(value, bool) or not isinstance(value, types):
+            snapshot[name] = None
+            continue
+        if name == "gpus":
+            # Devices only, as mappings. A list of strings would satisfy
+            # `isinstance(list)` and then class every entry as unreadable.
+            snapshot[name] = [g for g in value if isinstance(g, Mapping)]
+        else:
+            snapshot[name] = value
+    return snapshot
+
+
 def set_machine_capabilities(
     db: psycopg.Connection,
     *,
@@ -651,6 +715,7 @@ def set_machine_capabilities(
     unsandboxed_argv_capable: bool,
     module_capable: bool,
     dataset_cache_bytes: int = 0,
+    reported: Mapping[str, Any] | None = None,
 ) -> None:
     """Overwrite the capability snapshot from the latest registration
     (register proxy, best-effort — see migration 0008's header). A single
@@ -681,6 +746,21 @@ def set_machine_capabilities(
     Defaulting to ``0`` keeps the parameter optional for callers that have
     nothing to say about datasets, and re-registering without the field
     correctly retracts a capacity a machine used to advertise.
+
+    ``reported`` is the agent's own ``NodeCapabilities`` object, and the
+    allowlisted part of it (:data:`_REPORTED_CAPABILITY_FIELDS`) is merged in
+    beside ``dataset_cache_bytes``. It is the hardware description, nothing
+    more: it is not read by placement, by authorization, or by any gate. It IS
+    read by ``router.estimator.hardware_class`` and by
+    ``marketplace.capability_class``, which is exactly why it has to be
+    persisted — the class a machine may be listed and measured in is derived
+    from what its driver reported, never from anything a person typed, and
+    before this the column carried no reading to derive it from.
+
+    Self-reported, and that is the trust level the marketplace already
+    designed for: a host who lies about VRAM sells a promise their machine
+    cannot keep and the buyer's task OOMs. Nothing here makes that better or
+    worse; it makes the honest reading reach the ladder at all.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -691,13 +771,15 @@ def set_machine_capabilities(
                    unsandboxed_argv_capable = %s,
                    module_capable = %s,
                    capabilities = coalesce(capabilities, '{}'::jsonb)
+                                  || %s::jsonb
                                   || jsonb_build_object(
                                          'dataset_cache_bytes', %s::bigint
                                      )
              where id = %s
             """,
             (sandbox_capable, argv_capable, unsandboxed_argv_capable,
-             module_capable, int(dataset_cache_bytes), machine_id),
+             module_capable, Json(_reported_capabilities(reported)),
+             int(dataset_cache_bytes), machine_id),
         )
 
 
@@ -1259,6 +1341,39 @@ def record_contributions(
         return len(cur.fetchall())
 
 
+def _lease_deadline(value: Any) -> datetime | None:
+    """A lease deadline as a ``datetime``, or None for anything unusable.
+
+    The claim and heartbeat proxies hand this straight off a coordinator
+    response body, so it arrives as whatever JSON carried — normally the
+    ISO-8601 string pydantic serialised a ``Lease.deadline`` into, sometimes
+    (in-process callers, tests) an actual ``datetime``, and in the failure
+    cases nothing at all or something that is not a timestamp.
+
+    Parsed HERE rather than passed through to Postgres, because the write
+    this feeds is best-effort and the value is not. A malformed string
+    handed to a ``timestamptz`` parameter raises, and in ``record_attempt``
+    that would abort the INSERT — costing the whole lease→(job, task)
+    mapping, which is the row the credit path cannot work without, to save a
+    column only the expiry reconciler reads. Unparseable therefore degrades
+    to None: the attempt is recorded and is simply never reconciled.
+
+    ``Z`` is rewritten to ``+00:00`` because ``fromisoformat`` did not accept
+    it before Python 3.11 and the deployed floor is 3.10.
+    """
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def record_attempt(
     db: psycopg.Connection,
     *,
@@ -1266,6 +1381,7 @@ def record_attempt(
     machine_id: str,
     job_id: str,
     task_id: str,
+    deadline: Any = None,
 ) -> None:
     """Remember that ``machine_id`` claimed ``lease_id`` for a task.
 
@@ -1275,14 +1391,183 @@ def record_attempt(
 
     ``on conflict do nothing`` because a claim that is forwarded twice — a
     retry, a duplicated request — describes one lease, not two.
+
+    ``deadline`` is the coordinator's own ``Lease.deadline``, and it is the
+    only reason an attempt nobody ever reports on can be resolved at all
+    (see ``reconcile_expired_attempts``). Optional and defaulted so a caller
+    that has no deadline to give records the attempt anyway — the mapping
+    matters more than the metric.
     """
     with db.cursor() as cur:
         cur.execute(
             "insert into public.attempts"
-            "            (lease_id, machine_id, job_id, task_id)"
-            "     values (%s, %s, %s, %s)"
+            "            (lease_id, machine_id, job_id, task_id, lease_deadline)"
+            "     values (%s, %s, %s, %s, %s)"
             " on conflict (lease_id) do nothing",
-            (lease_id, machine_id, job_id, task_id),
+            (lease_id, machine_id, job_id, task_id, _lease_deadline(deadline)),
+        )
+
+
+def note_attempt_deadline(
+    db: psycopg.Connection,
+    *,
+    lease_id: str,
+    machine_id: str,
+    deadline: Any,
+) -> None:
+    """Carry an attempt's known deadline forward after a renewed heartbeat.
+
+    A heartbeat the coordinator accepts extends the lease, and this is the
+    only place that fact reaches Postgres. Without it the deadline recorded
+    at claim time would be the deadline for ever, and the expiry reconciler
+    would call a healthy hour-long task dead sixty seconds in — the reason
+    that reconciler must never run off ``claimed_at`` plus a guess.
+
+    Scoped to the claiming machine and to UNRESOLVED rows only. A machine
+    may not extend somebody else's lease here any more than it may at the
+    coordinator, and a resolved attempt is finished: moving its deadline
+    afterwards could only ever un-resolve a decision already made.
+
+    Silently does nothing when the deadline is unusable, matching
+    ``record_attempt`` — a heartbeat must never fail because of a column the
+    agent does not know exists.
+    """
+    parsed = _lease_deadline(deadline)
+    if parsed is None:
+        return
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts"
+            "   set lease_deadline = %s"
+            " where lease_id = %s and machine_id = %s and resolved_at is null",
+            (parsed, lease_id, machine_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# The hop from an attempt's terminal outcome to the credit ledger.
+#
+# `marketplace.py` SUPPORTS hard rule 4 — a buyer is never charged for work
+# that was not accepted — and until this existed nothing ENFORCED it: the
+# three writers below resolved an attempt as accepted / failed / expired and
+# the escrow held against that attempt's lease stayed held for ever.
+#
+# Three properties, in the order they are argued:
+#
+# **The ledger write shares the outcome write's transaction.** Every writer
+# below now opens one `db.transaction()` around both. psycopg makes a nested
+# `transaction()` a SAVEPOINT, so `settle_accepted_work` and
+# `refund_unaccepted_work` — which open their own — commit or roll back with
+# the outcome rather than beside it. A crash between the two is not a state
+# this can reach.
+#
+# **A ledger failure never costs the outcome.** That same savepoint is what
+# makes the guarantee cheap: an exception inside it rolls back to the
+# savepoint, clears the error state, and leaves the enclosing UPDATE intact,
+# so `_close_out_attempt_money` can log and return. Losing the record that an
+# attempt failed, in order to protect a credit entry, is the wrong trade — the
+# attempt outcome is what every reliability number divides by, and the ledger
+# hop is idempotently retryable (below) while a lost failure is not.
+#
+# **Idempotency is the unique index and nothing else.** No second guard, no
+# "have we refunded this already?" column: `credit_entries`' expression unique
+# index on (reason, ref_type, ref_id, account_id) makes a repeated refund
+# write zero rows and report `refunded_zc = 0`. That is also what makes a
+# retry safe after the failure case above — running the hop again for the same
+# lease can only ever complete it, never double it.
+# ---------------------------------------------------------------------------
+
+
+def _live_match_for_attempt(
+    db: psycopg.Connection, *, machine_id: str, job_id: str
+) -> str | None:
+    """The claimed entitlement this attempt was pulled under, or ``None``.
+
+    An attempt carries a lease, a machine and a coordinator job id; a match
+    carries a machine and (through its bid) a job id. That pair is the join,
+    and it is the only one available: nothing writes a match id onto an
+    attempt, because a match is not an assignment — the host pulled the work,
+    and the entitlement is what made it eligible to.
+
+    **``claimed`` only.** Escrow is held on claim and never on grant, so a
+    granted match has nothing held against any lease and refunding it would
+    write a movement of zero recording an event that did not happen.
+    ``settled``/``refunded``/``expired`` are closed. A match stays ``claimed``
+    across every lease it covers — `close_match` is what ends it — so this
+    stays correct for a match covering many tasks.
+
+    ``None`` is the ordinary answer and costs one indexed lookup: this
+    deployment has no marketplace rows at all until somebody lists a machine,
+    and an attempt with no entitlement behind it moves no money.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select m.id
+              from public.matches m
+              join public.bids b on b.id = m.bid_id
+             where m.machine_id = %s::uuid
+               and b.job_id = %s
+               and m.state = 'claimed'
+             order by m.claimed_at desc nulls last, m.granted_at desc, m.id
+             limit 1
+            """,
+            (machine_id, job_id),
+        )
+        row = cur.fetchone()
+    return str(row["id"]) if row is not None else None
+
+
+def _close_out_attempt_money(
+    db: psycopg.Connection,
+    *,
+    lease_id: str,
+    machine_id: str,
+    job_id: str,
+    accepted_seconds: int | None = None,
+) -> None:
+    """Settle or refund the escrow held against one resolved attempt.
+
+    ``accepted_seconds`` is the whole switch: a number means the coordinator
+    accepted this attempt's output and the host is paid for that much work at
+    the agreed rate; ``None`` means the attempt resolved without producing
+    anything accepted (``failed``, ``expired``) and every credit held goes
+    back to the buyer. Hard rule 4 is that switch and nothing else.
+
+    **Must be called inside the transaction that wrote the outcome.** The
+    whole body sits in its own nested `transaction()` — a savepoint — so that
+    a ledger failure rolls back to here and the outcome write survives it. It
+    is safe to call outside one; then the savepoint is an ordinary
+    transaction.
+
+    Never raises. A caller reaching this has already resolved an attempt, and
+    there is nothing it could usefully do with an exception from a credit
+    movement that is idempotently retryable.
+    """
+    try:
+        with db.transaction():
+            match_id = _live_match_for_attempt(
+                db, machine_id=machine_id, job_id=job_id
+            )
+            if match_id is None:
+                return
+            if accepted_seconds is None:
+                marketplacemod.refund_unaccepted_work(
+                    db, match_id=match_id, lease_id=lease_id
+                )
+            else:
+                marketplacemod.settle_accepted_work(
+                    db,
+                    match_id=match_id,
+                    lease_id=lease_id,
+                    accepted_seconds=max(int(accepted_seconds), 0),
+                )
+    except Exception:  # noqa: BLE001 - never lose an outcome over a ledger write
+        log.warning(
+            "could not %s escrow for lease %s; the attempt outcome stands and "
+            "the movement is still idempotently retryable",
+            "settle" if accepted_seconds is not None else "refund",
+            lease_id,
         )
 
 
@@ -1304,30 +1589,223 @@ def claim_attempt_credit(
     single statement makes that the database's problem rather than this
     process's.
 
+    **The terminal outcome is written by this same statement**, not by a
+    second one beside it. ``accepted_at`` and ``outcome='accepted'`` describe
+    one event, and two writes for one event is how a ledger ends up with a
+    credited attempt that the reliability page counts as unresolved.
+
+    The guard stays on ``accepted_at is null`` and deliberately does NOT
+    also require ``outcome is null``: an attempt the reconciler had inferred
+    to be ``expired`` may still be credited here, and crediting it corrects
+    the inference. The coordinator answering ``{"accepted": true}`` is the
+    strongest evidence this API ever receives about an attempt — stronger
+    than a deadline having appeared to pass — so it wins, and it must never
+    be the case that a wrong inference costs a volunteer their credit.
+
     ``duration_s`` is lease-held wall clock (claim to credit), which includes
     input download and output upload. That is the honest number for a
     contribution ledger. It is cast to ``float`` because ``extract(epoch …)``
     is ``numeric`` and psycopg returns ``Decimal``, which would otherwise
     reach ``record_contributions`` and land in the column as a different type
     from every row the federated path writes.
+
+    **Settlement rides along, in this transaction.** Taking the credit is the
+    moment this API knows work was accepted, so it is the moment the buyer's
+    escrow may pay the host — ``marketplace.settle_accepted_work``, keyed on
+    the same lease, capped at what was held, with the remainder released back
+    to the buyer. It is a no-op for the ordinary case of an attempt with no
+    entitlement behind it, and it can never cost the credit: see
+    ``_close_out_attempt_money``.
+
+    ``accepted_seconds`` is the lease-held wall clock ROUNDED UP to a whole
+    second. Up rather than down because the alternative charges nothing at all
+    for a sub-second accepted task, which is free compute rather than cheap
+    compute; the buyer's protection is the cap at the hold, not the rounding.
     """
-    with db.cursor() as cur:
-        cur.execute(
-            "update public.attempts"
-            "   set accepted_at = now()"
-            " where lease_id = %s and machine_id = %s and accepted_at is null"
-            " returning job_id, task_id,"
-            "           extract(epoch from (now() - claimed_at)) as duration_s",
-            (lease_id, machine_id),
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                "update public.attempts"
+                "   set accepted_at = now(),"
+                "       resolved_at = now(),"
+                "       outcome = 'accepted'"
+                " where lease_id = %s and machine_id = %s and accepted_at is null"
+                " returning job_id, task_id,"
+                "           extract(epoch from (now() - claimed_at)) as duration_s",
+                (lease_id, machine_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        credit = {
+            "job_id": row["job_id"],
+            "task_id": row["task_id"],
+            "duration_s": float(row["duration_s"]),
+        }
+        _close_out_attempt_money(
+            db,
+            lease_id=lease_id,
+            machine_id=machine_id,
+            job_id=str(row["job_id"]),
+            accepted_seconds=math.ceil(max(credit["duration_s"], 0.0)),
         )
-        row = cur.fetchone()
-    if row is None:
-        return None
-    return {
-        "job_id": row["job_id"],
-        "task_id": row["task_id"],
-        "duration_s": float(row["duration_s"]),
-    }
+    return credit
+
+
+def record_attempt_failure(
+    db: psycopg.Connection,
+    *,
+    lease_id: str,
+    machine_id: str,
+) -> bool:
+    """Mark ``lease_id`` failed, once. Returns whether this call is the one
+    that wrote it.
+
+    The mirror of ``claim_attempt_credit`` on the other outcome, and the
+    write that turns ``POST /attempts/{lease_id}/fail`` from a pure proxy
+    into an event this API remembers. Until it existed, a failed attempt and
+    an in-flight one were the same row, which is what made
+    ``tasks_accepted / tasks_attempted`` an unbounded ratio rather than a
+    reliability measure.
+
+    **Idempotent, and the asymmetry with the accepted path is the point.**
+    A retried fail — the agent's own retry, a duplicated request — describes
+    one failure, so the second call matches no row and returns False rather
+    than moving ``resolved_at`` forward and stretching the attempt's recorded
+    duration. An INFERRED ``expired`` may be corrected to ``failed`` (the
+    coordinator accepted the report, so the lease was alive after all, and an
+    observation beats an inference); an OBSERVED outcome — ``accepted``, or a
+    ``failed`` already written — is never overwritten by anything.
+
+    Scoped to the claiming machine for the same reason every other write on
+    this table is: a machine may only ever resolve its own attempt, and one
+    machine reporting another's lease failed would requeue-in-the-ledger work
+    that is still running.
+
+    The caller must only reach this after the coordinator has ACCEPTED the
+    failure report. A fail the coordinator refused (unknown lease, dead
+    lease, wrong holder) describes nothing that happened, and recording it
+    would resolve an attempt on the strength of a request that was rejected.
+
+    **The refund rides along, in this transaction.** A failed attempt produced
+    nothing accepted, so every credit held against its lease goes back to the
+    buyer and the host earns zero — hard rule 4, and the reason this market
+    can decline to bill for time at all. It fires exactly once because the
+    outcome write does: the second call matches no row, returns False, and
+    never reaches the ledger. Even if it did, ``credit_entries``' unique index
+    would refuse the second movement.
+    """
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                "update public.attempts"
+                "   set resolved_at = now(),"
+                "       outcome = 'failed'"
+                " where lease_id = %s and machine_id = %s"
+                "   and (resolved_at is null or outcome = 'expired')"
+                " returning lease_id, job_id",
+                (lease_id, machine_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return False
+        _close_out_attempt_money(
+            db,
+            lease_id=lease_id,
+            machine_id=machine_id,
+            job_id=str(row["job_id"]),
+        )
+    return True
+
+
+#: How long past its last known deadline an attempt must be before the
+#: reconciler is willing to call it expired.
+#:
+#: The deadline alone would be enough if this API saw every heartbeat land:
+#: past it the coordinator refuses the renewal and rejects the commit, so the
+#: attempt is dead by the coordinator's own rule. What this covers is the gap
+#: between the coordinator accepting a renewal and THIS API recording it —
+#: ``note_attempt_deadline`` is best-effort, like every other accounting
+#: write on the agent path, so a database blip can leave a live lease
+#: carrying a deadline that has passed.
+#:
+#: Fifteen minutes because the agent renews at a third of the lease window
+#: (``flashnode``'s ``_AttemptHeartbeat``), so for the default sixty-second
+#: lease this is dozens of consecutive lost writes, not one. The cost of
+#: being wrong is bounded anyway and in the safe direction: a wrongly expired
+#: attempt that then commits is corrected by ``claim_attempt_credit``, which
+#: does not consult ``outcome`` at all.
+EXPIRY_GRACE_SECONDS = 900
+
+
+def reconcile_expired_attempts(
+    db: psycopg.Connection, *, grace_seconds: int = EXPIRY_GRACE_SECONDS
+) -> int:
+    """Resolve attempts whose lease deadline passed with nothing reported.
+    Returns how many rows this call resolved.
+
+    **The coordinator never tells us.** Lease expiry happens inside its
+    two-second sweeper, which emits an event into its own ledger and makes no
+    call anywhere. So a machine that is unplugged mid-task produces no fail
+    hop, no completion, and — before this — an attempt row that stayed open
+    for ever. That is precisely the event this product exists to survive, and
+    it was the one event the reliability page could not see.
+
+    **What makes this a measurement and not a guess.** ``lease_deadline`` is
+    the coordinator's own instant, copied from the ``Lease`` it issued and
+    refreshed from every renewal it granted. After it, that coordinator
+    refuses the heartbeat with 410 and rejects the commit — the attempt is
+    over whether or not anybody says so. ``resolved_at`` is therefore set to
+    the DEADLINE, not to ``now()``: the deadline is when the work stopped
+    counting, while ``now()`` is when a console happened to be opened, and
+    stamping the second would make ``lost_task_seconds`` grow every time
+    somebody loaded the page — the exact failure ``metrics.py`` refused to
+    ship a number for in the first place.
+
+    **Only rows that carry a deadline.** An attempt claimed before migration
+    0015, or one whose claim response could not be parsed, has none. It stays
+    unresolved for ever and stays out of every denominator, which is the
+    honest handling: "we do not know how this ended" is not "it failed".
+
+    ``expired``, never ``abandoned``. The two are different facts — a lease
+    that ran out versus a node that vanished and later came back — and only
+    the coordinator can tell them apart. Recording the one we can prove and
+    leaving the other unwritten is the whole discipline of this table.
+
+    Unscoped by owner, deliberately. Expiry is a fact about a lease, not
+    about whose page is open, and an owner-scoped reconciler would make an
+    account's own numbers depend on somebody else having visited the console.
+    The partial index from 0015 is on this exact predicate, so after the
+    first pass this is an indexed statement that matches nothing.
+
+    **Each row it resolves is refunded, in this transaction.** An expired
+    attempt is a host that was entitled to pull, pulled, and produced nothing
+    — the exact event this product exists to survive, and the one the buyer
+    must not be billed for. The refund is per lease and idempotent, so the
+    sweep can run on every page load (it does) without the second pass moving
+    anything: it resolves no rows, and reaches the ledger for none.
+    """
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                "update public.attempts"
+                "   set resolved_at = lease_deadline,"
+                "       outcome = 'expired'"
+                " where resolved_at is null"
+                "   and lease_deadline is not null"
+                "   and lease_deadline < now() - make_interval(secs => %s)"
+                " returning lease_id, machine_id, job_id",
+                (float(grace_seconds),),
+            )
+            expired = cur.fetchall()
+        for row in expired:
+            _close_out_attempt_money(
+                db,
+                lease_id=str(row["lease_id"]),
+                machine_id=str(row["machine_id"]),
+                job_id=str(row["job_id"]),
+            )
+    return len(expired)
 
 
 # ---------------------------------------------------------------------------
@@ -1682,6 +2160,82 @@ def unbind_machine_pool(db: psycopg.Connection, *, machine_id: str, pool_id: str
             "delete from public.machine_pools where machine_id = %s and pool_id = %s",
             (machine_id, pool_id),
         )
+
+
+# --- raw bindings, for the isolation assertion -----------------------------
+#
+# The two readers below deliberately do NOT intersect ``machine_pools`` with
+# ``pool_members``, which is what separates them from ``pool_ids_for_machine``
+# and ``list_pool_machines`` above. Those answer "what does this machine serve
+# *right now*", and dropping a binding whose owner has left the pool is the
+# correct answer to that question.
+#
+# An isolation check asks a different and strictly harsher question: "could
+# anything else ever serve this pool, or could this machine ever serve
+# anything else". A binding left by a non-member is dormant, not absent — the
+# day that person is invited back it becomes live, with no write to
+# ``machine_pools`` to notice. Filtering it out here would let a caller pass
+# an isolation assertion that a later ``insert into pool_members`` silently
+# revokes. See ``sandbox_identity.assert_pool_isolated``.
+
+
+def machine_ids_bound_to_pool(db: psycopg.Connection, pool_id: str) -> list[str]:
+    """Every machine with a ``machine_pools`` row for this pool, membership
+    ignored — see the note above."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select machine_id from public.machine_pools where pool_id = %s",
+            (pool_id,),
+        )
+        return sorted(str(row["machine_id"]) for row in cur.fetchall())
+
+
+def pool_ids_bound_to_machine(db: psycopg.Connection, machine_id: str) -> list[str]:
+    """Every pool this machine has a ``machine_pools`` row for, membership
+    ignored — see the note above."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select pool_id from public.machine_pools where machine_id = %s",
+            (machine_id,),
+        )
+        return sorted(str(row["pool_id"]) for row in cur.fetchall())
+
+
+def lock_pool_for_owner(
+    db: psycopg.Connection, pool_id: str, owner_id: str
+) -> dict[str, Any] | None:
+    """Owner-scoped read that also takes a row lock on the pool until the
+    surrounding transaction ends. **Must be called inside one** — in
+    autocommit the lock is taken and dropped by the same statement, which
+    looks like it worked and serialises nothing.
+
+    Stricter than ``fetch_pool_for_member`` in one way and identical in the
+    other. Stricter: the caller must be the pool's OWNER, not merely one of
+    its members, because the writes this gates (minting a machine into a
+    pool) change what the whole pool's other members are exposed to.
+    Identical: a missing pool, a pool the caller cannot see, and a pool they
+    are in but do not own all return None, indistinguishably — the same
+    404-not-403 doctrine, for the same reason.
+
+    ``for update of p`` names the table on purpose. A bare ``for update``
+    across this join would lock the ``pool_members`` row too, which is not
+    what is being serialised and is a needless way to block an unrelated
+    invite from landing.
+    """
+    columns = ", ".join(f"p.{c}" for c in POOL_PUBLIC_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {columns}
+              from public.pools p
+              join public.pool_members pm
+                on pm.pool_id = p.id and pm.user_id = %s
+             where p.id = %s and p.owner_id = %s
+               for update of p
+            """,
+            (owner_id, pool_id, owner_id),
+        )
+        return cur.fetchone()
 
 
 def pools_for_machines_of_owner(
@@ -2320,6 +2874,82 @@ def peer_task_durations(
         return [float(row["duration_s"]) for row in cur.fetchall()]
 
 
+def peer_task_observations(
+    db: psycopg.Connection,
+    *,
+    job_id: str,
+    exclude_machine_id: str | None = None,
+    limit: int = PEER_SAMPLE_LIMIT,
+) -> list[dict[str, Any]]:
+    """The same durations as :func:`peer_task_durations`, each LABELLED with
+    the capability class of the machine that produced it.
+
+    **A separate function, not a wider return type**, because the two answer
+    different questions and the older one is on the credit hot path.
+    ``peer_task_durations`` feeds ``verify.timing_verdict``, which compares
+    one machine against a pool of peers and has no use for a class; this feeds
+    ``router.estimator``, which may not pool two classes at all. Bare floats
+    cannot satisfy that rule — a list of numbers with no class on them is
+    exactly what a cross-class average looks like — so the labelled shape is
+    what the router gets, and the verifier's signature is left alone.
+
+    Each row carries ``machine_id``, ``capability_class``, ``duration_s`` and
+    ``federated``, which is the shape ``estimator.Observation`` takes.
+
+    ``capability_class`` is derived HERE, from ``machines.capabilities``, by
+    ``router.estimator.hardware_class`` — the same function the planner and
+    the acceptance-rate query use. One producer: a second ladder written in
+    SQL beside it would agree on the day it was written and never again, and
+    the disagreement would surface as a machine whose measured durations pool
+    into one class while its acceptance rate is filed under another. ``None``
+    is kept rather than dropped: an unclassifiable machine's durations are
+    real, they simply match no class, and the estimator drops them for
+    whichever class it is asked about.
+
+    **Federated contributions cannot become timing evidence, twice over.**
+    ``fedavg.on_round`` credits from the coordinator's task view, which
+    reports no duration, so ``duration_s is not null`` already removes them;
+    the ``federated`` flag identifies them positively as well, so a federated
+    row that somehow acquired a duration is still refused by
+    ``estimator._usable``. Two mechanisms for one rule because the first is a
+    property of today's writer and the second is a property of the row.
+
+    ``exclude_machine_id`` is optional here and mandatory next door, and the
+    asymmetry is deliberate: excluding the subject is what stops a verifier
+    grading a machine against its own history, while a PLAN is about the whole
+    fleet and has no subject to exclude.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select c.machine_id, c.duration_s, m.capabilities,
+                   exists (
+                       select 1 from public.job_rounds r
+                        where r.coordinator_job_id = c.job_id
+                   ) as federated
+              from public.contributions c
+              join public.machines m on m.id = c.machine_id
+             where c.job_id = %s
+               and (%s::uuid is null or c.machine_id <> %s::uuid)
+               and c.duration_s is not null
+             order by c.accepted_at desc
+             limit %s
+            """,
+            (job_id, exclude_machine_id, exclude_machine_id, limit),
+        )
+        rows = cur.fetchall()
+
+    return [
+        {
+            "machine_id": str(row["machine_id"]),
+            "capability_class": hardware_class(row["capabilities"]),
+            "duration_s": float(row["duration_s"]),
+            "federated": bool(row["federated"]),
+        }
+        for row in rows
+    ]
+
+
 def record_verification(
     db: psycopg.Connection,
     *,
@@ -2505,6 +3135,28 @@ def record_job_artifact_bytes(
     )
 
 
+def mark_job_artifacts_mirrored(db: psycopg.Connection, job_id: str) -> None:
+    """Record that this job's accepted artifacts are in OSS (migration 0016).
+
+    Its own statement and its own column, NOT a second field on
+    `record_job_artifact_bytes`. The two facts are produced by different
+    operations that fail differently — measuring is one coordinator listing,
+    mirroring is N copies to a third party — and 0016's comment explains at
+    length why a shared marker would both record mirrors that never happened
+    (the delete route stamps the measurement) and suppress the retry of ones
+    that failed.
+
+    Called ONLY after `mirror_job` reports the objects are actually there.
+    Never on `NOT_CONFIGURED`, and never in a `finally`: an unstamped job is
+    retried on the next observation, which is the recoverable direction, and
+    a stamped one never is.
+    """
+    db.execute(
+        "update public.jobs set artifacts_mirrored_at = now() where id = %s",
+        (job_id,),
+    )
+
+
 # ---------------------------------------------------------------------------
 # reliability metrics (Stage 8)
 #
@@ -2516,10 +3168,21 @@ def record_job_artifact_bytes(
 # ---------------------------------------------------------------------------
 
 
+#: Outcomes that mean "this attempt ended and produced nothing usable".
+#: Spelled once, here, because three of the measurements below have to agree
+#: on it: lost seconds, the recovery interval, and the resolved denominator
+#: that is the complement of the accepted count. ``abandoned`` is in the
+#: vocabulary and unwritten today (0015) — listing it now means the day
+#: something writes it, it lands in the numbers instead of falling silently
+#: out of all three.
+_WASTED_OUTCOMES = "('failed', 'expired', 'abandoned')"
+
+
 def metrics_counts_for_owner(
     db: psycopg.Connection, owner_id: str, window_days: int
-) -> dict[str, int]:
-    """Job outcomes, attempt counts and contributing machines for one account.
+) -> dict[str, Any]:
+    """Job outcomes, attempt counts, wasted seconds and recovery intervals
+    for one account.
 
     **ONE WINDOW, DEFINED ON THE JOB.** Everything counted here belongs to a
     job this account submitted within ``window_days``; the attempt counts are
@@ -2538,6 +3201,17 @@ def metrics_counts_for_owner(
     goodput toward 1.0 for every job that eventually finished and erase the
     wasted work the whole page exists to show.
 
+    **RESOLVED IS THE DENOMINATOR, ATTEMPTED IS THE COUNT.** These are now
+    two different numbers and the split is the point of migration 0015.
+    ``tasks_attempted`` is every lease claimed — the honest answer to "how
+    much work was handed out". ``tasks_resolved`` counts only the attempts
+    that reached a terminal state, and it is what ``goodput_ratio`` divides
+    by. Before 0015 there was one number doing both jobs, so an attempt still
+    running and an attempt that had failed were the same row and the ratio
+    fell with every claim and recovered for nothing. An UNRESOLVED attempt is
+    in flight or predates 0015; in neither case is it evidence of anything,
+    and counting it as a failure would be the survivorship bias inverted.
+
     **THE FEDERATED JOIN IS NOT OPTIONAL.** A federated run is one
     coordinator job PER ROUND, and both ``attempts.job_id`` and
     ``contributions.job_id`` carry the ROUND's coordinator job id — an id
@@ -2551,15 +3225,38 @@ def metrics_counts_for_owner(
     ``tasks_attempted`` and NOT in ``machines_contributing`` — hard rule 4,
     the same distinction the credit ledger draws.
 
+    **LOST SECONDS COME FROM THE ATTEMPT, NEVER FROM ``contributions``.**
+    ``lost_seconds_total`` sums ``resolved_at - claimed_at`` over attempts
+    that ended without being accepted. It cannot be read off the credit
+    ledger, which by construction holds accepted work only — that is the
+    survivorship bias this change removes: every duration in
+    ``contributions`` is a duration that succeeded, so a median taken there
+    is biased fast by exactly the runs that timed out.
+
+    **RECOVERY IS A PAIR OR IT IS NOTHING.** ``recovery_seconds_total`` and
+    ``recoveries_observed`` describe intervals from a failure being resolved
+    to the REPLACEMENT attempt on the same ``(job_id, task_id)`` being
+    accepted — the replacement being the earliest accepted attempt CLAIMED at
+    or after that resolution, so an attempt already running when the failure
+    landed is not mistaken for a response to it. A failure that never
+    recovered contributes nothing rather than an invented interval, which
+    makes this a mean over recoveries and not over failures; ``metrics.py``
+    says so where the number is rendered.
+
     Statuses are compared upper-cased. Every writer today stores the
     protocol's own spelling (``SUCCEEDED``/``PARTIAL``/``FAILED``), and this
     makes a lower-cased row from some future writer count rather than
     silently drop out of the outcome columns while still counting in
     ``jobs_total``.
+
+    Durations are cast to ``float`` here for the reason
+    ``claim_attempt_credit`` gives: ``extract(epoch …)`` is ``numeric`` and
+    psycopg returns ``Decimal`` for it, which must not reach a JSON response
+    as a type nothing else in this module produces.
     """
     with db.cursor() as cur:
         cur.execute(
-            """
+            f"""
             with owned as (
                 select id
                   from public.jobs
@@ -2576,6 +3273,28 @@ def metrics_counts_for_owner(
                   from public.job_rounds r
                   join owned o on o.id = r.job_id
                  where r.coordinator_job_id is not null
+            ),
+            -- This account's attempts, once, so the measurements below read
+            -- the same rows rather than six repetitions of one join.
+            mine as (
+                select a.*
+                  from public.attempts a
+                  join coordinator_jobs c on c.job_id = a.job_id
+            ),
+            -- One row per resolved failure, carrying the gap to its
+            -- replacement — null when the task never recovered.
+            recoveries as (
+                select (
+                    select min(r.resolved_at)
+                      from public.attempts r
+                     where r.job_id = f.job_id
+                       and r.task_id = f.task_id
+                       and r.outcome = 'accepted'
+                       and r.claimed_at >= f.resolved_at
+                ) - f.resolved_at as gap
+                  from mine f
+                 where f.outcome in {_WASTED_OUTCOMES}
+                   and f.resolved_at is not null
             )
             select
                 (select count(*) from owned) as jobs_total,
@@ -2591,20 +3310,262 @@ def metrics_counts_for_owner(
                   where j.owner_id = %s
                     and j.created_at >= now() - make_interval(days => %s)
                     and upper(j.status) = 'FAILED') as jobs_failed,
-                (select count(*) from public.attempts a
-                   join coordinator_jobs c on c.job_id = a.job_id)
-                    as tasks_attempted,
-                (select count(*) from public.attempts a
-                   join coordinator_jobs c on c.job_id = a.job_id
-                  where a.accepted_at is not null) as tasks_accepted,
-                (select count(distinct a.machine_id) from public.attempts a
-                   join coordinator_jobs c on c.job_id = a.job_id
-                  where a.accepted_at is not null) as machines_contributing
+                (select count(*) from mine) as tasks_attempted,
+                (select count(*) from mine where outcome is not null)
+                    as tasks_resolved,
+                (select count(*) from mine where outcome = 'accepted')
+                    as tasks_accepted,
+                (select count(distinct machine_id) from mine
+                  where outcome = 'accepted') as machines_contributing,
+                -- `greatest(..., 0)` per row, not on the sum. A negative
+                -- interval is not a short piece of wasted work, it is a
+                -- clock that disagreed with itself — an `expired` attempt is
+                -- resolved against the COORDINATOR's deadline while
+                -- `claimed_at` is this database's `now()`, so the two come
+                -- from different clocks. Clamping per row keeps one skewed
+                -- attempt from subtracting from the real wasted time of the
+                -- attempts beside it, which is the failure mode of clamping
+                -- the total instead.
+                (select coalesce(sum(greatest(
+                            extract(epoch from (resolved_at - claimed_at)), 0)), 0)
+                   from mine
+                  where outcome in {_WASTED_OUTCOMES}
+                    and resolved_at is not null) as lost_seconds_total,
+                (select count(*) from recoveries where gap is not null)
+                    as recoveries_observed,
+                (select coalesce(sum(extract(epoch from gap)), 0)
+                   from recoveries where gap is not null)
+                    as recovery_seconds_total
             """,
             (owner_id, window_days) + (owner_id, window_days) * 3,
         )
         row = cur.fetchone()
-    return {key: int(value) for key, value in (row or {}).items()}
+
+    seconds = ("lost_seconds_total", "recovery_seconds_total")
+    return {
+        key: float(value) if key in seconds else int(value)
+        for key, value in dict(row or {}).items()
+    }
+
+
+def acceptance_rate_rows(
+    db: psycopg.Connection, *, machine_ids: Sequence[str] | None = None
+) -> list[dict[str, Any]]:
+    """Resolved attempts, each labelled with a capability class — the input
+    ``metrics.acceptance_rates`` has always required and nothing supplied.
+
+    ``acceptance_rates`` is keyed on ``(machine_id, capability_class)`` and
+    refuses to roll up across classes, so it cannot be called at all without
+    a class on every row. This is that producer, and it is the ONLY one: the
+    class comes from ``router.estimator.hardware_class`` over
+    ``machines.capabilities``, the same function
+    :func:`peer_task_observations` and the planner call. A second ladder
+    spelled out in SQL would drift from it, and the drift would read as a host
+    that is 0.95 in one place and unproven in another.
+
+    **The class labels the machine's HARDWARE, and that is a compromise this
+    schema forces.** ``acceptance_rates`` documents the key as the class of
+    the WORK — the property that lets one host be 0.95 on cpu work and 0.40 on
+    gpu work — but nothing records the class of a task: ``attempts`` carries a
+    lease, a machine, a job and a task id, and no column anywhere says what
+    class of work that task was. So a machine appears under exactly one class
+    here, its own, and the split ``acceptance_rates`` was built for is
+    unreachable until something writes the work's class down. Deriving it from
+    the hardware is the honest approximation — it is at least a fact about
+    something — and it is named as one rather than presented as the other.
+    (The schema change that would fix it: a ``capability_class`` column on
+    ``attempts``, written at claim time from the bid the task was matched
+    under. Not written here; this module does not own migrations.)
+
+    **Unresolved attempts never appear.** ``outcome is null`` means in flight
+    or pre-0015, and both are excluded in the query rather than left for the
+    caller — an unresolved attempt in a denominator is a machine's rate
+    falling because it is busy.
+
+    **A duration only for an accepted attempt.** ``resolved_at - claimed_at``
+    on an accepted row is the same lease-held wall clock
+    ``claim_attempt_credit`` records; on a failed or expired one it is time
+    that was WASTED, not time a task takes, and ``median_seconds`` is a
+    statement about the second. So the column is null for those rows and they
+    count toward the rate while contributing nothing to the median — which is
+    the split ``acceptance_rates`` already documents for federated rows.
+
+    Federated work cannot reach this at all: ``fedavg.on_round`` writes no
+    ``attempts`` row, so there is nothing to exclude.
+
+    Machines whose class cannot be derived are DROPPED, not filed under a
+    placeholder. ``str(None)`` would key a group under the literal string
+    ``"None"``, and a rate reported against a class that does not exist is
+    worse than no rate: ``select_acceptance`` refuses to match a ``None``
+    class for the same reason, and a host with no readable hardware is
+    unproven, which is a state the fleet handles.
+
+    ``machine_ids`` scopes the read; ``None`` means every machine. Callers
+    on a request path pass the fleet they are about to plan, which keeps this
+    an indexed read of a bounded set (``attempts_machine_id_idx``).
+    """
+    ids = None if machine_ids is None else [str(m) for m in machine_ids]
+    if ids is not None and not ids:
+        return []
+
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select a.machine_id, a.outcome, m.capabilities,
+                   case when a.outcome = 'accepted'
+                        then extract(epoch from (a.resolved_at - a.claimed_at))
+                   end as duration_s
+              from public.attempts a
+              join public.machines m on m.id = a.machine_id
+             where a.outcome is not null
+               and (%s::uuid[] is null or a.machine_id = any(%s::uuid[]))
+             order by a.machine_id, a.claimed_at
+            """,
+            (ids, ids),
+        )
+        rows = cur.fetchall()
+
+    labelled: list[dict[str, Any]] = []
+    for row in rows:
+        capability_class = hardware_class(row["capabilities"])
+        if capability_class is None:
+            continue
+        duration = row["duration_s"]
+        labelled.append(
+            {
+                "machine_id": str(row["machine_id"]),
+                "capability_class": capability_class,
+                "outcome": str(row["outcome"]),
+                "duration_s": None if duration is None else float(duration),
+            }
+        )
+    return labelled
+
+
+#: What one machine offers a plan, beyond what the placement gates will say
+#: about it. Kept as a tuple so the column list is written once.
+_CANDIDATE_COLUMNS = (
+    "id", "node_id", "name", "owner_id", "capabilities",
+    "sandbox_capable", "argv_capable", "unsandboxed_argv_capable",
+    "module_capable",
+)
+
+
+def router_candidates_for_owner(
+    db: psycopg.Connection, owner_id: str
+) -> list[dict[str, Any]]:
+    """Every machine this account could plan work onto, with its venue and
+    its price. **Read-only, and it matches nothing** — no listing is consumed,
+    no bid is written, no credit moves.
+
+    Two venues, and the difference between them is decision M1:
+
+    - ``workspace`` — the account's own machines, plus every machine bound to
+      a pool it is a live member of. **Free** (``ask_zc_per_hour`` 0), because
+      members consume each other's machines at no charge. A machine that is
+      both a teammate's and listed on the open market appears here and not
+      there: workspace demand has priority (M12), and quoting a member a price
+      for capacity they already have would be wrong in both directions.
+    - ``market`` — machines with an OPEN listing, at the host's own ask. A
+      zero ask is legal and means donated (M13), which is why the price and
+      the venue are separate fields: "free because it is yours" and "free
+      because somebody donated it" are different facts.
+
+    ``rented`` has no producer. Nothing in this deployment sells USD-priced
+    capacity, and a venue with no supply behind it would be an empty column
+    the console draws as though it were a choice.
+
+    ``pool_ids`` is the machine's bindings intersected with its owner's live
+    memberships — the same rule ``pool_ids_for_machine`` applies, because the
+    register proxy stamps that exact value onto the node view the coordinator
+    gates against. The caller stamps it back onto the view it builds here, so
+    the preview's seventh gate sees what the real one will.
+
+    ``status = 'active'`` only: a pending or revoked machine cannot claim
+    anything, and planning work onto one would quote a fleet that does not
+    exist.
+    """
+    columns = ", ".join(f"m.{c}" for c in _CANDIDATE_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            with mine as (
+                select m.id
+                  from public.machines m
+                 where m.owner_id = %s::uuid
+                 union
+                select mp.machine_id
+                  from public.machine_pools mp
+                  join public.pool_members me
+                    on me.pool_id = mp.pool_id and me.user_id = %s::uuid
+                  join public.machines om on om.id = mp.machine_id
+                  join public.pool_members owner_member
+                    on owner_member.pool_id = mp.pool_id
+                   and owner_member.user_id = om.owner_id
+            ),
+            listed as (
+                select l.machine_id, l.id as listing_id, l.ask_zc_per_hour,
+                       l.max_concurrent_tasks, l.capability_class
+                  from public.listings l
+                 where l.state = 'open'
+            )
+            select {columns},
+                   (m.id in (select id from mine)) as workspace,
+                   listed.listing_id, listed.ask_zc_per_hour,
+                   listed.max_concurrent_tasks, listed.capability_class
+                       as listed_capability_class,
+                   (select coalesce(
+                               array_agg(mp.pool_id::text order by mp.pool_id),
+                               array[]::text[])
+                      from public.machine_pools mp
+                      join public.pool_members pm
+                        on pm.pool_id = mp.pool_id and pm.user_id = m.owner_id
+                     where mp.machine_id = m.id) as pool_ids
+              from public.machines m
+              left join listed on listed.machine_id = m.id
+             where m.status = 'active'
+               and (m.id in (select id from mine)
+                    or listed.machine_id is not null)
+             order by m.created_at, m.id
+            """,
+            (owner_id, owner_id),
+        )
+        rows = cur.fetchall()
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        workspace = bool(row["workspace"])
+        candidates.append(
+            {
+                "machine_id": str(row["id"]),
+                "node_id": row["node_id"],
+                "name": row["name"],
+                "owner_id": str(row["owner_id"]),
+                "capabilities": row["capabilities"] or {},
+                "pool_ids": list(row["pool_ids"] or []),
+                "sandbox_capable": bool(row["sandbox_capable"]),
+                "argv_capable": bool(row["argv_capable"]),
+                "unsandboxed_argv_capable": bool(row["unsandboxed_argv_capable"]),
+                "module_capable": bool(row["module_capable"]),
+                "venue": "workspace" if workspace else "market",
+                "listing_id": (
+                    None if workspace or row["listing_id"] is None
+                    else str(row["listing_id"])
+                ),
+                # Zero for workspace capacity because it IS zero (M1), not
+                # because the price is unknown: `venue` is what says which.
+                "ask_zc_per_hour": (
+                    0 if workspace else int(row["ask_zc_per_hour"] or 0)
+                ),
+                "max_concurrent_tasks": (
+                    1 if workspace else max(int(row["max_concurrent_tasks"] or 1), 1)
+                ),
+                "listed_capability_class": (
+                    None if workspace else row["listed_capability_class"]
+                ),
+            }
+        )
+    return candidates
 
 
 def sync_observed_job_states(

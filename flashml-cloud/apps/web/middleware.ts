@@ -18,8 +18,35 @@ const PUBLIC_PATHS = [
   "/manifest.webmanifest",
 ];
 
+// The public evidence page, `/share/<share_token>` — the ONE authenticated-
+// product route that answers without a session, and the reason the exact
+// shape of this pattern matters more than the others above.
+//
+// It is a prefix rule and not an entry in PUBLIC_PATHS because the token is
+// part of the path. That makes it the only rule here that could, written
+// carelessly, open something that is not this page — so it is pinned tighter
+// than `startsWith` in three ways:
+//
+//   - Anchored at both ends. `/share/abc/../machines` and `/share/abc/edit`
+//     do not match: the token is ONE path segment, with no slash in it.
+//   - `/share` and `/share/` alone do not match, and neither does
+//     `/shareholders` — the `/share/` prefix plus a non-empty segment is
+//     required, so no sibling route can be reached by resembling this one.
+//   - The character class is exactly what `secrets.token_urlsafe` produces
+//     (`shr_` + base64url). No `%`, no `.`, no `:` — a percent-encoded
+//     traversal attempt fails the match and falls through to the signed-out
+//     redirect, which is the safe direction to fail in.
+//
+// Widening WITHIN this pattern opens nothing but the share page itself, which
+// is public by design and holds no full identifiers (see the route's own
+// docstring and `SESSION_SHARE_COLUMNS` upstream). Widening OUTSIDE it — a
+// bare `startsWith("/share")`, say — is how a matcher meant to satisfy one
+// requirement quietly unauthenticates the console.
+const SHARE_PATH = /^\/share\/[A-Za-z0-9_-]{1,128}$/;
+
 export function isPublicPath(pathname: string): boolean {
   if (PUBLIC_PATHS.includes(pathname)) return true;
+  if (SHARE_PATH.test(pathname)) return true;
   // Next.js static assets / metadata files served from the app's public dir.
   if (pathname.startsWith("/_next")) return true;
   if (pathname.startsWith("/models/")) return true;

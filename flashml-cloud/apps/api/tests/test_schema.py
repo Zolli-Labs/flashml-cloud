@@ -24,7 +24,10 @@ ALL_SQL = "\n".join(p.read_text() for p in sorted(MIGRATIONS.glob("*.sql")))
 
 TABLES = ["profiles", "machines", "device_codes", "jobs", "contributions"]
 
-ALL_TABLES = TABLES + ["job_rounds", "pools", "pool_members", "pool_invites", "machine_pools"]
+ALL_TABLES = TABLES + [
+    "job_rounds", "pools", "pool_members", "pool_invites", "machine_pools",
+    "sandbox_sessions", "sandbox_events",
+]
 
 
 def test_every_table_is_created():
@@ -125,7 +128,8 @@ def test_job_rounds_records_what_the_aggregation_clipped(db):
 
 
 def test_attempts_table_exists_with_rls(db):
-    """The attempt ledger: the API's durable lease -> (job, task) mapping.
+    """The attempt ledger: the API's durable lease -> (job, task) mapping,
+    with a terminal outcome since 0015.
 
     Without it the API can see that a completion was ACCEPTED but not what
     was completed, because the coordinator's complete response carries only
@@ -142,8 +146,11 @@ def test_attempts_table_exists_with_rls(db):
         "accepted_at": "timestamp with time zone",
         "claimed_at": "timestamp with time zone",
         "job_id": "text",
+        "lease_deadline": "timestamp with time zone",
         "lease_id": "text",
         "machine_id": "uuid",
+        "outcome": "text",
+        "resolved_at": "timestamp with time zone",
         "task_id": "text",
     }
 
@@ -153,6 +160,110 @@ def test_attempts_table_exists_with_rls(db):
             " where oid = 'public.attempts'::regclass"
         )
         assert cur.fetchone()["relrowsecurity"] is True
+
+
+def test_an_attempt_outcome_is_constrained_to_the_four_the_ledger_knows(db):
+    """Constrained in the database, the same discipline as `machines.status`
+    in 0001 and `sandbox_sessions.state` in 0014: a bug in `db.py` must not be
+    able to invent a fifth terminal state that every later reader then has to
+    guess the meaning of.
+
+    `abandoned` is in the list and nothing writes it — the coordinator can
+    tell an abandoned lease from an expired one and this API cannot, so the
+    value is reserved rather than manufactured. It is checked here so that the
+    day the distinction becomes visible, the vocabulary is already there.
+    """
+    match = re.search(
+        r"attempts_outcome_check\s+check\s*\(outcome in \(([^)]*)\)", ALL_SQL, re.I
+    )
+    assert match, "attempts.outcome is not constrained at all"
+    assert set(re.findall(r"'(\w+)'", match.group(1))) == {
+        "accepted", "failed", "expired", "abandoned",
+    }
+
+
+def test_an_unresolved_attempt_is_storable_and_is_not_a_failure(db):
+    """NULL is a legal outcome and it is the one every reader has to handle.
+
+    An attempt in flight, and an attempt claimed before 0015, both have no
+    terminal state on record. The column must accept that rather than force a
+    writer to pick a bucket — bucketing them is precisely the manufactured
+    number this migration exists to prevent.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select is_nullable from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'attempts'"
+            "   and column_name in ('outcome', 'resolved_at', 'lease_deadline')"
+        )
+        assert {r["is_nullable"] for r in cur.fetchall()} == {"YES"}
+
+
+def test_the_expiry_reconciler_has_an_index_on_exactly_its_predicate(db):
+    """PARTIAL, on unresolved rows only. The reconciler runs on a page a
+    console polls, so after the first pass it has to be a statement that
+    matches nothing cheaply; an index over the whole history would grow with
+    every attempt ever made and be scanned for the few that are open."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select indexdef from pg_indexes"
+            " where schemaname = 'public' and tablename = 'attempts'"
+            "   and indexname = 'attempts_unresolved_deadline_idx'"
+        )
+        row = cur.fetchone()
+    assert row is not None, "migration 0015 did not apply"
+    definition = row["indexdef"].lower()
+    assert "where (resolved_at is null)" in definition, definition
+    assert "lease_deadline" in definition, definition
+
+
+def test_a_job_records_when_its_artifacts_were_mirrored(db):
+    """Migration 0016, checked against the applied schema.
+
+    The mirror's once-only guard IS this column: `app._mirror_job_artifacts`
+    is entered only for a job whose `artifacts_mirrored_at` is null, so a
+    migration that failed to apply would either take the job route down or —
+    if the read were made forgiving — copy every finished job to OSS again on
+    every two-second poll.
+
+    Nullable and with no default, deliberately. NULL is the answer for every
+    pre-0016 job, for every deployment with no OSS configured, and for a
+    mirror that failed and is owed a retry; a default would assert one of
+    those three about all of them.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select is_nullable, column_default, data_type"
+            "  from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'jobs'"
+            "   and column_name = 'artifacts_mirrored_at'"
+        )
+        row = cur.fetchone()
+    assert row is not None, "migration 0016 did not apply"
+    assert row["is_nullable"] == "YES"
+    assert row["column_default"] is None
+    assert row["data_type"] == "timestamp with time zone"
+
+
+def test_the_mirror_marker_is_not_the_footprint_marker(db):
+    """Two columns, and 0016 exists because they cannot be one.
+
+    `artifact_bytes_recorded_at` is stamped by the footprint measurement AND
+    by `DELETE /jobs/{id}/artifacts`, neither of which copies a byte to OSS.
+    Collapsing the two would record a mirror for every job anybody deleted,
+    and — the damaging direction — would hide a mirror that FAILED behind a
+    footprint call that succeeded on the same poll, so the copy would never
+    be retried and that job's model would stay on a disk a redeploy erases.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select column_name from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'jobs'"
+            "   and column_name in "
+            "       ('artifact_bytes_recorded_at', 'artifacts_mirrored_at')"
+        )
+        columns = {r["column_name"] for r in cur.fetchall()}
+    assert columns == {"artifact_bytes_recorded_at", "artifacts_mirrored_at"}
 
 
 def test_verifications_table_exists_with_rls(db):
@@ -253,6 +364,83 @@ def test_device_codes_carries_a_kind_defaulting_to_machine(postgres_dsn):
     # Relaxed so a CLI code, which has no node, can be inserted at all.
     assert cols["node_id"]["is_nullable"] == "YES"
     assert cols["credential_id"]["is_nullable"] == "YES"
+
+
+def test_sandbox_sessions_stores_no_credential_of_any_kind(db):
+    """0014's central promise, checked against the applied schema rather than
+    against the file that was typed.
+
+    A sandbox reaches this system as an ordinary machine — hashed `fmk_` token
+    in `public.machines` (0001) — and reaches OSS through presigned URLs that
+    expire on their own (spec D5). A token, key or signed URL parked here
+    would recreate exactly the liability the GitHub App design removes: a
+    table whose leak grants somebody something. See AGENTS.md, "Nothing stored
+    is a credential".
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select column_name from information_schema.columns"
+            " where table_schema = 'public'"
+            "   and table_name in ('sandbox_sessions', 'sandbox_events')"
+        )
+        columns = {r["column_name"] for r in cur.fetchall()}
+
+    assert columns, "migration 0014 did not apply"
+    for forbidden in ("token", "token_hash", "api_key", "access_key",
+                      "secret", "credential", "password", "signed_url"):
+        assert forbidden not in columns, forbidden
+    # share_token is the one bearer value on the table and it is a capability
+    # for a deliberately public, read-only view — not a credential for
+    # anything the holder could act with.
+    assert "share_token" in columns
+
+
+def test_a_sandbox_session_cannot_be_written_in_an_invented_state(db):
+    """Constrained in the database so a bug in `sandbox_sessions.py` cannot
+    write a state the state machine has never heard of — the same discipline
+    as `machines.status` in 0001."""
+    match = re.search(
+        r"state\s+text\s+not null\s+check\s*\(state in \(([^)]*)\)", ALL_SQL, re.I
+    )
+    assert match, "sandbox_sessions.state is not constrained at all"
+    allowed = set(re.findall(r"'(\w+)'", match.group(1)))
+    assert allowed == {
+        "REQUESTED", "ACTIVE", "PREPARED", "HIBERNATED", "RESUMING",
+        "EVALUATING", "SUCCEEDED", "FAILED", "TERMINATED",
+    }
+
+
+def test_an_event_belongs_to_one_session_and_one_sequence(db):
+    """Append-only and idempotent by schema, the same argument 0003 makes for
+    the credit ledger: a controller retrying after a lost round trip must
+    produce one row, and that has to be a property of the table rather than of
+    the caller's discipline."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select conname, pg_get_constraintdef(oid) as def"
+            "  from pg_constraint"
+            " where conrelid = 'public.sandbox_events'::regclass"
+            "   and contype = 'u'"
+        )
+        uniques = [r["def"].replace('"', "") for r in cur.fetchall()]
+    assert any("(session_id, sequence)" in d for d in uniques), uniques
+
+
+def test_a_sandbox_session_survives_losing_its_machine(db):
+    """`on delete set null`, not cascade. A session whose machine row was
+    deleted still holds a live `external_sandbox_id` that has to be woken and
+    killed; cascading would delete the only record that says so, turning a
+    lost pointer into a leaked, billing sandbox nobody can find."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select confdeltype from pg_constraint"
+            " where conrelid = 'public.sandbox_sessions'::regclass"
+            "   and contype = 'f'"
+            "   and confrelid = 'public.machines'::regclass"
+        )
+        row = cur.fetchone()
+    assert row is not None, "sandbox_sessions has no machine foreign key"
+    assert row["confdeltype"] == "n", "expected ON DELETE SET NULL"
 
 
 def test_a_machine_device_code_still_requires_a_node_id(postgres_dsn):
