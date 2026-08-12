@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ARTIFACTS_UNREADABLE_MESSAGE,
+  FEDERATED_ARTIFACTS_MESSAGE,
   summariseJobArtifacts,
   type ArtifactsRead,
 } from "./job-artifacts";
@@ -284,5 +285,32 @@ describe("summariseJobArtifacts — empty is not the same as unreadable", () => 
     expect(panel.emptyMessage).toBeNull();
     expect(panel.errorMessage).toBeNull();
     expect(panel.canClear).toBe(false);
+  });
+});
+
+describe("summariseJobArtifacts — a federated run's empty listing is designed", () => {
+  it("explains the per-round shape instead of claiming the run wrote nothing", () => {
+    const panel = summariseJobArtifacts({
+      read: listed([]),
+      jobState: "SUCCEEDED",
+      tasks: [],
+      federated: true,
+    });
+    expect(panel.state).toBe("empty");
+    expect(panel.emptyMessage).toBe(FEDERATED_ARTIFACTS_MESSAGE);
+    expect(panel.emptyMessage).not.toContain(
+      "finished without writing any artifacts"
+    );
+  });
+
+  it("keeps the ordinary empty copy for non-federated jobs", () => {
+    const panel = summariseJobArtifacts({
+      read: listed([]),
+      jobState: "SUCCEEDED",
+      tasks: [],
+    });
+    expect(panel.emptyMessage).toBe(
+      "This job finished without writing any artifacts."
+    );
   });
 });

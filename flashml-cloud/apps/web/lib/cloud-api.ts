@@ -1689,3 +1689,206 @@ export function updateProfile(
     body: JSON.stringify(fields),
   });
 }
+
+// -- marketplace -----------------------------------------------------------
+//
+// The seven routes the 2026-08-12 plan put over marketplace.py / prices.py.
+// Every money figure is MILLICREDITS as an integer (1 ZC = 1000) — the API
+// settles in integers so it cannot round, and formatting for display lives
+// in lib/market-credits.ts where a test can reach it. Nothing here converts
+// ZC to USD or back: the two travel in separate fields and meet only on
+// screen, side by side.
+
+export interface CreditsBalance {
+  spendable_zc: number;
+  held_zc: number;
+}
+
+export function getCredits(): Promise<CreditsBalance> {
+  return request<CreditsBalance>("/v1alpha1/credits");
+}
+
+/** One leg of one ledger movement. `mine` says whether the account belongs
+ * to the caller; the counterparty leg travels with the viewer's own because
+ * a movement without its counterparty is a balance change without a cause. */
+export interface LedgerLeg {
+  kind: "spendable" | "escrow" | string;
+  delta_zc: number;
+  mine: boolean;
+}
+
+export interface LedgerMovement {
+  cursor: number;
+  created_at: string;
+  /** The viewer's own leg's reason; a settlement's other leg carries the
+   * paired reason, so the display copy lives in lib/market-credits.ts. */
+  reason: string;
+  ref_type: string | null;
+  ref_id: string | null;
+  legs: LedgerLeg[];
+}
+
+export interface LedgerPage {
+  movements: LedgerMovement[];
+  /** The cursor for the next page; null when this page was not full. */
+  next_before: number | null;
+}
+
+export function getCreditsLedger(opts?: {
+  limit?: number;
+  before?: number;
+}): Promise<LedgerPage> {
+  const params = new URLSearchParams();
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts?.before !== undefined) params.set("before", String(opts.before));
+  const query = params.toString();
+  return request<LedgerPage>(
+    `/v1alpha1/credits/ledger${query ? `?${query}` : ""}`
+  );
+}
+
+/** One open ask in the market book. `acceptance_rate` is null for an
+ * unproven host — "not asked yet", never 0 — and `resolved_n` is the count
+ * behind the rate, null on the same condition. */
+export interface MarketAsk {
+  id: string;
+  machine_id: string;
+  host_id: string;
+  capability_class: string;
+  ask_zc_per_hour: number;
+  donated: boolean;
+  price_label: string;
+  max_concurrent_tasks: number;
+  acceptance_rate: number | null;
+  resolved_n: number | null;
+}
+
+/** The host's own listing row, verbatim from the API plus the two display
+ * fields the server computes from the ask. */
+export interface MarketListing {
+  id: string;
+  machine_id: string;
+  capability_class: string;
+  ask_zc_per_hour: number;
+  max_concurrent_tasks: number;
+  state: string;
+  donated: boolean;
+  price_label: string;
+  created_at: string;
+}
+
+export interface MarketListings {
+  asks: MarketAsk[];
+  mine: MarketListing[];
+}
+
+export function getMarketListings(): Promise<MarketListings> {
+  return request<MarketListings>("/v1alpha1/market/listings");
+}
+
+export function createMarketListing(body: {
+  machine_id: string;
+  ask_zc_per_hour: number;
+  max_concurrent_tasks?: number;
+}): Promise<MarketListing> {
+  return request<MarketListing>("/v1alpha1/market/listings", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function withdrawMarketListing(
+  listingId: string
+): Promise<{ withdrawn: boolean }> {
+  return request<{ withdrawn: boolean }>(
+    `/v1alpha1/market/listings/${encodeURIComponent(listingId)}`,
+    { method: "DELETE" }
+  );
+}
+
+/** A priced entitlement, verbatim from the API. `state` is the vocabulary
+ * granted/claimed/settled/refunded/expired — the console renders it as-is,
+ * because a match is an entitlement, not an assignment. */
+export interface MarketMatch {
+  id: string;
+  bid_id: string;
+  listing_id: string;
+  machine_id: string;
+  buyer_id: string;
+  host_id: string;
+  job_id: string;
+  capability_class: string;
+  agreed_zc_per_hour: number;
+  tasks: number;
+  est_task_seconds: number;
+  state: string;
+  granted_at: string;
+  claimed_at: string | null;
+  settled_at: string | null;
+  held_zc: number;
+  charged_zc: number;
+  refunded_zc: number;
+}
+
+export interface MarketMatches {
+  as_buyer: MarketMatch[];
+  as_host: MarketMatch[];
+}
+
+export function getMarketMatches(): Promise<MarketMatches> {
+  return request<MarketMatches>("/v1alpha1/market/matches");
+}
+
+/** One external quote as `prices.render` shapes it: the vendor's digits as
+ * a string (a float would round them on the way to the page), when it was
+ * OBSERVED, who observed it, and the staleness verdict with its age. */
+export interface PriceQuote {
+  provider: string;
+  sku: string;
+  region: string;
+  tier: string | null;
+  currency: string;
+  amount: string;
+  unit: string;
+  attrs: Record<string, unknown>;
+  captured_at: string;
+  age_seconds: number;
+  stale: boolean;
+  max_age_seconds: number;
+  source: string;
+  observed_by: string | null;
+}
+
+/** A venue with no quote, shaped like one so the view cannot skip it.
+ * `amount` null, state "not observed" — never 0. */
+export interface PriceUnpriced {
+  provider: string;
+  state: string;
+  amount: null;
+  currency: null;
+  unit: null;
+  captured_at: null;
+  age_seconds: null;
+  stale: null;
+  source: null;
+  observed_by: null;
+}
+
+/** The ZC side of the comparison: the reference ladder and the best live
+ * ask per class (null where the book is empty). A separate list on purpose
+ * — a shape with nowhere to put a cross-currency total. */
+export interface ZcRung {
+  capability_class: string;
+  reference_zc_per_hour: number;
+  best_ask_zc: number | null;
+}
+
+export interface PricesView {
+  quotes: PriceQuote[];
+  unpriced: PriceUnpriced[];
+  zc: ZcRung[];
+}
+
+export function getPrices(): Promise<PricesView> {
+  return request<PricesView>("/v1alpha1/prices");
+}

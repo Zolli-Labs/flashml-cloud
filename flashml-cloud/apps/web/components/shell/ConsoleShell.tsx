@@ -5,6 +5,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   BookOpen,
+  ChartLineUp,
+  Coins,
   Compass,
   Gauge,
   Gear,
@@ -16,6 +18,7 @@ import {
   Desktop,
   ShieldCheck,
   SidebarSimple,
+  Storefront,
   Terminal,
   UsersThree,
   UserCircle,
@@ -263,6 +266,33 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                 label="GitHub"
                 icon={GithubLogo}
                 active={isActive("/account/github")}
+              />
+            </div>
+
+            {/* The marketplace: the account's credits and ledger, the book
+                of listings, and the price comparison. Reads are open to
+                every signed-in account; the API gates the writes. */}
+            <div className="mt-5 space-y-0.5">
+              <p className="label-caps px-2.5 pb-1">Market</p>
+              <NavItem
+                href="/market"
+                label="Credits"
+                icon={Coins}
+                // Exact match: `isActive` would keep Credits lit under
+                // /market/listings and /market/prices too.
+                active={pathname === "/market"}
+              />
+              <NavItem
+                href="/market/listings"
+                label="Listings"
+                icon={Storefront}
+                active={isActive("/market/listings")}
+              />
+              <NavItem
+                href="/market/prices"
+                label="Prices"
+                icon={ChartLineUp}
+                active={isActive("/market/prices")}
               />
             </div>
 

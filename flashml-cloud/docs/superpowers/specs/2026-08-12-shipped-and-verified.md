@@ -178,3 +178,26 @@ recomputed.
 5. Dev's coordinator is free-tier and its node registry is **in-memory**: a
    restart answers `unregistered node — register first` until agents
    re-register. Looks like a failure during a demo and is not.
+
+### Found while summarising: mirrored artifacts go invisible when the coordinator forgets a job
+
+`GET /jobs/{id}/artifacts` builds its listing from the **coordinator**, and
+falls back to the coordinator for bytes. But `storage` and `mirrored_at` come
+from our own row. So after the coordinator loses a job from its registry, a
+mirrored job answers:
+
+    state=None   files=0   storage="oss"   mirrored_at=2026-08-12T10:44:39Z
+
+while OSS holds **185 objects** for that job id — every checkpoint, the model,
+metrics, logs and `_mirror/manifest.json`. The data is safe and completely
+unreachable through the product.
+
+This is the failure the mirror exists to prevent, arriving one layer up: the
+bytes survived the machine AND the coordinator, and the console still shows an
+empty Artifacts card. **`_mirror/manifest.json` already contains the full key
+listing** — when `mirrored_at` is set, the listing should be served from it
+rather than from the coordinator, and the coordinator should be the fallback,
+not the source of truth.
+
+Belongs in the UI/API work: it makes the Artifacts card wrong precisely for
+finished jobs, which are the ones people come back to look at.
