@@ -25,7 +25,11 @@
  * has no function that could, because a helper that cannot exist cannot
  * drift into existing.
  */
-import type { LedgerMovement } from "./cloud-api";
+import type {
+  CreditsBalance,
+  LedgerMovement,
+  MarketMatch,
+} from "./cloud-api";
 
 /** Millicredits as a ZC string, from integer arithmetic only.
  *
@@ -162,4 +166,198 @@ export function ledgerRows(movements: LedgerMovement[]): LedgerRow[] {
           : null,
     };
   });
+}
+
+// -- v2 wallet -------------------------------------------------------------
+
+/** One stat tile on the wallet header. `sub` is the one-line sentence under
+ * the value; for lifetime tiles a zero is a TRUE zero (nothing has moved)
+ * and the sub says so, because a lifetime sum is not an unmeasured metric. */
+export interface WalletTile {
+  icon: string;
+  label: string;
+  valueText: string;
+  sub: string;
+}
+
+export function walletTiles(balance: CreditsBalance): WalletTile[] {
+  const life = balance.lifetime;
+  return [
+    {
+      icon: "spendable",
+      label: "ZC spendable",
+      valueText: formatZc(balance.spendable_zc),
+      sub: "yours to commit to work",
+    },
+    {
+      icon: "held",
+      label: "ZC held in escrow",
+      valueText: formatZc(balance.held_zc),
+      sub: "committed against claimed work; settles only for accepted work",
+    },
+    {
+      icon: "earned",
+      label: "earned, lifetime",
+      valueText: formatZc(life.earned_zc),
+      sub:
+        life.earned_zc === 0
+          ? "no accepted-work settlements yet"
+          : "paid out for accepted work",
+    },
+    {
+      icon: "spent",
+      label: "spent, lifetime",
+      valueText: formatZc(life.spent_zc),
+      sub:
+        life.spent_zc === 0
+          ? "nothing bought on the market yet"
+          : "paid to hosts for your jobs",
+    },
+  ];
+}
+
+/** Counts per reason over the movements currently in view, as chips.
+ * Empty ledger yields an empty list — the strip is absent, not "0 of
+ * everything". */
+export function activityStrip(movements: LedgerMovement[]): string[] {
+  const counts = new Map<string, number>();
+  for (const m of movements) {
+    counts.set(m.reason, (counts.get(m.reason) ?? 0) + 1);
+  }
+  const label: Record<string, string> = {
+    grant: "grant",
+    escrow_hold: "hold",
+    escrow_release: "release",
+    escrow_refund: "refund",
+    spent_accepted_work: "settle",
+    earned_accepted_work: "settle",
+  };
+  const out: string[] = [];
+  for (const [reason, n] of counts) {
+    const word = label[reason] ?? reason;
+    out.push(`${n} ${word}${n === 1 ? "" : "s"}`);
+  }
+  return out;
+}
+
+/** A match as a card. The state badge carries the API's vocabulary plus the
+ * one-line consequence a buyer needs so `granted` cannot read as
+ * "assigned". Held/charged/refunded render only when non-zero. */
+export interface MatchCard {
+  id: string;
+  side: "buyer" | "host";
+  capabilityClass: string;
+  tasks: number;
+  priceText: string;
+  state: string;
+  stateBadge: string;
+  mini: { label: string; valueText: string }[];
+}
+
+export function matchCards(matches: {
+  as_buyer: MarketMatch[];
+  as_host: MarketMatch[];
+}): { buyer: MatchCard[]; host: MatchCard[] } {
+  const one = (m: MarketMatch, side: "buyer" | "host"): MatchCard => {
+    const mini: { label: string; valueText: string }[] = [];
+    if (m.held_zc > 0) mini.push({ label: "held", valueText: formatZc(m.held_zc) });
+    if (m.charged_zc > 0)
+      mini.push({ label: "settled", valueText: formatZc(m.charged_zc) });
+    if (m.refunded_zc > 0)
+      mini.push({ label: "refunded", valueText: formatZc(m.refunded_zc) });
+    return {
+      id: m.id,
+      side,
+      capabilityClass: m.capability_class,
+      tasks: m.tasks,
+      priceText: `${formatZc(m.agreed_zc_per_hour)} ZC/hour`,
+      state: m.state,
+      stateBadge: matchStateBadge(m.state),
+      mini,
+    };
+  };
+  return {
+    buyer: matches.as_buyer.map((m) => one(m, "buyer")),
+    host: matches.as_host.map((m) => one(m, "host")),
+  };
+}
+
+export function matchStateBadge(state: string): string {
+  switch (state) {
+    case "granted":
+      return "granted · entitled, no money moved";
+    case "claimed":
+      return "claimed · escrow held";
+    case "settled":
+      return "settled · paid for accepted work";
+    case "refunded":
+      return "refunded · nothing accepted";
+    case "expired":
+      return "expired · hold returned";
+    default:
+      return `state the console does not recognise ("${state}")`;
+  }
+}
+
+/** A semantic icon key per reason. The component maps these to phosphor
+ * icons; lib stays free of React. An unrecognised reason gets a neutral
+ * key rather than being mapped onto the nearest known glyph. */
+export function movementIcon(reason: string): string {
+  switch (reason) {
+    case "grant":
+      return "grant";
+    case "escrow_hold":
+      return "hold";
+    case "escrow_release":
+    case "escrow_refund":
+      return "release";
+    case "spent_accepted_work":
+    case "earned_accepted_work":
+      return "settle";
+    default:
+      return "unknown";
+  }
+}
+
+/** Whether a ledger amount should read as a credit to spendable (green),
+ * a debit (ink), or a self-transfer (muted). The component colours by this
+ * verdict; the verdict itself is a fact about which pocket moved. */
+export function amountTone(
+  movement: LedgerMovement
+): "credit" | "debit" | "self" {
+  if (movement.legs.every((leg) => leg.mine)) return "self";
+  const mine = movement.legs.find((leg) => leg.mine);
+  if (!mine) return "self";
+  return mine.delta_zc > 0 ? "credit" : "debit";
+}
+
+/** A day key for grouping ledger rows under separators. Today reads
+ * "Today"; other days read "12 Aug". An unparseable timestamp groups under
+ * "Unknown date" rather than throwing or collapsing into today. */
+export function dayKey(iso: string): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "Unknown date";
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return "Today";
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+/** Group rows (newest first) into day buckets preserving order, so the
+ * table can draw a separator between different days. */
+export function groupRowsByDay<T extends { at: string }>(
+  rows: T[]
+): { day: string; rows: T[] }[] {
+  const out: { day: string; rows: T[] }[] = [];
+  for (const row of rows) {
+    const day = dayKey(row.at);
+    const last = out[out.length - 1];
+    if (last && last.day === day) last.rows.push(row);
+    else out.push({ day, rows: [row] });
+  }
+  return out;
 }

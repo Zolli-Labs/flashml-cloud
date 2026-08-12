@@ -5378,7 +5378,14 @@ def create_cloud_app(
         """
         marketplacemod.grant_starting_credits(db, user_id)
         found = marketplacemod.balances(db, user_id)
-        return {"spendable_zc": found["spendable"], "held_zc": found["escrow"]}
+        return {
+            "spendable_zc": found["spendable"],
+            "held_zc": found["escrow"],
+            # Lifetime sums read out of the ledger, for the wallet's
+            # earned/spent tiles. True zeros for a fresh account, labelled
+            # "lifetime" on the client so 0 reads as "nothing yet".
+            "lifetime": marketplacemod.lifetime_for_owner(db, user_id),
+        }
 
     @app.get("/v1alpha1/credits/ledger", tags=["browser"])
     async def get_credits_ledger(
@@ -5424,7 +5431,7 @@ def create_cloud_app(
             (str(row["machine_id"]), str(row["capability_class"])): row
             for row in rate_rows
         }
-        asks: list[dict[str, Any]] = []
+        raw_asks: list[tuple[str, Any, Any]] = []
         for klass in marketplacemod.CAPABILITY_CLASSES:
             for ask in marketplacemod.open_asks(
                 db,
@@ -5434,27 +5441,59 @@ def create_cloud_app(
                     for key, row in rate_by_key.items()
                 },
             ):
-                record = rate_by_key.get((ask.machine_id, klass))
-                asks.append(
-                    {
-                        "id": ask.listing_id,
-                        "machine_id": ask.machine_id,
-                        "host_id": ask.host_id,
-                        "capability_class": klass,
-                        "ask_zc_per_hour": ask.ask_zc_per_hour,
-                        "donated": marketplacemod.is_donated(
-                            ask.ask_zc_per_hour
-                        ),
-                        "price_label": marketplacemod.price_label(
-                            ask.ask_zc_per_hour
-                        ),
-                        "max_concurrent_tasks": ask.max_concurrent_tasks,
-                        "acceptance_rate": ask.acceptance_rate,
-                        "resolved_n": (
-                            record["resolved"] if record is not None else None
-                        ),
-                    }
+                raw_asks.append(
+                    (klass, ask, rate_by_key.get((ask.machine_id, klass)))
                 )
+        machine_by_id = marketplacemod.machines_for_ids(
+            db, {ask.machine_id for _, ask, _ in raw_asks}
+        )
+        asks: list[dict[str, Any]] = []
+        for klass, ask, record in raw_asks:
+            machine = machine_by_id.get(ask.machine_id)
+            # The effective price is ask/rate, the number a buyer actually
+            # pays per accepted hour. ``effective_price`` ranks an unproven
+            # host on the ask alone, but a surface must not print that as a
+            # per-accepted figure — there is no rate behind it — so the
+            # field is null for an unproven host and for a rate of 0
+            # (unclearable); both render as words, not a number.
+            effective = (
+                marketplacemod.effective_price(
+                    ask.ask_zc_per_hour, ask.acceptance_rate
+                )
+                if ask.acceptance_rate is not None
+                else None
+            )
+            asks.append(
+                {
+                    "id": ask.listing_id,
+                    "machine_id": ask.machine_id,
+                    "host_id": ask.host_id,
+                    "capability_class": klass,
+                    "machine_name": (
+                        machine["name"] if machine is not None else None
+                    ),
+                    "gpu_label": (
+                        marketplacemod.machine_gpu_label(
+                            machine["capabilities"]
+                        )
+                        if machine is not None
+                        else None
+                    ),
+                    "ask_zc_per_hour": ask.ask_zc_per_hour,
+                    "donated": marketplacemod.is_donated(ask.ask_zc_per_hour),
+                    "price_label": marketplacemod.price_label(
+                        ask.ask_zc_per_hour
+                    ),
+                    "max_concurrent_tasks": ask.max_concurrent_tasks,
+                    "acceptance_rate": ask.acceptance_rate,
+                    "resolved_n": (
+                        record["resolved"] if record is not None else None
+                    ),
+                    "effective_zc_per_hour": (
+                        int(effective) if effective is not None else None
+                    ),
+                }
+            )
         mine = [
             {
                 **_jsonable(row),
@@ -5547,6 +5586,65 @@ def create_cloud_app(
             pass
         raise HTTPException(status_code=404, detail="unknown listing")
 
+    @app.get("/v1alpha1/machines/{machine_id}/market-hint", tags=["browser"])
+    async def machine_market_hint(
+        machine_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """What the market says about a machine you might list.
+
+        The class and the book are composed server-side from the same
+        ladder and the same order book a listing would join, so the
+        "suggestion" is the market itself — best/median/reference — never a
+        model. 404 for an unknown or someone-else's machine, same doctrine
+        as the machines routes: the hint must not confirm which ids exist.
+        """
+        try:
+            rows = marketplacemod.machines_for_ids(db, {machine_id})
+        except psycopg.errors.InvalidTextRepresentation:
+            rows = {}
+        machine = rows.get(machine_id)
+        if machine is None or str(machine["owner_id"]) != user_id:
+            raise HTTPException(status_code=404, detail="unknown machine")
+        klass = marketplacemod.capability_class(machine["capabilities"])
+        board = (
+            marketplacemod.class_board(db, klass) if klass is not None else None
+        )
+        rates = metricsmod.acceptance_rates(
+            dbmod.acceptance_rate_rows(db, machine_ids=[machine_id])
+        )
+        record = rates[0] if rates else None
+        return {
+            "capability_class": klass,
+            "unclassifiable": (
+                None
+                if klass is not None
+                else "This machine's reported capabilities do not place it "
+                "in a capability class, so the market cannot price it."
+            ),
+            "book": (
+                None
+                if board is None
+                else {
+                    "open_asks": board["depth"],
+                    "best_ask_zc": board["last_zc"],
+                    "median_ask_zc": board["median_ask_zc"],
+                    "reference_zc_per_hour": (
+                        marketplacemod.REFERENCE_ZC_PER_HOUR[klass]
+                    ),
+                }
+            ),
+            "your_record": (
+                None
+                if record is None or record["acceptance_rate"] is None
+                else {
+                    "acceptance_rate": record["acceptance_rate"],
+                    "resolved_n": record["resolved"],
+                }
+            ),
+        }
+
     @app.get("/v1alpha1/market/matches", tags=["browser"])
     async def list_market_matches(
         user_id: str = Depends(current_user),
@@ -5587,16 +5685,29 @@ def create_cloud_app(
         now = datetime.now(timezone.utc)
         quotes = pricesmod.latest_quotes(db)
         zc = []
+        open_total = 0
+        live_classes = 0
+        observations_24h = 0
         for klass in marketplacemod.CAPABILITY_CLASSES:
-            series = marketplacemod.price_series(db, klass, limit=1)
-            best = series[0]["best_ask_zc"] if series else None
+            board = marketplacemod.class_board(db, klass)
+            open_total += board["depth"]
+            if board["last_zc"] is not None:
+                live_classes += 1
+            observations_24h += sum(
+                1
+                for point in board["history"]
+                if now - point["at"] <= timedelta(hours=24)
+            )
             zc.append(
                 {
                     "capability_class": klass,
                     "reference_zc_per_hour": (
                         marketplacemod.REFERENCE_ZC_PER_HOUR[klass]
                     ),
-                    "best_ask_zc": int(best) if best is not None else None,
+                    "best_ask_zc": board["last_zc"],
+                    "change_zc": board["change_zc"],
+                    "depth": board["depth"],
+                    "history": [_jsonable(h) for h in board["history"]],
                 }
             )
         return {
@@ -5608,6 +5719,11 @@ def create_cloud_app(
                 )
             ],
             "zc": zc,
+            "board": {
+                "open_asks_total": open_total,
+                "live_classes": live_classes,
+                "observations_24h": observations_24h,
+            },
         }
 
     @app.post("/v1alpha1/sandbox-sessions", status_code=201, tags=["browser"])

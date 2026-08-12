@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import type { PriceQuote, PriceUnpriced, ZcRung } from "./cloud-api";
-import { ageLabel, quoteRow, unpricedRow, zcRungRow } from "./market-prices";
+import type { PricePoint, PriceQuote, PriceUnpriced, ZcRung } from "./cloud-api";
+import {
+  ageLabel,
+  boardStrip,
+  deltaCell,
+  quoteRow,
+  sparkPoints,
+  unpricedRow,
+  zcRungRow,
+} from "./market-prices";
 
 function quote(over: Partial<PriceQuote> = {}): PriceQuote {
   return {
@@ -78,23 +86,65 @@ describe("unpricedRow — a venue with no quote is still a row", () => {
 });
 
 describe("zcRungRow — the ZC side, never converted", () => {
+  const rung = (over: Partial<ZcRung>): ZcRung => ({
+    capability_class: "gpu-24gb",
+    reference_zc_per_hour: 1000,
+    best_ask_zc: null,
+    change_zc: null,
+    depth: 0,
+    history: [],
+    ...over,
+  });
+
   it("names an empty book as no live ask, not zero", () => {
-    const rung: ZcRung = {
-      capability_class: "gpu-80gb-hopper",
-      reference_zc_per_hour: 5000,
-      best_ask_zc: null,
-    };
-    const row = zcRungRow(rung);
+    const row = zcRungRow(
+      rung({ capability_class: "gpu-80gb-hopper", reference_zc_per_hour: 5000 })
+    );
     expect(row.referenceText).toBe("5 ZC/hour reference");
     expect(row.bestAskText).toBe("no live ask");
   });
 
   it("names a zero best ask as donated", () => {
-    const row = zcRungRow({
-      capability_class: "cpu-small",
-      reference_zc_per_hour: 100,
-      best_ask_zc: 0,
-    });
+    const row = zcRungRow(
+      rung({ capability_class: "cpu-small", reference_zc_per_hour: 100, best_ask_zc: 0 })
+    );
     expect(row.bestAskText).toBe("donated");
+  });
+});
+
+describe("the compute board", () => {
+  const point = (best: number | null, day: number): PricePoint => ({
+    at: `2026-08-0${day}T00:00:00Z`,
+    best_ask_zc: best,
+    open_asks: 1,
+  });
+
+  it("delta is directional, and null change is 'no history' not 0", () => {
+    expect(deltaCell(null)).toEqual({ direction: "none", text: "—" });
+    expect(deltaCell(100).direction).toBe("up");
+    expect(deltaCell(-100).direction).toBe("down");
+    expect(deltaCell(100).text).toContain("▲");
+  });
+
+  it("a sparkline needs two real points; flat series centres, nulls drop", () => {
+    expect(sparkPoints([point(null, 1)])).toBeNull();
+    expect(
+      sparkPoints([point(5, 1), point(5, 2)])!.every((p) => p.y === 50)
+    ).toBe(true);
+    // Input is newest-first, like the API; the oldest low sits at the bottom.
+    const rising = sparkPoints([point(10, 3), point(null, 2), point(0, 1)]);
+    expect(rising).toHaveLength(2);
+    expect(rising![0].y).toBe(100);
+    expect(rising![1].y).toBe(0);
+  });
+
+  it("the header strip is three real counts", () => {
+    expect(
+      boardStrip({ open_asks_total: 3, live_classes: 2, observations_24h: 5 })
+    ).toEqual([
+      { label: "open asks", value: "3" },
+      { label: "classes with a live book", value: "2" },
+      { label: "observations, 24h", value: "5" },
+    ]);
   });
 });

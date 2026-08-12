@@ -19,7 +19,13 @@
  * never claims "live" — the most it may say is how long ago it was
  * observed, because that is the fact behind it.
  */
-import type { PriceQuote, PriceUnpriced, ZcRung } from "./cloud-api";
+import type {
+  PricePoint,
+  PriceQuote,
+  PricesView,
+  PriceUnpriced,
+  ZcRung,
+} from "./cloud-api";
 import { formatZc } from "./market-credits";
 
 /** `age_seconds` as a human interval, floored at each unit so the label
@@ -94,4 +100,62 @@ export function zcRungRow(rung: ZcRung): ZcRungRow {
           ? "donated"
           : `${formatZc(rung.best_ask_zc)} ZC/hour best ask`,
   };
+}
+
+// -- the compute board (stock-terminal view) -------------------------------
+
+/** The 24h delta as a directional ticker cell. `direction` is purely
+ * directional (market convention colours it); null change is "no history",
+ * never 0 — a class observed once has moved, we just cannot say how. */
+export interface DeltaCell {
+  direction: "up" | "down" | "none";
+  text: string;
+}
+
+export function deltaCell(changeZc: number | null): DeltaCell {
+  if (changeZc === null) return { direction: "none", text: "—" };
+  if (changeZc === 0) return { direction: "none", text: formatZc(0) };
+  return {
+    direction: changeZc > 0 ? "up" : "down",
+    text: `${changeZc > 0 ? "▲" : "▼"} ${formatZc(Math.abs(changeZc))}`,
+  };
+}
+
+/** Sparkline points from a class's observations, oldest→newest, using only
+ * non-null best asks. Fewer than two points returns null — the component
+ * draws a dashed "no history" baseline of the same visual weight, never a
+ * fabricated flat line. Values are normalised to a 0–100 box; a flat series
+ * (all equal) centres on 50 rather than dividing by zero. */
+export function sparkPoints(
+  history: PricePoint[],
+  box = 100
+): { x: number; y: number }[] | null {
+  const values = history
+    .slice()
+    .reverse()
+    .map((p) => p.best_ask_zc)
+    .filter((v): v is number => v !== null);
+  if (values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min;
+  const step = box / (values.length - 1);
+  return values.map((v, i) => ({
+    x: i * step,
+    y: span === 0 ? box / 2 : box - ((v - min) / span) * box,
+  }));
+}
+
+/** The board's header strip: three real counts over the whole book. */
+export interface BoardStrip {
+  label: string;
+  value: string;
+}
+
+export function boardStrip(board: PricesView["board"]): BoardStrip[] {
+  return [
+    { label: "open asks", value: String(board.open_asks_total) },
+    { label: "classes with a live book", value: String(board.live_classes) },
+    { label: "observations, 24h", value: String(board.observations_24h) },
+  ];
 }

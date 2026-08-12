@@ -18,7 +18,7 @@
  * through `formatZc`, the integer-only formatter, so the page shows the
  * same digits `marketplace.price_label` produced server-side.
  */
-import type { MarketAsk, MarketListing } from "./cloud-api";
+import type { MarketAsk, MarketHint, MarketListing } from "./cloud-api";
 import { formatZc } from "./market-credits";
 
 /** The book grouped by capability class, API rank order preserved inside
@@ -76,4 +76,59 @@ export function listingStateLabel(listing: MarketListing): string {
     default:
       return `state the console does not recognise ("${listing.state}")`;
   }
+}
+
+/** The spec line for a book row: the machine's reported hardware, then its
+ * name. When neither arrived, say so rather than drawing a blank cell —
+ * an ask with no machine behind it is exactly what this market must not
+ * look like. */
+export function specLine(ask: MarketAsk): string {
+  if (ask.gpu_label) return ask.gpu_label;
+  if (ask.machine_name) return ask.machine_name;
+  return "spec not reported";
+}
+
+/** The per-accepted-hour figure, or the word for why there is not one.
+ * Unproven (no rate) and unclearable (rate 0) are different facts and get
+ * different sentences; neither renders a number. */
+export function effectiveLabel(ask: MarketAsk): string {
+  if (ask.effective_zc_per_hour !== null) {
+    return `${formatZc(ask.effective_zc_per_hour)} ZC per accepted hour`;
+  }
+  return ask.acceptance_rate === null
+    ? "no accepted-work record — effective price unknown"
+    : "rate 0 — nothing clears this ask";
+}
+
+/** One chip the listing form offers as a market-grounded ask. `valueMzc`
+ * is the millicredit amount the button writes into the ask input; null
+ * means the book has no number for it and the chip is hidden. */
+export interface AskChip {
+  label: string;
+  valueText: string;
+  valueMzc: number | null;
+}
+
+export function bookChips(hint: MarketHint): AskChip[] {
+  const book = hint.book;
+  const chips: AskChip[] = [];
+  if (book) {
+    chips.push({
+      label: "Match best ask",
+      valueText: book.best_ask_zc === null ? "—" : formatZc(book.best_ask_zc),
+      valueMzc: book.best_ask_zc,
+    });
+    chips.push({
+      label: "At median",
+      valueText:
+        book.median_ask_zc === null ? "—" : formatZc(book.median_ask_zc),
+      valueMzc: book.median_ask_zc,
+    });
+    chips.push({
+      label: "At reference",
+      valueText: formatZc(book.reference_zc_per_hour),
+      valueMzc: book.reference_zc_per_hour,
+    });
+  }
+  return chips;
 }

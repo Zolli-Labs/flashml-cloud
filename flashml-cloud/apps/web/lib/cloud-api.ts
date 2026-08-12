@@ -1702,6 +1702,15 @@ export function updateProfile(
 export interface CreditsBalance {
   spendable_zc: number;
   held_zc: number;
+  /** Lifetime sums read out of the ledger. True zeros for a fresh account
+   * — a lifetime sum of zero is a fact, unlike an unmeasured metric; the
+   * tiles are labelled "lifetime" so 0 reads as "nothing yet". */
+  lifetime: {
+    earned_zc: number;
+    spent_zc: number;
+    granted_zc: number;
+    refunded_zc: number;
+  };
 }
 
 export function getCredits(): Promise<CreditsBalance> {
@@ -1755,12 +1764,39 @@ export interface MarketAsk {
   machine_id: string;
   host_id: string;
   capability_class: string;
+  /** The host's machine, named and spec'd from what the agent reported. */
+  machine_name: string | null;
+  gpu_label: string | null;
   ask_zc_per_hour: number;
   donated: boolean;
   price_label: string;
   max_concurrent_tasks: number;
   acceptance_rate: number | null;
   resolved_n: number | null;
+  /** ask/rate, the per-accepted-hour price. Null for unproven (no rate)
+   * and for rate 0 (unclearable) — both render as words, not a number. */
+  effective_zc_per_hour: number | null;
+}
+
+/** What the market says about a machine you might list — the class, the
+ * book in that class, and your own record. The "suggestion" is the market
+ * itself (best/median/reference), never a model. */
+export interface MarketHint {
+  capability_class: string | null;
+  unclassifiable: string | null;
+  book: {
+    open_asks: number;
+    best_ask_zc: number | null;
+    median_ask_zc: number | null;
+    reference_zc_per_hour: number;
+  } | null;
+  your_record: { acceptance_rate: number; resolved_n: number } | null;
+}
+
+export function getMarketHint(machineId: string): Promise<MarketHint> {
+  return request<MarketHint>(
+    `/v1alpha1/machines/${encodeURIComponent(machineId)}/market-hint`
+  );
 }
 
 /** The host's own listing row, verbatim from the API plus the two display
@@ -1874,19 +1910,38 @@ export interface PriceUnpriced {
   observed_by: null;
 }
 
-/** The ZC side of the comparison: the reference ladder and the best live
- * ask per class (null where the book is empty). A separate list on purpose
- * — a shape with nowhere to put a cross-currency total. */
+/** One observation of a class's book, recorded as the book moved. The
+ * sparkline and the 24h delta are drawn from these and nothing else — no
+ * interpolation between points. */
+export interface PricePoint {
+  at: string;
+  best_ask_zc: number | null;
+  open_asks: number;
+}
+
+/** A row on the compute board: one capability class as a ticker. `last`
+ * null where the book is empty (rendered `—`, never 0); `change_zc` null
+ * when there is no observation older than 24 h to compare against
+ * ("no history", not 0). */
 export interface ZcRung {
   capability_class: string;
   reference_zc_per_hour: number;
   best_ask_zc: number | null;
+  change_zc: number | null;
+  depth: number;
+  history: PricePoint[];
 }
 
 export interface PricesView {
   quotes: PriceQuote[];
   unpriced: PriceUnpriced[];
   zc: ZcRung[];
+  /** Real counts over the whole book, for the board's header strip. */
+  board: {
+    open_asks_total: number;
+    live_classes: number;
+    observations_24h: number;
+  };
 }
 
 export function getPrices(): Promise<PricesView> {

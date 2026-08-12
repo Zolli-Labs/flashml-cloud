@@ -1,26 +1,29 @@
 "use client";
 
-import type { MarketMatch } from "@/lib/cloud-api";
-import { formatZc } from "@/lib/market-credits";
+import { Coins, HandCoins, type Icon } from "@phosphor-icons/react";
 
-/** This account's priced entitlements, on both sides, state verbatim.
+import type { MarketMatches } from "@/lib/cloud-api";
+import { matchCards, type MatchCard } from "@/lib/market-credits";
+
+/** This account's priced entitlements, on both sides, drawn as cards.
  *
- * Markup only. The state column is the API's vocabulary — granted,
- * claimed, settled, refunded, expired — because a match is an
- * entitlement, not an assignment, and the one misunderstanding this panel
- * can cause is a buyer reading `granted` as "work was assigned". The
- * sentence under the heading says so up front. */
-export function MatchesPanel({
-  matches,
-}: {
-  matches: { as_buyer: MarketMatch[]; as_host: MarketMatch[] } | null;
-}) {
+ * Markup only: `matchCards` in `lib/market-credits.ts` turns each API
+ * match into its card — the class, the tasks × price line, the state
+ * badge with its one-line consequence, and the held/settled/refunded
+ * mini-stats (present only when non-zero). Nothing here re-derives a
+ * state or invents an amount.
+ *
+ * The state column stays the API's vocabulary — granted, claimed,
+ * settled, refunded, expired — because a match is an entitlement, not an
+ * assignment, and the one misunderstanding this panel can cause is a
+ * buyer reading `granted` as "work was assigned". The sentence under the
+ * heading says so up front. */
+export function MatchesPanel({ matches }: { matches: MarketMatches | null }) {
   if (matches === null) return null;
-  const empty =
-    matches.as_buyer.length === 0 && matches.as_host.length === 0;
+  const cards = matchCards(matches);
 
   return (
-    <section className="rounded-lg border border-border bg-surface p-4">
+    <section>
       <h2 className="text-sm font-semibold">Matches</h2>
       <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
         Priced entitlements, not assignments: a granted match entitles the
@@ -28,76 +31,92 @@ export function MatchesPanel({
         and settles only for accepted work.
       </p>
 
-      {empty ? (
-        <p className="mt-3 max-w-prose text-sm text-muted-foreground">
-          No matches on either side yet. A match appears when a bid clears
-          an ask in one of the books.
-        </p>
-      ) : (
-        <div className="mt-4 grid gap-6 lg:grid-cols-2">
-          <MatchList title="As buyer" matches={matches.as_buyer} />
-          <MatchList title="As host" matches={matches.as_host} />
-        </div>
-      )}
+      <div className="mt-4 grid gap-6 lg:grid-cols-2">
+        <MatchColumn
+          title="As buyer"
+          cards={cards.buyer}
+          icon={Coins}
+          emptySentence="No matches as a buyer yet — a match appears when a bid clears an ask in one of the books."
+        />
+        <MatchColumn
+          title="As host"
+          cards={cards.host}
+          icon={HandCoins}
+          emptySentence="No matches as a host yet — a match appears when a bid clears an ask in one of the books."
+        />
+      </div>
     </section>
   );
 }
 
-function MatchList({
+/** One side of the market: a column of match cards, or the designed empty
+ * state — an icon in a dashed square and one sentence, never a bare
+ * "none". */
+function MatchColumn({
   title,
-  matches,
+  cards,
+  icon: Icon,
+  emptySentence,
 }: {
   title: string;
-  matches: MarketMatch[];
+  cards: MatchCard[];
+  icon: Icon;
+  emptySentence: string;
 }) {
   return (
     <div>
       <h3 className="label-caps">{title}</h3>
-      {matches.length === 0 ? (
-        <p className="mt-2 text-sm text-muted-foreground">none</p>
+      {cards.length === 0 ? (
+        <div className="mt-2 flex flex-col items-center justify-center rounded-lg border border-dashed border-border px-4 py-8 text-center">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground">
+            <Icon className="h-4 w-4" />
+          </div>
+          <p className="mt-2 max-w-prose text-sm text-muted-foreground">
+            {emptySentence}
+          </p>
+        </div>
       ) : (
-        <ul className="mt-2 divide-y divide-border rounded-md border border-border">
-          {matches.map((m) => (
-            <li key={m.id} className="px-3 py-2.5">
-              <div className="flex items-baseline justify-between gap-4">
-                <span className="font-mono text-xs">
-                  {m.capability_class} · {m.tasks} task
-                  {m.tasks === 1 ? "" : "s"}
-                </span>
-                <span className="shrink-0 font-mono text-xs">
-                  {formatZc(m.agreed_zc_per_hour)} ZC/hour
-                </span>
-              </div>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                <StateWord state={m.state} />
-                {m.held_zc > 0 && ` · ${formatZc(m.held_zc)} ZC held`}
-                {m.charged_zc > 0 && ` · ${formatZc(m.charged_zc)} ZC settled`}
-                {m.refunded_zc > 0 &&
-                  ` · ${formatZc(m.refunded_zc)} ZC refunded`}
-              </p>
-            </li>
+        <div className="mt-2 space-y-3">
+          {cards.map((card) => (
+            <MatchCardView key={card.id} card={card} />
           ))}
-        </ul>
+        </div>
       )}
     </div>
   );
 }
 
-/** The state in words a buyer cannot misread. `granted` says explicitly
- * that no money has moved; the closed states say what ended them. */
-function StateWord({ state }: { state: string }) {
-  switch (state) {
-    case "granted":
-      return "granted — entitled, no money moved yet";
-    case "claimed":
-      return "claimed — escrow held against the lease";
-    case "settled":
-      return "settled — paid for accepted work";
-    case "refunded":
-      return "refunded — the attempt produced nothing accepted";
-    case "expired":
-      return "expired — the hold went back to the buyer";
-    default:
-      return `state the console does not recognise ("${state}")`;
-  }
+/** One match as a card: class chip and state badge on the first line, the
+ * tasks × agreed price in mono, and the money mini-stats when the lib
+ * says there are any. */
+function MatchCardView({ card }: { card: MatchCard }) {
+  return (
+    <div className="rounded-lg border border-border bg-surface p-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="rounded-full border border-border px-1.5 py-0.5 font-mono text-[10px] text-foreground">
+          {card.capabilityClass}
+        </span>
+        <span className="rounded-full border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+          {card.stateBadge}
+        </span>
+      </div>
+
+      <div className="mt-3 font-mono text-xs">
+        {card.tasks} × {card.priceText}
+      </div>
+
+      {card.mini.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 border-t border-border pt-3">
+          {card.mini.map((stat) => (
+            <div key={stat.label}>
+              <div className="label-caps">{stat.label}</div>
+              <div className="mt-0.5 font-mono text-xs">
+                {stat.valueText} ZC
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

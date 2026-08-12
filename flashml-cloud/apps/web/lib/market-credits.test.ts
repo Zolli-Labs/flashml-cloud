@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import type { LedgerMovement } from "./cloud-api";
 import {
+  amountTone,
   formatZc,
+  groupRowsByDay,
   ledgerRows,
   movementAmountMzc,
   movementCounterparty,
+  movementIcon,
   movementLabel,
 } from "./market-credits";
 
@@ -186,5 +189,52 @@ describe("ledgerRows", () => {
       }),
     ]);
     expect(row.amountText).toBe("+1 ZC");
+  });
+});
+
+describe("v2 wallet helpers", () => {
+  it("maps reasons to stable icon keys and unknowns to a neutral key", () => {
+    expect(movementIcon("grant")).toBe("grant");
+    expect(movementIcon("escrow_hold")).toBe("hold");
+    expect(movementIcon("earned_accepted_work")).toBe("settle");
+    expect(movementIcon("airdrop")).toBe("unknown");
+  });
+
+  it("tones a cross-account credit as credit and a self-transfer as self", () => {
+    expect(
+      amountTone(
+        movement({
+          reason: "earned_accepted_work",
+          legs: [
+            { kind: "spendable", delta_zc: 1000, mine: true },
+            { kind: "escrow", delta_zc: -1000, mine: false },
+          ],
+        })
+      )
+    ).toBe("credit");
+    expect(
+      amountTone(
+        movement({
+          reason: "escrow_hold",
+          legs: [
+            { kind: "spendable", delta_zc: -1000, mine: true },
+            { kind: "escrow", delta_zc: 1000, mine: true },
+          ],
+        })
+      )
+    ).toBe("self");
+  });
+
+  it("groups rows into day buckets preserving order", () => {
+    // Identical instants always share a key; January vs August are different
+    // days in every timezone, so the grouping is deterministic.
+    const groups = groupRowsByDay([
+      { at: "2026-08-12T09:00:00Z" },
+      { at: "2026-08-12T09:00:00Z" },
+      { at: "2026-01-01T00:00:00Z" },
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].rows).toHaveLength(2);
+    expect(groups[1].rows).toHaveLength(1);
   });
 });

@@ -55,6 +55,7 @@ lives inside a SQL string cannot be read or argued with.
 from __future__ import annotations
 
 import math
+from datetime import timedelta
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -2143,3 +2144,165 @@ def price_series(
             (capability_class_name, int(limit)),
         )
         return list(cur.fetchall())
+
+
+# --- v2 market terminal: composed reads ------------------------------------
+
+
+def machine_gpu_label(capabilities: Any) -> str | None:
+    """A one-line spec for a machine, from what the agent reported.
+
+    ``"NVIDIA GeForce RTX 4090 · 24 GB · 1 GPU"`` for a single readable
+    card, the smallest card's memory naming the class promise when several
+    differ; ``"8 cores"`` for a CPU-only machine. ``None`` when the
+    capabilities say nothing a reader could stand behind — the same
+    under-claiming rule :func:`capability_class` uses, one surface down.
+
+    The memory is the reported MiB rounded to whole GiB for display only;
+    the CLASS still comes from the exact MiB ladder, and this label never
+    feeds it. A label that rounds a 23.9 GiB card to "24 GB" is a fact
+    about the card; a class that did the same rounding would be a promise
+    the hardware might not keep.
+    """
+    if not isinstance(capabilities, Mapping):
+        return None
+    gpus = capabilities.get("gpus")
+    devices = (
+        [g for g in gpus if isinstance(g, Mapping)]
+        if isinstance(gpus, list)
+        else []
+    )
+    if devices:
+        named = [d for d in devices if isinstance(d.get("name"), str)]
+        memories = [_gpu_memory_mb(d) for d in devices]
+        if any(m is None for m in memories):
+            return None  # unreadable memory: same refusal as the ladder
+        gib = round(min(m for m in memories if m is not None) / 1024)
+        name = named[0]["name"] if named else "GPU"
+        count = len(devices)
+        return f"{name} · {gib} GB · {count} GPU" if count > 1 else f"{name} · {gib} GB"
+    cores = capabilities.get("cpu_cores")
+    if isinstance(cores, (int, float)) and not isinstance(cores, bool):
+        return f"{int(cores)} cores"
+    return None
+
+
+def lifetime_for_owner(db: psycopg.Connection, owner_id: str) -> dict[str, int]:
+    """Lifetime sums per reason over this account's ledger legs.
+
+    Read OUT OF THE LEDGER like every balance in this module, never tracked
+    in a second column. A fresh account returns all zeros, which is a TRUE
+    zero (nothing has moved) unlike an unmeasured metric — the caller labels
+    the tiles "lifetime" so 0 reads as "nothing yet", not "we lost the
+    number".
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select e.reason, coalesce(sum(e.delta_zc), 0) as total
+              from public.credit_entries e
+              join public.credit_accounts a on a.id = e.account_id
+             where a.owner_id = %s::uuid
+             group by e.reason
+            """,
+            (owner_id,),
+        )
+        totals = {str(row["reason"]): int(row["total"]) for row in cur.fetchall()}
+    return {
+        "earned_zc": totals.get("earned_accepted_work", 0),
+        "spent_zc": -totals.get("spent_accepted_work", 0),
+        "granted_zc": totals.get("grant", 0),
+        "refunded_zc": totals.get("escrow_refund", 0)
+        + totals.get("escrow_release", 0),
+    }
+
+
+def class_board(
+    db: psycopg.Connection, capability_class_name: str, *, history_limit: int = 24
+) -> dict[str, Any]:
+    """One class's row on the market board, composed from recorded rows.
+
+    ``last`` is the newest observation's best ask (null when the book is
+    empty), ``depth`` the open asks behind it, ``history`` the last N
+    observations for a sparkline, and ``change_zc`` the newest best ask
+    minus the newest observation older than 24 h — null when there is no
+    such pair, rendered as "no history", never as 0. Every input is a row
+    ``record_price_observation`` wrote as the book moved; nothing here is
+    interpolated between them.
+    """
+    series = price_series(db, capability_class_name, limit=history_limit)
+    last = series[0] if series else None
+    change: int | None = None
+    if last is not None and last["best_ask_zc"] is not None:
+        for older in series[1:]:
+            if older["best_ask_zc"] is None:
+                continue
+            age = last["observed_at"] - older["observed_at"]
+            if age >= timedelta(hours=24):
+                change = int(last["best_ask_zc"]) - int(older["best_ask_zc"])
+                break
+    asks = [
+        int(row["ask_zc_per_hour"])
+        for row in _open_listings_in_class(db, capability_class_name)
+    ]
+    median: int | None = None
+    if asks:
+        ordered = sorted(asks)
+        mid = len(ordered) // 2
+        median = (
+            ordered[mid]
+            if len(ordered) % 2
+            else (ordered[mid - 1] + ordered[mid]) // 2
+        )
+    return {
+        "capability_class": capability_class_name,
+        "last_zc": int(last["best_ask_zc"]) if last and last["best_ask_zc"] is not None else None,
+        "depth": int(last["open_listings"]) if last else 0,
+        "change_zc": change,
+        "median_ask_zc": median,
+        "history": [
+            {
+                "at": row["observed_at"],
+                "best_ask_zc": (
+                    int(row["best_ask_zc"]) if row["best_ask_zc"] is not None else None
+                ),
+                "open_asks": int(row["open_listings"]),
+            }
+            for row in series
+        ],
+    }
+
+
+def _open_listings_in_class(
+    db: psycopg.Connection, capability_class_name: str
+) -> list[dict[str, Any]]:
+    with db.cursor() as cur:
+        cur.execute(
+            "select ask_zc_per_hour from public.listings"
+            " where capability_class = %s and state = 'open'",
+            (capability_class_name,),
+        )
+        return list(cur.fetchall())
+
+
+def machines_for_ids(
+    db: psycopg.Connection, machine_ids: Collection[str]
+) -> dict[str, dict[str, Any]]:
+    """``id -> {owner_id, name, capabilities}`` for a set of machines, one query.
+
+    Only the fields a market surface renders (the spec line, the name) plus
+    the owner (already public on every ask as ``host_id``) are selected: a
+    helper that returned the whole machines row would hand token hashes and
+    enrolment state to a read that has no business with them. Unknown ids
+    are simply absent, so a caller enriching asks tolerates a machine that
+    vanished between the book read and this one.
+    """
+    if not machine_ids:
+        return {}
+    with db.cursor() as cur:
+        cur.execute(
+            "select id, owner_id, name, capabilities from public.machines"
+            " where id = any(%s::uuid[])",
+            (sorted(machine_ids),),
+        )
+        return {str(row["id"]): dict(row) for row in cur.fetchall()}

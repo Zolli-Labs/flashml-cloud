@@ -757,3 +757,125 @@ def test_a_failed_attempt_refunds_the_buyer_and_earns_nothing(
     assert buyer_credits["held_zc"] == 0
     assert buyer_credits["spendable_zc"] == marketmod.STARTING_GRANT_ZC
     assert host_credits["spendable_zc"] == marketmod.STARTING_GRANT_ZC
+
+
+# ---------------------------------------------------------------------------
+# v2 market terminal contract
+# ---------------------------------------------------------------------------
+
+
+def test_machine_gpu_label_reads_only_what_the_agent_reported():
+    assert marketmod.machine_gpu_label(
+        {"gpus": [{"name": "NVIDIA GeForce RTX 4090", "memory_total_mb": 24564}]}
+    ) == "NVIDIA GeForce RTX 4090 · 24 GB"
+    assert marketmod.machine_gpu_label({"cpu_cores": 8}) == "8 cores"
+    # Unreadable memory is refused, same direction as the class ladder.
+    assert marketmod.machine_gpu_label(
+        {"gpus": [{"name": "x", "memory_total_mb": None}]}
+    ) is None
+    assert marketmod.machine_gpu_label({}) is None
+
+
+def test_credits_carry_lifetime_sums_out_of_the_ledger(client, db, coordinator):
+    host, buyer = _new_user(db), _new_user(db)
+    client.get("/v1alpha1/credits", headers=_auth(buyer))
+    machine_id, token = _enrolled_machine(db, host, capabilities=GPU_24GB)
+    _, _, bid, _ = _listed_match(
+        db, host=host, buyer=buyer, machine_id=machine_id
+    )
+    coordinator_lease = f"lease-{uuid.uuid4().hex[:8]}"
+    _claim(client, coordinator, token, lease_id=coordinator_lease,
+           job_id=str(bid["job_id"]))
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts set claimed_at = now() - interval '1 hour'"
+            " where lease_id = %s",
+            (coordinator_lease,),
+        )
+    client.post(
+        f"/v1alpha1/attempts/{coordinator_lease}/complete",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"output_sha256": "0" * 64},
+    )
+
+    host_credits = client.get("/v1alpha1/credits", headers=_auth(host)).json()
+    buyer_credits = client.get("/v1alpha1/credits", headers=_auth(buyer)).json()
+    assert host_credits["lifetime"]["earned_zc"] == 1000
+    assert buyer_credits["lifetime"]["spent_zc"] == 1000
+    assert buyer_credits["lifetime"]["granted_zc"] == (
+        marketmod.STARTING_GRANT_ZC
+    )
+
+
+def test_listings_carry_spec_line_and_effective_price(client, db):
+    host, buyer = _new_user(db), _new_user(db)
+    machine = _machine(
+        db, host,
+        capabilities={"gpus": [
+            {"name": "NVIDIA GeForce RTX 4090", "memory_total_mb": 24564}
+        ]},
+    )
+    marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=1000
+    )
+    body = client.get(
+        "/v1alpha1/market/listings", headers=_auth(buyer)
+    ).json()
+    ask = next(a for a in body["asks"] if a["machine_id"] == machine)
+    assert ask["gpu_label"] == "NVIDIA GeForce RTX 4090 · 24 GB"
+    # Unproven host: effective price is null, never a fabricated number.
+    assert ask["acceptance_rate"] is None
+    assert ask["effective_zc_per_hour"] is None
+
+
+CPU_ONLY = {"cpu_cores": 4}  # lands in cpu-small, a class no other test lists
+
+
+def test_market_hint_composes_class_book_and_record(client, db):
+    host = _new_user(db)
+    machine = _machine(db, host, capabilities=CPU_ONLY)
+    marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=1200
+    )
+    got = client.get(
+        f"/v1alpha1/machines/{machine}/market-hint", headers=_auth(host)
+    )
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["capability_class"] == "cpu-small"
+    assert body["book"]["best_ask_zc"] == 1200
+    assert body["book"]["median_ask_zc"] == 1200
+    assert body["book"]["reference_zc_per_hour"] == (
+        marketmod.REFERENCE_ZC_PER_HOUR["cpu-small"]
+    )
+
+
+def test_market_hint_is_404_for_a_stranger(client, db):
+    host, stranger = _new_user(db), _new_user(db)
+    machine = _machine(db, host, capabilities=GPU_24GB)
+    got = client.get(
+        f"/v1alpha1/machines/{machine}/market-hint", headers=_auth(stranger)
+    )
+    assert got.status_code == 404
+
+
+def test_prices_board_carries_history_depth_and_change(client, db):
+    host = _new_user(db)
+    machine = _machine(db, host, capabilities=CPU_ONLY)
+    marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=900
+    )
+    body = client.get(
+        "/v1alpha1/prices", headers=_auth(_new_user(db))
+    ).json()
+    row = next(r for r in body["zc"] if r["capability_class"] == "cpu-small")
+    # The hint test may also list cpu-small in the same session, so the
+    # book can hold more than this test's ask; the min is still ours.
+    assert row["best_ask_zc"] == 900
+    assert row["depth"] >= 1
+    assert row["history"], "listing a machine records an observation"
+    assert row["history"][0]["best_ask_zc"] == 900
+    # A single observation has no 24h-ago pair: change is null, not 0.
+    assert row["change_zc"] is None
+    assert body["board"]["open_asks_total"] >= 1
+    assert body["board"]["live_classes"] >= 1

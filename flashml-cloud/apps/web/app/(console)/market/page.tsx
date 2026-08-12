@@ -16,9 +16,10 @@ import {
 } from "@/lib/cloud-api";
 import { ledgerRows, type LedgerRow } from "@/lib/market-credits";
 
-/** The market's account page: balance, ledger, and this account's priced
- * entitlements. Reads are classified — loading, present, unreadable — and
- * a failed read renders as unreadable, never as an empty account. */
+/** The market's account page: the wallet header, the activity strip, the
+ * double-entry ledger as a table, and this account's priced entitlements
+ * as cards. Reads are classified — loading, present, unreadable — and a
+ * failed read renders as unreadable, never as an empty account. */
 export default function MarketPage() {
   const router = useRouter();
   const [state, setState] = useState<"loading" | "present" | "unreadable">(
@@ -94,6 +95,7 @@ export default function MarketPage() {
         <CreditsPanel
           state={state}
           balance={balance}
+          movements={movements}
           rows={rows}
           nextBefore={nextBefore}
           onLoadMore={loadMore}
