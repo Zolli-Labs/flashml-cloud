@@ -54,6 +54,15 @@ class AcquiredMachine:
     provider_handle: str
     machine_id: str | None
     node_id: str | None
+    #: What the venue says it will actually charge, which is not necessarily
+    #: what it quoted. ``acquire_for_job`` re-runs the budget ceilings against
+    #: this number when it is higher than the quote and destroys the machine
+    #: rather than keep one that breaks a ceiling, so the two null-ish values
+    #: are NOT interchangeable: ``None`` means the venue did not restate the
+    #: price and the quote stands, while ``0.0`` is a positive claim that the
+    #: machine is free -- it overwrites the quote on the row and contributes
+    #: nothing to the rolling-window ceiling. An adapter that has no number
+    #: must return ``None``.
     usd_per_hour: float | None
 
 
@@ -75,9 +84,34 @@ class ResourceProvider(Protocol):
     venue_id: str
 
     async def acquire(self, *, request: CapacityRequest) -> AcquiredMachine:
+        """Create one machine and return once it is claiming leases.
+
+        **An implementation that raises must first destroy whatever it
+        created.** Between creating the instance and returning, the handle
+        exists only inside this call: it is not on the row, nothing else knows
+        it, and the caller cannot name what it does not receive. An adapter
+        that gives up after creating something -- registration timed out is the
+        usual way -- and lets the handle die with the exception has produced a
+        machine that bills until a human reads the venue's console.
+
+        The caller does not *rely* on this. ``acquire.acquire_for_job`` keeps
+        the row in a state the reconciler selects whenever this call raises,
+        precisely because the obligation cannot be enforced from outside. But
+        an unnameable machine is one no sweep can destroy, so an implementation
+        that cannot honour it should at minimum log the handle it is about to
+        lose.
+        """
         ...
 
     async def release(self, *, handle: str) -> ReleaseOutcome:
+        """Destroy the machine ``handle`` names. Idempotent.
+
+        ``destroyed=True`` is a claim that nothing is running any more, and a
+        row is closed on it -- an already-gone handle is a success, but "the
+        call returned" is not. Report ``destroyed=False`` rather than raising
+        when the venue answered and refused; both are treated as *unknown* and
+        leave the row to be swept again.
+        """
         ...
 
     async def observe(self, *, handle: str) -> ProviderState:

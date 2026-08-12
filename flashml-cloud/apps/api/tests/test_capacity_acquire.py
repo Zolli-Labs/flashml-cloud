@@ -1,15 +1,22 @@
 """Acquisition: the row exists before the money does.
 
 The ordering under test is the whole point. A crash between "we decided to
-spend" and "the venue answered" must leave a REQUESTED row, because that row
-is the only thing that will ever find the orphan.
+spend" and "the venue answered" must leave a row the reconciler still selects,
+because that row is the only thing that will ever find the orphan.
 
-**Every test here cleans up its `rented_capacity` rows.** The Postgres
-fixture is session-scoped and never truncated between files, and
-`window_spend_usd` has no venue, owner or job filter *on purpose* — it is one
-global ceiling. Rows left behind here are refusals somewhere else, in a file
-that has no idea why. `test_capacity_budget.py::spender` states the same rule
-at length; the fixtures below are a deliberate copy of it rather than a
+Most of these tests are really one question, the same one
+``test_capacity_reconcile.py`` asks: *can a machine we are paying for end up
+in a state nothing will ever look at again?* The answer has to be no, and the
+interesting cases are the ones where something went wrong — the venue raised,
+the venue refused to destroy what it made, or a sweep settled the row while
+the venue was still answering.
+
+**Every test here cleans up its `rented_capacity`, `machines` and `pools`
+rows.** The Postgres fixture is session-scoped and never truncated between
+files, and `window_spend_usd` has no venue, owner or job filter *on purpose* —
+it is one global ceiling. Rows left behind here are refusals somewhere else, in
+a file that has no idea why. `test_capacity_budget.py::spender` states the same
+rule at length; the fixtures below are a deliberate copy of it rather than a
 shared `conftest.py` entry, because `conftest.py` is loaded by every test in
 the suite and a collision there breaks runs that have nothing to do with this
 feature.
@@ -17,15 +24,28 @@ feature.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import sandbox_identity as si
-from flashml_cloud_api.capacity.acquire import acquire_for_job
-from flashml_cloud_api.capacity.budget import BudgetRefused, assert_within_budget
-from flashml_cloud_api.capacity.provider import CapacityRequest, FakeProvider
+from flashml_cloud_api.capacity.acquire import (
+    ACQUIRE_NOT_DESTROYED,
+    ACQUIRE_UNCONFIRMED,
+    acquire_for_job,
+)
+from flashml_cloud_api.capacity.budget import (
+    BudgetRefused,
+    assert_within_budget,
+    window_spend_usd,
+)
+from flashml_cloud_api.capacity.provider import (
+    CapacityRequest,
+    FakeProvider,
+    ReleaseOutcome,
+)
+from flashml_cloud_api.capacity.reconcile import unreleased_rows
 from test_jobs_from_repo import db  # noqa: F401 - fixture
 
 
@@ -36,15 +56,62 @@ class _Settings:
     coordinator_url = "http://coordinator"
 
 
+@dataclass
+class _Venue(FakeProvider):
+    """A venue that can be made to behave badly on purpose.
+
+    A subclass of the shipped `FakeProvider` so `acquire` stays the real thing
+    and only the named half is instrumented. It mirrors
+    `test_capacity_reconcile.py::_Venue` rather than importing it: a test
+    module reaching into another test module's private names couples two files
+    that are only meant to share a subject.
+
+    `refuse_destroy` exists because **the `destroyed=False` branch had no
+    coverage at all in this file**, and that gap is what allowed a RELEASED row
+    to keep a live handle.
+    """
+
+    #: Refuse the destroy, the way a venue that answers and says no does.
+    refuse_destroy: bool = False
+    #: Answer a different hourly rate than the request quoted.
+    answers_usd_per_hour: float | None = None
+    #: A live connection. When set, the row is settled mid-`acquire`, the way
+    #: a reconciler sweeping in another task would.
+    sweeps_with: object = None
+
+    async def acquire(self, *, request: CapacityRequest):
+        got = await super().acquire(request=request)
+        if self.sweeps_with is not None:
+            with self.sweeps_with.cursor() as cur:
+                cur.execute(
+                    """
+                    update public.rented_capacity
+                       set state = 'RELEASED', released_at = now()
+                     where owner_id = %s and state = 'REQUESTED'
+                    """,
+                    (request.owner_id,),
+                )
+        if self.answers_usd_per_hour is not None:
+            got = replace(got, usd_per_hour=self.answers_usd_per_hour)
+        return got
+
+    async def release(self, *, handle: str) -> ReleaseOutcome:
+        if self.refuse_destroy:
+            # Still live afterwards: a venue that says no and means it.
+            return ReleaseOutcome(destroyed=False, detail="deletion refused")
+        return await super().release(handle=handle)
+
+
 @pytest.fixture
 def an_owner(db):
     """A real profile to charge against, and a promise to clean up.
 
     `rented_capacity.owner_id` is a real foreign key to `public.profiles`, so
     an invented `gen_random_uuid()` is refused by the database. Deleting the
-    `auth.users` row cascades the profile, its machines and its rented rows;
-    the explicit delete first is there so the intent survives a future change
-    to the cascade.
+    `auth.users` row cascades everything below it; the explicit deletes first
+    are there so the intent survives a future change to the cascade — and so a
+    leak fails here rather than as somebody else's budget refusal three files
+    later.
     """
     user_id = str(uuid.uuid4())
     with db.cursor() as cur:
@@ -60,6 +127,12 @@ def an_owner(db):
             cur.execute(
                 "delete from public.rented_capacity where owner_id = %s",
                 (user_id,),
+            )
+            cur.execute(
+                "delete from public.machines where owner_id = %s", (user_id,)
+            )
+            cur.execute(
+                "delete from public.pools where owner_id = %s", (user_id,)
             )
             cur.execute("delete from auth.users where id = %s", (user_id,))
 
@@ -100,12 +173,25 @@ def _rows_for(db, owner_id):
         return cur.fetchall()
 
 
+def _is_swept(db, rid) -> bool:
+    """Would the reconciler find this row? The real query, not a restatement
+    of it — the whole failure-path design is written against this list, so a
+    test that asserted a state name instead would pass the day the list
+    changed."""
+    return str(rid) in {str(r["id"]) for r in unreleased_rows(db, settle_after_s=0.0)}
+
+
+# ---------------------------------------------------------------------------
+# the happy path
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_a_successful_acquisition_lands_active_with_a_handle(
     db, an_owner, a_pool
 ):
     rid = await acquire_for_job(
-        db, FakeProvider(), _Settings(), request=_request(an_owner, a_pool),
+        db, _Venue(), _Settings(), request=_request(an_owner, a_pool),
     )
     row = _row(db, rid)
     assert row["state"] == "ACTIVE"
@@ -128,7 +214,7 @@ async def test_a_refused_budget_creates_no_row_and_calls_no_provider(
 ):
     """The gate runs BEFORE anything is created, so a refusal costs nothing
     and leaves nothing."""
-    provider = FakeProvider()
+    provider = _Venue()
 
     class _Tight(_Settings):
         rented_usd_per_acquisition_max = 0.0
@@ -147,11 +233,73 @@ async def test_a_refused_budget_creates_no_row_and_calls_no_provider(
     assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
 
 
+# ---------------------------------------------------------------------------
+# what the venue answers about money
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_a_provider_failure_records_FAILED_and_leaves_nothing_live(
+async def test_an_answered_rate_above_the_quote_is_re_gated_and_destroyed(
     db, an_owner, a_pool
 ):
-    provider = FakeProvider(fail_after_create=True)
+    """The ceilings ran against the QUOTE. This is the first sight of what the
+    venue will actually charge, and without a second look a venue that quotes
+    $0.50 and answers $50.00/hr is recorded at $50.00 and refused by nothing.
+
+    The refusal is not a note in a log: the machine is destroyed before it is
+    raised.
+    """
+    venue = _Venue(answers_usd_per_hour=50.0)
+    with pytest.raises(BudgetRefused) as exc:
+        await acquire_for_job(
+            db, venue, _Settings(), request=_request(an_owner, a_pool),
+        )
+    assert "50.0" in str(exc.value)
+    assert venue.live_handles() == []
+    row = _rows_for(db, an_owner)[0]
+    assert row["state"] == "FAILED"
+    assert row["failure_code"] == "BudgetRefused"
+    assert row["released_at"] is not None
+    # Never ACTIVE, so the answered rate was never recorded: the row keeps the
+    # quote it was gated on, and the window is not left carrying $50/hr for a
+    # machine that lived for a second.
+    assert float(row["usd_per_hour"]) == 0.5
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
+
+
+@pytest.mark.asyncio
+async def test_an_answered_rate_within_the_ceilings_is_recorded_not_ignored(
+    db, an_owner, a_pool
+):
+    """The other half of the re-gate: a higher-but-affordable answer is what
+    we are billed, so it is what the window counts."""
+    rid = await acquire_for_job(
+        db, _Venue(answers_usd_per_hour=1.5), _Settings(),
+        request=_request(an_owner, a_pool),
+    )
+    row = _row(db, rid)
+    assert row["state"] == "ACTIVE"
+    assert float(row["usd_per_hour"]) == 1.5
+
+
+# ---------------------------------------------------------------------------
+# the failure paths, which are the reason this module is written the way it is
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_failed_acquire_leaves_a_row_the_sweep_still_selects(
+    db, an_owner, a_pool
+):
+    """`acquire` raising is the most likely orphan there is: the pod is
+    created, then waiting for it to register times out.
+
+    `FakeProvider` destroys what it made before raising and is *required* to —
+    but that obligation lives in a docstring, and "the venue refused before
+    creating anything" is indistinguishable from "the venue created something
+    and we lost it" from here. So the row is not closed on the strength of it.
+    """
+    provider = _Venue(fail_after_create=True)
     with pytest.raises(RuntimeError):
         await acquire_for_job(
             db, provider, _Settings(), request=_request(an_owner, a_pool),
@@ -159,11 +307,59 @@ async def test_a_provider_failure_records_FAILED_and_leaves_nothing_live(
     assert provider.live_handles() == []
     rows = _rows_for(db, an_owner)
     assert len(rows) == 1
-    assert rows[0]["state"] == "FAILED"
-    assert rows[0]["failure_code"]
-    # The failure is legible without reading source: which venue, and what
-    # went wrong.
+    assert rows[0]["failure_code"] == ACQUIRE_UNCONFIRMED
     assert rows[0]["failure_detail"]
+    # Nothing to name, so nothing was named.
+    assert rows[0]["provider_handle"] is None
+    # The property, asked the way the reconciler asks it.
+    assert _is_swept(db, rows[0]["id"])
+
+
+@pytest.mark.asyncio
+async def test_a_failure_before_the_venue_is_closed_not_left_for_the_sweep(
+    db, an_owner, a_pool
+):
+    """The other side of the rule, and what keeps the sweep's list worth
+    reading.
+
+    A failure that happens before `provider.acquire` is ever called cannot
+    have created anything, because nothing was asked. Closing it FAILED is
+    provable rather than optimistic — and if these rows were left sweepable
+    too, the list an operator reconciles against the venue would fill up with
+    attempts that provably never reached it.
+
+    A pool that already holds a machine is the failure used here because it is
+    also the KNOWN LIMIT of this feature: it is meant to put a rented machine
+    into the submitter's ordinary pool, alongside the machines they already
+    have, and it cannot yet — `provision_sandbox_machine` ends with
+    `assert_pool_isolated`, which requires the pool to hold exactly the one
+    machine being minted. Relaxing that is out of scope in the design (§6);
+    this test fails the moment somebody changes it, which is the conversation
+    that should happen.
+    """
+    sitting_tenant = str(
+        dbmod.insert_machine(
+            db, owner_id=an_owner, node_id=f"laptop-{uuid.uuid4()}",
+            name="the owner's own laptop", platform="linux",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=sitting_tenant, pool_id=str(a_pool))
+
+    provider = _Venue()
+    with pytest.raises(si.PoolNotIsolated):
+        await acquire_for_job(
+            db, provider, _Settings(), request=_request(an_owner, a_pool),
+        )
+    assert provider.live_handles() == []
+    rows = _rows_for(db, an_owner)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "FAILED"
+    assert rows[0]["failure_code"] == "PoolNotIsolated"
+    assert rows[0]["provider_handle"] is None
+    assert not _is_swept(db, rows[0]["id"])
+    # The pool is exactly as it was: the failed mint rolled back with its
+    # transaction rather than leaving a half-bound machine behind.
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [sitting_tenant]
 
 
 @pytest.mark.asyncio
@@ -177,45 +373,17 @@ async def test_a_failed_acquisition_gives_the_pool_back(db, an_owner, a_pool):
     """
     with pytest.raises(RuntimeError):
         await acquire_for_job(
-            db, FakeProvider(fail_after_create=True), _Settings(),
+            db, _Venue(fail_after_create=True), _Settings(),
             request=_request(an_owner, a_pool, job="job-doomed"),
         )
     assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
 
     # ...and the retry, into the same pool, works.
     rid = await acquire_for_job(
-        db, FakeProvider(), _Settings(),
+        db, _Venue(), _Settings(),
         request=_request(an_owner, a_pool, job="job-retry"),
     )
     assert _row(db, rid)["state"] == "ACTIVE"
-
-
-@dataclass
-class _SweptFromUnderUs(FakeProvider):
-    """A venue that answers while the reconciler releases the row.
-
-    Not a contrivance: the row is opened before the venue is asked anything
-    precisely so that a sweep can find it, and a sweep that fires during a
-    slow acquisition is the race the `and state = 'REQUESTED'` guard on the
-    ACTIVE update exists for. What matters is what happens next — the machine
-    the venue just created is ours, it is billing, and nothing else knows its
-    handle.
-    """
-
-    db: object = None
-
-    async def acquire(self, *, request):
-        got = await super().acquire(request=request)
-        with self.db.cursor() as cur:  # type: ignore[union-attr]
-            cur.execute(
-                """
-                update public.rented_capacity
-                   set state = 'RELEASED', released_at = now()
-                 where owner_id = %s and state = 'REQUESTED'
-                """,
-                (request.owner_id,),
-            )
-        return got
 
 
 @pytest.mark.asyncio
@@ -230,72 +398,85 @@ async def test_a_machine_acquired_into_a_lost_race_is_destroyed_not_dropped(
     then makes the acquisition fail, which is the only shape in which
     "releases whatever the provider created" is actually a claim.
     """
-    provider = _SweptFromUnderUs(db=db)
+    venue = _Venue(sweeps_with=db)
     with pytest.raises(RuntimeError):
         await acquire_for_job(
-            db, provider, _Settings(), request=_request(an_owner, a_pool),
+            db, venue, _Settings(), request=_request(an_owner, a_pool),
         )
     # The money stopped.
-    assert provider.live_handles() == []
+    assert venue.live_handles() == []
     row = _rows_for(db, an_owner)[0]
     # ...and the row names what was destroyed, rather than the handle living
     # and dying in a local variable.
     assert row["provider_handle"]
     assert row["failure_code"]
+    # RELEASED, written by the sweep that raced us, is now TRUE — so it is
+    # left alone. Relabelling another actor's settled row as FAILED would
+    # discard a correct statement for a less useful one.
+    assert row["state"] == "RELEASED"
+    assert row["released_at"] is not None
     # The credential went with it, so the pool can be rented into again.
     assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
 
 
 @pytest.mark.asyncio
-async def test_a_pool_that_already_holds_a_machine_is_refused_today(
+async def test_a_machine_that_will_not_die_reopens_the_row_it_lost_the_race_to(
     db, an_owner, a_pool
 ):
-    """A KNOWN LIMIT, pinned here so it is discovered by a test rather than
-    by a buyer.
+    """THE case this failure path exists for.
 
-    This feature is meant to put a rented machine into the submitter's
-    ordinary pool, alongside the machines they already have. It cannot yet:
-    `provision_sandbox_machine` ends with `assert_pool_isolated`, which
-    requires the pool to hold exactly the one machine being minted. So the
-    first rental into an already-populated pool is refused, and a second
-    rental into the same pool is refused by the first one.
+    A reconciler marks a handleless REQUESTED row RELEASED. This acquisition
+    then returns from the venue with a real handle, loses its compare-and-set,
+    records the handle — and its own release fails. Leaving the state alone
+    would leave a RELEASED row naming a live machine, and
+    `unreleased_rows` selects neither RELEASED nor FAILED, so nothing would
+    ever look at it again: the machine bills for ever.
 
-    The refusal is clean — it happens before the venue is asked anything, so
-    no money is spent — and the row records it. Relaxing the assertion is
-    explicitly out of scope in the design (§6 "Out of scope"); this test
-    fails the moment somebody changes that, which is the conversation that
-    should happen.
+    So an unknown outcome does not leave the state alone. It forces the row
+    back into the list.
     """
-    sitting_tenant = str(
-        dbmod.insert_machine(
-            db, owner_id=an_owner, node_id=f"laptop-{uuid.uuid4()}",
-            name="the owner's own laptop", platform="linux",
-        )
-    )
-    dbmod.bind_machine_pool(db, machine_id=sitting_tenant, pool_id=str(a_pool))
-
-    provider = FakeProvider()
-    with pytest.raises(si.PoolNotIsolated):
+    venue = _Venue(sweeps_with=db, refuse_destroy=True)
+    with pytest.raises(RuntimeError):
         await acquire_for_job(
-            db, provider, _Settings(), request=_request(an_owner, a_pool),
+            db, venue, _Settings(), request=_request(an_owner, a_pool),
         )
-    # Refused before the venue was asked for anything.
-    assert provider.live_handles() == []
-    rows = _rows_for(db, an_owner)
-    assert len(rows) == 1
-    assert rows[0]["state"] == "FAILED"
-    assert rows[0]["provider_handle"] is None
-    # The pool is exactly as it was: the failed mint rolled back with its
-    # transaction rather than leaving a half-bound machine behind.
-    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [sitting_tenant]
+    # The machine really is still running. That is the premise, not an
+    # accident of the fake.
+    assert len(venue.live_handles()) == 1
+
+    row = _rows_for(db, an_owner)[0]
+    assert row["provider_handle"] == venue.live_handles()[0]
+    assert row["failure_code"] == ACQUIRE_NOT_DESTROYED
+    assert row["state"] == "REQUESTED"
+    # The released_at the sweep wrote was a claim about a machine that turned
+    # out to be alive, so it does not survive either.
+    assert row["released_at"] is None
+    assert _is_swept(db, row["id"])
+    # The credential dies whatever the venue said — `cleanup_session`'s rule.
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
+
+
+# ---------------------------------------------------------------------------
+# the guard on the guard
+# ---------------------------------------------------------------------------
 
 
 def test_the_window_is_left_clean_for_the_next_file(db):
-    """The guard on the guard, copied from `test_capacity_budget.py` for the
-    same reason: if this file ever commits rows it does not remove, every
-    later test file inherits a ceiling it never spent — and the failure lands
-    somewhere else entirely, which is the worst possible place to debug it
-    from."""
+    """If this file ever commits rows it does not remove, every later test
+    file inherits a ceiling it never spent — and the failure lands somewhere
+    else entirely, which is the worst possible place to debug it from.
+
+    Asserted as a NUMBER, not by calling `assert_within_budget`: the most this
+    file could ever leak is a couple of dollars an hour against a $10 cap, and
+    `FakeProvider` answers $0.00/hr, so a gate-shaped guard here would pass no
+    matter how much it left behind.
+
+    A failure means either this file leaked or an earlier one did; both are
+    worth stopping for.
+    """
+    assert window_spend_usd(db, hours=24.0) == 0.0
+    # And the gate itself still passes, which is what a later file will
+    # actually depend on.
     assert_within_budget(
         db, venue_id="runpod", usd_per_hour=0.5, settings=_Settings(),
     )
