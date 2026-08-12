@@ -29,6 +29,10 @@ Two things, and no FlashML imports:
   produce it cannot commit and will be retried elsewhere until its attempts
   run out.
 
+There is a third thing, and it is not a key in this file at all: if you want
+your task to survive a machine dying, it has to write and read checkpoints
+at two fixed paths. See "Not losing the work" below.
+
 Your repo is staged at `/work/inputs/code/`. Anything else you declared as
 an input lands beside it. **A task has no network** — it cannot `pip
 install`, fetch a dataset, or reach HuggingFace once it starts. Everything
@@ -476,6 +480,100 @@ reduce:
 `reduce` without `kind` is refused — `reduce: {metric: acc}` is a plausible
 typo that would otherwise silently mean no reduction at all, discovered
 after the job ran.
+
+## Not losing the work: checkpoints
+
+`allow_partial` below decides what happens to a **job** when a task is lost.
+Checkpoints decide how much of the **task** is lost in the first place.
+
+Every task runs with the checkpoint relay on. There is no `checkpoint:` key,
+nothing to switch on and nothing to configure — the relay is always
+watching, and the only question is whether your code gives it anything to
+watch. If it does not, a machine that gets closed or reclaimed takes the
+whole task with it and the retry starts again from step 0, however far the
+first attempt got. Preflight warns about this at submit time
+(`no-checkpoint`), because nothing else in the product would.
+
+Two halves. Both are required, and both paths are fixed.
+
+**Write your state to `/work/out/ckpt/step-<N>.json`.** That directory, that
+filename, `N` the integer step you reached, one file per checkpoint. The
+relay globs `step-*.json` in that one directory and ships each new file off
+the machine the moment it appears. Anything else — including
+`/work/out/checkpoints/`, which is the plausible spelling — is not a
+checkpoint. It is collected as an ordinary artifact when the task finishes,
+and lost with the machine if it does not.
+
+**Read `/work/inputs/resume.json` on start.** When a previous attempt died,
+the agent stages that attempt's last committed checkpoint there before your
+code runs. On a first attempt the file is simply absent, so "no such file"
+means "start from scratch", not an error.
+
+```python
+ckpt_dir = Path(args.out) / "ckpt"          # args.out is /work/out
+ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+start_step = 0
+resume = Path("/work/inputs/resume.json")
+if resume.exists():                          # absent on a first attempt
+    state = json.loads(resume.read_text())
+    start_step = state["step"]
+
+for step in range(start_step, total_steps):
+    ...
+    if step % 100 == 0:
+        write_atomically(ckpt_dir / f"step-{step}.json", state)
+```
+
+### Write it atomically
+
+The relay ships whatever it finds, and it can find your file a millisecond
+after you create it. A checkpoint caught half-written is a checkpoint
+nothing can resume from — and the run it kills is the *next* one, which
+makes it a bug you discover long after you wrote it.
+
+Write to a temp file **in the same directory**, then `os.replace` it into
+place:
+
+```python
+def write_atomically(path: Path, state: dict) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")   # same dir; not a step-*.json
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, path)     # atomic within one filesystem
+```
+
+Two details that are easy to get wrong: rename is only atomic *within* a
+filesystem, so the temp file has to be next to the target and not in
+`/tmp`; and the temp name must not itself match `step-*.json`, or the relay
+will ship the half-written file you were trying to hide.
+
+`e2e/competition/workload_common.py` has the full-strength version — it
+fsyncs the file before the rename and the directory after it, so the
+checkpoint survives a power cut and not just a killed process.
+
+### `flashruntime.torch.checkpoint()` is not this
+
+It is the closest thing to a trap in the system, because it gets the
+directory *right*. Its root defaults to `<output dir>/ckpt` — exactly where
+the relay is looking — and then it writes `step-000100/` **directories**
+holding `model.pt` and `optimizer.pt`. The relay globs `step-*.json`
+**files**. So reaching for the runtime's own helper lands you in the right
+place in a shape nothing can see: none of it is ever shipped, no error is
+raised, and the first sign is a retry that starts from zero.
+
+If you call it, you still have to write your own `step-<N>.json` beside it.
+
+### Checkpoint small resumable state, not the model
+
+A task's whole output directory is capped at **2 GiB**, and checkpoints sit
+inside it and count against that cap. They also cross the network twice on
+a task that succeeds — once from the relay while you are running, once as
+part of the final output.
+
+So checkpoint what you need to *resume*: the step, the optimizer state, the
+RNG state, and the weights only if they are small. A 1.5 GiB snapshot every
+hundred steps does not make the task likelier to survive — it fails the
+output cap and saturates a volunteer's uplink on the way there.
 
 ## Surviving a dead machine: `allow_partial`
 

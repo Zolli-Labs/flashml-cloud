@@ -47,6 +47,19 @@ def _levels(findings: list[Finding], code: str) -> set[str]:
     return {f.level for f in findings if f.code == code}
 
 
+def _except_checkpoint(findings: list[Finding]) -> list[Finding]:
+    """Everything except the ``no-checkpoint`` advisory.
+
+    Checkpointing is on for every task, so an entrypoint that says nothing
+    about it draws a warning — which is the entire point of that check, and
+    which most fixtures in this file do. They are testing something else,
+    and asserting "no findings at all" on them would be asserting that
+    ``no-checkpoint`` does not work. The dedicated section near the bottom
+    is where its firing and staying quiet are both pinned down.
+    """
+    return [f for f in findings if f.code != "no-checkpoint"]
+
+
 CLEAN_SOURCE = """
     import json
     import os.path
@@ -75,7 +88,21 @@ CLEAN_SOURCE = """
 
 def test_a_clean_repo_produces_no_findings_at_all(tmp_path):
     root = _repo(tmp_path, {"train.py": CLEAN_SOURCE})
-    assert preflight(_config(), root, PYTHON_SLIM) == []
+    assert _except_checkpoint(preflight(_config(), root, PYTHON_SLIM)) == []
+
+
+def test_the_only_finding_on_a_clean_repo_is_the_checkpoint_advisory(tmp_path):
+    """The baseline moved, and it is worth spelling out where it moved to.
+
+    A file this short has nothing to resume from, so `no-checkpoint` firing
+    is the check working: checkpointing is on for every task and this one
+    would lose everything to a closed laptop. It is a warning precisely so
+    that saying so costs a line of advice and not a refused submission.
+    """
+    root = _repo(tmp_path, {"train.py": CLEAN_SOURCE})
+    findings = preflight(_config(), root, PYTHON_SLIM)
+    assert _codes(findings) == {"no-checkpoint"}
+    assert _levels(findings, "no-checkpoint") == {"warning"}
 
 
 def test_a_clean_pytorch_repo_produces_no_findings(tmp_path):
@@ -93,7 +120,8 @@ def test_a_clean_pytorch_repo_produces_no_findings(tmp_path):
             """
         },
     )
-    assert preflight(_config(image="pytorch-cpu"), root, PYTORCH) == []
+    findings = preflight(_config(image="pytorch-cpu"), root, PYTORCH)
+    assert _except_checkpoint(findings) == []
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +400,7 @@ def test_a_docstring_mentioning_curl_does_not_fire(tmp_path):
             ''',
         },
     )
-    assert preflight(_config(), root, PYTHON_SLIM) == []
+    assert _except_checkpoint(preflight(_config(), root, PYTHON_SLIM)) == []
 
 
 def test_an_ordinary_subprocess_call_is_not_network_use(tmp_path):
@@ -454,7 +482,7 @@ def test_reading_a_file_outside_work_out_is_not_a_write(tmp_path):
         tmp_path,
         {"train.py": 'open("/work/inputs/data.csv").close()\nprint("metrics.json")\n'},
     )
-    assert preflight(_config(), root, PYTHON_SLIM) == []
+    assert _except_checkpoint(preflight(_config(), root, PYTHON_SLIM)) == []
 
 
 def test_a_computed_path_is_not_guessed_at(tmp_path):
@@ -471,6 +499,237 @@ def test_a_computed_path_is_not_guessed_at(tmp_path):
         },
     )
     assert "writes-outside-out" not in _codes(preflight(_config(), root, PYTHON_SLIM))
+
+
+# ---------------------------------------------------------------------------
+# no-checkpoint / checkpoint-path — the convention nothing else states
+#
+# Checkpointing is unconditional: the compiler emits `parameters["checkpoint"]
+# = {}` for every job, so the relay is always running and there is no
+# `checkpoint:` key for a user to find. The directory and the glob are
+# hardcoded in flashnode. That makes these two findings the only place in the
+# product where a user is told what their code has to do, which is why both
+# halves of the contract — the write path and the resume path — are pinned
+# here rather than left to the message text.
+# ---------------------------------------------------------------------------
+
+COMPETITION = Path(__file__).resolve().parents[4] / "e2e" / "competition"
+
+#: The two tests below read real workloads out of `e2e/`, which is a sibling
+#: of this app inside the repo and absent from an installed wheel. Skipped
+#: rather than failed there: they are a cross-check on files this package
+#: does not own, not a property of the package.
+needs_competition = pytest.mark.skipif(
+    not COMPETITION.is_dir(), reason="e2e/competition not present in this checkout"
+)
+
+
+def _competition_repo(tmp_path: Path, entry: str) -> Path:
+    """A repo holding one real competition workload plus the helper it
+    imports. These are the reference implementations of the convention (and
+    of having nothing to checkpoint), so they are the strongest available
+    check that these findings fire on the right file and only on it."""
+    root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
+    for name in (entry, "workload_common.py"):
+        (root / name).write_bytes((COMPETITION / name).read_bytes())
+    return root
+
+
+def test_an_entrypoint_that_never_mentions_checkpointing_is_warned(tmp_path):
+    root = _repo(tmp_path, {"train.py": CLEAN_SOURCE})
+    findings = preflight(_config(), root, PYTHON_SLIM)
+    assert "no-checkpoint" in _codes(findings), findings
+    assert _levels(findings, "no-checkpoint") == {"warning"}
+
+
+def test_no_checkpoint_never_blocks_a_submission(tmp_path):
+    """A warning, not an error, and the reason is not squeamishness.
+
+    `federated-contract` is an error because the author opted into a mode
+    that cannot work without the contract. Nobody opts into checkpointing —
+    it is on for everyone — and a forty-second job has nothing to resume
+    from. Refusing those would block working code, which the module
+    docstring rules out in as many words.
+    """
+    root = _repo(tmp_path, {"train.py": CLEAN_SOURCE})
+    findings = preflight(_config(), root, PYTHON_SLIM)
+    assert [f for f in findings if f.level == "error"] == []
+
+
+def test_no_checkpoint_states_both_halves_of_the_contract(tmp_path):
+    """The finding is the documentation. A message that said "this job is
+    not resumable" would be an observation with no way to act on it."""
+    root = _repo(tmp_path, {"train.py": CLEAN_SOURCE})
+    (message,) = [
+        f.message for f in preflight(_config(), root, PYTHON_SLIM)
+        if f.code == "no-checkpoint"
+    ]
+    assert "/work/out/ckpt/step-<N>.json" in message      # where to write
+    assert "/work/inputs/resume.json" in message          # where to read
+    assert "atomic" in message                            # how to write it
+    assert "start from scratch" in message                # absent on attempt 1
+
+
+def test_no_checkpoint_warns_about_the_torch_helper_that_looks_right(tmp_path):
+    """`flashruntime.torch.checkpoint()` defaults its root to
+    `<output dir>/ckpt` — the exact directory the relay watches — and then
+    writes `step-000100/` *directories* of `model.pt`, while the relay globs
+    `step-*.json` *files*. Reaching for the runtime's own helper is the one
+    wrong turn a careful user is most likely to take, and it is silent."""
+    root = _repo(tmp_path, {"train.py": CLEAN_SOURCE})
+    (message,) = [
+        f.message for f in preflight(_config(), root, PYTHON_SLIM)
+        if f.code == "no-checkpoint"
+    ]
+    assert "flashruntime.torch.checkpoint()" in message
+    assert "step-*.json" in message
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'open("/work/out/ckpt/step-100.json", "w").close()',
+        'open("out/ckpt/step-0.json", "w").close()',
+        'print("/work/inputs/resume.json")',
+        'ckpt = f"step-{n}.json"',
+        'CKPT_DIR = "/work/out/ckpt"',
+    ],
+)
+def test_any_one_marker_silences_no_checkpoint(tmp_path, line):
+    """Each marker is individually weak evidence, so any one of them is
+    enough. Demanding all three would fire on code that builds its
+    checkpoint directory out of an `--out` flag — which is most of it."""
+    root = _repo(tmp_path, {"train.py": f"{line}\nprint('metrics.json')\n"})
+    assert "no-checkpoint" not in _codes(preflight(_config(), root, PYTHON_SLIM))
+
+
+@needs_competition
+def test_the_real_checkpointed_workload_is_not_warned(tmp_path):
+    """`e2e/competition/train_checkpointed.py` is the convention done right,
+    and it never spells `out/ckpt` — it joins `--out` with "ckpt" at run
+    time. If this fires, the check is wrong about the reference file."""
+    root = _competition_repo(tmp_path, "train_checkpointed.py")
+    findings = preflight(_config("train_checkpointed.py"), root, PYTHON_SLIM)
+    assert _codes(findings) == set(), findings
+
+
+@needs_competition
+def test_the_real_evaluate_workload_is_warned_and_still_allowed(tmp_path):
+    """`evaluate_model.py` genuinely has nothing to checkpoint. It is still
+    told — an eval that dies halfway still starts over — and it is still a
+    warning, so nothing about this finding stands in its way."""
+    root = _competition_repo(tmp_path, "evaluate_model.py")
+    findings = preflight(_config("evaluate_model.py"), root, PYTHON_SLIM)
+    assert "no-checkpoint" in _codes(findings), findings
+    assert _levels(findings, "no-checkpoint") == {"warning"}
+    assert "checkpoint-path" not in _codes(findings)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # The trap in the brief: plausible, under `out/`, and silent until
+        # now because `writes-outside-out` correctly does not fire on it.
+        'open("/work/out/checkpoints/model.pt", "wb").close()',
+        'open("/work/out/ckpt/model.pt", "wb").close()',
+        'open("/work/out/ckpt/latest.json", "w").close()',
+        # What `flashruntime.torch.checkpoint()` produces, spelled out.
+        'open("/work/out/ckpt/step-000100/model.pt", "wb").close()',
+        'open("out/ckpt/checkpoint.json", "w").close()',
+        'from pathlib import Path; Path("/work/out/ckpt/final.json").write_text("{}")',
+    ],
+)
+def test_a_checkpoint_shaped_write_in_the_wrong_shape_is_warned(tmp_path, line):
+    root = _repo(tmp_path, {"train.py": f"{line}\nprint('metrics.json')\n"})
+    findings = preflight(_config(), root, PYTHON_SLIM)
+    assert "checkpoint-path" in _codes(findings), findings
+    assert _levels(findings, "checkpoint-path") == {"warning"}
+    # `writes-outside-out` is silent on all of these — the path IS under
+    # `out/` — which is exactly the gap this finding exists to close.
+    assert "writes-outside-out" not in _codes(findings)
+
+
+def test_checkpoint_path_names_the_line_and_the_offending_path(tmp_path):
+    root = _repo(
+        tmp_path,
+        {
+            "train.py": 'print("metrics.json")\n'
+            'open("/work/out/checkpoints/model.pt", "wb").close()\n'
+        },
+    )
+    (message,) = [
+        f.message for f in preflight(_config(), root, PYTHON_SLIM)
+        if f.code == "checkpoint-path"
+    ]
+    assert message.startswith("line 2:")
+    assert "'/work/out/checkpoints/model.pt'" in message
+    assert "collected as an ordinary artifact" in message
+    assert "lost with the machine" in message
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'open("/work/out/ckpt/step-100.json", "w").close()',
+        'open("/work/out/ckpt/step-000100.json", "w").close()',
+        'open("out/ckpt/step-7.json", "w").close()',
+        'from pathlib import Path; Path("/work/out/ckpt/step-1.json").write_text("{}")',
+    ],
+)
+def test_the_convention_itself_is_never_warned_about(tmp_path, line):
+    root = _repo(tmp_path, {"train.py": f"{line}\nprint('metrics.json')\n"})
+    assert "checkpoint-path" not in _codes(preflight(_config(), root, PYTHON_SLIM))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'open("/work/out/metrics.json", "w").close()',
+        'open("/work/out/model.pt", "wb").close()',
+        'open("/work/out/nested/results.json", "w").close()',
+    ],
+)
+def test_an_ordinary_output_is_not_mistaken_for_a_checkpoint(tmp_path, line):
+    """The name is the whole trigger. An output that never claims to be a
+    checkpoint is just an output, and saying otherwise would put this
+    warning on every job in the system."""
+    root = _repo(tmp_path, {"train.py": f"{line}\nprint('metrics.json')\n"})
+    assert "checkpoint-path" not in _codes(preflight(_config(), root, PYTHON_SLIM))
+
+
+def test_a_checkpoint_written_outside_out_is_reported_once_as_the_worse_thing(
+    tmp_path,
+):
+    """`/tmp/ckpt/step-1.json` is not collected at all, which subsumes not
+    being relayed. One finding, and it is the one that matters."""
+    root = _repo(
+        tmp_path,
+        {
+            "train.py": 'open("/tmp/ckpt/step-1.json", "w").close()\n'
+            'print("metrics.json")\n'
+        },
+    )
+    codes = _codes(preflight(_config(), root, PYTHON_SLIM))
+    assert "writes-outside-out" in codes
+    assert "checkpoint-path" not in codes
+
+
+def test_a_computed_checkpoint_path_is_not_guessed_at(tmp_path):
+    """Same doctrine as `writes-outside-out`: no literal, no finding. The
+    `no-checkpoint` text scan is what covers the computed case."""
+    root = _repo(
+        tmp_path,
+        {
+            "train.py": """
+                from pathlib import Path
+                ckpt_dir = Path("/work/out") / "ckpt"
+                open(ckpt_dir / "step-1.json", "w").close()
+                print("metrics.json")
+            """,
+        },
+    )
+    assert "checkpoint-path" not in _codes(preflight(_config(), root, PYTHON_SLIM))
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +802,7 @@ def test_a_sitecustomize_or_pth_file_in_the_repo_is_never_loaded(tmp_path):
             "__init__.py": f"from pathlib import Path; Path({str(marker)!r}).write_text('x')\n",
         },
     )
-    assert preflight(_config(), root, PYTHON_SLIM) == []
+    assert _except_checkpoint(preflight(_config(), root, PYTHON_SLIM)) == []
     assert not marker.exists()
 
 
@@ -596,7 +855,15 @@ def test_an_enormous_literal_path_is_truncated_in_the_message(tmp_path):
         {"train.py": 'open("/tmp/' + "A" * 50_000 + '", "w").close()\n'},
     )
     findings = preflight(_config(), root, PYTHON_SLIM)
-    assert all(len(f.message) < 1000 for f in findings)
+    assert findings
+    # What has to be bounded is the part the *repo* controls. A finding's
+    # own fixed text is as long as the contract it has to state — both
+    # `federated-contract` and `no-checkpoint` quote a full protocol on
+    # purpose — so a flat cap on message length would be measuring the
+    # wrong thing and would shorten the wrong text when it failed.
+    for finding in findings:
+        assert "A" * 200 not in finding.message
+        assert len(finding.message) < 2000
 
 
 def test_a_pathologically_nested_source_file_does_not_hang_or_crash(tmp_path):

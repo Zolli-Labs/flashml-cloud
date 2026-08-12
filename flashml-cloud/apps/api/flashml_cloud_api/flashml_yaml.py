@@ -64,6 +64,38 @@ REMOVED_FEDERATED_KEYS = {
     ),
 }
 
+#: Every key refused with a REASON rather than as a typo — the three removed
+#: federated keys above, plus one that was never a key at all.
+#:
+#: ``checkpoint`` is here because someone who reads that FlashML survives a
+#: machine dying will reasonably try to switch that on, and today they get
+#: "unknown key(s) ['checkpoint']" and go hunting for a spelling mistake in a
+#: feature that is not theirs to configure: it is unconditional, emitted on
+#: every compiled job (see ``compile.CHECKPOINT_PARAM``). So the refusal has
+#: to teach the convention — where to write state and where to read it back —
+#: rather than merely say no.
+#:
+#: It is deliberately NOT added to ``ALLOWED_KEYS``. Accepting the key and
+#: ignoring whatever it was set to is exactly the "surface that takes input it
+#: does not honour" this module exists to refuse.
+#:
+#: ONE dict and ONE check, extended rather than paralleled: a second refusal
+#: path with its own message shape is how two answers to the same file drift
+#: into disagreeing.
+REFUSED_KEYS = {
+    **REMOVED_FEDERATED_KEYS,
+    # Absolute paths, matching `preflight` and the authoring guide. Both
+    # spellings work — the container runs with `-w /work` — but one product
+    # must not say `out/ckpt/` here and `/work/out/ckpt/` two screens later,
+    # and absolute is the one that survives a workload that chdir()s.
+    "checkpoint": (
+        "not a key — checkpointing is always on. Write your resumable state "
+        "to /work/out/ckpt/step-<N>.json and read /work/inputs/resume.json "
+        "on start; FlashML relays those files as your task runs and stages "
+        "the last one back when a machine dies"
+    ),
+}
+
 # num_shards is bounded at 999 downstream (flashruntime's federated
 # averaging service); a sweep anywhere near that size is far more likely
 # a typo (a stray extra axis, a pasted range) than an intentional launch,
@@ -269,11 +301,11 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     if not isinstance(raw, dict):
         raise ConfigError("flashml.yaml must be a mapping at the top level")
 
-    removed = sorted(set(raw) & set(REMOVED_FEDERATED_KEYS))
-    if removed:
+    refused = sorted(set(raw) & set(REFUSED_KEYS))
+    if refused:
         raise ConfigError(
             "flashml.yaml sets " + ", ".join(
-                f"{key!r} ({REMOVED_FEDERATED_KEYS[key]})" for key in removed
+                f"{key!r} ({REFUSED_KEYS[key]})" for key in refused
             ) + "."
         )
 

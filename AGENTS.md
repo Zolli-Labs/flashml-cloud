@@ -28,14 +28,34 @@ repo had already removed. The deployed coordinator and the agents talking to
 it were running different code, and nothing detected it.
 
 **There is now exactly one copy of the runtime, and this repo does not hold
-it.** Both `flashml-cloud/apps/api/pyproject.toml` and `render.yaml` pin the
-same commit of `Zolli-Labs/flashml`. When you change the pin, change it in
-**both**, plus `FLASHML_PIN` in the `Makefile` — the API and the coordinator
-running different protocol versions is precisely the failure this removed.
+it.** It is consumed as an **exact PyPI version** — not a git ref — and
+**four** sites carry that version. All four move together:
 
-Commit pins are acceptable while `flashruntime` is unpublished. Once it is on
-PyPI, move to `flashruntime==0.3.0` and treat a surviving commit pin as a
-release blocker. See
+| Site | Line as of **0.6.0** (verified 2026-08-11) |
+|---|---|
+| `Makefile` | `RUNTIME_VERSION := 0.6.0` |
+| `render.yaml` | **prod** coordinator `buildCommand` — `flashruntime[service]==0.6.0` |
+| `render.yaml` | **dev** coordinator `buildCommand` — `flashruntime[service]==0.6.0` |
+| `flashml-cloud/apps/api/pyproject.toml` | `"flashruntime==0.6.0"` |
+
+Bumping three of the four ships an API and a coordinator speaking different
+protocol versions, which is precisely the failure this consolidation removed.
+
+**`FLASHML_PIN` no longer exists.** Anything still naming it — or saying the
+pin lives in "three places", or in "both" of two files — predates the dev
+coordinator joining on 2026-08-02 and is wrong. `render.yaml` is the
+authority. Stale mentions survive in `docs/superpowers/plans/`; those are
+history, not instructions.
+
+When you bump the pin, **bump this table and the identical one in the
+workspace `CLAUDE.md` in the same commit.** A stale version on the page an
+agent reads before touching a pin is how a correct set of four gets
+"corrected" back to a version that no longer exists on PyPI.
+
+Because the pin is a *published* version, this repo cannot consume unreleased
+runtime work at all: merge → release to PyPI → bump all four.
+`make e2e-setup LOCAL=1` installs from `../flashml` for local rehearsal only
+and is not release evidence. See
 `flashml-cloud/docs/superpowers/specs/2026-08-01-foundation-design.md` §3.3.
 
 ## Dependency direction

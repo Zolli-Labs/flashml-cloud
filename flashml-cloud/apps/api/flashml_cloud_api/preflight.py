@@ -114,6 +114,58 @@ OUT_DIR = "/work/out"
 FEDERATED_WEIGHTS_PATH = "/work/inputs/weights.json"
 FEDERATED_DELTA_FILE = "delta.json"
 
+#: The checkpoint convention, which is the whole of fault tolerance and is
+#: not written down anywhere the user can see.
+#:
+#: Every task now runs with the checkpoint relay on — the compiler emits
+#: ``parameters["checkpoint"] = {}`` unconditionally — so there is no
+#: ``checkpoint:`` key in ``flashml.yaml`` and nothing for a config to
+#: decide. Both of these paths are **hardcoded in flashnode**, which is why
+#: they are duplicated here rather than derived from anything: the relay
+#: globs ``step-*.json`` under ``workdir/out/ckpt``
+#: (``flashnode/executor/loop.py``) and stages the last committed part at
+#: ``/work/inputs/resume.json`` for the next attempt. A user who writes
+#: their state anywhere else, or under any other filename, gets a job that
+#: looks fine and has no fault tolerance at all.
+CKPT_DIR = f"{OUT_DIR}/ckpt"
+CKPT_FILENAME = "step-<N>.json"
+RESUME_PATH = "/work/inputs/resume.json"
+RESUME_FILE = "resume.json"
+
+#: A checkpoint path as the relay sees it — relative to the output
+#: directory. Anything under ``out/`` whose name says "checkpoint" and does
+#: not match this is a file the relay will never ship.
+#: ``fullmatch``, not ``match``: ``$`` also matches before a trailing
+#: newline, and a path is not allowed a lucky one.
+_CKPT_CONVENTION = re.compile(r"ckpt/step-\d+\.json")
+
+#: The full statement of the checkpoint contract, quoted verbatim in both
+#: checkpoint findings for the same reason ``FEDERATED_CONTRACT`` is: a
+#: finding that said "your job is not resumable" would be an observation
+#: with no way to act on it. The ``flashruntime.torch.checkpoint()``
+#: sentence is not a footnote — that helper defaults its root to
+#: ``<output dir>/ckpt``, the exact directory the relay watches, and then
+#: writes ``step-000100/`` *directories* of ``model.pt``/``optimizer.pt``
+#: into it. The relay globs ``step-*.json`` *files*, so a user who reaches
+#: for the runtime's own helper lands in the right place in a shape nothing
+#: can see, and hears nothing about it.
+CHECKPOINT_CONTRACT = (
+    f"Every task runs with the checkpoint relay on — there is no "
+    f"'checkpoint:' key and nothing to configure — but it ships only what it "
+    f"recognises: (1) write your resumable state to "
+    f"{CKPT_DIR}/{CKPT_FILENAME}, that directory and that filename, N the "
+    f"integer step reached, one file per checkpoint, written atomically "
+    f"(temp file in the same directory, then os.replace) — a half-written "
+    f"file is a checkpoint nothing can resume from; (2) on start read "
+    f"{RESUME_PATH}, where the agent stages the last committed checkpoint "
+    f"when a previous attempt died — absent on a first attempt, so 'no such "
+    f"file' means 'start from scratch'. Note that "
+    f"flashruntime.torch.checkpoint() does NOT satisfy this: it writes "
+    f"'step-<N>/' directories of model.pt into that same {CKPT_DIR} while "
+    f"the relay globs 'step-*.json' files, so nothing it writes is shipped. "
+    f"See docs/guides/writing-flashml-yaml.md, 'Not losing the work'"
+)
+
 #: The metrics key naming the data chunks a machine actually finished.
 #:
 #: Load-bearing, and the quietest thing in the system if it is missing.
@@ -583,6 +635,7 @@ def preflight(
     findings.extend(_shell_findings(tree))
     findings.extend(_metrics_findings(source_text, entry_label))
     findings.extend(_federated_findings(config, source_text, entry_label))
+    findings.extend(_checkpoint_findings(source_text, entry_label))
     findings.extend(_write_findings(tree))
 
     return _dedupe(findings)
@@ -736,21 +789,120 @@ def _federated_findings(
     ]
 
 
+def _checkpoint_findings(source_text: str, entry_label: str) -> list[Finding]:
+    """Tell a job with no fault tolerance that it has none.
+
+    A **warning**, unlike ``federated-contract`` next door, and the
+    difference is the same one that docstring draws. That check guards a
+    mode the author *opted into*: ``mode: federated`` cannot work at all
+    without the delta protocol, so refusing is the kind thing. Here the
+    author opted into nothing. Checkpointing is on for every task whether
+    the entrypoint uses it or not, and a forty-second job legitimately has
+    no state worth saving — refusing that would block working code, which
+    this module's docstring rules out in as many words.
+
+    But saying nothing is not an option either, because until now that is
+    exactly what happened: the convention lives in flashnode's source, no
+    key in ``flashml.yaml`` hints at it, and a user who never met it finds
+    out by losing a run.
+
+    Deliberately a *text* scan rather than an ast walk, for the reason
+    ``_federated_findings`` gives: the path is far more often
+    ``ckpt_dir / f"step-{step}.json"`` than a literal, and requiring a
+    recognisable ``open()`` would fire on every repo that does the right
+    thing. The markers are correspondingly loose — they ask whether the
+    author has *heard of* the convention, not whether they implemented it.
+
+    Which is why **any one** marker silences this, rather than all three.
+    Each is individually weak evidence, and a file that builds its
+    checkpoint directory out of an ``--out`` flag names ``out/ckpt``
+    nowhere while doing exactly the right thing — ``e2e/competition/
+    train_checkpointed.py`` is that file. Demanding all three would fire on
+    the reference implementation of the convention, which is the precise
+    definition of a check that trains people to ignore it.
+    """
+    markers = (
+        # `out/ckpt`, not the full `/work/out/ckpt`: the common shape is a
+        # `--out` flag joined with "ckpt", so the absolute prefix is often
+        # nowhere in the file even when the directory is exactly right.
+        (CKPT_DIR, "out/ckpt" in source_text),
+        # The filename in two loose halves, because it is nearly always
+        # built: `f"step-{step}.json"` has no single literal to look for.
+        (
+            f"a '{CKPT_FILENAME}' filename",
+            "step-" in source_text and ".json" in source_text,
+        ),
+        (RESUME_PATH, RESUME_FILE in source_text),
+    )
+    if any(present for _, present in markers):
+        return []
+    absent = [label for label, _ in markers]
+    return [
+        Finding(
+            WARNING,
+            "no-checkpoint",
+            f"{entry_label} never mentions {' or '.join(absent)}, so this job "
+            f"has no fault tolerance. Nothing about it is wrong — but a "
+            f"machine that dies takes the whole task with it, and the retry "
+            f"starts again from step 0 however far the first attempt got. "
+            f"{CHECKPOINT_CONTRACT}",
+        )
+    ]
+
+
+def _checkpoint_tail(path: str) -> str | None:
+    """A collected path as the relay sees it — relative to the output
+    directory — when its name claims to be a checkpoint, else None.
+
+    Only ever called on paths ``_writes_outside_out`` already accepted, so
+    the string is either absolute under ``/work/out`` or relative under
+    ``out/`` and the prefix strip below cannot run off the front.
+    """
+    normalised = posixpath.normpath(path)
+    prefix = OUT_DIR if normalised.startswith(OUT_DIR) else "out"
+    tail = normalised[len(prefix) :].lstrip("/")
+    lowered = tail.lower()
+    if "ckpt" not in lowered and "checkpoint" not in lowered:
+        return None
+    return tail
+
+
 def _write_findings(tree: ast.AST) -> list[Finding]:
     findings: list[Finding] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         for target in _open_write_paths(node) + _method_write_paths(node):
-            if not _writes_outside_out(target):
+            if _writes_outside_out(target):
+                findings.append(
+                    Finding(
+                        WARNING,
+                        "writes-outside-out",
+                        f"line {node.lineno}: writes to {_safe(target)!r}, which is "
+                        f"outside {OUT_DIR} — only files under {OUT_DIR} are "
+                        f"collected as artifacts",
+                    )
+                )
+                continue
+            # Collected, so `writes-outside-out` is silent — and that
+            # silence is the trap. `/work/out/checkpoints/model.pt` is
+            # plausible, is under `out/`, and is not a checkpoint: the
+            # relay never ships it, and the user hears nothing until a
+            # machine dies and the retry starts from zero.
+            tail = _checkpoint_tail(target)
+            if tail is None or _CKPT_CONVENTION.fullmatch(tail):
                 continue
             findings.append(
                 Finding(
                     WARNING,
-                    "writes-outside-out",
-                    f"line {node.lineno}: writes to {_safe(target)!r}, which is "
-                    f"outside {OUT_DIR} — only files under {OUT_DIR} are "
-                    f"collected as artifacts",
+                    "checkpoint-path",
+                    f"line {node.lineno}: writes what looks like a checkpoint to "
+                    f"{_safe(target)!r}, which is not {CKPT_DIR}/{CKPT_FILENAME}. "
+                    f"The relay ships only 'step-*.json' files directly inside "
+                    f"{CKPT_DIR}, so this file is not a checkpoint: it will be "
+                    f"collected as an ordinary artifact when the task finishes, "
+                    f"and lost with the machine if it does not. "
+                    f"{CHECKPOINT_CONTRACT}",
                 )
             )
     return findings

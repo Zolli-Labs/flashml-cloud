@@ -280,6 +280,39 @@ export interface ArtifactRecord {
   created_at: string;
 }
 
+/** One file of `GET /v1alpha1/jobs/{id}/artifacts` — the listing route, and
+ * the ONLY source of a job's output files this console reads.
+ *
+ * `key` is already relative to the job's own artifact prefix (`task-000/
+ * result.json`, `task-000/ckpt/step-40.json`), which is exactly what the
+ * download route's `{key}` segment takes — so nothing here strips a prefix
+ * off anything, and there is no uri to misread. */
+export interface JobArtifactEntry {
+  key: string;
+  size_bytes: number;
+}
+
+/** Where the bytes this listing describes actually are.
+ *
+ * `"oss"` — mirrored to Alibaba OSS. `"coordinator"` — still only on the
+ * coordinator. Typed as a widened string for the same reason `JobEvent.type`
+ * is: a third backend added API-side must not turn into a console build
+ * break, and the UI names an unrecognised value verbatim rather than
+ * guessing which of the two it resembles. */
+export type ArtifactStorage = "oss" | "coordinator";
+
+/** `GET /v1alpha1/jobs/{id}/artifacts`.
+ *
+ * `mirrored_at` is null whenever no mirror has been recorded — including
+ * when `storage` is `"oss"`, which the contract permits. Null means "not
+ * reported", never "just now", and nothing built on it may supply a time the
+ * API did not. */
+export interface JobArtifactListing {
+  artifacts: JobArtifactEntry[];
+  storage: ArtifactStorage | string;
+  mirrored_at: string | null;
+}
+
 /** The coordinator's job record, passed through by the API once ownership
  * is established. Field set matches `flashruntime.protocol.v1alpha1`. */
 /** A job as `/v1alpha1/jobs` returns it — and it returns TWO shapes.
@@ -319,6 +352,12 @@ export interface JobRecord {
   created_at?: string;
   finished_at?: string | null;
   error?: string | null;
+  /** The coordinator's own artifact list, and **always `[]` for every job
+   * this deployment actually runs**: its only writer sits on a KubeRay path
+   * nothing here takes. Kept because the API still sends the field, but the
+   * console must not read it — `listJobArtifacts` below is the real listing.
+   * Rendering a card off this field is how the Artifacts card came to be
+   * empty for every job in the first place. */
   artifacts?: ArtifactRecord[];
 }
 
@@ -474,6 +513,71 @@ export interface JobTask {
   round?: number;
 }
 
+/** One file of a committed checkpoint. Mirrors
+ * `flashruntime.protocol.v1alpha1.CheckpointPart`. */
+export interface CheckpointPart {
+  key: string;
+  sha256: string;
+  size_bytes: number;
+}
+
+/** One committed checkpoint manifest, as
+ * `GET /v1alpha1/jobs/{id}/tasks/{task_id}/checkpoints/latest` returns it.
+ * Mirrors `flashruntime.protocol.v1alpha1.CheckpointManifest`.
+ *
+ * `job_id` here is NOT this job's id. The catalog is keyed per (job, task)
+ * and the scope it stores is the composite `"<job_id>::<task_id>"`
+ * (`flashruntime/service/checkpoints.py`), so the manifest carries that
+ * composite string in its `job_id` field. Nothing in the console should
+ * match it against a job id; the id you asked about is the one you already
+ * have.
+ *
+ * `validation` is the runtime's own verdict from its validation ladder —
+ * `hash_verified`, `restore_verified`, or `invalid` — and is typed loosely
+ * for the same reason `JobEvent.type` is: it is an enum that grows upstream,
+ * and a union here would turn a runtime addition into a console build break. */
+export interface CheckpointManifest {
+  manifest_id: string;
+  job_id: string;
+  attempt_id: string;
+  step: number;
+  framework: string;
+  strategy_family: string;
+  world_size: number;
+  compatible_world_sizes: number[];
+  storage_prefix: string;
+  parts: CheckpointPart[];
+  validation: "hash_verified" | "restore_verified" | "invalid" | string;
+  created: string;
+  checkpoint_duration_s: number | null;
+}
+
+/** The four answers a checkpoint read can give, kept apart because the UI
+ * must say something different for each — and because collapsing any two of
+ * them would put a false statement on the page.
+ *
+ * - `committed` — a manifest. Every number shown comes from it.
+ * - `none` — the coordinator answered 404, which its own route spells "no
+ *   valid checkpoint". That is ALL it means: it does not distinguish a task
+ *   that has not reached its first checkpoint from a workload that never
+ *   writes one, so nothing built on it may claim to either.
+ * - `unreadable` — 401. The checkpoint routes are declared `tags=["agent"]`
+ *   and depend on `current_machine`, whose docstring is explicit that a
+ *   valid browser JWT is refused: "a different credential kind [that] must
+ *   not open agent routes". A 401 here is therefore a fact about this API's
+ *   shape, NOT about the caller's session — which is exactly why this
+ *   function does not raise `NotAuthenticated` and must never be allowed to
+ *   bounce a signed-in user to /sign-in. `getJob` next door is the authority
+ *   on whether the session is real.
+ * - `unknown` — anything else. Rendered as unknown, never as "no
+ *   checkpoints": a gateway blip must not be reported to a user as their run
+ *   having lost its resume point. */
+export type TaskCheckpointRead =
+  | { status: "committed"; manifest: CheckpointManifest }
+  | { status: "none" }
+  | { status: "unreadable" }
+  | { status: "unknown"; detail: string };
+
 /** A row of `public.pools` — exactly `POOL_PUBLIC_COLUMNS` in `db.py` — as
  * every pool route returns it: `GET /v1alpha1/pools/{id}` (flattened
  * alongside `members`, see `getPool()`) and `POST /v1alpha1/pools` both
@@ -565,6 +669,158 @@ export interface JobContribution {
 }
 
 // ---------------------------------------------------------------------------
+// the router's answer: POST /v1alpha1/jobs/preview-plans
+// ---------------------------------------------------------------------------
+//
+// Read `preview_plans`' docstring in `apps/api/flashml_cloud_api/app.py`
+// before changing any of these. Four of its invariants are shapes, not
+// conventions, and the types below are written to make breaking them
+// awkward:
+//
+//   1. ZC and USD sit SIDE BY SIDE and are never summed. There is no
+//      exchange rate. `PreviewCost` therefore has exactly two fields and
+//      deliberately no third that adds them, and nothing downstream may add
+//      one.
+//   2. Every figure carries its `basis` and its `n`.
+//   3. Anything not derivable is `null` — *not observed*, never 0. That is
+//      why `makespan_seconds`, `basis`, `n`, `acceptance_rate` and friends
+//      are nullable here rather than defaulted.
+//   4. A plan's `basis` is the WEAKEST behind any machine it allocates to.
+//
+// `kind`, `kind_evidence`, `venues` and `venue_excluded_machines` are
+// OPTIONAL rather than nullable, and that is a fact about the route: its
+// `_degraded` answer (routing not configured on this deployment, a spec that
+// expands to nothing, an account with no capacity at all) is a 200 that omits
+// those keys entirely. A consumer that assumes they are present renders the
+// router's verdict for a job the router never looked at.
+
+/** A cost vector. Two currencies, never a total — see invariant 1. */
+export interface PreviewCost {
+  zc: number;
+  usd: number;
+}
+
+/** A duration estimate with the evidence behind it. `null` for the whole
+ * object means no estimate exists; `low_seconds`/`high_seconds` are the
+ * range. `basis` is one of `measured` / `estimated` / `projected`. */
+export interface PreviewEstimate {
+  low_seconds: number | null;
+  high_seconds: number | null;
+  basis: string | null;
+  n: number | null;
+  note: string | null;
+}
+
+/** One venue judged against this job's kind of work.
+ *
+ * THE TWO REFUSALS ARE DIFFERENT STATEMENTS and this interface keeps them
+ * apart because the API does:
+ *
+ *   `suited: false`      this venue PHYSICALLY CANNOT run this work
+ *   `acquirable: false`  we CANNOT GET CAPACITY there yet
+ *
+ * `usable` is both. Collapsing the first two into one boolean would let a
+ * surface imply we chose not to use a venue we simply cannot reach. */
+export interface PreviewVenue {
+  id: string;
+  display: string;
+  currency: string;
+  suited: boolean;
+  acquirable: boolean;
+  usable: boolean;
+  /** `automatic` | `manual` | `none`. */
+  acquisition: string;
+  /** The API's own sentence, carrying the fact behind the verdict. Rendered
+   * verbatim — paraphrasing it makes it more confident than it is. */
+  reason: string;
+}
+
+/** One machine inside one plan. */
+export interface PreviewAllocation {
+  machine_id: string;
+  tasks: number;
+  finish_seconds: number | null;
+  cost: PreviewCost;
+  venue: string | null;
+  currency: string | null;
+  reliability_tier: string;
+  basis: string | null;
+  n: number | null;
+}
+
+/** One of cheapest / balanced / fastest. `balanced` appears ONLY when a
+ * deadline was given — with nothing to balance against it would be
+ * "cheapest" shown twice. */
+export interface PreviewPlan {
+  name: string;
+  recommended: boolean;
+  tasks_placed: number;
+  tasks_unplaced: number;
+  cost: PreviewCost;
+  /** Answered PER CURRENCY, and `null` where no budget was given for that
+   * currency — a fact about a question nobody asked, not a pass. */
+  within_budget: { zc: boolean | null; usd: boolean | null };
+  makespan_seconds: number | null;
+  deadline_seconds: number | null;
+  deadline_met: boolean | null;
+  achievable_deadline_seconds: number | null;
+  basis: string | null;
+  n: number | null;
+  duration_basis: string | null;
+  dominated_by: string | null;
+  allocations: PreviewAllocation[];
+  notes: string[];
+}
+
+/** One machine in the fleet this account can reach, priced. */
+export interface PreviewCandidate {
+  machine_id: string;
+  name: string | null;
+  venue: string | null;
+  currency: string;
+  price_zc_per_hour: number;
+  price_label: string;
+  listing_id: string | null;
+  capability_class: string | null;
+  reliability_tier: string;
+  acceptance_rate: number | null;
+  n: number | null;
+  max_concurrent_tasks: number;
+  seconds_per_task: number | null;
+  basis: string | null;
+  eligible: boolean;
+}
+
+/** The probe that turns "we cannot predict this" into a measurement. */
+export interface PreviewCanary {
+  machine_id: string;
+  tasks_to_calibrate: number;
+  reason: string;
+  current_basis: string | null;
+}
+
+/** `POST /v1alpha1/jobs/preview-plans`. Nothing is submitted, matched, held
+ * or charged by this call — it is read-only by construction. */
+export interface PlanPreview {
+  job_id: string | null;
+  tasks: number | null;
+  /** Absent on the `_degraded` answer — see the block comment above. */
+  kind?: string | null;
+  kind_evidence?: string | null;
+  venues?: PreviewVenue[];
+  venue_excluded_machines?: number;
+  duration: PreviewEstimate | null;
+  plans: PreviewPlan[];
+  candidates: PreviewCandidate[];
+  canary: PreviewCanary | null;
+  recommended: string | null;
+  eligible_machines: number;
+  excluded_machines: number;
+  unplannable_machines: number;
+  notes: string[];
+}
+
+// ---------------------------------------------------------------------------
 // request plumbing
 // ---------------------------------------------------------------------------
 
@@ -602,7 +858,16 @@ async function parseErrorBody(res: Response): Promise<ParsedErrorBody> {
   return { detail: text, findings: null };
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** One authenticated call, up to and including turning a non-2xx into the
+ * right error class — everything `request` does except reading the body.
+ *
+ * Split out so the artifact download can share it: that one wants the raw
+ * `Response` to read as a Blob rather than as JSON, and it must fail in
+ * exactly the same way as every other call (a 401 has to become
+ * `NotAuthenticated` and redirect to sign-in, not surface as a corrupt file).
+ * A second hand-rolled fetch with its own error handling is how those two
+ * drift apart. */
+async function send(path: string, init: RequestInit = {}): Promise<Response> {
   const auth = await authHeader();
   const headers: Record<string, string> = {
     ...auth,
@@ -642,6 +907,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(res.status, detail ?? `${res.status} ${res.statusText}`);
   }
+  return res;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await send(path, init);
   if (res.status === 204) {
     return undefined as T;
   }
@@ -1054,6 +1324,69 @@ export function listJobTasks(jobId: string): Promise<JobTask[]> {
   );
 }
 
+/** `GET /v1alpha1/jobs/{id}/tasks/{task_id}/checkpoint`, classified rather
+ * than thrown.
+ *
+ * Singular, and NOT the agent's `.../checkpoints/latest` one path segment
+ * away: that route is machine-credentialed and answers 401 to a browser JWT
+ * by design. This is the browser-tagged wrapper over the same coordinator
+ * read, gated on the job's viewer check.
+ *
+ * The one read that can answer "how much work would a machine death cost
+ * right now", and the only one that can: the coordinator emits
+ * `CHECKPOINT_MANIFEST_COMMITTED` under the composite scope
+ * `"<job_id>::<task_id>"`, so those events are absent from the bare-job
+ * event feed `listJobEvents` reads and no ledger query can recover them.
+ *
+ * NEVER REJECTS. A job page reads this for several tasks on every poll tick,
+ * and none of those reads may take the page down, redirect it, or leave an
+ * unhandled rejection behind — the checkpoint panel is additive detail over
+ * a page that has to keep working without it. See `TaskCheckpointRead` for
+ * why a 401 in particular is classified and not raised. */
+export async function readTaskCheckpoint(
+  jobId: string,
+  taskId: string
+): Promise<TaskCheckpointRead> {
+  try {
+    const manifest = await request<CheckpointManifest>(
+      `/v1alpha1/jobs/${encodeURIComponent(jobId)}/tasks/${encodeURIComponent(
+        taskId
+      )}/checkpoint`
+    );
+    return { status: "committed", manifest };
+  } catch (err) {
+    if (err instanceof NotFound) return { status: "none" };
+    if (err instanceof NotAuthenticated) return { status: "unreadable" };
+    if (err instanceof ApiError) return { status: "unknown", detail: err.detail };
+    return {
+      status: "unknown",
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** `POST /v1alpha1/jobs/preview-plans` for a job this account already
+ * submitted — the routing story behind it: what kind of work the router took
+ * it to be, which venues can and cannot run it, and what the reachable fleet
+ * would cost and take.
+ *
+ * A POST that writes nothing. The route is read-only by construction (its
+ * docstring: "Nothing is submitted, matched, held or charged by this call"),
+ * and it is a POST only because it also accepts a whole JobSpec in the body.
+ * That is why it is safe to issue from a page load — but it plans the fleet
+ * on every call, so it is deliberately NOT part of this page's 2.5s poll.
+ *
+ * Owner-scoped like `getJob`: somebody else's job id is a 404 and not a 403,
+ * because a 403 would confirm to a guesser that the id is real. A job with no
+ * stored spec to plan against is a 409, which reaches the caller as an
+ * `ApiError` carrying the API's own sentence. */
+export function previewJobPlans(jobId: string): Promise<PlanPreview> {
+  return request<PlanPreview>("/v1alpha1/jobs/preview-plans", {
+    method: "POST",
+    body: JSON.stringify({ job_id: jobId }),
+  });
+}
+
 /** `GET /v1alpha1/jobs/{id}/contributions` — visibility matches the
  * sibling read routes above: the owner, or any member of the job's pool,
  * may see who did the work; a job that exists and the caller cannot see
@@ -1094,41 +1427,88 @@ export function listSandboxEvents(sessionId: string): Promise<SandboxEvent[]> {
   );
 }
 
-/** The relative key a result artifact's `uri` maps to under
- * `/v1alpha1/jobs/{jobId}/artifacts/{key}` — the only artifact route a
- * browser may call (`apps/api/flashml_cloud_api/compile.py` sets every
- * job's `outputPrefix` to `artifact://jobs/{job_id}/`). Returns `null` for
- * a `uri` that isn't under this job's output prefix — e.g. the staged
- * input-code upload from `/from-repo`, which is not a result and has no
- * browser-readable route. Never guessed: it is a straight strip of the
- * prefix the API itself defines. */
-export function jobArtifactKey(jobId: string, uri: string): string | null {
-  const prefix = `artifact://jobs/${jobId}/`;
-  return uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
+/** `GET /v1alpha1/jobs/{id}/artifacts` — what this job actually wrote.
+ *
+ * Owner/viewer-scoped exactly like `getJob`, so an unknown or someone
+ * else's job answers 404 (`NotFound`) rather than a distinguishing 403. An
+ * API deployed before this route existed answers 404 too, and that is not a
+ * distinction this client can make — which is precisely why the caller must
+ * render a failed read as "could not read", never as "no artifacts". */
+export function listJobArtifacts(jobId: string): Promise<JobArtifactListing> {
+  return request<JobArtifactListing>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/artifacts`
+  );
 }
 
-/** Fetches a result artifact's bytes with the caller's JWT attached, for a
- * browser-triggered download — the route requires auth, so a plain `<a
- * href>` cannot reach it. */
-export async function fetchJobArtifact(
+/** `{jobId}/{key}` as a path, each segment encoded on its own so the `/`
+ * separators inside a key stay separators — both artifact routes take the key
+ * as `{key:path}` and expect exactly that.
+ *
+ * Not exported. It used to be, as `jobArtifactDownloadUrl`, and every caller
+ * put the string it returned into an `<a href download>`. That is precisely
+ * the bug this pair of functions replaces: the route is authenticated, a
+ * NAVIGATION sends no `Authorization` header, and every download answered
+ * 401. Keeping the URL builder public would keep that mistake one import
+ * away. */
+function jobArtifactPath(jobId: string, key: string, route: string): string {
+  const path = key.split("/").map(encodeURIComponent).join("/");
+  return `/v1alpha1/jobs/${encodeURIComponent(jobId)}/${route}/${path}`;
+}
+
+/** `GET /v1alpha1/jobs/{id}/artifact-url/{key}` — where ONE artifact's bytes
+ * should be fetched from.
+ *
+ * `storage: "oss"` comes with a `url`: a presigned Alibaba OSS grant, good
+ * for one object and expiring on its own, which the browser may simply
+ * navigate to. That navigation is the point — it needs no header of ours (so
+ * no 401), it crosses no CORS boundary the browser will refuse (a navigation
+ * is not a fetch), and it never puts a multi-gigabyte checkpoint through this
+ * tab's memory.
+ *
+ * `storage: "coordinator"` comes with a null `url`, and that is an ORDINARY
+ * answer, not a failure. Four situations reach it and the caller handles them
+ * identically, by fetching the bytes through the API: no OSS configured (the
+ * deployment default), the job never mirrored, the bucket unwell, or — the
+ * one that has nothing to do with configuration — **this key is absent from
+ * the job's manifest.** A task that failed produced no accepted output, so
+ * its `stderr.txt` legitimately exists, is legitimately readable, and has no
+ * OSS copy, while the job as a whole is stamped mirrored. Anything that reads
+ * the job-level `storage` as the answer for every key breaks on exactly the
+ * file somebody opens after a failure. */
+export interface JobArtifactUrl {
+  storage: ArtifactStorage | string;
+  /** Null whenever these bytes must come through the API instead. */
+  url: string | null;
+}
+
+export function getJobArtifactUrl(
+  jobId: string,
+  key: string
+): Promise<JobArtifactUrl> {
+  return request<JobArtifactUrl>(
+    jobArtifactPath(jobId, key, "artifact-url")
+  );
+}
+
+/** One artifact's bytes, through the API, with the bearer header.
+ *
+ * The path for anything not mirrored. It holds the whole file in memory as a
+ * Blob, which is acceptable here and only here: these are the files still on
+ * the coordinator's own 5 GB disk, so the size is bounded by that disk rather
+ * than by what a user might upload. Mirrored artifacts — the ~100 MB–1 GB
+ * model weights this product exists to produce — never come this way; they
+ * are a navigation to OSS, and the browser streams them to disk itself.
+ *
+ * `send`, not a hand-rolled fetch: a 401 here must become `NotAuthenticated`
+ * and send the person to sign in, exactly as it does on every other call,
+ * rather than being saved to their downloads folder as a file full of JSON. */
+export function fetchJobArtifactBlob(
   jobId: string,
   key: string
 ): Promise<Blob> {
-  const auth = await authHeader();
-  const res = await fetch(
-    `${cloudApiBase()}/v1alpha1/jobs/${encodeURIComponent(jobId)}/artifacts/${key
-      .split("/")
-      .map(encodeURIComponent)
-      .join("/")}`,
-    { headers: auth }
+  return send(jobArtifactPath(jobId, key, "artifacts")).then((res) =>
+    res.blob()
   );
-  if (res.status === 401) throw new NotAuthenticated();
-  if (res.status === 404) throw new NotFound("artifact not found");
-  if (!res.ok) {
-    const { detail } = await parseErrorBody(res);
-    throw new ApiError(res.status, detail ?? `${res.status} ${res.statusText}`);
-  }
-  return res.blob();
 }
 
 /** `DELETE /v1alpha1/jobs/{id}/artifacts`'s success body — how much this

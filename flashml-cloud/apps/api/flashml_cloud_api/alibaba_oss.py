@@ -190,13 +190,30 @@ class OSSArtifacts:
 
     # -- grants -------------------------------------------------------------
 
-    def sign_get(self, key: str, *, ttl_s: int = DEFAULT_TTL_S) -> str:
+    def sign_get(self, key: str, *, ttl_s: int = DEFAULT_TTL_S,
+                 content_disposition: str | None = None) -> str:
         """A URL that can read exactly this object, for `ttl_s` seconds.
 
         This is what a sandbox is given instead of a credential. Re-mint it
         after a wake; never carry one across a hibernation.
+
+        `content_disposition` becomes OSS's `response-content-disposition`
+        override, which is what makes a *browser navigation* to this URL save
+        the object instead of rendering it. It has to go through `params`
+        rather than being appended to the returned string: the signature
+        covers the query, so a parameter added afterwards invalidates the URL
+        it was added to. A caller that leaves it None gets exactly the URL
+        this method always returned — the sandbox path, which reads bytes with
+        an HTTP client and has no use for a disposition.
         """
-        return self._bucket.sign_url("GET", key, ttl_s, slash_safe=True)
+        params = (
+            {"response-content-disposition": content_disposition}
+            if content_disposition is not None
+            else None
+        )
+        return self._bucket.sign_url(
+            "GET", key, ttl_s, params=params, slash_safe=True
+        )
 
     def sign_put(self, key: str, *, ttl_s: int = DEFAULT_TTL_S) -> str:
         """A URL that can write exactly this object, for `ttl_s` seconds."""

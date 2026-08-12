@@ -38,9 +38,11 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
+from flashml_cloud_api import app as appmod
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api.app import (
+    AGENT_RETRY_DELAYS,
     DELEGATION_HEADER,
     MAX_JSON_BODY_BYTES,
     _scrub_identity,
@@ -836,6 +838,94 @@ def test_checkpoint_routes_are_proxied_with_delegation(client, machine, transpor
                    headers=auth)
     assert r.status_code == 200
     assert transport.last.url.query == b"world_size=2"
+
+
+# ---------------------------------------------------------------------------
+# 3b. the resume point survives a gateway blip
+#
+# Checkpointing is on for every job, so `checkpoints/latest` runs at the
+# START of every task. flashnode treats a non-404, non-200 there as fatal,
+# and that exception is caught neither as a task failure nor as a lost
+# lease — the lease is held to expiry and the host takes a strike toward
+# quarantine. One blip would do that to every task in the fleet.
+# ---------------------------------------------------------------------------
+
+
+class _Scripted(RecordingTransport):
+    """Answers a fixed sequence of statuses, then 200 forever."""
+
+    def __init__(self, statuses: list[int]):
+        super().__init__()
+        self._statuses = list(statuses)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        self.requests.append(request)
+        status = self._statuses.pop(0) if self._statuses else 200
+        return httpx.Response(status, json={"step": 7})
+
+
+def _client_with(settings, postgres_dsn, transport):
+    def connect() -> psycopg.Connection:
+        conn = psycopg.connect(postgres_dsn, row_factory=dict_row, connect_timeout=5)
+        conn.autocommit = True
+        return conn
+
+    return TestClient(create_cloud_app(settings, connect=connect, transport=transport))
+
+
+def test_checkpoint_latest_is_retried_through_a_gateway_blip(
+    machine, settings, postgres_dsn, monkeypatch
+):
+    monkeypatch.setattr(appmod, "AGENT_RETRY_DELAYS", (0.0, 0.0, 0.0))
+    t = _Scripted([502, 503])
+    with _client_with(settings, postgres_dsn, t) as c:
+        r = c.get("/v1alpha1/jobs/j1/tasks/t1/checkpoints/latest",
+                  headers={"Authorization": f"Bearer {machine['token']}"})
+    assert r.status_code == 200, "two gateway answers should not reach the agent"
+    assert r.json() == {"step": 7}
+    assert len(t.requests) == 3
+
+
+def test_a_404_from_checkpoint_latest_is_not_retried(
+    machine, settings, postgres_dsn, monkeypatch
+):
+    """404 is the ANSWER "this task has no checkpoint", not a failure — and
+    it is the common case, since every first attempt gets one. Retrying it
+    would put the whole ladder in front of every task start."""
+    monkeypatch.setattr(appmod, "AGENT_RETRY_DELAYS", (0.0, 0.0, 0.0))
+    t = _Scripted([404])
+    with _client_with(settings, postgres_dsn, t) as c:
+        r = c.get("/v1alpha1/jobs/j1/tasks/t1/checkpoints/latest",
+                  headers={"Authorization": f"Bearer {machine['token']}"})
+    assert r.status_code == 404
+    assert len(t.requests) == 1
+
+
+def test_checkpoint_writes_are_not_retried(
+    machine, settings, postgres_dsn, monkeypatch
+):
+    """Only the GET is repeatable. `commit` is a write whose repeat mints a
+    second manifest, so a gateway answer there is passed straight back."""
+    monkeypatch.setattr(appmod, "AGENT_RETRY_DELAYS", (0.0, 0.0, 0.0))
+    t = _Scripted([502])
+    with _client_with(settings, postgres_dsn, t) as c:
+        r = c.post("/v1alpha1/jobs/j1/tasks/t1/checkpoints/commit", json={"step": 1},
+                   headers={"Authorization": f"Bearer {machine['token']}"})
+    assert r.status_code == 502
+    assert len(t.requests) == 1
+
+
+def test_the_agent_retry_ladder_fits_inside_flashnode_s_socket_timeout():
+    """flashnode's HTTP timeout is 15s and it does NOT retry a status it
+    received — `_request` returns an HTTPError's code straight to the
+    caller. A ladder that outlasts that timeout cannot help anyone: the
+    agent has already given up and raised before the last forward goes out.
+
+    Pinned as a test because the number lives in the other repo. If someone
+    lowers flashnode's timeout, this is the thing that should go red."""
+    assert sum(AGENT_RETRY_DELAYS) < 15.0
+    assert sum(AGENT_RETRY_DELAYS) < sum(appmod.GATEWAY_RETRY_DELAYS)
 
 
 def test_coordinator_status_and_body_are_passed_through(client, machine, settings,

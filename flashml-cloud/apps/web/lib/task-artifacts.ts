@@ -14,6 +14,14 @@
  * gets no test coverage, and any decision that could be wrong belongs where
  * a test can reach it.
  *
+ * WHERE THE LIST COMES FROM. `GET /v1alpha1/jobs/{id}/artifacts` — the
+ * listing route — and nothing else. It was `job.artifacts` until 2026-08-11,
+ * which is always `[]` for every job this deployment runs, so this grouping
+ * had been correct and fed nothing since the day it shipped. The listing's
+ * rows are `{key, size_bytes}` with the key ALREADY relative to the job's own
+ * prefix, so there is no longer a uri to strip a prefix off and no longer a
+ * class of row that fails to resolve to a key at all.
+ *
  * The exact filenames the task executor writes are not fixed by any
  * contract available here — that change lives in a sibling repo this task
  * was explicitly told not to go read. `classifyLogFilename` below matches
@@ -22,25 +30,48 @@
  * like `stdout.log` — so `stdout.log`, `stdout.txt`, `STDOUT`, and a bare
  * `stdout` all resolve the same way, and this keeps working if the
  * extension turns out to differ from a guess made here.
+ *
+ * The same grouping now also separates CHECKPOINTS from output. Checkpointing
+ * is on for every job, so a task that dies mid-run leaves `ckpt/step-*.json`
+ * files at its own result keys — a deliberate, accepted consequence, but one
+ * that reads as job output unless something says otherwise. Each group
+ * therefore carries `results` and `checkpoints` alongside the full
+ * `artifacts` list; the classifier itself lives in `lib/task-checkpoints.ts`
+ * with the rest of the checkpoint vocabulary.
  */
 
-import type { ArtifactRecord, JobTask } from "./cloud-api";
-import { jobArtifactKey } from "./cloud-api";
+import type { JobArtifactEntry, JobTask } from "./cloud-api";
+import { checkpointStepFromKey } from "./task-checkpoints";
 
 export type LogKind = "stdout" | "stderr";
 
 export interface ArtifactWithKey {
-  artifact: ArtifactRecord;
-  /** The relative key under this job's own artifact route — what
-   * `fetchJobArtifact` and the download link need, not the raw `uri`. */
+  /** The key relative to this job's own artifact prefix — exactly what the
+   * listing returned, and exactly what the download route's `{key}` segment
+   * takes. Never re-derived from anything. */
   key: string;
-  /** The last path segment of `key` — what a download offers as a
-   * filename. */
+  /** The last path segment of `key`. What the log classifier below matches
+   * on — NOT what a download is saved as. That is the whole key with its
+   * separators flattened (`lib/artifact-download.ts`'s `artifactFilename`),
+   * because every task of a job writes a file called `stdout.txt` and the
+   * last segment alone would save twenty of them over each other. */
   filename: string;
+  /** The file's size as the API reported it, or null when it reported
+   * something that is not a finite number. Null is rendered as unknown, not
+   * as 0: a zero-byte file and a size we could not read are different facts
+   * and a total built from them would be wrong in the second case. */
+  sizeBytes: number | null;
   /** `"stdout"` or `"stderr"` when the filename matches one of those
    * conventions, else null. Null is the common case: most artifacts are
    * ordinary output, not a log. */
   logKind: LogKind | null;
+  /** The step this file is a checkpoint of, or null for anything that is
+   * not one — see `checkpointStepFromKey`. Now that checkpointing is on for
+   * every job, a task that dies mid-run leaves its `ckpt/step-*.json` files
+   * at its own result keys, and an unlabelled list renders them beside the
+   * job's actual output as if they were part of the deliverable. They are
+   * not: they are the machinery that made the run survivable. */
+  checkpointStep: number | null;
 }
 
 export interface ArtifactGroup {
@@ -53,7 +84,16 @@ export interface ArtifactGroup {
   /** The matching task's current state from `listJobTasks()`, or null when
    * `groupId` does not name a task at all. */
   taskState: JobTask["state"] | null;
+  /** Everything in this group, checkpoints included — what a download-all
+   * or a count has to work from. */
   artifacts: ArtifactWithKey[];
+  /** The group's artifacts minus its checkpoints: the part that is job
+   * output. Ordered exactly as they arrived. */
+  results: ArtifactWithKey[];
+  /** The checkpoint files, oldest step first. Empty, never absent, for a
+   * task that wrote none — which says nothing about whether one is coming;
+   * see `lib/task-checkpoints.ts`. */
+  checkpoints: ArtifactWithKey[];
   /** The subset of `artifacts` recognised as a log file, stdout ordered
    * before stderr when both exist. Empty, never absent, when this task
    * predates the logging change or genuinely wrote no logs — an older job's
@@ -67,18 +107,6 @@ export interface ArtifactGroup {
    * component reads to decide which group to put first and highlight, so
    * "the obvious thing to open" is never a broken promise. */
   hasFailureLog: boolean;
-}
-
-export interface GroupedArtifacts {
-  /** FAILED-task groups first (so the failed task's logs are the obvious
-   * thing to open), then every other group in the order its first artifact
-   * appeared in the input list. */
-  groups: ArtifactGroup[];
-  /** Artifacts whose `uri` does not resolve to a key under this job's own
-   * prefix at all — `jobArtifactKey` returns null for these (e.g. a staged
-   * input-code upload, which is not a result). Kept rather than dropped so
-   * nothing an API actually returned silently disappears from the page. */
-  unresolved: ArtifactRecord[];
 }
 
 /** Matches a filename's root against the two conventional log names,
@@ -99,28 +127,42 @@ function logOrder(kind: LogKind): number {
   return kind === "stdout" ? 0 : 1;
 }
 
+/** The size to carry for one listed file. The contract types `size_bytes` as
+ * an integer, so this normally passes it straight through; anything that is
+ * not a finite number becomes null so it renders as unknown rather than as a
+ * fabricated 0 that a total would then silently absorb. */
+function sizeOf(entry: JobArtifactEntry): number | null {
+  return typeof entry.size_bytes === "number" &&
+    Number.isFinite(entry.size_bytes)
+    ? entry.size_bytes
+    : null;
+}
+
 export function groupArtifactsByTask(
-  jobId: string,
-  artifacts: ArtifactRecord[],
+  artifacts: JobArtifactEntry[],
   tasks: JobTask[]
-): GroupedArtifacts {
+): ArtifactGroup[] {
   const taskStateById = new Map(tasks.map((t) => [t.task_id, t.state]));
   const groupsById = new Map<string, ArtifactGroup>();
   const order: string[] = []; // first-seen order, since Map iteration order already is insertion order — kept explicit for the sort below to read from
-  const unresolved: ArtifactRecord[] = [];
 
-  for (const artifact of artifacts) {
-    const key = jobArtifactKey(jobId, artifact.uri);
-    if (key === null) {
-      unresolved.push(artifact);
-      continue;
-    }
-
+  for (const entry of artifacts) {
+    const key = entry.key;
     const segments = key.split("/");
     const groupId = segments[0];
     const filename = segments[segments.length - 1];
     const logKind = classifyLogFilename(filename);
-    const entry: ArtifactWithKey = { artifact, key, filename, logKind };
+    // Matched against the key, not the filename: a checkpoint is identified
+    // by its `ckpt/` directory as well as its `step-<n>` name, so a result
+    // file that happens to be called `step-3.json` is not relabelled.
+    const checkpointStep = checkpointStepFromKey(key);
+    const item: ArtifactWithKey = {
+      key,
+      filename,
+      sizeBytes: sizeOf(entry),
+      logKind,
+      checkpointStep,
+    };
 
     let group = groupsById.get(groupId);
     if (!group) {
@@ -128,19 +170,25 @@ export function groupArtifactsByTask(
         groupId,
         taskState: taskStateById.get(groupId) ?? null,
         artifacts: [],
+        results: [],
+        checkpoints: [],
         logs: [],
         hasFailureLog: false,
       };
       groupsById.set(groupId, group);
       order.push(groupId);
     }
-    group.artifacts.push(entry);
-    if (logKind !== null) group.logs.push(entry);
+    group.artifacts.push(item);
+    if (checkpointStep !== null) group.checkpoints.push(item);
+    else group.results.push(item);
+    if (logKind !== null) group.logs.push(item);
   }
 
   const groups = order.map((id) => groupsById.get(id)!);
   for (const group of groups) {
     group.logs.sort((a, b) => logOrder(a.logKind!) - logOrder(b.logKind!));
+    // Oldest step first, so the last row is the furthest the task got.
+    group.checkpoints.sort((a, b) => a.checkpointStep! - b.checkpointStep!);
     group.hasFailureLog = group.taskState === "FAILED" && group.logs.length > 0;
   }
 
@@ -148,5 +196,5 @@ export function groupArtifactsByTask(
   // move to the front without disturbing the relative order of the rest.
   groups.sort((a, b) => Number(b.hasFailureLog) - Number(a.hasFailureLog));
 
-  return { groups, unresolved };
+  return groups;
 }

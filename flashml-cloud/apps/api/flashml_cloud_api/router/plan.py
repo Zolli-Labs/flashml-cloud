@@ -38,6 +38,16 @@ is precisely what decision M4 forbids and what ``contributions.py`` warns a
 credit balance must never imply. Cross-currency ordering is therefore done by
 **venue precedence** — a stated product preference — never by comparing
 magnitudes.
+
+*Fit narrows; it never widens, and it is not a price.* A ``PlanRequest`` may
+carry the job's ``WorkloadKind`` (``workload.classify``), and when it does,
+``venue_admitted`` removes candidates sitting in venues that cannot do that
+kind of work — after the gates, never instead of them, and never by
+comparing a number. A cheap venue that cannot run the workload is not a cheap
+option, it is not an option, so fit decides the **set** and price decides
+**within** it. The two are kept in separate functions precisely so nobody can
+average them. With no kind supplied nothing is narrowed and every number in
+this file is what it was before venue fit existed.
 """
 from __future__ import annotations
 
@@ -49,6 +59,7 @@ from typing import Any
 
 from flashruntime.protocol.v1alpha1 import TaskSpec
 
+from flashml_cloud_api.router import venues as venuesmod
 from flashml_cloud_api.router.estimator import (
     BASIS_PROJECTED,
     TIER_MIXED,
@@ -58,6 +69,7 @@ from flashml_cloud_api.router.estimator import (
     Estimate,
     planning_seconds,
 )
+from flashml_cloud_api.router.workload import WorkloadKind
 
 __all__ = [
     "CURRENCY_USD",
@@ -79,11 +91,13 @@ __all__ = [
     "PlanSet",
     "balanced_plan",
     "canary_for",
+    "candidate_venue_id",
     "cheapest_plan",
     "eligible_fleet",
     "fastest_plan",
     "frontier",
     "plan_job",
+    "venue_admitted",
 ]
 
 CURRENCY_ZC = "ZC"
@@ -236,6 +250,16 @@ class Candidate:
     ``capability_class`` is the machine's HARDWARE class from
     ``estimator.hardware_class``, carried for the note a plan renders. It is
     not read by any solver.
+
+    ``venue_id`` is the PHYSICAL venue this machine's capacity comes from —
+    ``venues.VENUE_OWNED``, ``VENUE_RUNPOD``, ``VENUE_FC_SANDBOX``,
+    ``VENUE_FC_GPU`` — as opposed to ``venue`` above, which says whose machine
+    it is and who pays. ``None`` means the caller did not attribute it, and
+    then ``candidate_venue_id`` derives what it honestly can from ``venue``: a
+    workspace machine and a market listing are both FlashNode hosts, so both
+    are ``owned``. A machine that stays unattributed is **never excluded on
+    venue grounds** — there is no venue fact about it to exclude it on, and
+    guessing one would drop capacity for a reason nobody could check.
     """
 
     machine_id: str
@@ -247,6 +271,7 @@ class Candidate:
     seconds_per_task: float | None = None
     reliability_tier: str = TIER_UNPROVEN
     capability_class: str | None = None
+    venue_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -264,6 +289,9 @@ class Allocation:
     venue: str
     currency: str
     reliability_tier: str
+    #: The physical venue, when the candidate was attributable to one. See
+    #: ``Candidate.venue_id``.
+    venue_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -293,6 +321,11 @@ class Plan:
     achievable_deadline_seconds: float | None = None
     duration_basis: str | None = None
     dominated_by: str | None = None
+    #: The physical venues this plan actually places work in, sorted. Derived
+    #: from the allocations rather than from the request, because a plan that
+    #: reached for a venue and placed nothing there did not use it — and a row
+    #: claiming otherwise is how a page starts implying capacity.
+    venues: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
 
 
@@ -335,6 +368,18 @@ class PlanRequest:
     duration: Estimate | None = None
     deadline_seconds: float | None = None
     venue_order: tuple[str, ...] = DEFAULT_VENUE_ORDER
+    #: What kind of work this is, from ``workload.classify``, with the
+    #: evidence that produced it. ``None`` means the caller did not classify,
+    #: and then **no venue narrowing happens at all** — the planner behaves
+    #: exactly as it did before fit existed. That default is deliberate: a
+    #: classifier that had not been asked must never quietly start removing
+    #: capacity.
+    kind: WorkloadKind | None = None
+    kind_evidence: str | None = None
+    #: The job's declared GPUs per task, when it declares one. Used only to
+    #: refuse a venue with no GPU; it is a hardware fact, not a preference,
+    #: and it never adds a venue.
+    gpus_per_task: int | None = None
 
 
 @dataclass(frozen=True)
@@ -357,6 +402,18 @@ class PlanSet:
     eligible_machines: int = 0
     excluded_machines: int = 0
     unplannable_machines: int = 0
+    #: What kind of work this was taken to be, and why. ``None`` when the
+    #: caller did not classify.
+    kind: WorkloadKind | None = None
+    kind_evidence: str | None = None
+    #: Every venue judged against that kind, ordered, each carrying the fact
+    #: behind its verdict — including the ones that were ruled out, because a
+    #: page that shows only the survivors cannot say why RunPod is missing.
+    venue_fits: tuple[venuesmod.VenueFit, ...] = ()
+    #: Machines that passed the placement gates and were then removed because
+    #: their venue cannot do this kind of work. Counted separately from
+    #: ``excluded_machines`` (a gate refusal) so the two reasons never merge.
+    venue_excluded_machines: int = 0
     notes: tuple[str, ...] = ()
 
     def plans(self) -> tuple[Plan, ...]:
@@ -422,6 +479,67 @@ def _passes(
         return eligible(task, node) is True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# fit, after the gates and before any price
+# ---------------------------------------------------------------------------
+
+
+def candidate_venue_id(candidate: Candidate) -> str | None:
+    """Which physical venue this machine's capacity comes from, or ``None``.
+
+    The explicit ``venue_id`` when the caller set one, otherwise whatever the
+    commercial label honestly implies — ``workspace`` and ``market`` are both
+    FlashNode hosts, so both are ``owned``. ``rented`` implies nothing: it
+    names "a rented cloud" and RunPod and Alibaba FC are not interchangeable,
+    so it stays ``None`` rather than being guessed into one of them.
+    """
+    if candidate.venue_id:
+        return candidate.venue_id
+    return venuesmod.venue_for_listing(candidate.venue)
+
+
+def venue_admitted(
+    candidates: Sequence[Candidate],
+    *,
+    kind: WorkloadKind | None,
+    gpus_per_task: int | None = None,
+) -> tuple[tuple[Candidate, ...], tuple[Candidate, ...]]:
+    """Split gate-approved candidates into ``(kept, refused_on_venue_fit)``.
+
+    **This narrows and can never widen.** It only ever removes, it runs after
+    ``eligible_fleet`` and never in place of it, and with ``kind`` ``None`` it
+    removes nothing at all — an unclassified job is planned exactly as it was
+    before this layer existed.
+
+    Two things are refused and they are different refusals, both from
+    ``venues``: a venue that cannot do this *kind* of work (a federated round
+    on a two-vCPU box), and a venue that has no GPU when the job declared it
+    needs one (which overrides even ``COMMAND``, where fit otherwise rules
+    nothing out). A venue whose ``acquisition`` is ``none`` is refused too,
+    for the third reason — however well it fits, a plan resting on it would
+    name capacity that does not exist.
+
+    A candidate with no attributable venue is **kept**. There is no venue fact
+    about it, and dropping capacity for a reason nobody can check is worse
+    than planning it on the gates and the price alone; ``plan_job`` says so in
+    a note rather than letting it pass silently.
+
+    Order is preserved on both sides, so this stays a pure partition.
+    """
+    if kind is None:
+        return tuple(candidates), ()
+    usable = venuesmod.usable_venue_ids(kind, gpus_per_task=gpus_per_task)
+    kept: list[Candidate] = []
+    refused: list[Candidate] = []
+    for candidate in candidates:
+        venue_id = candidate_venue_id(candidate)
+        if venue_id is not None and venue_id not in usable:
+            refused.append(candidate)
+        else:
+            kept.append(candidate)
+    return tuple(kept), tuple(refused)
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +765,7 @@ def _assemble(
                 venue=candidate.venue,
                 currency=candidate.currency,
                 reliability_tier=candidate.reliability_tier,
+                venue_id=candidate_venue_id(candidate),
             )
         )
 
@@ -686,6 +805,15 @@ def _assemble(
         deadline_met=deadline_met,
         achievable_deadline_seconds=achievable,
         duration_basis=duration.basis if duration is not None else None,
+        venues=tuple(
+            sorted(
+                {
+                    allocation.venue_id
+                    for allocation in allocations
+                    if allocation.venue_id is not None
+                }
+            )
+        ),
         notes=tuple(plan_notes),
     )
 
@@ -827,11 +955,19 @@ def _prepared(
     tasks: int,
     duration: Estimate | None,
     venue_order: Sequence[str],
+    kind: WorkloadKind | None = None,
+    gpus_per_task: int | None = None,
 ) -> tuple[list[_Resolved], float | None]:
-    """Gate, resolve, and compute the fleet's best possible finish. In that
-    order, every time — which is what makes it impossible to reach a price
-    without having gone through the gates first."""
+    """Gate, narrow on fit, resolve, and compute the fleet's best finish.
+
+    In that order, every time — which is what makes it impossible to reach a
+    price without having gone through the gates first, and impossible to reach
+    a price for a venue that cannot run the work.
+    """
     survivors = eligible_fleet(task, candidates, eligible=eligible)
+    survivors, _ = venue_admitted(
+        survivors, kind=kind, gpus_per_task=gpus_per_task
+    )
     members, _ = _resolve(survivors, duration=duration, venue_order=venue_order)
     _, achievable = _fill(members, tasks, deadline=None)
     return members, achievable
@@ -846,6 +982,8 @@ def cheapest_plan(
     duration: Estimate | None,
     deadline: float | None = None,
     venue_order: Sequence[str] = DEFAULT_VENUE_ORDER,
+    kind: WorkloadKind | None = None,
+    gpus_per_task: int | None = None,
 ) -> Plan:
     """``_cheapest_over`` with the gates in front of it.
 
@@ -853,7 +991,9 @@ def cheapest_plan(
     including the ones that only care about price. That is not ceremony: a
     solver reachable without the gates is a path on which a price decides
     placement, and the invariant is worth more than the convenience of one
-    shorter signature.
+    shorter signature. ``kind`` rides along for the same reason — a solver
+    reachable without fit is a path on which a price puts a training run on a
+    CPU sandbox.
     """
     members, achievable = _prepared(
         task,
@@ -862,6 +1002,8 @@ def cheapest_plan(
         tasks=tasks,
         duration=duration,
         venue_order=venue_order,
+        kind=kind,
+        gpus_per_task=gpus_per_task,
     )
     return _cheapest_over(
         members,
@@ -881,6 +1023,8 @@ def balanced_plan(
     duration: Estimate | None,
     deadline: float,
     venue_order: Sequence[str] = DEFAULT_VENUE_ORDER,
+    kind: WorkloadKind | None = None,
+    gpus_per_task: int | None = None,
 ) -> Plan:
     """Consume what you already own, then buy only the deficit.
 
@@ -907,6 +1051,8 @@ def balanced_plan(
         tasks=tasks,
         duration=duration,
         venue_order=venue_order,
+        kind=kind,
+        gpus_per_task=gpus_per_task,
     )
     return _cheapest_over(
         members,
@@ -927,6 +1073,8 @@ def fastest_plan(
     duration: Estimate | None,
     deadline: float | None = None,
     venue_order: Sequence[str] = DEFAULT_VENUE_ORDER,
+    kind: WorkloadKind | None = None,
+    gpus_per_task: int | None = None,
 ) -> Plan:
     """``_fastest_over`` with the gates in front of it. See ``cheapest_plan``."""
     members, achievable = _prepared(
@@ -936,6 +1084,8 @@ def fastest_plan(
         tasks=tasks,
         duration=duration,
         venue_order=venue_order,
+        kind=kind,
+        gpus_per_task=gpus_per_task,
     )
     return _fastest_over(
         members,
@@ -1076,20 +1226,66 @@ def canary_for(
 
 
 def plan_job(request: PlanRequest, *, eligible: EligibilityPredicate) -> PlanSet:
-    """Gate the fleet, then price it three ways, then say which to take.
+    """Gate the fleet, narrow it to venues that fit, price it three ways.
 
-    Order is the contract: ``eligible_fleet`` first and unconditionally, so a
-    price can never buy past a capability, a pool, a host's local data or an
-    isolation requirement. Everything after it is arithmetic over a set the
-    gates already approved.
+    Order is the contract, and it has three steps now rather than two:
+
+    1. ``eligible_fleet`` first and unconditionally, so a price can never buy
+       past a capability, a pool, a host's local data or an isolation
+       requirement.
+    2. ``venue_admitted``, which can only remove and only when the caller
+       classified the job. Fit decides the SET.
+    3. the arithmetic, which decides WITHIN it.
+
+    Steps 2 and 3 are separate functions and separate numbers on the way out
+    (``venue_excluded_machines`` against ``excluded_machines``) because the
+    moment they are averaged, a cheap venue that cannot run the workload
+    starts looking like a cheap option.
     """
-    survivors = eligible_fleet(request.task, request.candidates, eligible=eligible)
-    excluded = len(request.candidates) - len(survivors)
+    gated = eligible_fleet(request.task, request.candidates, eligible=eligible)
+    excluded = len(request.candidates) - len(gated)
+    survivors, venue_refused = venue_admitted(
+        gated, kind=request.kind, gpus_per_task=request.gpus_per_task
+    )
+    venue_fits = (
+        venuesmod.venues_for(request.kind, gpus_per_task=request.gpus_per_task)
+        if request.kind is not None
+        else ()
+    )
     members, unplannable = _resolve(
         survivors, duration=request.duration, venue_order=request.venue_order
     )
 
     notes: list[str] = []
+    if request.kind is not None:
+        notes.append(
+            f"routed as {request.kind.value} work"
+            + (f": {request.kind_evidence}" if request.kind_evidence else "")
+        )
+    if venue_refused:
+        refused_venues = sorted(
+            {
+                venue_id
+                for candidate in venue_refused
+                for venue_id in (candidate_venue_id(candidate),)
+                if venue_id is not None
+            }
+        )
+        notes.append(
+            f"{len(venue_refused)} machine"
+            f"{'s' if len(venue_refused) != 1 else ''} passed the placement "
+            f"gates and were then left out on venue fit "
+            f"({', '.join(refused_venues)}): a venue that cannot do this kind "
+            f"of work is not a cheap option, it is not an option"
+        )
+    if request.kind is not None and any(
+        candidate_venue_id(candidate) is None for candidate in survivors
+    ):
+        notes.append(
+            "some eligible machines are not attributable to a venue, so venue "
+            "fit could say nothing about them — they are planned on the gates "
+            "and the price alone rather than dropped on a guess"
+        )
     if unplannable:
         notes.append(
             f"{len(unplannable)} eligible machine"
@@ -1122,6 +1318,10 @@ def plan_job(request: PlanRequest, *, eligible: EligibilityPredicate) -> PlanSet
             eligible_machines=len(survivors),
             excluded_machines=excluded,
             unplannable_machines=len(unplannable),
+            kind=request.kind,
+            kind_evidence=request.kind_evidence,
+            venue_fits=venue_fits,
+            venue_excluded_machines=len(venue_refused),
             notes=tuple(notes),
         )
 
@@ -1201,6 +1401,10 @@ def plan_job(request: PlanRequest, *, eligible: EligibilityPredicate) -> PlanSet
         eligible_machines=len(survivors),
         excluded_machines=excluded,
         unplannable_machines=len(unplannable),
+        kind=request.kind,
+        kind_evidence=request.kind_evidence,
+        venue_fits=venue_fits,
+        venue_excluded_machines=len(venue_refused),
         notes=tuple(notes),
     )
 

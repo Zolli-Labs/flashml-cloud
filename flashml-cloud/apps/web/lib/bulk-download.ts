@@ -18,35 +18,40 @@
  * not discover it as a stream of browser permission prompts.
  */
 
-import type { ArtifactRecord } from "./cloud-api";
-import { jobArtifactKey } from "./cloud-api";
+import { artifactFilename } from "./artifact-download";
+import type { ArtifactGroup } from "./task-artifacts";
 
 export interface DownloadableArtifact {
-  artifact: ArtifactRecord;
-  /** What `fetchJobArtifact` needs — see `jobArtifactKey`. */
+  /** The listing's own key, which is already what the download route takes.
+   * Nothing is stripped or re-derived from it. */
   key: string;
-  /** Safe to hand to `<a download>`: `key` with every `/` flattened to
-   * `__`, so two tasks that both wrote `stdout` save as two distinguishable
-   * files (`task-000__stdout`, `task-001__stdout`) instead of colliding and
-   * making the browser silently append `(1)` to the second one — which
-   * erases exactly the "which task was this" fact a person opens the file
-   * to find. */
+  /** What this file is saved as: `key` with every `/` flattened to `__`, so
+   * two tasks that both wrote `stdout` save as two distinguishable files
+   * (`task-000__stdout`, `task-001__stdout`) instead of colliding.
+   *
+   * `artifactFilename` rather than a copy of the rule: single downloads,
+   * bulk downloads and the API's own `Content-Disposition` must all name a
+   * file the same way, and a second implementation of "flatten the key" is
+   * how two of the three come to disagree. */
   filename: string;
+  /** The size the listing reported, or null when it reported something that
+   * was not a finite number. */
+  sizeBytes: number | null;
 }
 
 export interface BulkDownloadPlan {
-  /** In the order `artifacts` was given, minus anything that is not a
-   * result of this job at all (see `jobArtifactKey`'s own doc — a staged
-   * input-code upload has no browser-readable route and must not be
-   * silently attempted and failed). */
+  /** Every file of every group, in group order — so the failed task whose
+   * logs `groupArtifactsByTask` sorted to the front is also the first thing
+   * saved. Checkpoints are included: they are as downloadable as anything
+   * else, and a button labelled "all" that quietly skipped them would be
+   * the same lie in the other direction. */
   files: DownloadableArtifact[];
-  /** The sum of every KNOWN `size_bytes` among `files`. Not an estimate of
-   * the true total when `sizeIsPartial` is true — an unknown size is
-   * omitted from the sum entirely rather than treated as 0, so this number
-   * is always a real, verifiable floor, never a guess dressed up as a
-   * total. */
+  /** The sum of every KNOWN size among `files`. Not an estimate of the true
+   * total when `sizeIsPartial` is true — an unknown size is omitted from the
+   * sum entirely rather than treated as 0, so this number is always a real,
+   * verifiable floor, never a guess dressed up as a total. */
   totalBytes: number;
-  /** True when at least one file's `size_bytes` is null — `totalBytes` is
+  /** True when at least one file's size was unreadable — `totalBytes` is
    * then a floor, not a total, and must be labelled "at least" rather than
    * presented as exact. */
   sizeIsPartial: boolean;
@@ -62,27 +67,20 @@ export interface BulkDownloadPlan {
  * exactly here. */
 export const MANY_FILES_THRESHOLD = 10;
 
-function flattenKey(key: string): string {
-  return key.replace(/\//g, "__");
-}
-
-export function planBulkDownload(
-  jobId: string,
-  artifacts: ArtifactRecord[]
-): BulkDownloadPlan {
+export function planBulkDownload(groups: ArtifactGroup[]): BulkDownloadPlan {
   const files: DownloadableArtifact[] = [];
   let totalBytes = 0;
   let sizeIsPartial = false;
 
-  for (const artifact of artifacts) {
-    const key = jobArtifactKey(jobId, artifact.uri);
-    if (key === null) continue; // not a result of this job — nothing to offer
-
-    files.push({ artifact, key, filename: flattenKey(key) });
-    if (artifact.size_bytes === null) {
-      sizeIsPartial = true;
-    } else {
-      totalBytes += artifact.size_bytes;
+  for (const group of groups) {
+    for (const entry of group.artifacts) {
+      files.push({
+        key: entry.key,
+        filename: artifactFilename(entry.key),
+        sizeBytes: entry.sizeBytes,
+      });
+      if (entry.sizeBytes === null) sizeIsPartial = true;
+      else totalBytes += entry.sizeBytes;
     }
   }
 

@@ -174,6 +174,31 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-11 — Artifact downloads: 401 on every click, fixed by splitting url-lookup from bytes (flashml-cloud, api + web)
+What/why: every artifact download answered 401. The console had been changed
+to plain `<a href download>` anchors so a browser would follow the download
+route's 307 into presigned Alibaba OSS — and a NAVIGATION sends no
+`Authorization` header, which is the only thing `current_user` reads. New
+`GET /v1alpha1/jobs/{id}/artifact-url/{key:path}` is an ordinary authenticated
+JSON call answering `{storage, url}`; the console navigates to the presigned
+url (OSS's own expiring single-object grant — no header, no CORS, no blob) and
+falls back to an authenticated fetch+Blob for anything not mirrored. Also
+added `Content-Disposition: attachment` on both paths, named from the flattened
+key, without which a navigation to a JSON artifact navigated the console away.
+How verified: api 2177 passed / 2 skipped / 3 deselected / 1 xfailed (was
+2163); web 732 passed across 45 files (was 714/44), `tsc --noEmit` clean,
+`eslint` clean, `next build` compiled.
+Gotchas: the obvious shape `.../artifacts/{key:path}/download-url` is
+ambiguous by construction — `{key:path}` is greedy and a job that wrote a file
+called `download-url` would find its own bytes unreachable — so the route is a
+SIBLING segment (`artifact-url`), matched one component before the wildcard.
+Per-key fallback is mandatory, not defensive: only ACCEPTED work is mirrored
+(hard rule 4), so a FAILED shard's `stderr.txt` is coordinator-only under a job
+stamped `storage: "oss"`. Everything OSS stays gated on `Settings.oss_configured`.
+Next: nothing outstanding on this path. Parking lot: `expose_headers` for
+`Content-Disposition` if the console ever wants to read the API's filename back
+instead of deriving it.
+
 ### 2026-08-11 — Fresh production: database reset, admin bootstrap, GitHub App, email proven (flashml-cloud, prod)
 What/why: owner wanted a clean prod for the competition demo. Truncated every
 app table and all `auth.users`, preserving `schema_migrations` so nothing

@@ -1,12 +1,22 @@
 """The compute router: which machines should be eligible, and what it costs.
 
 "OpenRouter for compute." A submitter has a job of independent tasks (an HPO
-sweep, an eval shard set) and three venues to run it in — their workspace,
-the open market, a rented cloud. This package answers two questions and
-refuses a third.
+sweep, an eval shard set) and several venues to run it in — their workspace,
+the open market, a rented pod, an Alibaba FC sandbox. This package answers
+three questions and refuses a fourth.
 
-**It answers: how long will one task take (``estimator``), and how should the
-fleet be split (``plan``).**
+**It answers: what kind of work is this (``workload``), which venues suit
+that kind (``venues``), how long will one task take (``estimator``), and how
+should the fleet be split (``plan``).**
+
+The first two are what make this a resource-allocation layer rather than a
+price comparison. Cost and ETA cannot see the difference between forty
+six-second trials and one eight-hour fine-tune, and routing by **fit** — HPO
+to anything with a CPU, training to real hardware, wait-heavy scoring to a
+venue that hibernates at near-zero cost — is the product thesis. Fit decides
+the eligible SET; cost and ETA choose WITHIN it. They are never averaged: a
+cheap venue that cannot run the workload is not a cheap option, it is not an
+option.
 
 **It refuses to answer: which machine runs which task.** ``flashruntime``'s
 scheduler states the constraint outright at ``scheduler/__init__.py:628`` —
@@ -99,11 +109,36 @@ from flashml_cloud_api.router.plan import (
     PlanSet,
     balanced_plan,
     canary_for,
+    candidate_venue_id,
     cheapest_plan,
     eligible_fleet,
     fastest_plan,
     frontier,
     plan_job,
+    venue_admitted,
+)
+from flashml_cloud_api.router.venues import (
+    ACQUISITION_AUTOMATIC,
+    ACQUISITION_MANUAL,
+    ACQUISITION_NONE,
+    VENUE_FC_GPU,
+    VENUE_FC_SANDBOX,
+    VENUE_OWNED,
+    VENUE_RUNPOD,
+    VENUES,
+    Venue,
+    VenueFit,
+    usable_venue_ids,
+    venue_for_listing,
+    venues_for,
+)
+from flashml_cloud_api.router.workload import (
+    Signals,
+    WorkloadKind,
+    classify,
+    signals_for,
+    signals_from_config,
+    signals_from_job_spec,
 )
 
 __all__ = [
@@ -152,9 +187,32 @@ __all__ = [
     "PlanSet",
     "balanced_plan",
     "canary_for",
+    "candidate_venue_id",
     "cheapest_plan",
     "eligible_fleet",
     "fastest_plan",
     "frontier",
     "plan_job",
+    "venue_admitted",
+    # workload
+    "Signals",
+    "WorkloadKind",
+    "classify",
+    "signals_for",
+    "signals_from_config",
+    "signals_from_job_spec",
+    # venues
+    "ACQUISITION_AUTOMATIC",
+    "ACQUISITION_MANUAL",
+    "ACQUISITION_NONE",
+    "VENUES",
+    "VENUE_FC_GPU",
+    "VENUE_FC_SANDBOX",
+    "VENUE_OWNED",
+    "VENUE_RUNPOD",
+    "Venue",
+    "VenueFit",
+    "usable_venue_ids",
+    "venue_for_listing",
+    "venues_for",
 ]

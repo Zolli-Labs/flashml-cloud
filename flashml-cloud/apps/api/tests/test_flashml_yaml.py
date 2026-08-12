@@ -156,6 +156,76 @@ def test_unknown_top_level_key_is_refused():
         parse_flashml_yaml(text)
 
 
+# ---------------------------------------------------------------------------
+# `checkpoint:` — refused with an explanation, never as a typo
+#
+# Checkpointing is unconditional: the compiler emits the workload parameter
+# on every job (`compile.CHECKPOINT_PARAM`). Someone who reads that FlashML
+# survives a machine dying will still reasonably try to switch it on, and
+# "unknown key(s) ['checkpoint']" sends them looking for a spelling mistake
+# in a feature that simply is not theirs to configure. So it joins the three
+# removed federated keys in `REFUSED_KEYS`, checked BEFORE the generic
+# unknown-key check — and it is NOT added to `ALLOWED_KEYS`, because
+# accepting the key and ignoring its value is the surface this parser exists
+# to refuse.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["true", "{}", '{dir: out/ckpt}', "every: 10"])
+def test_checkpoint_is_refused_whatever_it_is_set_to(value):
+    with pytest.raises(ConfigError) as excinfo:
+        parse_flashml_yaml(MINIMAL + f"\ncheckpoint: {value}\n")
+    assert "checkpoint" in str(excinfo.value)
+
+
+def test_checkpoint_is_refused_with_the_convention_not_as_a_typo():
+    """The whole point of the entry: the message has to teach where to write
+    resumable state and where to read it back, so the reader stops looking
+    for a typo and goes and writes the two file paths instead."""
+    with pytest.raises(ConfigError) as excinfo:
+        parse_flashml_yaml(MINIMAL + "\ncheckpoint: true\n")
+    message = str(excinfo.value)
+    assert "unknown key" not in message
+    assert "always on" in message
+    assert "out/ckpt/step-<N>.json" in message
+    assert "/work/inputs/resume.json" in message
+
+
+def test_checkpoint_is_not_an_accepted_key():
+    """It is refused, not honoured — `ALLOWED_KEYS` must not learn it, or
+    the parser would accept a value nothing reads."""
+    from flashml_cloud_api.flashml_yaml import ALLOWED_KEYS
+
+    assert "checkpoint" not in ALLOWED_KEYS
+
+
+def test_the_removed_federated_keys_are_still_refused_with_their_reasons():
+    """`REFUSED_KEYS` extends the existing mechanism rather than replacing
+    it: the federated migration messages must survive the extension."""
+    with pytest.raises(ConfigError) as excinfo:
+        parse_flashml_yaml(MINIMAL + "\nshards: 4\n")
+    message = str(excinfo.value)
+    assert "shards" in message
+    assert "epochs" in message
+    assert "unknown key" not in message
+
+
+def test_a_typo_is_still_an_unknown_key():
+    """The explained refusals must not swallow the generic check — an
+    ordinary misspelling still gets the unknown-key message."""
+    with pytest.raises(ConfigError) as excinfo:
+        parse_flashml_yaml(MINIMAL + "\ncheckpointing: true\n")
+    message = str(excinfo.value)
+    assert "unknown key" in message
+    assert "checkpointing" in message
+
+
+def test_a_config_that_says_nothing_about_checkpoints_still_parses():
+    """The overwhelmingly common case, unchanged: the key never appears in a
+    real flashml.yaml because there is nothing to say."""
+    assert parse_flashml_yaml(MINIMAL).name == "cifar-sweep"
+
+
 def test_not_a_mapping_is_refused():
     with pytest.raises(ConfigError):
         parse_flashml_yaml("- just\n- a\n- list\n")

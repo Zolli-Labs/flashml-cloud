@@ -25,7 +25,12 @@ import { formatBytes } from "./utils";
  * that were going to finish already have. A job in any other state might
  * still write into its own output directory, so offering the button for it
  * would only relay the API's 409 back at the user with extra steps. */
-const CLEARABLE_STATES = new Set(["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"]);
+export const CLEARABLE_STATES = new Set([
+  "SUCCEEDED",
+  "PARTIAL",
+  "FAILED",
+  "CANCELLED",
+]);
 
 export interface ClearableJob {
   jobId: string;

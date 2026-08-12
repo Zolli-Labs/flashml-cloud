@@ -1,0 +1,76 @@
+# The competition demo's TRAINING job.
+#
+# Ship this as `flashml.yaml` at the root of the demo branch, beside
+# train_checkpointed.py, evaluate_model.py and workload_common.py. One repo is
+# one job (docs/guides/writing-flashml-yaml.md), so the two configs in this
+# directory are two branches of that repo, not two files in one — the names
+# here exist because both have to live in this checkout side by side.
+#
+# Every key below is in `flashml_yaml.ALLOWED_KEYS` and was parsed by the real
+# `parse_flashml_yaml` + `compile_to_jobspec`; unknown keys are REFUSED, not
+# ignored, so nothing aspirational can hide in here.
+#
+# WHAT THIS FILE CANNOT SAY, and it is the one the demo depends on: there is no
+# `checkpoint:` key. flashnode's `_CheckpointRelay` and its `resume.json`
+# staging are both gated on `task.payload["checkpoint"]` being non-None
+# (flashnode/executor/loop.py:466). `CommandRecipe.expand` forwards that
+# workload parameter verbatim (recipes/command.py:199), but `compile.py` never
+# emits it and `ALLOWED_KEYS` has no key that would. So a job authored HERE
+# trains, checkpoints to its own disk, and loses every checkpoint when the
+# machine dies. See the report accompanying these files.
+
+version: 1
+name: flashml-competition-train
+image: python-slim
+entrypoint: train_checkpointed.py
+
+# An argv list, never a shell string — there is no shell on the far side.
+#
+# The two paths are written out rather than left to the script's own defaults
+# because both tiers resolve them differently and the demo should show which:
+# the container tiers bind the workdir at /work, and the trusted tier rewrites
+# `/work`-prefixed argv TOKENS onto the real workdir
+# (TrustedArgvRunner.run). A path the script computed for itself would miss
+# that rewrite.
+#
+# The sizing is measured, not guessed: 60 epochs x 8000 samples at hidden 64
+# runs 37.0 s and writes 60 checkpoints on an M-series laptop under CPython
+# 3.12. That is the window where a worker can be killed around checkpoint 25
+# and the run still finishes inside a three-minute demo.
+args:
+  - "--out"
+  - "/work/out"
+  - "--resume"
+  - "/work/inputs/resume.json"
+  - "--epochs"
+  - "60"
+  - "--samples"
+  - "8000"
+  - "--hidden"
+  - "64"
+
+# A task whose metrics.json is intact and hashes correctly but carries neither
+# of these fails its attempt and is retried elsewhere. `model_sha256` is in the
+# list on purpose: it is the evidential tie between "a model was trained" and
+# "this model was evaluated", and a training result that cannot name its model
+# is not a result this demo can use.
+validators:
+  keys: [accuracy, model_sha256]
+
+# One task, so there is nothing to rank against. `collect` returns the manifest
+# of what was produced, which is what the console and run_demo.py read to find
+# the model. Reduction happens lazily at GET /jobs/{id}/result, so declaring it
+# cannot fail the job.
+reduce:
+  kind: collect
+
+# Wall clock per task, well inside the 24 h cap. Generously above the measured
+# 37 s because a volunteer's machine is not this laptop and a resumed attempt
+# pays for the epochs the dead one lost.
+timeout_seconds: 1800
+
+# One dead machine must not discard the run. Immaterial for a single-task job
+# today and deliberately set anyway: the day this grows a sweep, the default
+# (one exhausted task fails the whole job) is the wrong one on volunteer
+# hardware.
+allow_partial: true

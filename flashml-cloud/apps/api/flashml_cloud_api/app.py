@@ -64,7 +64,7 @@ import httpx
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from psycopg.rows import dict_row
 from starlette.concurrency import run_in_threadpool
 
@@ -102,6 +102,7 @@ from flashml_cloud_api.artifact_mirror import (
     MirrorError,
     job_prefix,
     mirror_job,
+    presign_mirrored_artifact,
     unmirror_job,
 )
 from flashml_cloud_api.auth import (
@@ -584,6 +585,22 @@ GATEWAY_RETRY_DELAYS: tuple[float, ...] = (2.0, 5.0, 12.0)
 # answer and repeating it just multiplies a request that cannot succeed.
 GATEWAY_STATUSES = frozenset({502, 503, 504})
 
+# The same idea, sized for an AGENT waiting on the far end rather than a
+# browser — and it has to be shorter, not longer.
+#
+# flashnode's HTTP timeout is 15s (`executor/client.py`), and it does NOT
+# retry a status it received: `_request` catches `HTTPError` and returns the
+# code straight to the caller, retrying only when nothing answered at all.
+# So a ladder outlasting 15s cannot help anyone — the agent has already given
+# up and is raising by the time the last forward goes out. 1+2+4 = 7s leaves
+# room for the four forwards themselves inside that budget.
+#
+# Why an agent GET needs this at all: `forward` turns "coordinator did not
+# answer" into a 502 *answer* (see its except clause). To flashnode that is
+# an HTTPError, which it trusts as a decision and does not retry — so our
+# gateway shape defeats the transport retry the agent already has.
+AGENT_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
+
 
 class CoordinatorClient:
     """The only holder of the operator credential.
@@ -672,6 +689,8 @@ async def forward_idempotent(
     coordinator: CoordinatorClient,
     method: str,
     path: str,
+    *,
+    delays: tuple[float, ...] = GATEWAY_RETRY_DELAYS,
     **kwargs: Any,
 ) -> httpx.Response:
     """``forward`` plus a retry while the coordinator is still coming up.
@@ -682,12 +701,16 @@ async def forward_idempotent(
     another user's staged code, nor an earlier attempt of this same request.
     Do not reach for this on job submission — a repeated POST there is a
     duplicate job.
+
+    ``delays`` is the ladder to walk. It is a parameter because the right
+    one depends on who is waiting: a browser will sit through a cold start,
+    an agent with a 15s socket timeout will not (``AGENT_RETRY_DELAYS``).
     """
     last = await coordinator.forward(method, path, **kwargs)
     if last.status_code not in GATEWAY_STATUSES:
         return last
 
-    for delay in GATEWAY_RETRY_DELAYS:
+    for delay in delays:
         await asyncio.sleep(delay)
         last = await coordinator.forward(method, path, **kwargs)
         if last.status_code not in GATEWAY_STATUSES:
@@ -869,17 +892,174 @@ async def _mirror_job_artifacts(
         )
 
 
-def _passthrough(r: httpx.Response) -> Response:
+def _relative_artifacts(job_id: str, listing: Any) -> list[dict[str, Any]]:
+    """The coordinator's artifact listing, keyed RELATIVE to the job prefix.
+
+    The coordinator answers absolute keys (``jobs/{job_id}/shard-000/out.bin``)
+    because that is how its store is addressed. The browser is handed the
+    remainder (``shard-000/out.bin``) for one concrete reason: it is exactly
+    what ``GET /v1alpha1/jobs/{job_id}/artifacts/{key}`` takes, so a console
+    that lists a job's files can build every download link by concatenation
+    and never has to know the store's layout. Returning the absolute key would
+    make every caller strip the prefix itself, and the first one to forget
+    would ask for ``jobs/{job}/jobs/{job}/…``.
+
+    **Nothing is invented and nothing is inferred.** An entry with no usable
+    ``key``, or one that does not sit under this job's prefix, is dropped —
+    a listing that disagrees with the job it was asked about is not evidence
+    about this job. An entry whose ``size_bytes`` is missing or nonsensical is
+    KEPT, at 0: the file demonstrably exists and hiding it would be the worse
+    error, while a guessed size would be a number nobody measured. That is the
+    same judgement — and the same explicit ``bool`` exclusion, since ``True``
+    is an ``int`` — that ``storage.sum_artifact_sizes`` makes about the very
+    same payload, and the two must not disagree about one listing.
+    """
+    if not isinstance(listing, list):
+        return []
+    prefix = job_prefix(job_id)
+    out: list[dict[str, Any]] = []
+    for entry in listing:
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("key")
+        if not isinstance(key, str) or not key.startswith(prefix):
+            continue
+        relative = key[len(prefix):]
+        if not relative:
+            continue
+        size = entry.get("size_bytes")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            size = 0
+        out.append({"key": relative, "size_bytes": size})
+    out.sort(key=lambda e: e["key"])
+    return out
+
+
+def _artifact_filename(key: str) -> str:
+    """What a downloaded artifact is saved as: the key with ``/`` flattened.
+
+    ``shard-000/stdout.txt`` becomes ``shard-000__stdout.txt``. The last
+    segment alone would be the obvious choice and is the wrong one: every task
+    of a job writes ``stdout.txt``, so a run with twenty shards would save
+    twenty files the browser silently renames ``stdout (1).txt`` …
+    ``stdout (19).txt``, erasing the one fact — which task — the person opened
+    them to learn. The console's ``lib/bulk-download.ts`` already flattens the
+    same way for its ``download`` attribute; the two agree deliberately, so a
+    file saves under the same name whichever path it came down.
+
+    **The result is header-safe because ``_artifact_key`` already said so.**
+    Every segment of a key that reaches here has matched
+    ``PATH_SEGMENT_RE`` — ``[A-Za-z0-9][A-Za-z0-9._:-]{0,255}`` — which admits
+    no quote, no backslash, no control character and nothing outside ASCII, so
+    the quoted-string form below needs no escaping and no RFC 5987 fallback.
+    That is a dependency between two functions, not a coincidence: loosening
+    that alphabet without revisiting this would let a key inject a header
+    parameter. A test pins the pair together.
+    """
+    return key.replace("/", "__")
+
+
+def _attachment_disposition(key: str) -> str:
+    """``Content-Disposition`` for one artifact download, in both directions.
+
+    WITHOUT THIS A DOWNLOAD NAVIGATES THE CONSOLE AWAY. Both download paths
+    end in a navigation for a mirrored object (a presigned OSS URL, which is a
+    cross-origin GET the browser performs itself), and a navigation to
+    ``metrics.json`` served as ``application/json`` renders it in the tab the
+    console was in. ``attachment`` is what turns that into a save. It is set on
+    the proxy path too, so the two paths behave the same way rather than
+    differing by whether a bucket happens to be configured.
+    """
+    return f'attachment; filename="{_artifact_filename(key)}"'
+
+
+async def _mirrored_artifact_url(
+    job_id: str,
+    coordinator_key: str,
+    row: dict[str, Any],
+    settings: Settings,
+    *,
+    content_disposition: str | None = None,
+) -> str | None:
+    """A presigned OSS URL for one artifact, or None to serve it as before.
+
+    WHY A REDIRECT AND NOT A SERVER-SIDE FETCH. The point of the mirror, for
+    downloads, is that the bytes stop travelling through this process: a 500 MB
+    model pulled from OSS and re-streamed to the browser costs the API the
+    whole transfer twice over and holds a worker for its duration, which is how
+    one person downloading a model makes the control plane unavailable to
+    everybody else. A 307 hands the browser a single-object, expiring grant and
+    the transfer happens between the browser and OSS. The API's part is one
+    signature.
+
+    NONE IS THE NORMAL ANSWER, NOT THE EXCEPTIONAL ONE. It means "serve this
+    from the coordinator exactly as before", and four different situations
+    reach it, all of them ordinary:
+
+      * no OSS configured — the deployment default, and the gate is FIRST so
+        that such a deployment does not build a client or open a socket;
+      * this job was never mirrored (``artifacts_mirrored_at`` null, read off
+        the row the visibility check already fetched — no extra query);
+      * the key is not in the job's manifest, which is what an unaccepted
+        task's output IS: hard rule 4 keeps a failed shard's bytes on the
+        coordinator's disk deliberately, and this route is how they stay
+        reachable;
+      * OSS is configured and unwell.
+
+    That last one is why every failure here is logged and swallowed rather than
+    raised. The coordinator still holds every byte this route can be asked for
+    — the mirror is an ADDITIONAL copy, never a migration — so a bucket having
+    a bad minute must cost a slower download, not a broken one. The inverse,
+    a 502 for an artifact that is sitting on a disk we can reach, would make
+    configuring OSS strictly worse than not configuring it.
+    """
+    if not settings.oss_configured or row.get("artifacts_mirrored_at") is None:
+        return None
+    try:
+        oss = OSSArtifacts.from_settings(settings)
+        return await presign_mirrored_artifact(
+            job_id, coordinator_key, oss,
+            content_disposition=content_disposition,
+        )
+    except (OSSUnavailable, MirrorError) as exc:
+        log.warning(
+            json.dumps({"text": "could not presign a mirrored artifact; "
+                                "serving it from the coordinator",
+                        "job_id": job_id, "error": str(exc)})
+        )
+        return None
+    except Exception:  # noqa: BLE001 - a download must never fail on the mirror
+        # The narrow catch above covers what the two modules promise. This one
+        # exists because the promise is another module's to keep and this
+        # route's fallback has to hold whether or not it does.
+        log.warning(
+            json.dumps({"text": "could not presign a mirrored artifact; "
+                                "serving it from the coordinator",
+                        "job_id": job_id, "error": "unexpected"})
+        )
+        return None
+
+
+def _passthrough(
+    r: httpx.Response, *, headers: dict[str, str] | None = None
+) -> Response:
     """Return the coordinator's answer verbatim: status *and* body.
 
     Status fidelity is load-bearing — ``claim`` answers 204 for "nothing to
     do right now", and flattening that to 200 would make an idle agent think
     it had been given work.
+
+    ``headers`` adds to the answer without touching it; the only caller is the
+    artifact proxy, adding the ``Content-Disposition`` the coordinator has no
+    reason to know about (it serves a store, not a browser). It is deliberately
+    additive and never a rewrite — nothing here may edit what the coordinator
+    said, only say something further.
     """
     return Response(
         content=r.content,
         status_code=r.status_code,
         media_type=r.headers.get("content-type"),
+        headers=headers,
     )
 
 
@@ -2218,6 +2398,7 @@ def create_cloud_app(
         force_node_id: bool = False,
         pools: list[str] | None = None,
         pools_where: Literal["capabilities", "top"] = "capabilities",
+        retry_delays: tuple[float, ...] | None = None,
     ) -> Response:
         is_artifact = path.startswith("/v1alpha1/artifacts/")
         limit = max_upload_bytes if is_artifact else MAX_JSON_BODY_BYTES
@@ -2247,14 +2428,22 @@ def create_cloud_app(
             )
         else:
             media_type = None
-        r = await coordinator.forward(
-            request.method,
-            path,
+        forward_kwargs: dict[str, Any] = dict(
             on_behalf_of=machine.node_id,
             content=body if body else None,
             query=request.url.query,
             media_type=media_type,
         )
+        if retry_delays is None:
+            r = await coordinator.forward(request.method, path, **forward_kwargs)
+        else:
+            # Caller has asserted this path is safe to repeat. Nothing here
+            # checks that — `proxy` cannot know — so the assertion lives at
+            # the route, next to the reason.
+            r = await forward_idempotent(
+                coordinator, request.method, path,
+                delays=retry_delays, **forward_kwargs,
+            )
         return _passthrough(r)
 
     # -- health -------------------------------------------------------------
@@ -3368,6 +3557,23 @@ def create_cloud_app(
                 task, candidates, eligible=placement_eligible
             )
         }
+        # What KIND of work is this, and therefore which venues can do it?
+        #
+        # Without this the planner narrows on nothing and prices every machine
+        # as if any of them could run any job — which is how a GPU fine-tune
+        # gets quoted on a 2 vCPU CPU sandbox. `kind=None` is a deliberate
+        # no-op inside the planner, so before this line venue fit was built,
+        # tested, and unreachable.
+        #
+        # `raw_spec` rather than the validated model: `signals_from_job_spec`
+        # reads a compiled JobSpec mapping, which is what this route holds. It
+        # never sees the flashml.yaml those were compiled from.
+        #
+        # `task_count` is passed explicitly because we have just run the
+        # runtime's own `expand_tasks` and know the real number. Re-deriving it
+        # inside the classifier would be a second copy of the coordinator's
+        # expansion rule, and the two would eventually disagree.
+        kind, kind_evidence = routermod.classify(raw_spec, task_count=len(tasks))
         plan_set = routermod.plan_job(
             routermod.PlanRequest(
                 task=task,
@@ -3375,6 +3581,15 @@ def create_cloud_app(
                 candidates=tuple(candidates),
                 duration=duration,
                 deadline_seconds=deadline_seconds,
+                kind=kind,
+                kind_evidence=kind_evidence,
+                # `resources.gpuPerTask` is the hardware refusal: a venue with
+                # no GPU is not eligible for a job that needs one, whatever it
+                # costs. Read off the validated model rather than `raw_spec`
+                # so a missing or malformed value becomes the schema default
+                # (0 = no GPU required) instead of a KeyError on a read-only
+                # preview route.
+                gpus_per_task=getattr(spec.spec.resources, "gpuPerTask", 0) or None,
             ),
             eligible=placement_eligible,
         )
@@ -3397,6 +3612,39 @@ def create_cloud_app(
         return {
             "job_id": job_id,
             "tasks": len(tasks),
+            # WHAT KIND OF WORK, AND WHY — never the enum alone.
+            #
+            # "hpo" tells a reader nothing they can check. "hpo, because the
+            # spec expands to 40 independent trials over 2 sweep axes" is a
+            # sentence they can hold against the job they submitted, and
+            # disagree with if it is wrong. A classifier that cannot be
+            # audited from its own output is one nobody will trust the day it
+            # routes something surprisingly.
+            "kind": plan_set.kind.value if plan_set.kind else None,
+            "kind_evidence": plan_set.kind_evidence,
+            # Every venue, INCLUDING the refused ones, each with its reason.
+            #
+            # A surface that lists only usable venues cannot answer "why isn't
+            # RunPod here?" — and the two refusals mean opposite things:
+            # `suited=False` is "this venue physically cannot run this work",
+            # `acquirable=False` is "we cannot get capacity there yet". The
+            # second is a roadmap item and the first is a fact about hardware.
+            # Collapsing them would let the UI imply we chose not to use a
+            # venue we simply cannot reach.
+            "venues": [
+                {
+                    "id": fit.venue.id,
+                    "display": fit.venue.display,
+                    "currency": fit.venue.currency,
+                    "suited": fit.suited,
+                    "acquirable": fit.acquirable,
+                    "usable": fit.usable,
+                    "acquisition": fit.venue.acquisition,
+                    "reason": fit.reason,
+                }
+                for fit in (plan_set.venue_fits or ())
+            ],
+            "venue_excluded_machines": plan_set.venue_excluded_machines,
             "duration": _preview_estimate(plan_set.duration),
             "plans": [
                 _preview_plan(
@@ -4296,6 +4544,70 @@ def create_cloud_app(
         r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks")
         return _passthrough(r)
 
+    @app.get("/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoint", tags=["browser"])
+    async def get_task_checkpoint(
+        job_id: str, task_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The latest committed checkpoint for a task the caller can see.
+
+        Answers the only question the console can ask about fault tolerance
+        while a job is still running: *how much work would this task lose if
+        its machine vanished right now?* Checkpointing is on for every job,
+        so this is live for all of them.
+
+        **Why this exists next to an identical agent route.** The agent's
+        ``.../checkpoints/latest`` is machine-credentialed —
+        ``current_machine`` answers 401 to a browser JWT on purpose, the two
+        credential kinds never cross over — so the console could not read it
+        at all. Same path with a second auth mode would put both kinds on one
+        route, which is exactly the mixing this API refuses everywhere else;
+        a separate browser path keeps them apart. It is a route wrapper, not
+        a protocol change: the coordinator's own ``/latest`` takes no
+        credential.
+
+        That last fact is why the visibility check here is load-bearing
+        rather than decorative. A checkpoint manifest carries artifact keys,
+        and the coordinator will hand it to anyone who asks; ``job_id`` is
+        the only thing standing between one account's manifests and another,
+        so this route resolves the job through ``fetch_job_for_viewer``
+        first, exactly as the sibling task and event routes do.
+
+        **404 is passed through untouched** and means "no valid checkpoint",
+        which is not the same as "this workload does not checkpoint" — the
+        coordinator cannot tell those apart and neither can this route, so
+        neither invents a distinction. The console renders the ambiguity
+        rather than guessing.
+
+        Not retried, unlike the agent's copy: this is a 2.5s browser poll,
+        and holding a request through a retry ladder would stack polls on a
+        coordinator that is already struggling. The next tick is the retry.
+        """
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        if fedavgmod.is_federated_job_id(job_id):
+            # Checkpoint scope is `<coordinator_job_id>::<task_id>`, and a
+            # federated run has one coordinator job PER ROUND — so this
+            # umbrella id addresses no scope at all. 409 rather than 404:
+            # "there is no checkpoint here" would be indistinguishable from
+            # a task that has not committed one yet, and the caller would
+            # believe it.
+            raise HTTPException(
+                status_code=409,
+                detail="a federated run checkpoints per round; read the "
+                       "round's coordinator job",
+            )
+
+        r = await coordinator.forward(
+            "GET",
+            f"/v1alpha1/jobs/{_seg(job_id)}/tasks/{_seg(task_id)}"
+            f"/checkpoints/latest",
+        )
+        return _passthrough(r)
+
     @app.get("/v1alpha1/me/storage", tags=["browser"])
     async def get_my_storage(
         user_id: str = Depends(current_user),
@@ -4500,6 +4812,168 @@ def create_cloud_app(
         r = await coordinator.forward("POST", f"/v1alpha1/jobs/{_seg(job_id)}/cancel")
         return _passthrough(r)
 
+    @app.get("/v1alpha1/jobs/{job_id}/artifacts", tags=["browser"])
+    async def list_job_artifacts(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """What a finished job left behind, for the console's Artifacts card.
+
+        THE GAP THIS CLOSES. Until now the console read ``job.artifacts``,
+        a field on ``JobRecord`` whose only writer sits on the KubeRay ingest
+        path this deployment never takes — so it was ``[]`` for every job this
+        product has ever run, and the card was empty for a job whose model was
+        sitting on the coordinator's disk the whole time. The bytes were never
+        missing; there was no route that would say they were there.
+
+        THE ANSWER COMES FROM THE COORDINATOR, WHICH IS THE ONLY THING THAT
+        KNOWS. Not from ``jobs``, which stores a footprint total and no keys,
+        and not from the OSS manifest, which describes the *accepted* subset
+        and does not exist at all on a deployment with no OSS. One listing, and
+        every key and size in the answer came out of it — see
+        ``_relative_artifacts`` for what is dropped and what is kept.
+
+        ``storage`` AND ``mirrored_at`` DESCRIBE WHERE THE NEXT DOWNLOAD COMES
+        FROM, which is a different question from what exists. ``"oss"`` is
+        claimed only when this deployment can actually sign an OSS URL *and*
+        this job has a manifest — the same two conditions the download route
+        checks, deliberately read the same way, because a card that said "OSS"
+        while every download proxied would be describing a system nobody is
+        running. With no OSS configured the pair is fixed at
+        ``("coordinator", null)`` and this route behaves exactly as it would
+        have before the mirror existed.
+
+        A FEDERATED RUN ANSWERS EMPTY, and honestly so. Its parent id names no
+        coordinator job — a run is N round jobs the coordinator sees as
+        unrelated — so there is nothing to list under ``jobs/{parent}/``, and
+        forwarding the parent id would spend a round trip to be told so.
+        Fanning out over the rounds, the way ``/events`` and ``/tasks`` do,
+        would return keys under a DIFFERENT job's prefix: they would not
+        compose with the fetch-by-key route below, so every link the console
+        built from them would 404. A known gap, stated rather than papered
+        over — a federated run's outputs need a per-round shape both routes
+        agree on, which is its own task.
+        """
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        # Read before the coordinator is asked anything, off the row already
+        # in hand: `oss_configured` is a property, `artifacts_mirrored_at` is
+        # a column of the row the visibility check just fetched, so knowing
+        # where downloads will come from costs nothing at all.
+        mirrored_at = (
+            row.get("artifacts_mirrored_at") if settings.oss_configured else None
+        )
+        answer: dict[str, Any] = {
+            "artifacts": [],
+            "storage": "oss" if mirrored_at is not None else "coordinator",
+            # `_isoformat`, not `str()`: the sibling job routes render a
+            # timestamp with `str()` and get `2026-08-11 22:15:00+00:00`,
+            # which is not ISO 8601 and lands in the corner of `Date` parsing
+            # that is implementation-defined. This field is new, so it can
+            # simply be right.
+            "mirrored_at": _isoformat(mirrored_at),
+        }
+        if fedavgmod.is_federated_job_id(job_id):
+            return answer
+
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts"
+        )
+        if r.status_code >= 300:
+            # The coordinator's own answer, unedited. An empty list here would
+            # render as "this job produced nothing", which is the one thing a
+            # failed listing does not establish — and the console cannot tell
+            # the difference from a body it did not receive.
+            return _passthrough(r)
+        try:
+            listing = r.json()
+        except ValueError:
+            return _passthrough(r)
+        if not isinstance(listing, list):
+            return _passthrough(r)
+        answer["artifacts"] = _relative_artifacts(job_id, listing)
+        return answer
+
+    @app.get("/v1alpha1/jobs/{job_id}/artifact-url/{key:path}", tags=["browser"])
+    async def get_job_artifact_url(
+        job_id: str,
+        key: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Where the console should send the browser for ONE artifact.
+
+        THE 401 THIS EXISTS TO REMOVE. The download route below sits on
+        ``current_user``, which reads a bearer token from the ``Authorization``
+        header and from nothing else. That is correct and stays correct — but
+        a browser NAVIGATION sends no such header, so a plain ``<a href>`` to
+        it answers 401 every time, and a navigation is the only thing that
+        follows the route's 307 into OSS cleanly. Fetching the bytes with the
+        header instead only moves the failure: the fetch would follow that same
+        307 to a third origin whose response carries no CORS grant of ours, and
+        it would pull a multi-gigabyte checkpoint through browser memory on the
+        way. So the two facts are separated. This route is an ORDINARY
+        authenticated JSON call — same origin as every other call the console
+        makes, header and all — and it answers with a URL that needs no header
+        of its own.
+
+        WHY A PRESIGNED URL MAY TRAVEL WITHOUT ONE. It is not this API's
+        credential and it grants nothing this API grants: it reads exactly one
+        object, it expires by itself after ``alibaba_oss.DEFAULT_TTL_S``, and
+        it is minted only after the same ``fetch_job_for_viewer`` check every
+        other job route runs. Nothing about this weakens ``current_user`` — the
+        caller proved who they were to get here.
+
+        ``storage`` IS THE ANSWER, ``url`` IS ONLY SOMETIMES. ``"coordinator"``
+        with a null ``url`` is a completely ordinary reply and the console must
+        handle it as the normal case, not an error: no OSS configured (the
+        deployment default), this job never mirrored, the bucket unwell, or —
+        the one that has nothing to do with configuration — **this key is not
+        in the manifest**. A task that failed produced no accepted output, so
+        hard rule 4 deliberately leaves its ``stderr.txt`` on the coordinator's
+        disk while the job as a whole is stamped mirrored. A console that
+        assumed a mirrored job means a mirrored key would fail on exactly the
+        file somebody opens after a failure. ``_mirrored_artifact_url``
+        collapses all four to None on purpose; the caller's fallback is one
+        branch, not four.
+
+        WHY ITS OWN PATH SEGMENT AND NOT A SUFFIX ON THE DOWNLOAD ROUTE.
+        ``{key:path}`` is greedy and an artifact key is arbitrary, so
+        ``…/artifacts/{key:path}/download-url`` would be ambiguous by
+        construction: a job that wrote a file named ``download-url`` would find
+        its own bytes unreachable, because that URL parses as a URL request for
+        the parent directory. A sibling literal segment cannot collide with
+        anything, since the segment is matched before any wildcard is
+        considered — ``…/artifacts/anything/at/all`` and
+        ``…/artifact-url/anything/at/all`` are told apart by ``artifacts`` vs
+        ``artifact-url``, one path component earlier than the greedy part.
+        """
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        # Built exactly as the download route builds it, one line for one
+        # line: the URL this hands back and the bytes that route would serve
+        # have to name the same object, and two spellings of the same key is
+        # how they would stop doing so.
+        full_key = _artifact_key(f"{_seg(job_id)}/{key}")
+        coordinator_key = f"jobs/{full_key}"
+        signed = await _mirrored_artifact_url(
+            job_id, coordinator_key, row, settings,
+            content_disposition=_attachment_disposition(key),
+        )
+        # Named from what actually happened, not from what the job row claims.
+        # The listing route reports a job-level `storage`; this reports a
+        # key-level one, and the two legitimately disagree for an unaccepted
+        # task's output. Saying "oss" here without a URL, or "coordinator"
+        # beside one, would each describe a system nobody is running.
+        return {
+            "storage": "coordinator" if signed is None else "oss",
+            "url": signed,
+        }
+
     @app.get("/v1alpha1/jobs/{job_id}/artifacts/{key:path}", tags=["browser"])
     async def get_job_artifact(
         job_id: str,
@@ -4515,13 +4989,51 @@ def create_cloud_app(
         404-not-403 rule as the rest of this block. This is a read, so it
         uses ``fetch_job_for_viewer`` like its siblings: the owner, or any
         member of the job's pool, may fetch a job's artifacts.
+
+        A MIRRORED ARTIFACT IS ANSWERED 307, NOT PROXIED. Once the bytes are
+        in OSS there is no reason for them to travel through this process
+        again, and a strong reason for them not to — see
+        ``_mirrored_artifact_url``, which also lists the four ordinary ways
+        this falls back to the proxy below. The URL it returns is a
+        single-object grant good for ``alibaba_oss.DEFAULT_TTL_S``; the
+        redirect is 307 rather than 302 so the method is preserved verbatim,
+        the same reason ``_passthrough`` refuses to normalise a status.
+
+        The visibility check runs BEFORE the redirect, not just before the
+        proxy. A presigned URL carries no identity of its own, so minting one
+        for a caller who cannot see the job would hand out exactly the access
+        the check exists to refuse — and it would do it in a form that keeps
+        working after they are removed from the pool.
+
+        WHO CALLS THIS, NOW THAT ``artifact-url`` EXISTS. A signed-in console
+        reaches it with a real ``fetch`` and the bearer header, for a key that
+        is NOT mirrored — coordinator-only bytes have to come through here,
+        there is nowhere else they live, and those files sit on a 5 GB disk so
+        pulling one through this process is bounded by construction. The 307 is
+        unchanged for every other client (the CLI follows it happily, having no
+        CORS to fail); the console simply asks ``artifact-url`` first and never
+        needs the redirect. ``Content-Disposition`` is set on both answers, so
+        a file saves under the same name whichever way it was fetched.
         """
-        if dbmod.fetch_job_for_viewer(db, job_id, user_id) is None:
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
         full_key = _artifact_key(f"{_seg(job_id)}/{key}")
         coordinator_key = f"jobs/{full_key}"
+        disposition = _attachment_disposition(key)
+        signed = await _mirrored_artifact_url(
+            job_id, coordinator_key, row, settings,
+            content_disposition=disposition,
+        )
+        if signed is not None:
+            return RedirectResponse(signed, status_code=307)
         r = await coordinator.forward("GET", f"/v1alpha1/artifacts/{coordinator_key}")
-        return _passthrough(r)
+        # Only on an answer that carries the bytes. Labelling the
+        # coordinator's 404 body as an attachment would offer to save the
+        # error message as if it were the file.
+        if r.status_code >= 300:
+            return _passthrough(r)
+        return _passthrough(r, headers={"Content-Disposition": disposition})
 
     async def _require_stopped(job_id: str, db: psycopg.Connection) -> None:
         """Refuse unless the coordinator says this job has stopped writing.
@@ -5526,9 +6038,32 @@ def create_cloud_app(
         job_id: str, task_id: str, request: Request,
         machine: Machine = Depends(current_machine),
     ):
+        """The resume point for a task that is about to start.
+
+        Retried, and it is the only agent route that is. Checkpointing is
+        now on for every job, so this GET runs at the START of every task —
+        and flashnode treats a non-404, non-200 as fatal: it raises, and
+        that exception is caught neither as a task failure nor as a lost
+        lease, so the lease is held to expiry instead of being requeued and
+        the host takes a strike toward quarantine. A momentary gateway blip
+        would do that fleet-wide.
+
+        A GET of the latest checkpoint is idempotent, so repeating it is
+        free. Answering 404 on a gateway error would NOT be free and is the
+        tempting wrong fix: 404 means "no checkpoint exists", the agent
+        would believe it, and a resumable task would silently restart from
+        step 0 — losing exactly the work this feature exists to protect.
+        Better to stay honest and keep the (now much narrower) failure.
+
+        The residual window is real: a coordinator down for longer than the
+        ladder still produces that fatal raise. Closing it properly means
+        making the raise non-fatal in flashnode, which is a public-repo
+        change and a release.
+        """
         return await proxy(
             request, machine,
             f"/v1alpha1/jobs/{_seg(job_id)}/tasks/{_seg(task_id)}/checkpoints/latest",
+            retry_delays=AGENT_RETRY_DELAYS,
         )
 
     @app.get("/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoints/lost-work",

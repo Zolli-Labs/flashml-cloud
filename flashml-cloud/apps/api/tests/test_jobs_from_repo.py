@@ -528,7 +528,17 @@ def test_warnings_alone_do_not_block_and_are_returned(make_client, db, transport
     findings = r.json()["findings"]
     assert findings
     assert {f["level"] for f in findings} == {"warning"}
-    assert {f["code"] for f in findings} == {"no-metrics-json", "writes-outside-out"}
+    # `no-checkpoint` joins the other two because this fixture has no
+    # checkpointing and checkpointing is on for every task — see
+    # `preflight._checkpoint_findings`. All three ride back on the **201**,
+    # which is the property this test is really about: a warning is advice,
+    # so the job exists, and the advice arrives with it rather than being
+    # dropped on the floor.
+    assert {f["code"] for f in findings} == {
+        "no-metrics-json",
+        "writes-outside-out",
+        "no-checkpoint",
+    }
     assert len(_job_rows(db, alice)) == 1
 
 

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { DownloadSimple, Warning } from "@phosphor-icons/react";
+import { usePathname, useRouter } from "next/navigation";
+import { DownloadSimple } from "@phosphor-icons/react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,13 +14,15 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { fetchJobArtifact, type ArtifactRecord } from "@/lib/cloud-api";
+import { downloadArtifact, signInHref } from "@/lib/artifact-download";
 import { MANY_FILES_THRESHOLD, planBulkDownload } from "@/lib/bulk-download";
+import { NotAuthenticated } from "@/lib/cloud-api";
+import type { ArtifactGroup } from "@/lib/task-artifacts";
 import { formatBytes } from "@/lib/utils";
 
-/** Milliseconds between one saved file and the next. Not a performance
- * knob: firing every download in the same synchronous burst is exactly the
- * pattern browsers ship abuse protection for (see
+/** Milliseconds between one triggered download and the next. Not a
+ * performance knob: firing every download in the same synchronous burst is
+ * exactly the pattern browsers ship abuse protection for (see
  * `MANY_FILES_THRESHOLD`'s doc in `lib/bulk-download.ts`) — spacing them out
  * gives the browser, and the person watching, room to see this as a
  * deliberate sequence rather than something to block. */
@@ -35,75 +38,91 @@ function describePlan(plan: ReturnType<typeof planBulkDownload>): string {
   const size = plan.sizeIsPartial
     ? `at least ${formatBytes(plan.totalBytes)}`
     : formatBytes(plan.totalBytes);
-  return `Saves ${plan.files.length} files separately (${size}), not as one archive.`;
+  return `Triggers ${plan.files.length} separate downloads (${size}), not one archive.`;
 }
 
 /**
- * Fetches and saves every one of a job's artifacts, one at a time, instead
- * of making someone click a download link per file — the reason this exists
- * is a 24-shard job whose only retrieval path used to be 24 individual
- * clicks. It does NOT produce a single archive; see `lib/bulk-download.ts`'s
- * module doc for why that is not reachable here without a dependency, and
- * `describePlan` above for how that limitation is stated in the UI rather
- * than hidden behind a button that implies more than it does.
+ * Triggers a download of every one of a job's artifacts, one at a time,
+ * instead of making someone click a download link per file — the reason this
+ * exists is a 24-shard job whose only retrieval path used to be 24
+ * individual clicks. It does NOT produce a single archive; see
+ * `lib/bulk-download.ts`'s module doc for why that is not reachable here
+ * without a dependency, and `describePlan` above for how that limitation is
+ * stated in the UI rather than hidden behind a button that implies more than
+ * it does.
  *
- * Renders nothing when there is nothing this job's own key resolves to
- * download — same "absence is not an error" rule the rest of this page's
- * empty states already follow.
+ * EVERY FILE GOES THROUGH `downloadArtifact`, exactly as a single row's
+ * button does — the two must not have their own ideas about how a download
+ * works. Which means each file is resolved on its own: a mirrored one becomes
+ * a navigation to a presigned OSS url (no header needed, nothing through this
+ * page's memory), an unmirrored one a fetch through the API with the bearer
+ * header. A job can be both at once, since only ACCEPTED work is mirrored, so
+ * "download all" on a run with a failed shard genuinely takes both paths.
+ *
+ * WHAT THIS CAN AND CANNOT REPORT. A triggered navigation reports nothing
+ * back, so the label says "started" and never claims a file was saved. A
+ * fetch that fails, on the other hand, is a fact — it is counted and said out
+ * loud rather than folded into a number that reads as success, and one
+ * failure does not stop the rest.
+ *
+ * Renders nothing when the job listed no files — same "absence is not an
+ * error" rule the rest of this page's empty states already follow.
  */
 export function DownloadAllButton({
   jobId,
-  artifacts,
+  storage,
+  groups,
 }: {
   jobId: string;
-  artifacts: ArtifactRecord[];
+  /** The listing's job-level `storage`, verbatim — see
+   * `lib/artifact-download.ts` for what it is used for and what it is not. */
+  storage: string | null;
+  groups: ArtifactGroup[];
 }) {
-  const plan = planBulkDownload(jobId, artifacts);
-  const [progress, setProgress] = useState<{ done: number; failed: number } | null>(
-    null
-  );
+  const plan = planBulkDownload(groups);
+  const [started, setStarted] = useState<number | null>(null);
+  const [failed, setFailed] = useState(0);
+  const router = useRouter();
+  const pathname = usePathname();
 
   if (plan.files.length === 0) return null;
 
-  const running =
-    progress !== null && progress.done + progress.failed < plan.files.length;
+  const running = started !== null && started < plan.files.length;
   const many = plan.files.length > MANY_FILES_THRESHOLD;
 
   async function run() {
-    setProgress({ done: 0, failed: 0 });
+    setStarted(0);
+    setFailed(0);
+    let failures = 0;
     for (let i = 0; i < plan.files.length; i++) {
-      const file = plan.files[i];
       try {
-        const blob = await fetchJobArtifact(jobId, file.key);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = file.filename;
-        a.click();
-        URL.revokeObjectURL(url);
-        setProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
-      } catch {
-        // One failed file must not stop the rest — a 404 on a single
-        // artifact (deleted between listing and this run, say) is exactly
-        // the kind of thing this loop exists to keep going through, the
-        // same way a person clicking each link by hand would just skip a
-        // broken one and move on. `failed` is surfaced in the label so the
-        // count at the end is honest about not being complete.
-        setProgress((p) => (p ? { ...p, failed: p.failed + 1 } : p));
+        await downloadArtifact({ jobId, key: plan.files[i].key, storage });
+      } catch (err) {
+        if (err instanceof NotAuthenticated) {
+          // Stop, do not keep trying: the session is gone, so every remaining
+          // file would fail the same way and the count would read as forty
+          // separate problems instead of one.
+          router.push(signInHref(pathname));
+          return;
+        }
+        // Counted, not thrown: one unreachable file must not cost the other
+        // thirty-nine. The count is shown below, so this is not swallowed
+        // either.
+        failures += 1;
       }
+      setStarted(i + 1);
       if (i < plan.files.length - 1) {
         await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_PACING_MS));
       }
     }
+    setFailed(failures);
   }
 
-  const label = progress
-    ? running
-      ? `Downloading ${progress.done + progress.failed}/${plan.files.length}…`
-      : progress.failed > 0
-        ? `${progress.done} of ${plan.files.length} saved, ${progress.failed} failed`
-        : `Saved all ${plan.files.length}`
-    : `Download all (${plan.files.length})`;
+  const label = running
+    ? `Starting ${started}/${plan.files.length}…`
+    : started !== null
+      ? `Started ${plan.files.length}`
+      : `Download all (${plan.files.length})`;
 
   const button = (
     <button
@@ -137,7 +156,8 @@ export function DownloadAllButton({
                 {describePlan(plan)} Most browsers pause or block a page that
                 triggers this many downloads in a row unless you allow it —
                 watch for a permission prompt after the first few, and allow
-                it to get the rest.
+                it to get the rest. Your browser reports how each one ends;
+                this page only knows how many it started.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
@@ -149,12 +169,17 @@ export function DownloadAllButton({
       ) : (
         button
       )}
-      <span className="flex items-start gap-1 text-[10px] text-muted-foreground">
-        {progress?.failed ? (
-          <Warning className="mt-px h-2.5 w-2.5 shrink-0 text-destructive" weight="fill" />
-        ) : null}
+      <span className="text-[10px] text-muted-foreground">
         {describePlan(plan)}
       </span>
+      {/* Only ever shown after a run that actually failed something, and it
+          counts fetches this page watched fail — never a navigation, whose
+          outcome this page cannot see and does not claim to. */}
+      {failed > 0 && (
+        <span className="text-[10px] text-destructive">
+          {failed} could not be fetched.
+        </span>
+      )}
     </span>
   );
 }

@@ -28,13 +28,16 @@ import {
   createPoolInvite,
   declineAccessRequest,
   deleteJobArtifacts,
+  fetchJobArtifactBlob,
   getJob,
+  getJobArtifactUrl,
   getMe,
   getMyContributions,
   getMyMetrics,
   getPool,
   getPoolInviteState,
   listAccessRequests,
+  listJobArtifacts,
   listJobContributions,
   getJobResult,
   getMyStorage,
@@ -42,6 +45,7 @@ import {
   listMachines,
   listPoolMachines,
   listPools,
+  readTaskCheckpoint,
   renamePool,
   revokePoolInvites,
   submitAccessRequest,
@@ -379,6 +383,135 @@ describe("cloud-api", () => {
 
       const err: unknown = await getJobResult("not-mine").catch((e) => e);
       expect(err).toBeInstanceOf(NotFound);
+    });
+  });
+
+  describe("listJobArtifacts", () => {
+    it("GETs the job's artifacts route with the bearer token and returns the listing verbatim", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      const body = {
+        artifacts: [{ key: "task-000/result.json", size_bytes: 2048 }],
+        storage: "oss",
+        mirrored_at: "2026-08-11T10:00:00Z",
+      };
+      fetchMock.mockResolvedValue(jsonResponse(200, body));
+
+      const listing = await listJobArtifacts("job-1");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${cloudApiBase()}/v1alpha1/jobs/job-1/artifacts`);
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(listing).toEqual(body);
+    });
+
+    it("raises NotFound on 404 rather than resolving to an empty listing", async () => {
+      // 404 is "unknown job" OR an API deployed before this route existed.
+      // Neither is evidence that the job produced nothing, so this must not
+      // become `{artifacts: []}` anywhere on the way to the page.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "unknown job" }));
+
+      const err: unknown = await listJobArtifacts("job-1").catch((e) => e);
+      expect(err).toBeInstanceOf(NotFound);
+    });
+  });
+
+  describe("getJobArtifactUrl", () => {
+    it("asks the artifact-url route WITH the bearer header — the call a navigation could not make", async () => {
+      // The whole point. This is an ordinary same-origin authenticated JSON
+      // call; what comes back is a url that needs no header of its own. The
+      // route is a sibling segment of `artifacts`, not a suffix on it,
+      // because `{key:path}` is greedy and a file called `download-url`
+      // would otherwise become unreachable.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { storage: "oss", url: "https://oss.example/x?sig" })
+      );
+
+      const told = await getJobArtifactUrl("job-1", "task-000/ckpt/step-20.json");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `${cloudApiBase()}/v1alpha1/jobs/job-1/artifact-url/task-000/ckpt/step-20.json`
+      );
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(told).toEqual({ storage: "oss", url: "https://oss.example/x?sig" });
+    });
+
+    it("carries a null url through as the ordinary answer it is", async () => {
+      // "This key is not mirrored" — an unaccepted task's output, or a
+      // deployment with no OSS at all. Not an error, and nothing may turn it
+      // into one.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { storage: "coordinator", url: null })
+      );
+
+      expect(await getJobArtifactUrl("job-1", "shard-001/stderr.txt")).toEqual({
+        storage: "coordinator",
+        url: null,
+      });
+    });
+
+    it("encodes each key segment and keeps the separators", async () => {
+      // The route takes `{key:path}`, so a `/` inside the key is structure,
+      // not a character to escape — but everything else in a segment is.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { storage: "coordinator", url: null })
+      );
+
+      await getJobArtifactUrl("a/b", "task 1/out put.json");
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        `${cloudApiBase()}/v1alpha1/jobs/a%2Fb/artifact-url/task%201/out%20put.json`
+      );
+    });
+  });
+
+  describe("fetchJobArtifactBlob", () => {
+    it("fetches the bytes through the API with the bearer header", async () => {
+      // The path for anything not mirrored: those bytes live only on the
+      // coordinator, so they have to come through our API, which needs the
+      // header — the exact thing an `<a href download>` navigation could not
+      // send, and the reason every download used to answer 401.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        new Response("traceback\n", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        })
+      );
+
+      const blob = await fetchJobArtifactBlob("job-1", "shard-001/stderr.txt");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `${cloudApiBase()}/v1alpha1/jobs/job-1/artifacts/shard-001/stderr.txt`
+      );
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(await blob.text()).toBe("traceback\n");
+    });
+
+    it("raises NotAuthenticated on a 401 rather than saving the error body as a file", async () => {
+      // Shares `send` with every other call precisely so this stays true: a
+      // 401 has to reach the UI as "sign in again", not land in somebody's
+      // downloads folder as a file full of JSON.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(401, { detail: "sign-in required" }));
+
+      await expect(
+        fetchJobArtifactBlob("job-1", "shard-000/model.bin")
+      ).rejects.toBeInstanceOf(NotAuthenticated);
+    });
+
+    it("raises NotFound on a 404", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "unknown job" }));
+
+      await expect(
+        fetchJobArtifactBlob("job-1", "shard-000/model.bin")
+      ).rejects.toBeInstanceOf(NotFound);
     });
   });
 
@@ -1160,6 +1293,119 @@ describe("cloud-api", () => {
       const [path, init] = fetchMock.mock.calls[0];
       expect(String(path)).toContain("/v1alpha1/github/installations/42");
       expect(init.method).toBe("DELETE");
+    });
+  });
+
+  // The one read that can answer "how much work would a machine death cost
+  // right now". Every branch below is a DIFFERENT thing to tell a user, and
+  // collapsing any two of them puts a false statement on the job page — so
+  // each is pinned here rather than left to the caller to get right.
+  describe("readTaskCheckpoint", () => {
+    const manifest = {
+      manifest_id: "m1",
+      // The catalog's composite scope, not this job's id. Kept verbatim in
+      // the fixture so nothing downstream is tempted to match it against a
+      // job id.
+      job_id: "job-abc::task-000",
+      attempt_id: "lease-1",
+      step: 1200,
+      framework: "",
+      strategy_family: "",
+      world_size: 1,
+      compatible_world_sizes: [],
+      storage_prefix: "artifact://jobs/job-abc/task-000/ckpt/1200/",
+      parts: [
+        {
+          key: "jobs/job-abc/task-000/ckpt/step-1200.json",
+          sha256: "aa",
+          size_bytes: 10,
+        },
+      ],
+      validation: "hash_verified",
+      created: "2026-08-11T10:00:00Z",
+      checkpoint_duration_s: null,
+    };
+
+    it("returns the manifest on 200, from the per-task checkpoint route", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, manifest));
+
+      const read = await readTaskCheckpoint("job-abc", "task-000");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `${cloudApiBase()}/v1alpha1/jobs/job-abc/tasks/task-000/checkpoint`
+      );
+      expect(init.headers.Authorization).toBe(`Bearer ${SESSION.access_token}`);
+      expect(read).toEqual({ status: "committed", manifest });
+    });
+
+    it("reports 404 as 'none' — the coordinator's words are 'no valid checkpoint'", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(404, { detail: "no valid checkpoint" })
+      );
+
+      await expect(readTaskCheckpoint("job-abc", "task-000")).resolves.toEqual({
+        status: "none",
+      });
+    });
+
+    it("reports any other failure as unknown, carrying the API's detail — never as 'none'", async () => {
+      // The distinction the whole panel rests on. A 502 reported as "no
+      // checkpoint" tells someone their run lost its resume point when all
+      // that happened is a gateway blip.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(502, { detail: "bad gateway" }));
+
+      await expect(readTaskCheckpoint("job-abc", "task-000")).resolves.toEqual({
+        status: "unknown",
+        detail: "bad gateway",
+      });
+    });
+
+    it("reports a transport failure as unknown rather than rejecting", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+      const read = await readTaskCheckpoint("job-abc", "task-000");
+      expect(read.status).toBe("unknown");
+    });
+
+    it("classifies a 401 as unreadable instead of raising NotAuthenticated", async () => {
+      // These routes are declared `tags=["agent"]` and depend on
+      // `current_machine`, which refuses a valid browser JWT on purpose. A
+      // 401 here is therefore a fact about the API's shape, NOT about the
+      // session — raising `NotAuthenticated` would bounce a signed-in user
+      // to /sign-in from a job page that is working perfectly well.
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(
+        jsonResponse(401, { detail: "machine token required" })
+      );
+
+      await expect(readTaskCheckpoint("job-abc", "task-000")).resolves.toEqual({
+        status: "unreadable",
+      });
+    });
+
+    it("classifies a missing session as unreadable too, never as an unhandled rejection", async () => {
+      getSession.mockResolvedValue({ data: { session: null } });
+
+      await expect(readTaskCheckpoint("job-abc", "task-000")).resolves.toEqual({
+        status: "unreadable",
+      });
+    });
+
+    it("escapes a job id and a task id that would otherwise break the path", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(404, { detail: "x" }));
+
+      await readTaskCheckpoint("a/b", "t/1");
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `${cloudApiBase()}/v1alpha1/jobs/a%2Fb/tasks/t%2F1/checkpoint`
+      );
     });
   });
 });

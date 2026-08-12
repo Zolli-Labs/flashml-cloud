@@ -91,6 +91,10 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
         self._prefix = uuid.uuid4().hex[:10]
         self._next_id = 1
         self.artifacts: dict[str, bytes] = {}
+        #: Job ids whose `checkpoints/latest` answers 404 — "no valid
+        #: checkpoint", which is NOT the same as an unknown job and must
+        #: reach the caller distinguishably.
+        self.no_checkpoint_jobs: set[str] = set()
 
     def seed_artifact(self, key: str, content: bytes) -> None:
         self.artifacts[key] = content
@@ -134,6 +138,31 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
             if job_id not in self._jobs:
                 return httpx.Response(404, json={"detail": "no such job"})
             return httpx.Response(200, json=[{"task_id": "task-0", "state": "RUNNING"}])
+
+        # The job-scoped artifact listing. Unscoped like everything else here:
+        # the real coordinator has no accounts, so it answers this for any id
+        # it is given, and any scoping the console sees is this API's alone.
+        if method == "GET" and path.endswith("/artifacts") and path.count("/") == 4:
+            prefix = f"jobs/{path.split('/')[-2]}/"
+            return httpx.Response(200, json=[
+                {"uri": f"artifact://{k}", "key": k, "size_bytes": len(v)}
+                for k, v in sorted(self.artifacts.items())
+                if k.startswith(prefix)
+            ])
+
+        # `/v1alpha1/jobs/<job>/tasks/<task>/checkpoints/latest` — seven
+        # slashes. The browser route is `.../checkpoint` (singular); it is
+        # the CLOUD that rewrites it to this, so the fake answers only the
+        # coordinator's spelling and a test that forgot the rewrite fails.
+        if (method == "GET" and path.endswith("/checkpoints/latest")
+                and path.count("/") == 7):
+            job_id = path.split("/")[3]
+            if job_id not in self._jobs:
+                return httpx.Response(404, json={"detail": "no such job"})
+            if job_id in self.no_checkpoint_jobs:
+                return httpx.Response(404, json={"detail": "no valid checkpoint"})
+            return httpx.Response(200, json={"step": 42, "parts": [
+                {"key": f"jobs/{job_id}/task-0/ckpt/step-42.json"}]})
 
         if method == "POST" and path.endswith("/cancel"):
             job_id = path.split("/")[-2]
@@ -354,9 +383,103 @@ def test_pool_member_can_read_a_pool_jobs_artifacts(client, db, transport):
     assert r.content == b"pool output"
 
 
+def test_pool_member_can_list_a_pool_jobs_artifacts(client, db, transport):
+    """The LISTING route, which is what the console's Artifacts card reads.
+
+    Its own visibility check, not the fetch-by-key route's: a `GET` on the
+    collection path is a different route from a `GET` on a key beneath it (and
+    from the `DELETE` on the same path, which is owner-only), so "the member
+    can read one file" says nothing about whether they can see the list.
+    """
+    owner = _new_user(db)
+    member = _new_user(db)
+    pool_id = _pool(db, owner)
+    _add_member(db, pool_id, member)
+    job_id = _seed_pool_job(client, owner, pool_id, db, "pool-job-artifact-list")
+    transport.seed_artifact(f"jobs/{job_id}/shard-000/model.bin", b"weights")
+    transport.seed_artifact(f"jobs/{job_id}/reduced/best.json", b"{}")
+    # Another job's files, seeded on the same fake coordinator. The listing is
+    # asked per job, but the prefix filter is this API's, and a leak here
+    # would put a teammate's key in a stranger's card.
+    transport.seed_artifact("jobs/some-other-job/shard-000/model.bin", b"nope")
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}/artifacts", headers=_auth(member))
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["artifacts"] == [
+        {"key": "reduced/best.json", "size_bytes": 2},
+        {"key": "shard-000/model.bin", "size_bytes": 7},
+    ]
+    # No OSS in this file's settings, so the card is told the plain truth:
+    # every one of those keys is served from the coordinator.
+    assert body["storage"] == "coordinator"
+    assert body["mirrored_at"] is None
+
+
+def test_a_federated_runs_artifact_listing_costs_no_coordinator_round_trip(
+    client, db, transport
+):
+    """A federated run's parent id names no coordinator job — the coordinator
+    sees N unrelated round jobs — so there is nothing under
+    ``jobs/{parent}/`` to list and nothing to ask. Empty, from local rows,
+    exactly as ``GET /v1alpha1/jobs/{id}`` answers a federated job. Fanning
+    out over the rounds would return keys under a DIFFERENT job's prefix,
+    which would not compose with the fetch-by-key route: every download link
+    the console built from them would 404.
+    """
+    owner = _new_user(db)
+    job_id = _seed_federated_job(db, owner, "fed-run")
+    before = len(transport.requests)
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}/artifacts", headers=_auth(owner))
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "artifacts": [], "storage": "coordinator", "mirrored_at": None,
+    }
+    assert len(transport.requests) == before
+
+
 # ---------------------------------------------------------------------------
 # 2. a non-member gets 404, indistinguishably, everywhere
 # ---------------------------------------------------------------------------
+
+
+def test_a_pool_member_can_read_a_task_checkpoint(client, db, transport):
+    """The console's whole fault-tolerance panel rests on this one read.
+
+    It exists as a browser route at all because the agent's
+    `.../checkpoints/latest` is machine-credentialed and answers 401 to a
+    browser JWT — so before this, the panel could show nothing."""
+    owner = _new_user(db)
+    member = _new_user(db)
+    pool_id = _pool(db, owner)
+    _add_member(db, pool_id, member)
+    job_id = _seed_pool_job(client, owner, pool_id, db, "ckpt-job")
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}/tasks/task-0/checkpoint",
+                   headers=_auth(member))
+    assert r.status_code == 200, r.text
+    assert r.json()["step"] == 42
+    assert transport.requests[-1].url.path == (
+        f"/v1alpha1/jobs/{job_id}/tasks/task-0/checkpoints/latest"
+    ), "the browser's singular path must be rewritten to the coordinator's"
+
+
+def test_no_checkpoint_yet_is_a_404_not_an_error(client, db, transport):
+    """404 means "no valid checkpoint", and the console distinguishes it
+    from a failed read. Collapsing the two would make a task that has not
+    checkpointed yet look identical to one whose state we could not fetch —
+    and the honest empty state depends on telling them apart."""
+    owner = _new_user(db)
+    job_id = _seed_pool_job(client, owner, _pool(db, owner), db, "fresh-job")
+    transport.no_checkpoint_jobs.add(job_id)
+
+    r = client.get(f"/v1alpha1/jobs/{job_id}/tasks/task-0/checkpoint",
+                   headers=_auth(owner))
+    assert r.status_code == 404
+    assert "no valid checkpoint" in r.text
 
 
 def test_non_member_gets_404_on_every_read_and_on_cancel(client, db, transport):
@@ -378,6 +501,17 @@ def test_non_member_gets_404_on_every_read_and_on_cancel(client, db, transport):
         f"/v1alpha1/jobs/{job_id}/tasks",
         f"/v1alpha1/jobs/{job_id}/contributions",
         f"/v1alpha1/jobs/{job_id}/artifacts/secret.bin",
+        # The listing is its own route with its own check. Reaching it would
+        # not hand over a byte, and would still enumerate the filenames of
+        # somebody else's job — which is enough to learn what they are
+        # training.
+        f"/v1alpha1/jobs/{job_id}/artifacts",
+        # The checkpoint read is the newest member of this list and the one
+        # most worth pinning: the coordinator's own `/latest` takes NO
+        # credential and its manifest carries artifact keys, so this route's
+        # viewer check is the only thing between one account's checkpoints
+        # and another's.
+        f"/v1alpha1/jobs/{job_id}/tasks/task-0/checkpoint",
     ):
         r = client.get(path, headers=stranger_auth)
         assert r.status_code == 404, f"{path} -> {r.status_code}: {r.text}"

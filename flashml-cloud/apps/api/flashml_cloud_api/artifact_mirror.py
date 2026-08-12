@@ -818,3 +818,56 @@ async def presign_job_artifacts(
         obj.key: await asyncio.to_thread(oss.sign_get, obj.key, ttl_s=ttl_s)
         for obj in manifest_objects(payload)
     }
+
+
+async def presign_mirrored_artifact(
+    job_id: str,
+    key: str,
+    oss: OSSArtifacts,
+    *,
+    ttl_s: int = DEFAULT_TTL_S,
+    content_disposition: str | None = None,
+) -> str | None:
+    """One mirrored object's presigned GET, or None if it is not mirrored.
+
+    ``presign_job_artifacts``' single-key sibling, for the browser's download
+    route. A person clicking one file in the console needs one URL, and
+    signing every object of the job to throw all but one away is a signature
+    per shard per click on a run that may hold thousands of them.
+
+    **None, not an exception, for a key the manifest does not list**, and that
+    optional return is the whole point. "Not mirrored" is a FACT about this
+    key, not a failure: ``classify_key`` deliberately leaves an unaccepted
+    task's output on the coordinator's disk (repo hard rule 4), so a failed
+    shard's ``stderr.txt`` is a key that legitimately exists, is legitimately
+    readable, and legitimately has no copy in OSS. Raising for it would push
+    the caller into treating a normal outcome as an error, and the first time
+    someone "fixed" that by catching broadly it would swallow the transport
+    failure below with it.
+
+    **From the manifest, never from a bucket listing** — the rule
+    ``presign_job_artifacts`` states, for the same reason. An object present
+    under the prefix but absent from a complete manifest belongs to an
+    interrupted mirror, and signing it hands out bytes nothing has certified.
+
+    Raises ``OSSUnavailable`` when the bucket cannot be read at all. That is a
+    statement about OSS and not about this key, and the two must stay
+    distinguishable: a caller may well answer both by serving the coordinator's
+    copy, but it can only *log* the difference if it is told the difference.
+
+    ``content_disposition`` is passed straight to ``sign_get``, which folds it
+    into the signature as ``response-content-disposition``. A browser sent to
+    this URL is a NAVIGATION, and a navigation to a text or JSON object with
+    no disposition renders it — which means clicking a download link would
+    replace the console with a wall of JSON. The anchor's own ``download``
+    attribute cannot fix that: OSS is a third origin, so the browser ignores
+    it. Naming the file is therefore the header's job or nobody's.
+    """
+    payload = await _read_manifest(oss, manifest_key(job_id))
+    if payload is None:
+        return None
+    if not any(obj.key == key for obj in manifest_objects(payload)):
+        return None
+    return await asyncio.to_thread(
+        oss.sign_get, key, ttl_s=ttl_s, content_disposition=content_disposition
+    )

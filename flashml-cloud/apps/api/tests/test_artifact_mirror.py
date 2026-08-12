@@ -46,6 +46,7 @@ from flashml_cloud_api.artifact_mirror import (
     mirror_jobs,
     parse_manifest,
     presign_job_artifacts,
+    presign_mirrored_artifact,
     reserved_collision,
     select_accepted_keys,
     unmirror_job,
@@ -77,6 +78,7 @@ class FakeOSS:
         self.puts: list[str] = []
         self.fail_on: set[str] = set()
         self.etag_override: str | None = None
+        self.dispositions: list[str | None] = []
 
     def put_bytes(self, key: str, data: bytes) -> StoredObject:
         if key in self.fail_on:
@@ -98,7 +100,13 @@ class FakeOSS:
         return StoredObject(key=key, size_bytes=len(self.objects[key]),
                             sha256=None, etag=None, last_modified=None)
 
-    def sign_get(self, key: str, *, ttl_s: int = 900) -> str:
+    def sign_get(self, key: str, *, ttl_s: int = 900,
+                 content_disposition: str | None = None) -> str:
+        #: Every disposition this fake was asked to fold into a signature,
+        #: including the Nones. The real `sign_url` puts it INSIDE the
+        #: signature, so a test cannot check for it by inspecting the returned
+        #: string the way it can check for a key — it has to observe the call.
+        self.dispositions.append(content_disposition)
         return f"https://example.invalid/{key}?Expires={ttl_s}"
 
 
@@ -630,6 +638,87 @@ async def test_a_half_mirrored_job_signs_nothing():
     assert oss.objects  # something was copied
     with pytest.raises(MirrorError):
         await presign_job_artifacts(JOB, oss)
+
+
+@pytest.mark.asyncio
+async def test_one_mirrored_object_can_be_signed_on_its_own():
+    """The browser download route's door. It signs ONE key because that is
+    what a click is: minting every object's signature to use one of them is a
+    signature per shard on a run that may hold thousands."""
+    source, oss = a_job(), FakeOSS()
+    await mirror_job(JOB, source, FakeSettings(), oss=oss)
+
+    url = await presign_mirrored_artifact(
+        JOB, f"jobs/{JOB}/shard-000/model.bin", oss, ttl_s=60
+    )
+
+    assert url is not None and url.startswith("https://")
+    assert f"jobs/{JOB}/shard-000/model.bin" in url
+    assert "AccessKeySecret" not in url
+
+
+@pytest.mark.asyncio
+async def test_a_disposition_is_folded_into_the_signature_not_appended_to_it():
+    """``response-content-disposition`` reaches ``sign_get`` as an argument,
+    which is the only place it can go: OSS signs the query string, so a
+    parameter bolted onto the returned URL would invalidate the URL it was
+    bolted onto. The browser needs it because a navigation to a mirrored
+    ``metrics.json`` with no disposition RENDERS it — replacing the console
+    with a wall of JSON instead of saving a file.
+
+    ``None`` stays the default and stays meaningful: the sandbox path reads
+    these with an HTTP client and has no use for one.
+    """
+    source, oss = a_job(), FakeOSS()
+    await mirror_job(JOB, source, FakeSettings(), oss=oss)
+
+    await presign_mirrored_artifact(
+        JOB, f"jobs/{JOB}/shard-000/model.bin", oss,
+        content_disposition='attachment; filename="shard-000__model.bin"',
+    )
+    assert oss.dispositions == ['attachment; filename="shard-000__model.bin"']
+
+    await presign_job_artifacts(JOB, oss)
+    assert oss.dispositions[1:] == [None] * (len(oss.dispositions) - 1)
+
+
+@pytest.mark.asyncio
+async def test_an_unaccepted_tasks_key_signs_to_none_rather_than_raising():
+    """The distinction the optional return exists for. A FAILED shard's
+    stderr is deliberately never mirrored (hard rule 4) — it is a key that
+    legitimately exists, is legitimately readable from the coordinator, and
+    legitimately has no OSS copy. That is a fact about the key, not a failure,
+    and a caller told it by exception would have to catch its way back to the
+    normal path."""
+    source, oss = a_job(), FakeOSS()
+    await mirror_job(JOB, source, FakeSettings(), oss=oss)
+
+    signed = await presign_mirrored_artifact(
+        JOB, f"jobs/{JOB}/shard-001/logs/stderr.txt", oss
+    )
+
+    assert signed is None
+
+
+@pytest.mark.asyncio
+async def test_a_job_with_no_manifest_signs_nothing_for_any_key():
+    assert await presign_mirrored_artifact(
+        JOB, f"jobs/{JOB}/shard-000/model.bin", FakeOSS()
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_an_object_in_the_bucket_but_not_the_manifest_is_not_signed():
+    """Set membership against the MANIFEST, never a bucket listing — the same
+    rule ``presign_job_artifacts`` states. An object under the prefix that no
+    complete manifest names belongs to an interrupted mirror, and signing it
+    hands out bytes nothing has certified."""
+    source, oss = a_job(), FakeOSS()
+    await mirror_job(JOB, source, FakeSettings(), oss=oss)
+    stray = f"jobs/{JOB}/shard-001/logs/stderr.txt"
+    oss.objects[stray] = b"traceback\n"
+
+    assert await presign_mirrored_artifact(JOB, stray, oss) is None
 
 
 # -- the real bucket ----------------------------------------------------------

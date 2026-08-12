@@ -940,3 +940,165 @@ def test_allow_partial_reaches_the_retry_policy():
 def test_a_job_that_did_not_ask_for_partial_does_not_say_so():
     spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "j")
     assert spec["spec"].get("retryPolicy", {}).get("allowPartial") in (None, False)
+
+
+# ---------------------------------------------------------------------------
+# checkpoint — the one parameter emitted UNCONDITIONALLY
+#
+# `flashnode/executor/loop.py` gates BOTH the incremental relay of
+# `out/ckpt/step-*.json` and the staging of `inputs["resume"]` on
+# `payload.get("checkpoint") is not None`. Without the key a job ships no
+# checkpoint while it runs and restarts from step 0 after a machine dies —
+# silently, with fault tolerance being the one claim FlashML makes about
+# volunteer machines. So this is the module's deliberate exception to
+# "absent stays absent": here the pre-existing path IS the bug.
+#
+# The VALUE is never read (the relay's directory, glob and poll interval are
+# all hardcoded), so these tests assert `{}` exactly — not truthiness, and
+# not a `{dir, glob}` mapping that would read as configuration nothing
+# honours.
+# ---------------------------------------------------------------------------
+
+
+def test_every_compiled_job_carries_the_checkpoint_parameter():
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    assert _params(spec)["checkpoint"] == {}
+
+
+def test_the_checkpoint_value_is_an_empty_object_and_not_a_flag():
+    """`{}` is the shape e2e/test_training_resume.py already sends and the
+    shape `flashruntime/workloads/command.py` emits. `true` would be a
+    second, undocumented spelling of the same non-None test; a `{dir, glob}`
+    mapping would read as configuration and be silently ignored, since
+    flashnode hardcodes both."""
+    value = _params(compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo"))["checkpoint"]
+    assert isinstance(value, dict)
+    assert value == {}
+    assert value is not True
+
+
+@pytest.mark.parametrize("over", [
+    {},
+    {"args": ["--epochs", "20"]},
+    {"sweep": {"lr": "[0.1, 0.2]"}},
+    {"timeout_seconds": 900},
+    {"local_inputs": ["patients"]},
+    {"allow_partial": True},
+    {"partition": {"range": "[0, 100]", "shards": 4}},
+])
+def test_checkpointing_is_not_conditional_on_anything_in_the_config(over):
+    """Unconditional means unconditional: no shape of flashml.yaml, and no
+    argument to the compiler, can produce a job that silently loses its work
+    to a machine dying."""
+    spec = compile_to_jobspec(_config(**over), PYTORCH, CODE_URI, "demo")
+    assert _params(spec)["checkpoint"] == {}
+
+
+def test_a_pool_job_is_checkpointed_too():
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo", pool="team-a")
+    assert _params(spec)["checkpoint"] == {}
+
+
+def test_the_checkpoint_parameter_survives_the_jobspec_round_trip():
+    """Not ceremony — `gpuPerTask` is dropped silently by this exact
+    round-trip on the current pin (see the resources section above), so
+    "the compiler set it" and "the coordinator is told" are two different
+    claims. `compile_to_jobspec` returns
+    `JobSpec.model_validate(spec).model_dump_json()`, so this asserts the
+    key is still there on the far side of pydantic."""
+    spec = compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo")
+    reparsed = json.loads(
+        JobSpec.model_validate(spec).model_dump_json()
+    )
+    assert reparsed["spec"]["workload"]["parameters"]["checkpoint"] == {}
+
+
+def test_the_real_recipe_forwards_checkpoint_into_the_task_payload():
+    """The end of the loop, against the pinned runtime rather than a stub.
+
+    `CommandRecipe.expand` already forwards this key verbatim
+    (`if p.get("checkpoint") is not None`), which is what makes the fix
+    cloud-only: no public-repo change, no PyPI release, no version bump.
+    `task.payload["checkpoint"]` is the exact dict flashnode's gate reads.
+    """
+    from flashruntime.recipes.command import CommandRecipe
+
+    spec = compile_to_jobspec(
+        _config(sweep={"lr": "[0.1, 0.2]"}), PYTORCH, CODE_URI, "demo"
+    )
+    tasks = CommandRecipe().expand("job-123", JobSpec.model_validate(spec))
+    assert len(tasks) == 2
+    for task in tasks:
+        assert task.payload["checkpoint"] == {}
+
+
+# --- federated rounds ------------------------------------------------------
+#
+# In scope, and it had the identical bug. Task-level resume is safe here even
+# though slot->chunk assignment rotates between rounds: a checkpoint's scope
+# is (coordinator job_id, task_id) (`flashruntime/service/checkpoints.py`),
+# and every round is a SEPARATE coordinator job — `fedavg` submits one per
+# round and records its own `coordinator_job_id` (`db.list_round_job_ids`),
+# which the `-rNNN` job-name suffix reflects. So round N+1's `task-000`
+# cannot resume round N's `task-000`; only a retried attempt of the same task
+# in the same round can, and that attempt trains the same chunk against the
+# same broadcast weights.
+
+
+def _fed_config():
+    return parse_flashml_yaml(
+        "version: 2\nname: fed\nimage: pytorch-cpu\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
+    )
+
+
+def test_a_federated_round_is_checkpointed():
+    spec = compile_federated_round(
+        _fed_config(), PYTORCH, CODE_URI, "fed", round_index=0, weights_uri=None,
+        **ONE_SLOT,
+    )
+    assert _params(spec)["checkpoint"] == {}
+
+
+def test_every_federated_round_is_checkpointed_including_later_ones():
+    for round_index in (0, 1, 7):
+        spec = compile_federated_round(
+            _fed_config(), PYTORCH, CODE_URI, "fed", round_index=round_index,
+            weights_uri=None if round_index == 0
+            else "artifact://jobs/j/round-000/weights.json",
+            **ONE_SLOT,
+        )
+        assert _params(spec)["checkpoint"] == {}
+
+
+def test_each_round_is_its_own_job_so_resume_cannot_cross_a_round():
+    """The safety property stated as an assertion rather than a comment.
+
+    Checkpoints are scoped per (job_id, task_id) upstream, so two rounds
+    sharing a job would let round N+1's `task-000` resume round N's — with a
+    different chunk and stale weights. They do not: each round compiles to a
+    distinct job, and `fedavg` submits each one separately and stores its own
+    `coordinator_job_id`.
+    """
+    names = {
+        compile_federated_round(
+            _fed_config(), PYTORCH, CODE_URI, "fed", round_index=i,
+            weights_uri=None, **ONE_SLOT,
+        )["metadata"]["name"]
+        for i in range(3)
+    }
+    assert len(names) == 3
+
+
+def test_a_federated_round_spec_is_accepted_and_forwarded_by_the_real_recipe():
+    from flashruntime.recipes.command import CommandRecipe
+
+    spec = compile_federated_round(
+        _fed_config(), PYTORCH, CODE_URI, "fed", round_index=1,
+        weights_uri="artifact://jobs/j/round-000/weights.json",
+        slot_chunks=[0, 1], total_chunks=2,
+    )
+    tasks = CommandRecipe().expand("job-fed-r001", JobSpec.model_validate(spec))
+    assert len(tasks) == 2
+    for task in tasks:
+        assert task.payload["checkpoint"] == {}

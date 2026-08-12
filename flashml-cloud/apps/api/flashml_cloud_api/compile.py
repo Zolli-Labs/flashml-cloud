@@ -131,6 +131,49 @@ EXTRA_DEPENDENCIES_PARAM = "extra_dependencies"
 #: origin and the host fetches them directly.
 DATASET_SLICES_PARAM = "dataset_slices"
 
+#: The workload parameter that turns fault tolerance on. Emitted
+#: UNCONDITIONALLY by both compilers below, always as ``{}``.
+#:
+#: **The value is never read.** flashnode gates both halves of the feature on
+#: ``payload.get("checkpoint") is not None``
+#: (``flashnode/executor/loop.py``) — the incremental relay of
+#: ``out/ckpt/step-*.json`` while the task runs, and the staging of the last
+#: valid checkpoint back as ``inputs["resume"]`` when a later attempt starts —
+#: and then ignores what it found: the relay's directory, its ``step-*.json``
+#: glob and its 0.3 s poll are all hardcoded. Any non-None value does the same
+#: thing.
+#:
+#: So ``{}``, and specifically NOT ``true`` and NOT ``{"dir": …, "glob": …}``:
+#: ``{}`` is the shape this repo's own e2e already sends
+#: (``e2e/test_training_resume.py``) and the shape the SDK path emits
+#: (``flashruntime/workloads/command.py``), while a mapping of settings would
+#: read as configuration and be silently ignored — a surface that accepts
+#: input it does not honour, which is the thing this codebase refuses to ship.
+#: ``flashruntime.protocol.plan_v1alpha1.CheckpointPolicy``
+#: (``{backend, interval_seconds, note}``) is not reused here for the same
+#: reason: flashnode honours none of its three fields.
+#:
+#: **This deliberately breaks the module's "absent stays absent" convention**
+#: — the judgement ``_local_inputs``, ``_dependencies`` and
+#: ``_dataset_slices`` each record. That rule exists to keep a correct
+#: pre-existing path exercised byte for byte. Here the pre-existing path IS
+#: the bug: with the key absent, every job submitted through the console ships
+#: no checkpoint while it runs and cannot resume after a machine dies — it
+#: restarts from step 0, silently, which is the one thing FlashML claims about
+#: volunteer machines.
+#:
+#: Emitting it unconditionally is safe because ``payload["checkpoint"]`` has
+#: exactly ONE reader in the whole system: the gate above. It is not a
+#: placement input — ``IsolationAwarePlacement``'s gates key on ``isolation``,
+#: ``argv``, ``module``, ``local_inputs``, ``gpus``, ``exclude_nodes``,
+#: ``pool``, ``extra_dependencies`` and ``datasets``, and none of them looks
+#: at this — and no scheduler or coordinator code consults it either;
+#: ``CommandRecipe.expand`` only forwards it verbatim into ``task.payload``
+#: (``recipes/command.py``), which is why this fix is cloud-only. It therefore
+#: cannot route a job anywhere it does not already go. It can only turn the
+#: relay on once the job is there.
+CHECKPOINT_PARAM = "checkpoint"
+
 #: A federated round's lease has to outlive local training, not a single
 #: HTTP call — ``CommandRecipe``'s 60 s default would expire mid-epoch and
 #: hand the shard to a second machine while the first was still working.
@@ -543,6 +586,12 @@ def compile_to_jobspec(
         # are one contract; changing either alone breaks the job.
         "unpack_inputs": [CODE_INPUT],
         "env": {},
+        # Fault tolerance, on for every job and not the submitter's to turn
+        # off. The literal `{}` is written here rather than shared from a
+        # module constant so two specs can never alias one mutable dict; see
+        # CHECKPOINT_PARAM for why the value is `{}`, why this key alone does
+        # not follow "absent stays absent", and why unconditional is safe.
+        CHECKPOINT_PARAM: {},
     }
     if task_params is not None:
         parameters["task_params"] = task_params
@@ -758,6 +807,22 @@ def compile_federated_round(
         "env": {},
         "task_params": task_params,
         "lease_seconds": min(lease_seconds, MAX_LEASE_SECONDS),
+        # Same unconditional emission as compile_to_jobspec — see
+        # CHECKPOINT_PARAM. A federated round is an ordinary command job and
+        # loses exactly as much to a machine dying, so it carries it too.
+        #
+        # Resume stays INSIDE the round, which is what makes this safe here
+        # even though slot→chunk assignment rotates between rounds: a
+        # checkpoint's scope is (coordinator job_id, task_id)
+        # (`flashruntime/service/checkpoints.py`), and every round is a
+        # SEPARATE coordinator job — `fedavg` submits one per round and
+        # records its own `coordinator_job_id` (`db.list_round_job_ids`),
+        # which is also what the `-rNNN` name suffix below reflects. So round
+        # N+1's `task-000` cannot see round N's `task-000` checkpoint; only a
+        # retried attempt of the SAME task in the SAME round can, and that
+        # attempt is training the same chunk against the same broadcast
+        # weights, which is precisely what should be resumed.
+        CHECKPOINT_PARAM: {},
     }
     if config.timeout_seconds is not None:
         parameters["timeout_seconds"] = config.timeout_seconds

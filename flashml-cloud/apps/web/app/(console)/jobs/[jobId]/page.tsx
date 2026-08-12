@@ -1,39 +1,55 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, DownloadSimple, Terminal, Warning } from "@phosphor-icons/react";
-import { ClearArtifactsButton } from "@/components/jobs/ClearArtifactsButton";
-import { DownloadAllButton } from "@/components/jobs/DownloadAllButton";
+import { ArrowLeft, Warning } from "@phosphor-icons/react";
+import { ArtifactsCard } from "@/components/jobs/ArtifactsCard";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { Swimlanes } from "@/components/jobs/Swimlanes";
 import { FleetTopology } from "@/components/jobs/FleetTopology";
 import { RoundProgress } from "@/components/jobs/RoundProgress";
 import { MemberCredits } from "@/components/jobs/MemberCredits";
 import { JobResultCard } from "@/components/jobs/JobResultCard";
+import { CheckpointsCard } from "@/components/jobs/CheckpointsCard";
+import { RoutingCard } from "@/components/jobs/RoutingCard";
 import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
-import { formatBytes } from "@/lib/utils";
 import {
   deriveAttempts,
   deriveProgress,
   deriveStallReason,
 } from "@/lib/job-activity";
-import { groupArtifactsByTask, type ArtifactGroup } from "@/lib/task-artifacts";
+import {
+  summariseJobArtifacts,
+  type ArtifactsPanel,
+  type ArtifactsRead,
+} from "@/lib/job-artifacts";
+import {
+  summariseRouting,
+  type RoutingPanel,
+  type RoutingRead,
+} from "@/lib/job-routing";
+import {
+  selectTasksForCheckpointRead,
+  summariseCheckpoints,
+  type CheckpointPanel,
+} from "@/lib/task-checkpoints";
 import { workspacePath } from "@/lib/workspace-scope";
 import {
   ApiError,
   NotAuthenticated,
   NotFound,
   cancelJob,
-  fetchJobArtifact,
   getJob,
   getJobResult,
-  jobArtifactKey,
+  listJobArtifacts,
   listJobContributions,
   listJobEvents,
   listJobRounds,
   listJobTasks,
+  previewJobPlans,
+  readTaskCheckpoint,
+  type TaskCheckpointRead,
   type JobContribution,
   type JobEvent,
   type JobRecord,
@@ -78,6 +94,148 @@ export default function JobDetailPage({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [view, setView] = useState<View | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [checkpoints, setCheckpoints] = useState<
+    Record<string, TaskCheckpointRead>
+  >({});
+  // Its own state, not a field of `job`: `job.artifacts` is always `[]` for
+  // every job this deployment runs (see `JobRecord.artifacts`), and reading
+  // the listing separately is the whole point of this card existing. It
+  // starts as `loading` and is only ever replaced by an answer — never
+  // silently by an empty list.
+  const [artifactsRead, setArtifactsRead] = useState<ArtifactsRead>({
+    status: "loading",
+  });
+  // Its own state and its own loader, for the same reason the artifacts
+  // listing has one: "the router put this job here, and here is why" and "we
+  // could not ask the router" are different sentences, and the panel must
+  // never substitute the second for the first.
+  const [routingRead, setRoutingRead] = useState<RoutingRead>({
+    status: "loading",
+  });
+  // One refusal ends the reads for the life of this page. The checkpoint
+  // route is declared `tags=["agent"]` and depends on `current_machine`,
+  // which refuses a browser JWT by design — so a 401 is a property of the
+  // API and will be the same answer for every task, on every tick. Retrying
+  // it would be one guaranteed 401 per task per 2.5s for as long as the tab
+  // is open. A ref, not state: it must take effect within the same tick that
+  // observed it, and it must not re-render anything by itself.
+  const checkpointsRefused = useRef(false);
+
+  /** Ask the coordinator, through the API, for the latest committed
+   * checkpoint of every task that could still lose work.
+   *
+   * A read per task, because that is the granularity the coordinator's
+   * catalog is keyed at — and the reason this is a poll at all rather than a
+   * subscription to the event feed: the coordinator emits
+   * `CHECKPOINT_MANIFEST_COMMITTED` under the composite scope
+   * `"<job_id>::<task_id>"`, so it can never appear in this job's ledger,
+   * however long anyone watches it.
+   *
+   * `readTaskCheckpoint` never rejects, so no failure here can take the page
+   * down or bounce a signed-in user to /sign-in — every outcome is a value
+   * the panel renders honestly. */
+  const readCheckpoints = useCallback(
+    async (currentTasks: JobTask[]) => {
+      if (checkpointsRefused.current) return;
+      const { taskIds } = selectTasksForCheckpointRead(currentTasks);
+      if (taskIds.length === 0) return;
+
+      const reads = await Promise.all(
+        taskIds.map(
+          async (taskId) =>
+            [taskId, await readTaskCheckpoint(jobId, taskId)] as const
+        )
+      );
+      if (reads.some(([, read]) => read.status === "unreadable")) {
+        checkpointsRefused.current = true;
+      }
+      setCheckpoints((prev) => {
+        const next = { ...prev };
+        for (const [taskId, read] of reads) next[taskId] = read;
+        return next;
+      });
+    },
+    [jobId]
+  );
+
+  /** Read the artifact listing, classifying every outcome into a value the
+   * card renders.
+   *
+   * Separate from `load` so the card's own "Try again" can re-read just this
+   * — a terminal job stops polling, so without it a transient failure would
+   * be permanent until a full page reload.
+   *
+   * A failure is recorded as `unreadable`, NEVER as an empty listing: a 404
+   * here is "unknown job" *or* an API deployed before this route existed,
+   * and neither is evidence that the job wrote nothing. `NotAuthenticated`
+   * is the one exception, handed to the same sign-in redirect the page's
+   * other reads use — this is a plain browser route, so a 401 really does
+   * mean signed out. */
+  const loadArtifacts = useCallback(() => {
+    listJobArtifacts(jobId)
+      .then((listing) => setArtifactsRead({ status: "listed", listing }))
+      .catch((err) => {
+        if (err instanceof NotAuthenticated) {
+          router.push(`/sign-in?next=/jobs/${jobId}`);
+          return;
+        }
+        setArtifactsRead({
+          status: "unreadable",
+          detail:
+            err instanceof ApiError
+              ? err.detail
+              : err instanceof Error
+                ? err.message
+                : String(err),
+        });
+      });
+  }, [jobId, router]);
+
+  /** Ask the router how this job routes.
+   *
+   * DELIBERATELY NOT PART OF `load` BELOW. Every other read on this page is
+   * re-issued on a 2.5s timer; this one plans the whole reachable fleet
+   * against the job's spec on every call, and the answer it gives — what
+   * kind of work this is, which venues can run it — is a property of the
+   * spec, which cannot change after submission. Polling it would spend a
+   * fleet-wide plan every 2.5s to redraw the same panel.
+   *
+   * It never rejects into the page's error state either: a job submitted
+   * before this API stored specs answers 409, and a deployment with no
+   * routing configured answers 200 with an explanation. Neither is a broken
+   * job page, so both land in the panel as values. */
+  const loadRouting = useCallback(() => {
+    // No synchronous `setRoutingRead({ status: "loading" })` here, matching
+    // `loadArtifacts` above: this runs from an effect, and a setState in an
+    // effect body is a cascading render (`react-hooks/set-state-in-effect`).
+    // The initial state is already `loading`, and `retryRouting` below —
+    // which runs from a click, not an effect — is what resets it.
+    previewJobPlans(jobId)
+      .then((preview) => setRoutingRead({ status: "previewed", preview }))
+      .catch((err) => {
+        if (err instanceof NotAuthenticated) {
+          router.push(`/sign-in?next=/jobs/${jobId}`);
+          return;
+        }
+        setRoutingRead({
+          status: "unavailable",
+          detail:
+            err instanceof ApiError
+              ? err.detail
+              : err instanceof Error
+                ? err.message
+                : String(err),
+        });
+      });
+  }, [jobId, router]);
+
+  /** The Try again button. Puts the panel back into `loading` before asking
+   * again, so a retry that ends in the same failure still looks like a
+   * retry. Safe to setState here — a click is an event, not an effect. */
+  const retryRouting = useCallback(() => {
+    setRoutingRead({ status: "loading" });
+    loadRouting();
+  }, [loadRouting]);
 
   const load = useCallback(() => {
     getJob(jobId)
@@ -112,18 +270,38 @@ export default function JobDetailPage({
       }
     };
     listJobRounds(jobId).then(setRounds).catch(soft);
-    listJobTasks(jobId).then(setTasks).catch(soft);
+    listJobTasks(jobId)
+      .then((ts) => {
+        setTasks(ts);
+        // Chained off the task list rather than given its own timer: the
+        // checkpoint route is per (job, task), so which tasks to ask about
+        // is only knowable once this answer lands, and hanging it here keeps
+        // the whole page on one cadence with no second interval to reason
+        // about. `selectTasksForCheckpointRead` — the same function the
+        // panel uses — bounds the fan-out to the tasks that could still lose
+        // work, so a completed task is never asked about again.
+        return readCheckpoints(ts);
+      })
+      .catch(soft);
     listJobEvents(jobId).then(setEvents).catch(soft);
     listJobContributions(jobId).then(setContributions).catch(soft);
     // Best-effort like its neighbours: a coordinator older than the
     // reduction surface 404s here, and that must leave the panel absent,
     // not take the page down.
     getJobResult(jobId).then(setResult).catch(soft);
-  }, [jobId, router]);
+    // On every tick, not once: a running job gains files as tasks commit,
+    // and the listing is the only place they appear.
+    loadArtifacts();
+  }, [jobId, router, readCheckpoints, loadArtifacts]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Once per job, not per tick — see `loadRouting`.
+  useEffect(() => {
+    loadRouting();
+  }, [loadRouting]);
 
   useEffect(() => {
     if (job && TERMINAL.has(job.state)) return;
@@ -142,6 +320,23 @@ export default function JobDetailPage({
   const stall = useMemo(
     () => (job ? deriveStallReason(job.state, tasks, events, now) : null),
     [job, tasks, events, now]
+  );
+  const checkpointPanel = useMemo(
+    () => summariseCheckpoints({ tasks, reads: checkpoints, attempts }),
+    [tasks, checkpoints, attempts]
+  );
+  const routingPanel = useMemo(
+    () => summariseRouting(routingRead),
+    [routingRead]
+  );
+  const artifactsPanel = useMemo(
+    () =>
+      summariseJobArtifacts({
+        read: artifactsRead,
+        jobState: job?.state ?? "",
+        tasks,
+      }),
+    [artifactsRead, job?.state, tasks]
   );
 
   // This route's path carries no pool id, so the rail would otherwise show
@@ -275,14 +470,20 @@ export default function JobDetailPage({
             rounds={rounds}
             contributions={contributions}
             result={result}
-            tasks={tasks}
-            onArtifactsCleared={() =>
-              setJob((j) => (j ? { ...j, artifacts: [] } : j))
-            }
+            checkpoints={checkpointPanel}
+            artifacts={artifactsPanel}
+            onReloadArtifacts={loadArtifacts}
           />
         )}
         {activeView === "placement" && (
-          <PlacementView job={job} tasks={tasks} attempts={attempts} now={now} />
+          <PlacementView
+            job={job}
+            tasks={tasks}
+            attempts={attempts}
+            now={now}
+            routing={routingPanel}
+            onRetryRouting={retryRouting}
+          />
         )}
         {activeView === "ledger" && <LedgerView events={events} />}
       </div>
@@ -365,15 +566,20 @@ function ProgressView({
   rounds,
   contributions,
   result,
-  tasks,
-  onArtifactsCleared,
+  checkpoints,
+  artifacts,
+  onReloadArtifacts,
 }: {
   job: JobRecord;
   rounds: JobRound[];
   contributions: JobContribution[];
   result: JobResult | null;
-  tasks: JobTask[];
-  onArtifactsCleared: () => void;
+  checkpoints: CheckpointPanel;
+  artifacts: ArtifactsPanel;
+  /** Re-read the listing. Used both by the card's own retry and after a
+   * clear — the API is the authority on what is left, so the console asks it
+   * rather than assuming the delete emptied everything. */
+  onReloadArtifacts: () => void;
 }) {
   return (
     <div className="space-y-6">
@@ -396,11 +602,22 @@ function ProgressView({
         <NoMetrics />
       )}
 
+      {/* Above the artifacts, and above the credits: the answer to "what
+          does a machine dying right now cost me" is the reason this product
+          exists, and it was the one thing this page never said. Renders
+          nothing when there is no task breakdown to say it about. */}
+      <CheckpointsCard panel={checkpoints} />
+
       {/* Renders nothing for a job with no recorded contributions — most
           jobs, since this data only exists for a pool job. */}
       <MemberCredits contributions={contributions} />
 
-      <ArtifactsCard job={job} tasks={tasks} onCleared={onArtifactsCleared} />
+      <ArtifactsCard
+        jobId={job.job_id}
+        panel={artifacts}
+        onCleared={onReloadArtifacts}
+        onRetry={onReloadArtifacts}
+      />
       {job.spec && <SpecCard job={job} />}
     </div>
   );
@@ -432,25 +649,41 @@ function PlacementView({
   tasks,
   attempts,
   now,
+  routing,
+  onRetryRouting,
 }: {
   job: JobRecord;
   tasks: JobTask[];
   attempts: ReturnType<typeof deriveAttempts>;
   now: number;
+  routing: RoutingPanel;
+  onRetryRouting: () => void;
 }) {
+  // The routing card sits ABOVE the "nothing has run yet" guard on purpose.
+  // Where the work went and where it COULD go are different questions, and
+  // the second one has an answer from the moment the job exists — a PENDING
+  // job with no attempts yet is exactly when "which venues can run this, and
+  // why not the others" is the only thing there is to say.
+  const routingCard = <RoutingCard panel={routing} onRetry={onRetryRouting} />;
+
   if (tasks.length === 0 && attempts.length === 0) {
     return (
-      <section className="rounded-lg border border-border bg-surface p-6">
-        <h2 className="text-sm font-semibold">No placement recorded</h2>
-        <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-          {noBreakdownReason(job)}
-        </p>
-      </section>
+      <div className="space-y-6">
+        {routingCard}
+        <section className="rounded-lg border border-border bg-surface p-6">
+          <h2 className="text-sm font-semibold">No placement recorded</h2>
+          <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
+            {noBreakdownReason(job)}
+          </p>
+        </section>
+      </div>
     );
   }
 
   return (
     <div className="space-y-6">
+      {routingCard}
+
       {attempts.length > 0 && (
         <>
           {/* Two readings of the same events. The topology answers "where is
@@ -611,147 +844,6 @@ function LedgerView({ events }: { events: JobEvent[] }) {
   );
 }
 
-/** Human label for a group whose id names no task — currently only a
- * reducer's own output bucket (`reduced/…`, see `lib/job-result.ts`'s
- * `concat` case). Falls back to the raw id for a bucket this page does not
- * yet know the name of, same "name it rather than hide it" rule
- * `summariseJobResult` follows for an unrecognised reducer. */
-function groupLabel(groupId: string): string {
-  if (groupId === "reduced") return "Reduced output";
-  return groupId;
-}
-
-const TASK_STATE_TONE: Record<string, string> = {
-  FAILED: "text-destructive border-destructive/40",
-  CANCELLED: "text-muted-foreground border-muted",
-  COMPLETED: "text-evergreen border-evergreen/40",
-  LEASED: "text-brand-foreground border-brand/40",
-  PENDING: "text-muted-foreground border-muted",
-};
-
-function ArtifactsCard({
-  job,
-  tasks,
-  onCleared,
-}: {
-  job: JobRecord;
-  tasks: JobTask[];
-  onCleared: () => void;
-}) {
-  const artifacts = job.artifacts ?? [];
-  // Recomputed on every render rather than memoised: the job list a real
-  // job carries is small (tens of files, not thousands), and memoising
-  // against `artifacts` — a fresh array reference every 2.5s poll tick
-  // whether or not its contents actually changed — would buy nothing.
-  const { groups, unresolved } = groupArtifactsByTask(
-    job.job_id,
-    artifacts,
-    tasks
-  );
-  // Offering the button on a job that could still be writing into its own
-  // output directory would just relay the API's 409 back with extra steps
-  // — see `lib/job-artifact-cleanup.ts`'s `CLEARABLE_STATES` for the same
-  // rule applied across a whole job list; this page already has `TERMINAL`
-  // for its own polling cutoff and it means the same thing here.
-  const canClear = TERMINAL.has(job.state) && artifacts.length > 0;
-
-  return (
-    <section className="rounded-lg border border-border bg-surface p-4">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold">Artifacts</h2>
-        <div className="flex items-start gap-2">
-          {artifacts.length > 0 && (
-            <DownloadAllButton jobId={job.job_id} artifacts={artifacts} />
-          )}
-          {canClear && (
-            <ClearArtifactsButton jobId={job.job_id} onCleared={onCleared} />
-          )}
-        </div>
-      </div>
-
-      {artifacts.length === 0 ? (
-        <p className="mt-3 font-mono text-xs text-muted-foreground">
-          {TERMINAL.has(job.state)
-            ? "no artifacts were produced"
-            : "artifacts appear once the job produces output"}
-        </p>
-      ) : (
-        <div className="mt-3 space-y-3">
-          {groups.map((g) => (
-            <ArtifactGroupSection key={g.groupId} jobId={job.job_id} group={g} />
-          ))}
-          {unresolved.length > 0 && (
-            <div>
-              <div className="label-caps">Other</div>
-              <div className="mt-1.5 space-y-2">
-                {unresolved.map((a) => (
-                  <ArtifactRow key={a.uri} jobId={job.job_id} artifact={a} />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
-/** One task's (or reducer bucket's) artifacts, grouped. A FAILED task with
- * at least one recognised log gets a visible callout — `hasFailureLog` is
- * exactly that check, computed once in `lib/task-artifacts.ts` rather than
- * re-derived here, and `groupArtifactsByTask` already sorts these groups to
- * the front so the callout is the first thing on the card, not something
- * to scroll past a healthy task's output to find. */
-function ArtifactGroupSection({
-  jobId,
-  group,
-}: {
-  jobId: string;
-  group: ArtifactGroup;
-}) {
-  return (
-    <div
-      className={`rounded-md border p-3 ${
-        group.hasFailureLog
-          ? "border-destructive/30 bg-destructive/[0.03]"
-          : "border-border"
-      }`}
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-xs font-medium">
-          {group.taskState === null ? groupLabel(group.groupId) : group.groupId}
-        </span>
-        {group.taskState !== null && (
-          <span
-            className={`rounded-full border px-1.5 py-0.5 font-mono text-[10px] ${
-              TASK_STATE_TONE[group.taskState] ?? "text-muted-foreground border-muted"
-            }`}
-          >
-            {group.taskState}
-          </span>
-        )}
-      </div>
-      {group.hasFailureLog && (
-        <p className="mt-1.5 flex items-start gap-1.5 text-xs text-destructive">
-          <Terminal className="mt-0.5 h-3.5 w-3.5 shrink-0" weight="fill" />
-          <span>This task failed. Its stdout and stderr are below.</span>
-        </p>
-      )}
-      <div className="mt-2 space-y-1.5">
-        {group.artifacts.map((entry) => (
-          <ArtifactRow
-            key={entry.key}
-            jobId={jobId}
-            artifact={entry.artifact}
-            logKind={entry.logKind}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-
 function SpecCard({ job }: { job: JobRecord }) {
   const s = job.spec;
   if (!s) return null;
@@ -776,78 +868,6 @@ function SpecCard({ job }: { job: JobRecord }) {
         ))}
       </dl>
     </section>
-  );
-}
-
-function ArtifactRow({
-  jobId,
-  artifact,
-  logKind,
-}: {
-  jobId: string;
-  artifact: NonNullable<JobRecord["artifacts"]>[number];
-  /** Set only for a recognised stdout/stderr file — see
-   * `lib/task-artifacts.ts`. Draws a small terminal marker ahead of the raw
-   * uri rather than replacing it, so the row stays identifiable by the same
-   * uri every other artifact row shows, with the one extra fact ("this is a
-   * log, and which one") called out instead of hidden behind a filename a
-   * reader has to already know to look for. */
-  logKind?: "stdout" | "stderr" | null;
-}) {
-  const [downloading, setDownloading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const key = jobArtifactKey(jobId, artifact.uri);
-
-  async function download() {
-    if (!key) return;
-    setDownloading(true);
-    setError(null);
-    try {
-      const blob = await fetchJobArtifact(jobId, key);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = key.split("/").pop() || "artifact";
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      setError("Couldn't download this artifact.");
-    } finally {
-      setDownloading(false);
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-0.5">
-      <div className="flex items-center justify-between gap-3 font-mono text-xs">
-        <span className="flex min-w-0 items-center gap-1.5">
-          {logKind && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              <Terminal className="h-2.5 w-2.5" />
-              {logKind}
-            </span>
-          )}
-          <span className="truncate text-brand-foreground">{artifact.uri}</span>
-        </span>
-        <span className="flex shrink-0 items-center gap-2">
-          <span className="text-muted-foreground">
-            {artifact.backend} · {formatBytes(artifact.size_bytes)}
-          </span>
-          {key && (
-            <button
-              type="button"
-              onClick={download}
-              disabled={downloading}
-              aria-label="Download artifact"
-              className="rounded p-1 hover:bg-surface-2 disabled:opacity-50"
-            >
-              <DownloadSimple className={downloading ? "animate-pulse" : ""} />
-            </button>
-          )}
-        </span>
-      </div>
-      {error && <span className="text-[10px] text-destructive">{error}</span>}
-    </div>
   );
 }
 

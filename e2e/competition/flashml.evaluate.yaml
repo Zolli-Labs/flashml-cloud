@@ -1,0 +1,75 @@
+# The competition demo's EVALUATION job.
+#
+# It is written in flashml.yaml's schema — every key below is in
+# `flashml_yaml.ALLOWED_KEYS` and it round-trips through the real
+# `parse_flashml_yaml` + `compile_to_jobspec` — but it is authored for ONE
+# consumer: `scripts/competition/run_demo.py` reads `image`, `entrypoint` and
+# `args` out of it to build the sandbox session's `evaluation_spec`, which
+# `app.build_evaluation_jobspec` compiles. That path chooses metadata.name,
+# execution.backend, placement.pool, isolation and resources for itself — they
+# are not the submitter's to state — so the keys below it does not read are
+# ignored, never silently reinterpreted.
+#
+# THIS FILE CANNOT BE SUBMITTED AS A REPO JOB, and the refusal is correct.
+# `preflight` returns one ERROR against it:
+#
+#     network-use: line 42: imports 'urllib', but volunteer nodes run with
+#     --network none
+#
+# Which is true of a volunteer node and false of the FC sandbox this workload
+# actually runs in — the sandbox reaches OSS over presigned HTTPS, which is the
+# whole wake path. `build_evaluation_jobspec` never calls preflight, so the
+# sandbox path is unaffected. Do not "fix" the finding by dropping the fetch:
+# the finding is the repo-job pipeline correctly refusing a workload that is
+# not for it.
+#
+# The other thing it cannot say: `build_evaluation_jobspec` takes `image` as a
+# pinned `repository:tag`, never a curated alias, because the sandbox has no
+# alias registry to resolve against. `run_demo.py` resolves `python-slim`
+# through `flashml_cloud_api.images` before it builds the spec, so the alias
+# below stays honest here and is never sent raw to the orchestrator.
+
+version: 1
+name: flashml-competition-evaluate
+image: python-slim
+entrypoint: evaluate_model.py
+
+# No credential appears here and none is needed. Every URL in artifacts.json is
+# presigned — the signature is in the query string and it expires on its own —
+# so the evaluator reads a file the orchestrator wrote at 0600 and fetches over
+# plain HTTPS. A key in this argv would mean the wake path was wrong.
+#
+# `--artifacts` is the orchestrator's own `evaluation_artifacts_path()`:
+# `SandboxPaths.control_dir` + `ARTIFACTS_NAME`. Written out rather than left
+# to the script's default so the contract is visible in the job, and so a
+# deployment with a different control_dir can override it in one place.
+#
+# `--expect-sha256` is deliberately ABSENT. It turns the hash from evidence
+# into an assertion, and the value is not knowable when this file is written —
+# it is the training job's reported `model_sha256`. run_demo.py appends the
+# pair once training has reported it; a human running this branch by hand gets
+# the hash reported rather than asserted, which is the honest default.
+args:
+  - "--artifacts"
+  - "/home/user/.flashml/artifacts.json"
+  - "--model-key"
+  - "model.json"
+  - "--out"
+  - "/work/out"
+
+# `accuracy` is the number being claimed and `model_sha256` is what ties it to
+# a specific model. An evaluation result carrying one without the other is not
+# evidence of anything, so a task that produces it fails its attempt.
+validators:
+  keys: [accuracy, model_sha256]
+
+reduce:
+  kind: collect
+
+# The evaluation is one fetch plus 600 forward passes — measured in hundreds of
+# milliseconds. The ceiling is here for the sandbox's sake rather than the
+# workload's: the orchestrator's own `DEFAULT_EVALUATION_TIMEOUT_S` is 900 s,
+# and a task still running when that elapses becomes an EvaluationTimeout with
+# a sandbox billing by the second behind it. 300 s fails first, and fails
+# attributably.
+timeout_seconds: 300
