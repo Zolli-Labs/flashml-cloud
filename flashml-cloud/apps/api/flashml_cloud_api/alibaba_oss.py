@@ -140,11 +140,36 @@ class OSSArtifacts:
 
     # -- bytes --------------------------------------------------------------
 
-    def put_bytes(self, key: str, data: bytes) -> StoredObject:
+    def put_bytes(self, key: str, data: bytes, *,
+                  public_read: bool = False) -> StoredObject:
+        """Write `data` at `key`. Private unless `public_read` is asked for.
+
+        `public_read` sets this **one object's** ACL to `public-read` at write
+        time, in the same request, via OSS's `x-oss-object-acl` header. It is a
+        deliberate, greppable flag rather than a pass-through `headers` dict so
+        that "which code publishes bytes to the open internet" is answerable by
+        searching for `public_read=True`. Today the only caller is
+        `scripts/competition/publish_dataset.py`, publishing a synthetic
+        dataset that hosts fetch anonymously.
+
+        Two things about it are easy to get wrong:
+
+        *It is per-object, and it does not stick.* Overwriting the object with
+        a plain `put_bytes` gives the new object the bucket default, which is
+        private. Anything that republishes has to pass the flag every time.
+
+        *The bucket can veto it.* With OSS **Block Public Access** enabled on
+        the bucket, this fails 403 `AccessDenied` — "Put public object acl is
+        not allowed", `EC 0016-00000901` — and so does setting the ACL after
+        the fact with `put_object_acl`. That switch is bucket-level
+        configuration, not something a key can be granted, so a caller that
+        needs public objects needs it off for the bucket first.
+        """
         import hashlib
 
         digest = hashlib.sha256(data).hexdigest()
-        result = self._bucket.put_object(key, data)
+        headers = {"x-oss-object-acl": "public-read"} if public_read else None
+        result = self._bucket.put_object(key, data, headers=headers)
         return StoredObject(
             key=key,
             size_bytes=len(data),
