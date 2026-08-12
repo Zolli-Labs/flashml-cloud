@@ -1,14 +1,18 @@
 """Teardown is the guarantee. The request path is best effort.
 
-Every test here is really one question: *can a machine we are paying for end
-up in a state nothing will ever look at again?* The answer has to be no, and
-the interesting cases are all the ones where something went wrong — the venue
-refused, the venue raised, the venue is not configured, or the row never
-learned the handle in the first place.
+Every test here is really one of two questions.
 
-That last one is the reason the "no handle, therefore nothing was created"
-shortcut is not taken anywhere in ``reconcile.py``, and
-``test_the_race_a_handleless_row_would_have_lost`` is the test that pins it.
+*Can a machine we are paying for end up in a state nothing will ever look at
+again?* The answer has to be no, and the interesting cases are all the ones
+where something went wrong — the venue refused, the venue raised, the venue is
+not configured, or the row never learned the handle in the first place.
+
+*Can this sweep destroy a machine somebody is using?* The answer has to be no
+as well, and it is the newer half of the file. An age-only sweep is a hard
+maximum rental lifetime, because nothing in the repository calls
+``release_capacity`` yet and so no row ever leaves ACTIVE by settling
+normally. ``test_a_heartbeating_machine_is_never_swept_however_old_the_rental``
+is the test that stands between this module and a training job three hours in.
 
 **Every test here cleans up its `rented_capacity`, `machines` and `pools`
 rows.** The Postgres fixture is session-scoped and never truncated between
@@ -28,6 +32,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from flashml_cloud_api import db as dbmod
+from flashml_cloud_api import sandbox_identity
 from flashml_cloud_api.capacity import reconcile as reconcile_mod
 from flashml_cloud_api.capacity.acquire import acquire_for_job
 from flashml_cloud_api.capacity.budget import window_spend_usd
@@ -38,15 +43,19 @@ from flashml_cloud_api.capacity.provider import (
     ReleaseOutcome,
 )
 from flashml_cloud_api.capacity.reconcile import (
+    NO_HANDLE,
+    NOT_DESTROYED,
+    VENUE_SAYS_GONE,
+    finished_rentals_with_live_credentials,
     reconcile_rented,
     release_capacity,
     unreleased_rows,
 )
 from test_jobs_from_repo import db  # noqa: F401 - fixture
 
-SETTLED = 3600.0  # the settle window every sweep in this file uses
-OLD = 10800.0     # 3h: comfortably past it
-FRESH = 60.0      # a minute: comfortably inside it
+OLD = 10800.0    # 3h: past every default window
+QUIET = 1200.0   # 20m of silence: past the 15m quiet window
+YOUNG = 60.0     # a minute: inside every window
 
 
 class _Settings:
@@ -176,6 +185,61 @@ def _machine_status(db, machine_id):  # noqa: F811
     return row["status"] if row else None
 
 
+def _machine(
+    db,  # noqa: F811
+    owner_id,
+    *,
+    status="pending",
+    last_seen_s=None,
+    pool_id=None,
+):
+    """A machine row standing in for a rented host.
+
+    ``last_seen_s`` is seconds ago, or ``None`` for a host that has never
+    heartbeated — which is what a real one looks like until it has booted,
+    pulled its image and enrolled.
+    """
+    machine_id = str(
+        dbmod.insert_machine(
+            db, owner_id=str(owner_id), node_id=f"rented-{uuid.uuid4()}",
+            name="a rented host", platform="linux",
+        )
+    )
+    if pool_id is not None:
+        dbmod.bind_machine_pool(
+            db, machine_id=machine_id, pool_id=str(pool_id)
+        )
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set status = %s where id = %s",
+            (status, machine_id),
+        )
+        if last_seen_s is not None:
+            cur.execute(
+                "update public.machines set last_seen_at = "
+                "now() - make_interval(secs => %s) where id = %s",
+                (float(last_seen_s), machine_id),
+            )
+    return machine_id
+
+
+def _seen(db, machine_id, seconds_ago):  # noqa: F811
+    """Move a machine's heartbeat. ``None`` means it has never been seen."""
+    with db.cursor() as cur:
+        if seconds_ago is None:
+            cur.execute(
+                "update public.machines set last_seen_at = null where id = %s",
+                (machine_id,),
+            )
+        else:
+            cur.execute(
+                "update public.machines set last_seen_at = "
+                "now() - make_interval(secs => %s) where id = %s",
+                (float(seconds_ago), machine_id),
+            )
+    db.commit()
+
+
 def _insert_row(
     db,  # noqa: F811
     *,
@@ -184,6 +248,7 @@ def _insert_row(
     venue_id="fake",
     state="ACTIVE",
     handle=None,
+    machine_id=None,
     age_s=OLD,
     usd_per_hour=0.5,
 ):
@@ -193,21 +258,21 @@ def _insert_row(
             """
             insert into public.rented_capacity
                 (venue_id, state, owner_id, pool_id, job_id, provider_handle,
-                 usd_per_hour, created_at, acquired_at)
-            values (%s, %s, %s, %s, 'job-sweep', %s, %s,
+                 machine_id, usd_per_hour, created_at, acquired_at)
+            values (%s, %s, %s, %s, 'job-sweep', %s, %s, %s,
                     now() - make_interval(secs => %s),
                     case when %s = 'REQUESTED' then null
                          else now() - make_interval(secs => %s) end)
             returning id
             """,
-            (venue_id, state, str(owner_id), str(pool_id), handle,
+            (venue_id, state, str(owner_id), str(pool_id), handle, machine_id,
              usd_per_hour, float(age_s), state, float(age_s)),
         )
         return str(cur.fetchone()["id"])
 
 
 def _aged(db, rid, seconds=OLD):  # noqa: F811
-    """Push a row's clock back past the settle window."""
+    """Push a row's clock back."""
     with db.cursor() as cur:
         cur.execute(
             """
@@ -220,6 +285,10 @@ def _aged(db, rid, seconds=OLD):  # noqa: F811
             (float(seconds), float(seconds), rid),
         )
     db.commit()
+
+
+def _swept(db, **windows):  # noqa: F811
+    return {str(r["id"]) for r in unreleased_rows(db, **windows)}
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +335,9 @@ async def test_the_sweep_releases_what_the_request_path_missed(
     rid = await acquire_for_job(
         db, venue, _Settings(), request=_request(an_owner, a_pool)
     )
-    _aged(db, rid)
+    _aged(db, rid)  # never heartbeated, and long past the boot allowance
 
-    touched = await reconcile_rented(db, {"fake": venue}, settle_after_s=SETTLED)
+    touched = await reconcile_rented(db, {"fake": venue})
     assert rid in touched
     assert venue.live_handles() == []
     assert _row(db, rid)["state"] == "RELEASED"
@@ -282,7 +351,7 @@ async def test_the_sweep_leaves_fresh_rentals_alone(db, an_owner, a_pool):  # no
     rid = await acquire_for_job(
         db, venue, _Settings(), request=_request(an_owner, a_pool)
     )
-    touched = await reconcile_rented(db, {"fake": venue}, settle_after_s=SETTLED)
+    touched = await reconcile_rented(db, {"fake": venue})
     assert rid not in touched
     assert len(venue.live_handles()) == 1
     assert venue.release_calls == []
@@ -345,6 +414,145 @@ async def test_the_credential_dies_even_when_the_venue_will_not(
 
 
 # ---------------------------------------------------------------------------
+# liveness: the difference between a sweep and a maximum rental lifetime
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_heartbeating_machine_is_never_swept_however_old_the_rental(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The test this module's predicate exists for.**
+
+    Nothing in the repository calls ``release_capacity`` yet, so no row leaves
+    ACTIVE by settling normally. A sweep that selected on age alone would
+    therefore be a hard maximum rental lifetime, and the first loop to run it
+    would destroy a machine three hours into a training run and heartbeating
+    perfectly.
+
+    Same row, twice. Only the heartbeat changes.
+    """
+    venue = _Venue()
+    rid = await acquire_for_job(
+        db, venue, _Settings(), request=_request(an_owner, a_pool)
+    )
+    machine_id = str(_row(db, rid)["machine_id"])
+    _aged(db, rid)  # three hours in
+
+    _seen(db, machine_id, 5.0)  # ...and talking to us five seconds ago
+    assert await reconcile_rented(db, {"fake": venue}) == []
+    assert venue.release_calls == []
+    assert _row(db, rid)["state"] == "ACTIVE"
+
+    _seen(db, machine_id, QUIET)  # the machine goes quiet
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+    assert venue.live_handles() == []
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_machine_is_swept_even_when_the_rental_is_young(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The quiet window needs no help from the row's age, and must not wait
+    for one: a machine that heartbeated and stopped is dead, and the money is
+    not. Twenty-five minutes old here — inside both the boot allowance and the
+    abandoned one, so age alone would have left it running."""
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=QUIET)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=machine_id, age_s=1500.0,
+    )
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+    assert venue.live_handles() == []
+
+
+@pytest.mark.asyncio
+async def test_a_machine_that_has_never_been_seen_keeps_its_boot_grace(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """A rented host has no ``last_seen_at`` until it has booted, pulled a
+    multi-gigabyte image and enrolled. Cutting that short destroys machines
+    that were about to start working, having already paid for the boot — the
+    same hazard ``acquire.py`` records as its reason for not minting rentals
+    ``lifecycle = 'ephemeral'``."""
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, last_seen_s=None)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=machine_id, age_s=1500.0,  # 25 minutes into a slow boot
+    )
+    assert await reconcile_rented(db, {"fake": venue}) == []
+    assert len(venue.live_handles()) == 1
+
+    _aged(db, rid, OLD)  # and now it has plainly never been coming
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_credential_is_swept_at_once(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """No allowance at all: a revoked machine can never claim our work again,
+    so the rental is waste from that instant.
+
+    It is also what keeps a failed destroy retryable. ``release_capacity``
+    revokes even when the venue refuses, so an age-gated branch here would
+    push the row we are mid-way through releasing back OUT of the sweep until
+    it aged into the window — the one thing a failed destroy must not do.
+    """
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, status="revoked", last_seen_s=5.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=machine_id, age_s=YOUNG,
+    )
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+    assert venue.live_handles() == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_leaves_the_row_visible_to_the_very_next_sweep(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The interaction between the two halves, pinned end to end: a venue
+    refuses, the credential is revoked anyway, and the row is still there on
+    the next pass rather than hidden by its own teardown."""
+    venue = _Venue(refuse_destroy=True)
+    rid = await acquire_for_job(
+        db, venue, _Settings(), request=_request(an_owner, a_pool)
+    )
+    _aged(db, rid)
+    assert await reconcile_rented(db, {"fake": venue}) == []
+    assert _machine_status(db, str(_row(db, rid)["machine_id"])) == "revoked"
+
+    # No ageing, no waiting: the next pass sees it.
+    assert rid in _swept(db)
+    venue.refuse_destroy = False
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+
+
+def test_the_windows_are_not_a_poll_interval(db, an_owner, a_pool):  # noqa: F811
+    """The misreading this signature is shaped to prevent.
+
+    ``settle_after_s`` used to be one knob, read as "seconds after
+    settlement", measured from acquisition, sitting beside a docstring line
+    about sweeping every few minutes. Someone wiring a loop sets that to 300.
+    Here, 300 seconds is passed as every window at once — the worst a confused
+    caller could do — and a machine that heartbeated ten seconds ago is still
+    not selected, because no window governs a live machine.
+    """
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=10.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-live",
+        machine_id=machine_id, age_s=OLD,
+    )
+    assert rid not in _swept(
+        db, quiet_after_s=300.0, boot_grace_s=300.0, abandoned_after_s=300.0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # what gets swept, and what deliberately does not
 # ---------------------------------------------------------------------------
 
@@ -369,11 +577,11 @@ def test_unreleased_rows_selects_only_what_is_still_billing_and_settled(
         ),
         "active_fresh": _insert_row(
             db, owner_id=an_owner, pool_id=a_pool, handle="h-active-fresh",
-            age_s=FRESH,
+            age_s=YOUNG,
         ),
         "requested_fresh": _insert_row(
             db, owner_id=an_owner, pool_id=a_pool, state="REQUESTED",
-            age_s=FRESH,
+            age_s=YOUNG,
         ),
         "released_old": _insert_row(
             db, owner_id=an_owner, pool_id=a_pool, state="RELEASED",
@@ -386,19 +594,22 @@ def test_unreleased_rows_selects_only_what_is_still_billing_and_settled(
     }
     # Intersected with our own ids: the database outlives every test file in
     # the session and a bare list would report on somebody else's rows.
-    swept = {str(r["id"]) for r in unreleased_rows(db, settle_after_s=SETTLED)}
+    swept = _swept(db)
     got = {name for name, rid in mine.items() if rid in swept}
     assert got == {"requested_old", "active_old"}
 
 
 def test_a_requested_row_is_measured_from_created_at(db, an_owner, a_pool):  # noqa: F811
-    """A REQUESTED row has no ``acquired_at`` at all, so the window has to
-    fall back to ``created_at`` — otherwise a null would compare as null and
-    the rows most likely to be orphans would be the ones never swept."""
+    """A REQUESTED row has no ``acquired_at`` at all — and no machine to ask
+    about either, since ``acquire.py`` records the machine in the same update
+    that leaves REQUESTED. So the window has to fall back to ``created_at``,
+    otherwise a null would compare as null and the rows most likely to be
+    orphans would be the ones never swept."""
     rid = _insert_row(db, owner_id=an_owner, pool_id=a_pool, state="REQUESTED")
-    assert _row(db, rid)["acquired_at"] is None
-    swept = {str(r["id"]) for r in unreleased_rows(db, settle_after_s=SETTLED)}
-    assert rid in swept
+    row = _row(db, rid)
+    assert row["acquired_at"] is None
+    assert row["machine_id"] is None
+    assert rid in _swept(db)
 
 
 # ---------------------------------------------------------------------------
@@ -421,18 +632,16 @@ async def test_a_handleless_row_is_never_marked_released(
     rid = _insert_row(
         db, owner_id=an_owner, pool_id=a_pool, state="REQUESTED", handle=None,
     )
-    touched = await reconcile_rented(db, {"fake": venue}, settle_after_s=SETTLED)
+    touched = await reconcile_rented(db, {"fake": venue})
 
     assert rid not in touched
     row = _row(db, rid)
     assert row["state"] == "REQUESTED"
     assert row["released_at"] is None
-    assert row["failure_code"] == "RECONCILE_NO_HANDLE"
+    assert row["failure_code"] == NO_HANDLE
     assert "provider_handle" in (row["failure_detail"] or "")
     # And it is still sweepable, which is the entire claim.
-    assert rid in {
-        str(r["id"]) for r in unreleased_rows(db, settle_after_s=SETTLED)
-    }
+    assert rid in _swept(db)
 
 
 @pytest.mark.asyncio
@@ -458,9 +667,7 @@ async def test_the_race_a_handleless_row_would_have_lost(
     )
 
     # 1. The sweep, mid-acquisition.
-    assert await reconcile_rented(
-        db, {"fake": venue}, settle_after_s=SETTLED
-    ) == []
+    assert await reconcile_rented(db, {"fake": venue}) == []
 
     # 2. The venue answers, the acquisition loses the race, and the handle is
     #    recorded on the row it can no longer move.
@@ -478,10 +685,25 @@ async def test_the_race_a_handleless_row_would_have_lost(
 
     # 3. The next healthy sweep finds it, because the row was never closed.
     venue.refuse_destroy = False
-    touched = await reconcile_rented(db, {"fake": venue}, settle_after_s=SETTLED)
-    assert touched == [rid]
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
     assert venue.live_handles() == []
     assert _row(db, rid)["state"] == "RELEASED"
+
+
+def test_a_note_never_libels_a_row_that_moved_on(db, an_owner, a_pool):  # noqa: F811
+    """The diagnosis is written after the row was read, and the row can change
+    in between — a handleless REQUESTED row is exactly the one that is about
+    to learn its handle. Stamping ``RECONCILE_NO_HANDLE`` on a healthy rental
+    sends somebody to a venue console looking for a machine that is working
+    fine, so the guard is part of the write."""
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="learned-it-just-now",
+    )
+    reconcile_mod._note(
+        db, rid, NO_HANDLE, "stale diagnosis",
+        guard="and provider_handle is null",
+    )
+    assert _row(db, rid)["failure_code"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -500,13 +722,13 @@ async def test_a_venue_that_refuses_leaves_the_row_sweepable(
     rid = _insert_row(
         db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
     )
-    touched = await reconcile_rented(db, {"fake": venue}, settle_after_s=SETTLED)
+    touched = await reconcile_rented(db, {"fake": venue})
 
     assert touched == []
     row = _row(db, rid)
     assert row["state"] == "ACTIVE"
     assert row["released_at"] is None
-    assert row["failure_code"] == "RECONCILE_NOT_DESTROYED"
+    assert row["failure_code"] == NOT_DESTROYED
     # The note names the machine that is still running. A row that says only
     # "failed" sends somebody to the venue's console with nothing to search.
     assert row["provider_handle"] in row["failure_detail"]
@@ -514,9 +736,7 @@ async def test_a_venue_that_refuses_leaves_the_row_sweepable(
 
     # ...and the next sweep, once the venue is healthy again, finishes it.
     venue.refuse_destroy = False
-    assert await reconcile_rented(
-        db, {"fake": venue}, settle_after_s=SETTLED
-    ) == [rid]
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
     assert _row(db, rid)["state"] == "RELEASED"
 
 
@@ -530,36 +750,60 @@ async def test_a_venue_that_raises_is_recorded_not_swallowed(
     rid = _insert_row(
         db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
     )
-    assert await reconcile_rented(
-        db, {"fake": venue}, settle_after_s=SETTLED
-    ) == []
+    assert await reconcile_rented(db, {"fake": venue}) == []
     row = _row(db, rid)
     assert row["state"] == "ACTIVE"
-    assert row["failure_code"] == "RECONCILE_NOT_DESTROYED"
+    assert row["failure_code"] == NOT_DESTROYED
     assert "RuntimeError" in row["failure_detail"]
 
 
 @pytest.mark.asyncio
-async def test_a_machine_the_venue_no_longer_has_counts_as_released(
+async def test_one_absent_reading_is_not_enough_to_close_a_row(
     db, an_owner, a_pool  # noqa: F811
 ):
-    """``observe`` reads the VENUE, never our own rows.
+    """A single ``exists=False`` is not proof.
 
-    A release call that will not confirm anything is not the end of the
-    question: if the venue says the handle does not exist, the machine is
-    gone and the row may be closed on that evidence — which is what makes a
-    release of an already-destroyed machine a success rather than a row stuck
-    for ever.
+    A transient 404, a read against a replica that has not caught up, an id
+    looked up in the wrong region — and the cost of being wrong is the worst
+    outcome this module has: a machine billing for ever behind a RELEASED row
+    that nothing will ever select again. So the first absent reading is
+    written down, not acted on.
     """
     venue = _Venue(refuse_destroy=True)
     gone = "fake-already-destroyed"  # never added to the venue's live set
     rid = _insert_row(db, owner_id=an_owner, pool_id=a_pool, handle=gone)
 
+    assert await release_capacity(db, venue, rented_id=rid) is False
+    row = _row(db, rid)
+    assert row["state"] == "ACTIVE"
+    assert row["released_at"] is None
+    assert row["failure_code"] == VENUE_SAYS_GONE
+    assert rid in _swept(db)
+
+
+@pytest.mark.asyncio
+async def test_two_sweeps_agreeing_the_machine_is_gone_close_the_row(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """``observe`` reads the VENUE, never our own rows — and corroboration is
+    what makes an absent reading evidence rather than a guess.
+
+    Two passes, minutes apart in production, each through a fresh call. The
+    row itself is the memory, so nothing lives in the process and a restart
+    loses only time. This is also what makes releasing an already-destroyed
+    machine terminate instead of retrying for ever.
+    """
+    venue = _Venue(refuse_destroy=True)
+    gone = "fake-already-destroyed"
+    rid = _insert_row(db, owner_id=an_owner, pool_id=a_pool, handle=gone)
+
+    await release_capacity(db, venue, rented_id=rid)  # pass one: noted
     assert await release_capacity(db, venue, rented_id=rid) is True
-    assert venue.release_calls == [gone]
+
     row = _row(db, rid)
     assert row["state"] == "RELEASED"
     assert row["released_at"] is not None
+    assert venue.release_calls == [gone, gone]
 
 
 @pytest.mark.asyncio
@@ -582,6 +826,9 @@ async def test_a_machine_that_merely_stopped_is_not_released(
     rid = _insert_row(
         db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
     )
+    # Twice, so that this is a statement about the observation and not about
+    # corroboration: neither pass may close the row.
+    assert await release_capacity(db, venue, rented_id=rid) is False
     assert await release_capacity(db, venue, rented_id=rid) is False
     assert _row(db, rid)["state"] == "ACTIVE"
 
@@ -606,15 +853,13 @@ async def test_a_venue_with_no_configured_provider_is_left_visible(
     mine = _insert_row(
         db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
     )
-    touched = await reconcile_rented(db, {"fake": venue}, settle_after_s=SETTLED)
+    touched = await reconcile_rented(db, {"fake": venue})
 
     assert touched == [mine]  # the configured venue is still swept
     row = _row(db, orphan)
     assert row["state"] == "ACTIVE"
     assert row["released_at"] is None
-    assert orphan in {
-        str(r["id"]) for r in unreleased_rows(db, settle_after_s=SETTLED)
-    }
+    assert orphan in _swept(db)
 
 
 @pytest.mark.asyncio
@@ -642,12 +887,34 @@ async def test_one_rows_failure_does_not_end_the_sweep(
         return await real(conn, provider, rented_id=rented_id)
 
     monkeypatch.setattr(reconcile_mod, "release_capacity", _explode)
-    touched = await reconcile_rented(db, {"fake": venue}, settle_after_s=SETTLED)
+    touched = await reconcile_rented(db, {"fake": venue})
 
     # Oldest first, so the exploding row is the one the sweep meets first.
     assert touched == [healthy]
     assert _row(db, doomed)["state"] == "ACTIVE"
     assert _row(db, healthy)["state"] == "RELEASED"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_listing_does_not_end_the_sweep(
+    db, an_owner, a_pool, monkeypatch  # noqa: F811
+):
+    """The listing is outside every per-row guard, so it was the one thing
+    that could still take the whole pass down — and the credential half with
+    it, which never touches a venue at all and had no reason to fail."""
+    machine_id = _machine(db, an_owner, status="active", pool_id=a_pool)
+    _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, state="RELEASED",
+        handle="h-done", machine_id=machine_id,
+    )
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("the connection went away mid-listing")
+
+    monkeypatch.setattr(reconcile_mod, "unreleased_rows", _explode)
+    assert await reconcile_rented(db, {"fake": _Venue()}) == []
+
+    assert _machine_status(db, machine_id) == "revoked"
 
 
 @pytest.mark.asyncio
@@ -681,6 +948,84 @@ async def test_a_failed_row_keeps_its_reason_when_its_machine_is_destroyed(
     assert row["state"] == "FAILED"
     assert row["released_at"] is not None
     assert venue.live_handles() == []
+
+
+# ---------------------------------------------------------------------------
+# the credential half, which fails on its own and is retried on its own
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_revoke_that_failed_is_retried_by_a_later_sweep(
+    db, an_owner, a_pool, monkeypatch  # noqa: F811
+):
+    """The hole a best-effort revoke leaves, and the sweep that closes it.
+
+    A RELEASED row is out of ``unreleased_rows`` for good, and rentals are
+    minted ``persistent`` so ``expire_stale_ephemeral_machines`` never comes
+    for the machine either. Without a second sweep, one failed revoke leaves a
+    live token and a bound pool for ever — and the next rental into that pool
+    refused by an isolation assertion about a machine nobody meant to keep.
+    """
+    venue = _Venue()
+    rid = await acquire_for_job(
+        db, venue, _Settings(), request=_request(an_owner, a_pool)
+    )
+    machine_id = str(_row(db, rid)["machine_id"])
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("the connection went away mid-revoke")
+
+    monkeypatch.setattr(sandbox_identity, "revoke_sandbox_machine", _explode)
+    assert await release_capacity(db, venue, rented_id=rid) is True
+    # The money stopped; the credential did not.
+    assert _row(db, rid)["state"] == "RELEASED"
+    assert _machine_status(db, machine_id) != "revoked"
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [machine_id]
+    assert rid in {
+        str(r["id"]) for r in finished_rentals_with_live_credentials(db)
+    }
+
+    monkeypatch.undo()
+    await reconcile_rented(db, {"fake": venue})
+    assert _machine_status(db, machine_id) == "revoked"
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
+
+
+@pytest.mark.asyncio
+async def test_releasing_an_already_released_row_still_revokes(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """Idempotent on BOTH halves. The early return for a RELEASED row used to
+    skip the credential entirely, which made the one call that mattered the
+    only call there would ever be."""
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, status="active", pool_id=a_pool)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, state="RELEASED",
+        handle="h-done", machine_id=machine_id,
+    )
+    assert await release_capacity(db, venue, rented_id=rid) is True
+    assert _machine_status(db, machine_id) == "revoked"
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
+    # ...and the venue was never asked about a rental that is already over.
+    assert venue.release_calls == []
+
+
+def test_a_bound_pool_alone_is_enough_to_come_back_for(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """``revoke_sandbox_machine`` unbinds on every call, including ones where
+    the row is already revoked — the half-done state a crashed revoke leaves.
+    A query that only looked at ``status`` would walk past exactly that."""
+    machine_id = _machine(db, an_owner, status="revoked", pool_id=a_pool)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, state="RELEASED",
+        handle="h-done", machine_id=machine_id,
+    )
+    assert rid in {
+        str(r["id"]) for r in finished_rentals_with_live_credentials(db)
+    }
 
 
 def test_the_window_is_left_clean_for_the_next_file(db):  # noqa: F811

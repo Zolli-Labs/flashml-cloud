@@ -2,12 +2,62 @@
 
 Release is attempted when a job settles. **Correctness does not depend on
 that call happening, or succeeding.** The sweep here is the guarantee: it
-reads the rows that are still costing money and destroys what they name,
-for ever, on a timer. Everything in this module is written for the case
-where the request path is already gone.
+finds rentals that are still costing money and nothing is using, destroys
+what they name, and does it on a timer for ever. Everything in this module
+is written for the case where the request path is already gone.
 
-``cleanup_session`` is the model in two respects.
+WHAT MAKES A RENTAL SWEEPABLE, AND WHY IT IS NOT AGE
+----------------------------------------------------
+**Read this before wiring the loop.** An earlier version of this module
+selected on state and age alone. Since nothing in the repository calls
+:func:`release_capacity` yet, no row ever leaves ACTIVE by settling normally
+-- so an age-only sweep is a *hard maximum rental lifetime*, and the first
+loop to call it would destroy every rental older than the window, including a
+machine three hours into a training run and heartbeating perfectly.
 
+So the predicate is liveness, not age. ``machines.last_seen_at`` is the
+signal — the same column the console renders Online/Offline from — and a
+rental whose machine is still heartbeating is never swept, however old it is.
+Three cases, mutually exclusive by construction in
+:func:`unreleased_rows`, each with its own allowance because they are not the
+same kind of doubt:
+
+* **Heartbeating and then quiet** (``quiet_after_s``). The machine spoke and
+  stopped. The rental is dead and the money is not, so this needs no help
+  from the row's own age: a rental five minutes old whose machine went quiet
+  is swept, and a rental five hours old whose machine is talking is not.
+* **Never seen at all** (``boot_grace_s``), measured from acquisition. A
+  rented host has no ``last_seen_at`` until it has booted, pulled a
+  multi-gigabyte image and enrolled. This allowance is deliberately the
+  longest of the three: cutting it short destroys machines that were about to
+  work, and pays for them anyway. ``acquire.py`` records the same hazard as
+  its reason for not minting rentals ``lifecycle = 'ephemeral'``.
+* **Nothing to ask** (``abandoned_after_s``), measured from acquisition. No
+  machine row is bound: a REQUESTED row, or an ACTIVE one whose machine was
+  deleted. A REQUESTED row that still carries a handle is by construction a
+  *failed* acquisition — ``acquire.py`` writes the handle onto the row only
+  on its way out — so this window is how long we wait before assuming the
+  process that opened the row is not coming back.
+
+A fourth case has no window at all: a bound credential that is already
+**revoked** can never claim our work again, so the rental is waste from that
+instant and is swept immediately.
+
+**None of the three is a poll interval.** The interval belongs to the caller
+and is a different order of magnitude: sweep often (minutes, as
+``DEFAULT_RECONCILE_INTERVAL_S`` does for sandboxes), but only ever destroy
+things these windows say nobody is using. The old name for this,
+``settle_after_s``, read as "seconds after settlement" while being measured
+from acquisition, which is exactly the misreading that turns a sweep into a
+lifetime cap.
+
+None of this constrains the settle path: :func:`release_capacity` called
+directly with a ``rented_id`` destroys immediately and asks nothing about
+heartbeats, because a caller who has just watched a job finish knows
+something the machine's liveness cannot tell us.
+
+TEARDOWN IS TWO THINGS, AND ``cleanup_session`` IS THE MODEL
+------------------------------------------------------------
 *Both halves, independently.* It kills the sandbox **and** revokes the
 credential, in separate try blocks, so neither failure can hide the other.
 Teardown here is the same two things: destroy the machine at the venue, and
@@ -22,17 +72,15 @@ sweep that cleans up rental *sessions* — never touches it. Left alone after
 release it is two live problems: a valid machine token for a machine that no
 longer exists, on hardware we handed back to a third party; and a binding
 that makes ``provision_sandbox_machine``'s closing ``assert_pool_isolated``
-refuse the NEXT rental into that pool, for a reason that has nothing to do
-with it. ``acquire.py`` already revokes on its failure path for exactly that
-reason; without the same on the success path, renting once would poison the
-pool for good.
+refuse the NEXT rental into that pool. ``acquire.py`` already revokes on its
+failure path for exactly that reason; without the same on the success path,
+renting once would poison the pool for good.
 
-*Positive evidence before a terminal state.* ``cleanup_session`` records
-TERMINATED only once the API confirms the sandbox is gone, because
-TERMINATED is a promise that nothing is running. ``RELEASED`` is the same
-promise about a machine that bills by the second, so it is written only
-when something actually said the machine is gone -- never on the strength of
-an assumption, and never on the strength of a *missing* handle.
+Because that half can fail on its own, it is swept on its own too:
+:func:`finished_rentals_with_live_credentials` finds rentals that are over
+and whose credential is not, and the sweep revokes them. Without it, a revoke
+that failed on the one call that mattered would never be retried — the row is
+RELEASED and out of :func:`unreleased_rows` for good.
 
 WHY A MISSING HANDLE IS THE DANGEROUS CASE, NOT THE EASY ONE
 ------------------------------------------------------------
@@ -46,17 +94,17 @@ venue that we cannot name.
 Closing such a row is not merely optimistic, it is a live race. The sweep
 marks the row RELEASED; the acquisition it raced then returns from the venue
 with a real handle, loses its compare-and-set against ``state =
-'REQUESTED'``, records the handle on the row and tries to release it -- and
-if that release fails, the result is a RELEASED row carrying a live handle.
-:func:`unreleased_rows` selects only ``REQUESTED`` and ``ACTIVE``, so nothing
-would ever look at that row again and the machine would bill for ever.
+'REQUESTED'``, records the handle, and if that release fails, the result is a
+RELEASED row carrying a live handle. :func:`unreleased_rows` selects only
+``REQUESTED`` and ``ACTIVE``, so nothing would ever look at that row again and
+the machine would bill for ever. ``acquire._keep_sweepable`` is the other half
+of this agreement: it forces a terminal row back to REQUESTED when its own
+outcome is unknown.
 
 So a handleless row is **left exactly where it is**: sweepable, visible, and
 re-examined on every pass. That is deliberate, and it means a crashed
 acquisition that truly created nothing also stays for ever. A permanently
 stuck row is a cheap, visible defect. A silently closed one is an invoice.
-This is the same trade ``acquire.py`` makes when it declines to mark a row
-FAILED while a handle may still be live.
 
 :func:`ResourceProvider.observe` is what would settle the question, and it
 cannot be asked: it reads the venue by handle, and a handle is the one thing
@@ -66,9 +114,6 @@ into a fact about the venue rather than a guess about our own rows. Finding a
 machine we can name nowhere at all is a venue-listing problem (an enumeration
 by tag or label), not something this sweep can solve, and it is why the
 handle is written to the row *before* anything is destroyed.
-
-The sweep races money. ``DEFAULT_RECONCILE_INTERVAL_S`` says it for the
-sandbox reconciler and it is just as true here: minutes, not hours.
 """
 from __future__ import annotations
 
@@ -80,7 +125,15 @@ import psycopg
 from flashml_cloud_api import sandbox_identity
 from flashml_cloud_api.capacity.provider import ResourceProvider
 
-__all__ = ["release_capacity", "reconcile_rented", "unreleased_rows"]
+__all__ = [
+    "DEFAULT_ABANDONED_AFTER_S",
+    "DEFAULT_BOOT_GRACE_S",
+    "DEFAULT_QUIET_AFTER_S",
+    "finished_rentals_with_live_credentials",
+    "reconcile_rented",
+    "release_capacity",
+    "unreleased_rows",
+]
 
 log = logging.getLogger(__name__)
 
@@ -95,55 +148,163 @@ _DETAIL_MAX = 2000
 #: still be live.
 SWEEPABLE = ("REQUESTED", "ACTIVE")
 
+#: Heartbeat silence that counts as gone. Ten times the 90-second window
+#: ``db.MACHINE_ONLINE_PREDICATE`` calls "online", and the same figure
+#: ``expire_stale_ephemeral_machines`` defaults to for a rental session that
+#: stopped speaking.
+DEFAULT_QUIET_AFTER_S = 15 * 60.0
+
+#: How long a machine that has NEVER been seen is given, from acquisition.
+#: The longest of the three on purpose: a rented host has to boot, pull a
+#: multi-gigabyte image and enrol before it can heartbeat once, and a window
+#: shorter than that destroys machines that were about to start working —
+#: having already paid for the boot.
+DEFAULT_BOOT_GRACE_S = 60 * 60.0
+
+#: How long a rental with no machine to ask about is given, from acquisition:
+#: no credential bound, or one already revoked. This is a bound on how long we
+#: wait for a process that opened a row to come back, not on a healthy
+#: acquisition.
+DEFAULT_ABANDONED_AFTER_S = 30 * 60.0
+
+#: Written on a row the sweep could not act on because it names no machine.
+NO_HANDLE = "RECONCILE_NO_HANDLE"
+#: Written on a row whose machine the venue would not confirm destroying.
+NOT_DESTROYED = "RECONCILE_NOT_DESTROYED"
+#: Written on the FIRST sweep at which the venue claims the handle is gone.
+#: A second, independent sweep saying the same thing is what closes the row;
+#: see :func:`release_capacity`.
+VENUE_SAYS_GONE = "RECONCILE_VENUE_SAYS_GONE"
+
 
 def unreleased_rows(
-    db: psycopg.Connection, *, settle_after_s: float
+    db: psycopg.Connection,
+    *,
+    quiet_after_s: float = DEFAULT_QUIET_AFTER_S,
+    boot_grace_s: float = DEFAULT_BOOT_GRACE_S,
+    abandoned_after_s: float = DEFAULT_ABANDONED_AFTER_S,
 ) -> list[dict]:
-    """Rows still costing money and old enough that nothing is mid-flight.
+    """Rentals still costing money that nothing is using.
+
+    The ``case`` is the whole design and is written as a case rather than a
+    chain of ``or``s so that the three allowances cannot silently overlap:
+    each row is judged by exactly one of them, and which one is a fact about
+    the machine, not about the row's age. **A machine that has heartbeated
+    within ``quiet_after_s`` matches nothing here at all** — that is the
+    clause standing between this sweep and a running training job. See the
+    module docstring for what each window means and why they differ.
 
     ``REQUESTED`` is included on purpose: a row that never learned its handle
     may still have created something at the venue. It is also why
     ``acquire.py`` leaves a doubtful row REQUESTED rather than FAILED -- this
     query is the only thing that will ever go looking.
 
-    ``settle_after_s`` measures from ``acquired_at`` when there is one and
-    ``created_at`` otherwise, so an acquisition still in flight is not
-    destroyed out from under itself. Oldest first: the row that has been
-    billing longest is the one worth settling first.
+    Oldest first: the rental that has been billing longest is the one worth
+    settling first.
     """
     with db.cursor() as cur:
         cur.execute(
-            f"""
-            select id, venue_id, state, provider_handle, machine_id
-              from public.rented_capacity
-             where state in ({", ".join(["%s"] * len(SWEEPABLE))})
-               and coalesce(acquired_at, created_at)
-                   < now() - make_interval(secs => %s)
-             order by coalesce(acquired_at, created_at)
+            """
+            select rc.id, rc.venue_id, rc.state, rc.provider_handle,
+                   rc.machine_id, m.status as machine_status, m.last_seen_at
+              from public.rented_capacity rc
+              left join public.machines m on m.id = rc.machine_id
+             where rc.state in ('REQUESTED', 'ACTIVE')
+               and case
+                     -- A revoked credential can never claim our work again,
+                     -- so the rental is waste from this instant and gets no
+                     -- allowance at all. Without this branch, revoking would
+                     -- push a row we are mid-way through releasing back OUT
+                     -- of the sweep until it aged into the window below --
+                     -- the one thing a failed destroy must not do.
+                     when m.id is not null and m.status = 'revoked'
+                       then true
+                     -- No machine bound to ask about: a REQUESTED row, or an
+                     -- ACTIVE one whose machine row was deleted.
+                     when m.id is null
+                       then coalesce(rc.acquired_at, rc.created_at)
+                            < now() - make_interval(secs => %(abandoned)s)
+                     -- It spoke, and then it stopped.
+                     when m.last_seen_at is not null
+                       then m.last_seen_at
+                            < now() - make_interval(secs => %(quiet)s)
+                     -- It has never spoken: still booting, or never will.
+                     else coalesce(rc.acquired_at, rc.created_at)
+                          < now() - make_interval(secs => %(boot)s)
+                   end
+             order by coalesce(rc.acquired_at, rc.created_at)
             """,
             # `secs` is the one make_interval() argument typed `double
-            # precision`, which is why the window is expressed in seconds
-            # here exactly as in `budget.window_spend_usd`.
-            (*SWEEPABLE, float(settle_after_s)),
+            # precision`, which is why every window here is expressed in
+            # seconds exactly as in `budget.window_spend_usd`.
+            {
+                "abandoned": float(abandoned_after_s),
+                "quiet": float(quiet_after_s),
+                "boot": float(boot_grace_s),
+            },
         )
         return [dict(r) for r in cur.fetchall()]
 
 
-def _note(db: psycopg.Connection, rented_id: str, code: str, detail: str) -> None:
+def finished_rentals_with_live_credentials(
+    db: psycopg.Connection,
+) -> list[dict]:
+    """Rentals that are over and whose credential is not.
+
+    The retry vehicle for the half of teardown that costs no money and is
+    therefore easiest to lose: ``_revoke_credential`` is best effort, and a
+    row that reached ``RELEASED`` is out of :func:`unreleased_rows` for good,
+    so without this query one failed revoke would leave a live token and a
+    bound pool for ever — and the next rental into that pool refused by an
+    isolation assertion about a machine nobody meant to keep.
+
+    A binding with no live token still counts: ``revoke_sandbox_machine``
+    unbinds on every call including ones where the row is already revoked,
+    which is exactly the half-done state a crashed revoke leaves behind.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select rc.id, rc.owner_id, rc.machine_id
+              from public.rented_capacity rc
+              join public.machines m on m.id = rc.machine_id
+             where rc.state in ('RELEASED', 'FAILED')
+               and (m.status <> 'revoked'
+                    or exists (select 1 from public.machine_pools mp
+                                where mp.machine_id = m.id))
+             order by coalesce(rc.released_at, rc.created_at)
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _note(
+    db: psycopg.Connection, rented_id: str, code: str, detail: str,
+    *, guard: str = "",
+) -> None:
     """Record why, WITHOUT closing the row.
 
-    Copied in spirit from ``acquire._note_failure``: the failure is worth
-    reading, but the state has to stay somewhere the sweep looks. Writing it
-    is best effort -- failing to annotate a row must not look like failing to
-    destroy a machine, so this never raises.
+    Copied in spirit from ``acquire._keep_sweepable``: the failure is worth
+    reading, but the state has to stay somewhere the sweep looks. This one
+    does not force the state, because it is only ever called about a row it
+    just read as sweepable.
+
+    ``guard`` is a static SQL fragment — never anything from outside this
+    module — naming what must still be true for the note to be truthful. A
+    row can change under us between the read and this write, and a stale
+    diagnosis is worse than none: it sends somebody to a venue console
+    looking for a machine that is working fine.
+
+    Writing it is best effort. Failing to annotate a row must not look like
+    failing to destroy a machine, so this never raises.
     """
     try:
         with db.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 update public.rented_capacity
                    set failure_code = %s, failure_detail = %s
-                 where id = %s
+                 where id = %s {guard}
                 """,
                 (code, detail[:_DETAIL_MAX], rented_id),
             )
@@ -153,6 +314,43 @@ def _note(db: psycopg.Connection, rented_id: str, code: str, detail: str) -> Non
             "capacity reconcile: could not annotate %s with %s",
             rented_id, code, exc_info=True,
         )
+
+
+def _fetch_row(db: psycopg.Connection, rented_id: str) -> dict | None:
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select id, state, provider_handle, venue_id, owner_id, machine_id,
+                   failure_code
+              from public.rented_capacity
+             where id = %s
+            """,
+            (rented_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def _mark_released(db: psycopg.Connection, rented_id: str) -> None:
+    """Close the row on evidence that the machine is gone.
+
+    ``FAILED`` keeps its state and gains a ``released_at``, exactly as
+    ``acquire._close_failed`` writes it: the reason a row failed is worth more
+    than relabelling it, and either way the row stops being swept. Only a
+    sweepable row becomes ``RELEASED``.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.rented_capacity
+               set state = case when state in ('REQUESTED', 'ACTIVE')
+                                then 'RELEASED' else state end,
+                   released_at = coalesce(released_at, now())
+             where id = %s and state <> 'RELEASED'
+            """,
+            (rented_id,),
+        )
+    db.commit()
 
 
 async def _venue_says_gone(provider: ResourceProvider, handle: str) -> bool:
@@ -191,11 +389,13 @@ async def _revoke_credential(db: psycopg.Connection, row: dict) -> None:
     ``cleanup_session``'s rule, that neither half may hide the other. There is
     no ordering dependency to respect: ``revoke_sandbox_machine`` touches
     nothing outside this database, so a machine that is already gone, still
-    running, or was never reachable revokes exactly as cleanly.
+    running, or was never reachable revokes exactly as cleanly. It is also
+    idempotent, which is what lets every path here call it unconditionally.
 
     Best effort by construction. It is a second liability, not the guarantee:
     losing it must not make a destroyed machine look undestroyed, so it is
-    logged and never raised.
+    logged and never raised. :func:`finished_rentals_with_live_credentials` is
+    what comes back for the ones this loses.
     """
     machine_id = row.get("machine_id")
     if not machine_id:
@@ -217,32 +417,29 @@ async def _revoke_credential(db: psycopg.Connection, row: dict) -> None:
 async def release_capacity(
     db: psycopg.Connection, provider: ResourceProvider, *, rented_id: str
 ) -> bool:
-    """Destroy one rental and mark it released. Idempotent.
+    """Destroy one rental and mark it released. Idempotent, on both halves.
 
     Two things are torn down, independently: the machine at the venue and the
     credential it was renting under. The return value reports only the first,
     because only the first costs money by the second.
 
     Returns ``True`` only when something is known to have stopped: the row was
-    already ``RELEASED``, the provider destroyed the machine, or the venue
-    says the handle no longer exists. ``False`` means *unknown*, and an
-    unknown row is deliberately left in a state :func:`unreleased_rows`
-    selects, so the next sweep tries again.
+    already ``RELEASED``, the provider destroyed the machine, or two
+    independent sweeps agree the venue no longer has the handle. ``False``
+    means *unknown*, and an unknown row is deliberately left in a state
+    :func:`unreleased_rows` selects, so the next sweep tries again.
 
     Called both from the settle path and from the sweep, repeatedly and
     concurrently, so every step is safe to repeat: an already-gone handle is a
-    success, and the state transition is a guarded compare-and-set.
+    success, the revoke runs on every call including ones where the row is
+    already closed, and the state transition is a guarded compare-and-set.
+
+    No liveness check. The sweep decides *which* rentals to hand here by
+    asking whether anything is still using them; a caller naming a
+    ``rented_id`` outright has already decided, and usually knows something —
+    that the job finished — which no heartbeat can tell us.
     """
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            select id, state, provider_handle, venue_id, owner_id, machine_id
-              from public.rented_capacity
-             where id = %s
-            """,
-            (rented_id,),
-        )
-        row = cur.fetchone()
+    row = await asyncio.to_thread(_fetch_row, db, rented_id)
 
     if row is None:
         # Nothing to destroy and nothing to record. Not an error: rows cascade
@@ -250,6 +447,11 @@ async def release_capacity(
         log.warning("capacity reconcile: no rented_capacity row %s", rented_id)
         return False
     if row["state"] == "RELEASED":
+        # Idempotent on BOTH halves. Returning early without this was a way
+        # for a revoke that failed once to be retried by nothing: the row is
+        # out of `unreleased_rows` for good, and rentals are minted
+        # `persistent` so no other sweep comes for the machine either.
+        await _revoke_credential(db, row)
         return True
 
     handle = row["provider_handle"]
@@ -263,12 +465,15 @@ async def release_capacity(
         # on no evidence would sabotage the acquisition that may be in flight
         # right now -- the machine it is booting would find its token already
         # dead -- while stopping no money at all.
-        _note(
-            db, rented_id, "RECONCILE_NO_HANDLE",
+        await asyncio.to_thread(
+            _note, db, rented_id, NO_HANDLE,
             f"state {row['state']} at venue {row['venue_id']} with no "
             "provider_handle: nothing to destroy and nothing to observe "
             "with. The venue may hold a machine we cannot name; the row is "
             "left sweepable rather than closed on that assumption.",
+            # Only while that is still true. A row that has just learned its
+            # handle is a row this diagnosis would libel.
+            guard="and provider_handle is null",
         )
         return False
 
@@ -288,48 +493,59 @@ async def release_capacity(
             handle, rented_id, exc_info=True,
         )
 
-    # 2. If the provider would not confirm it, ask the venue. A machine the
-    #    venue no longer has is released however badly the call went.
+    # 2. If the provider would not confirm it, ask the venue -- and make it
+    #    say so twice.
+    #
+    #    One `exists=False` is not proof: a transient 404, a read against a
+    #    replica that has not caught up, an id typed into the wrong region.
+    #    Acting on a single one closes the row for ever, and the cost of being
+    #    wrong is a machine that bills with a RELEASED row in front of it,
+    #    which is the exact failure this module exists to prevent. So the
+    #    first observation is only WRITTEN DOWN, and the row stays sweepable;
+    #    a later sweep that sees the same thing, minutes apart and through a
+    #    fresh call, is what closes it. The row is the memory, so no state
+    #    lives in the process and a restart loses nothing but time.
+    corroborated = row.get("failure_code") == VENUE_SAYS_GONE
     if not destroyed and await _venue_says_gone(provider, str(handle)):
-        destroyed = True
-        detail = (
-            f"release did not confirm ({detail or 'no detail'}), but the "
-            f"venue reports {handle} no longer exists"
-        )
+        if corroborated:
+            destroyed = True
+            detail = (
+                f"release did not confirm ({detail or 'no detail'}), and two "
+                f"sweeps agree the venue no longer has {handle}"
+            )
+        else:
+            await asyncio.to_thread(
+                _note, db, rented_id, VENUE_SAYS_GONE,
+                f"release did not confirm ({detail or 'no detail'}) and the "
+                f"venue reports {handle} no longer exists. Held for a second "
+                "sweep to agree before closing the row: one absent reading "
+                "can be a transient 404, and closing on it is how a machine "
+                "bills for ever behind a RELEASED row.",
+                guard="and state <> 'RELEASED'",
+            )
+            # The credential still goes, on the same reasoning as below.
+            await _revoke_credential(db, row)
+            return False
 
     # 3. Kill the identity, whatever happened above. A machine that outlived
     #    its destroy must not keep a working token, and the pool has to be
     #    given back either way or the next rental into it is refused by an
     #    isolation assertion about a machine nobody meant to keep.
-    await _revoke_credential(db, dict(row))
+    await _revoke_credential(db, row)
 
     if not destroyed:
         # Still billing, as far as anything knows. The row keeps its
         # sweepable state on purpose -- this is the only thing that will come
         # back for it.
-        _note(
-            db, rented_id, "RECONCILE_NOT_DESTROYED",
+        await asyncio.to_thread(
+            _note, db, rented_id, NOT_DESTROYED,
             f"{handle} at venue {row['venue_id']} may still be running: "
             f"{detail or 'the provider reported no destroy and no detail'}",
+            guard="and state <> 'RELEASED'",
         )
         return False
 
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            update public.rented_capacity
-               -- FAILED keeps its state and gains a released_at, exactly as
-               -- `acquire._fail_row` writes it: the reason a row failed is
-               -- worth more than relabelling it, and either way the row stops
-               -- being swept. Only a sweepable row becomes RELEASED.
-               set state = case when state in ('REQUESTED', 'ACTIVE')
-                                then 'RELEASED' else state end,
-                   released_at = coalesce(released_at, now())
-             where id = %s and state <> 'RELEASED'
-            """,
-            (rented_id,),
-        )
-    db.commit()
+    await asyncio.to_thread(_mark_released, db, rented_id)
     return True
 
 
@@ -337,18 +553,43 @@ async def reconcile_rented(
     db: psycopg.Connection,
     providers: dict[str, ResourceProvider],
     *,
-    settle_after_s: float,
+    quiet_after_s: float = DEFAULT_QUIET_AFTER_S,
+    boot_grace_s: float = DEFAULT_BOOT_GRACE_S,
+    abandoned_after_s: float = DEFAULT_ABANDONED_AFTER_S,
 ) -> list[str]:
-    """Sweep everything still billing. Returns the ids it settled.
+    """Sweep. Returns the ids whose machines it settled.
 
-    One row's trouble never ends the pass. A venue having a bad minute must
-    not stop the money from stopping everywhere else, so each row is handled
-    inside its own try block and the sweep carries on -- the same reason the
-    loops in ``app.py`` swallow and log a failed pass rather than letting the
-    task die and silently removing the backstop.
+    Every window has a default, and the defaults are the safe ones. **None of
+    them is how often to sweep** — call this as often as you like, minutes
+    apart; what these govern is how long a rental gets before we conclude
+    nobody is using it. Passing a poll interval here would destroy live
+    machines. See the module docstring.
+
+    Two sweeps, not one, because teardown is two things and they fail
+    separately: the money half destroys machines nothing is using, and the
+    credential half comes back for identities whose rentals are already over.
+    Each row is handled inside its own try block and each half inside another,
+    so one bad venue -- or one bad row -- never stops the money from stopping
+    everywhere else. The same reason the loops in ``app.py`` swallow and log a
+    failed pass rather than letting the task die and silently removing the
+    backstop.
     """
     settled: list[str] = []
-    for row in unreleased_rows(db, settle_after_s=settle_after_s):
+
+    try:
+        rows = await asyncio.to_thread(
+            unreleased_rows, db,
+            quiet_after_s=quiet_after_s, boot_grace_s=boot_grace_s,
+            abandoned_after_s=abandoned_after_s,
+        )
+    except Exception:  # noqa: BLE001 - a failed read must not end the pass
+        log.error(
+            "capacity reconcile: could not list unreleased rentals",
+            exc_info=True,
+        )
+        rows = []
+
+    for row in rows:
         rented_id = str(row["id"])
         provider = providers.get(str(row["venue_id"]))
         if provider is None:
@@ -367,4 +608,15 @@ async def reconcile_rented(
                 "capacity reconcile: releasing %s failed; continuing",
                 rented_id, exc_info=True,
             )
+
+    try:
+        for row in await asyncio.to_thread(
+            finished_rentals_with_live_credentials, db
+        ):
+            await _revoke_credential(db, row)
+    except Exception:  # noqa: BLE001 - the money half already happened
+        log.error(
+            "capacity reconcile: the credential sweep failed", exc_info=True
+        )
+
     return settled

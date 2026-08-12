@@ -177,8 +177,20 @@ def _is_swept(db, rid) -> bool:
     """Would the reconciler find this row? The real query, not a restatement
     of it — the whole failure-path design is written against this list, so a
     test that asserted a state name instead would pass the day the list
-    changed."""
-    return str(rid) in {str(r["id"]) for r in unreleased_rows(db, settle_after_s=0.0)}
+    changed.
+
+    Every window zeroed, which is this file's way of saying "ignoring time".
+    The reconciler's real windows are about liveness — how long a machine gets
+    to boot, or to go quiet, before nobody is using it — and none of that is
+    what these tests are about: the question here is only whether a row a
+    failed acquisition left behind is still in the list at all.
+    """
+    return str(rid) in {
+        str(r["id"])
+        for r in unreleased_rows(
+            db, quiet_after_s=0.0, boot_grace_s=0.0, abandoned_after_s=0.0,
+        )
+    }
 
 
 # ---------------------------------------------------------------------------
