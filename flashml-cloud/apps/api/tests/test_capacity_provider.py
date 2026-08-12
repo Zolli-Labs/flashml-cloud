@@ -14,7 +14,7 @@ from flashml_cloud_api.capacity.provider import (
 def _request(**over):
     base = dict(
         venue_id="fake", owner_id="o1", pool_id="p1", job_id="j1",
-        gpu_count=1, min_vram_gb=24.0, coordinator_url="http://c",
+        gpu_count=1, min_vram_gb=24.0, enrolment_url="http://c",
         quoted_usd_per_hour=0.5,
     )
     base.update(over)

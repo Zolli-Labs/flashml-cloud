@@ -164,7 +164,7 @@ def _request(owner_id, pool_id, job="job-1"):
     return CapacityRequest(
         venue_id="fake", owner_id=str(owner_id), pool_id=str(pool_id),
         job_id=job, gpu_count=1, min_vram_gb=24.0,
-        coordinator_url="http://coordinator", quoted_usd_per_hour=0.5,
+        enrolment_url="http://api.example", quoted_usd_per_hour=0.5,
     )
 
 
@@ -601,10 +601,12 @@ def test_unreleased_rows_selects_only_what_is_still_billing_and_settled(
 
 def test_a_requested_row_is_measured_from_created_at(db, an_owner, a_pool):  # noqa: F811
     """A REQUESTED row has no ``acquired_at`` at all — and no machine to ask
-    about either, since ``acquire.py`` records the machine in the same update
-    that leaves REQUESTED. So the window has to fall back to ``created_at``,
-    otherwise a null would compare as null and the rows most likely to be
-    orphans would be the ones never swept."""
+    about either, because this test inserts the row directly with
+    ``_insert_row`` rather than through ``acquire_for_job``, which since a
+    later fix may leave a REQUESTED row with ``machine_id`` bound (see
+    ``reconcile.py``'s module docstring). So the window has to fall back to
+    ``created_at``, otherwise a null would compare as null and the rows most
+    likely to be orphans would be the ones never swept."""
     rid = _insert_row(db, owner_id=an_owner, pool_id=a_pool, state="REQUESTED")
     row = _row(db, rid)
     assert row["acquired_at"] is None

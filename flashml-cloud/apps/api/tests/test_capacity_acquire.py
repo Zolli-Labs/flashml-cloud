@@ -153,7 +153,7 @@ def _request(owner_id, pool_id, job="job-1"):
     return CapacityRequest(
         venue_id="fake", owner_id=str(owner_id), pool_id=str(pool_id),
         job_id=job, gpu_count=1, min_vram_gb=24.0,
-        coordinator_url="http://coordinator", quoted_usd_per_hour=0.5,
+        enrolment_url="http://api.example", quoted_usd_per_hour=0.5,
     )
 
 

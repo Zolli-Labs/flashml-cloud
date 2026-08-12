@@ -33,15 +33,22 @@ same kind of doubt:
   work, and pays for them anyway. ``acquire.py`` records the same hazard as
   its reason for not minting rentals ``lifecycle = 'ephemeral'``.
 * **Nothing to ask** (``abandoned_after_s``), measured from acquisition. No
-  machine row is bound: a REQUESTED row, or an ACTIVE one whose machine was
-  deleted. A REQUESTED row that still carries a handle is by construction a
-  *failed* acquisition — ``acquire.py`` writes the handle onto the row only
-  on its way out — so this window is how long we wait before assuming the
-  process that opened the row is not coming back.
+  machine row is bound at all — which, now that ``acquire.py`` records
+  ``machine_id`` on its failure paths too (see ``_record_evidence`` there),
+  no longer describes every REQUESTED row: one whose acquisition failed
+  after minting a credential carries a bound, revoked machine and is caught
+  by the revoked-credential case below instead, with no allowance at all.
+  What is left in *this* case is a row whose acquisition never got as far as
+  binding a machine, or an ACTIVE row whose machine was since deleted. So
+  this window is how long we wait before assuming the process that opened
+  the row is not coming back.
 
 A fourth case has no window at all: a bound credential that is already
 **revoked** can never claim our work again, so the rental is waste from that
-instant and is swept immediately.
+instant and is swept immediately. This is also where a failed acquisition
+lands once it has minted and then revoked its credential: a REQUESTED row
+with no machine bound is doubt about whether anything was ever created, but
+a REQUESTED row with a *revoked* machine bound is not doubt at all.
 
 **None of the three is a poll interval.** The interval belongs to the caller
 and is a different order of magnitude: sweep often (minutes, as
@@ -245,8 +252,12 @@ def unreleased_rows(
                      -- the one thing a failed destroy must not do.
                      when m.id is not null and m.status = 'revoked'
                        then true
-                     -- No machine bound to ask about: a REQUESTED row, or an
-                     -- ACTIVE one whose machine row was deleted.
+                     -- No machine bound at all: acquisition never got as far
+                     -- as binding one, or an ACTIVE row whose machine row
+                     -- was since deleted. Not a REQUESTED row with a revoked
+                     -- credential -- acquire.py now records machine_id on
+                     -- its failure paths too, so that row is caught by the
+                     -- revoked branch above instead.
                      when m.id is null
                        then coalesce(rc.acquired_at, rc.created_at)
                             < now() - make_interval(secs => %(abandoned)s)

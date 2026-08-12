@@ -30,7 +30,7 @@ TABLES = ["profiles", "machines", "device_codes", "jobs", "contributions"]
 
 ALL_TABLES = TABLES + [
     "job_rounds", "pools", "pool_members", "pool_invites", "machine_pools",
-    "sandbox_sessions", "sandbox_events", "credit_requests",
+    "sandbox_sessions", "sandbox_events", "credit_requests", "rented_capacity",
 ]
 
 

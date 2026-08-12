@@ -39,7 +39,18 @@ class CapacityRequest:
     job_id: str
     gpu_count: int
     min_vram_gb: float
-    coordinator_url: str
+    #: The base URL the rented machine's flashnode must enrol against. This
+    #: is THIS API's public URL -- never the coordinator's. A machine token
+    #: means nothing to the coordinator, and on Render the coordinator is a
+    #: private service a rented host cannot route to at all; the same
+    #: reasoning `app.py` writes out in full where it builds
+    #: `sandbox_enrolment_url` for the E2B sandbox path.
+    #: `settings.coordinator_url` is right for a single-host dev run and
+    #: wrong for every deployed one -- reaching for it here would produce a
+    #: rented host that enrols against the wrong service, never records a
+    #: heartbeat, and is silently destroyed by the reconciler's
+    #: ``boot_grace_s`` window on every rental.
+    enrolment_url: str
     #: What this is expected to cost, read from the venue's price board
     #: BEFORE anything is created. The budget gate needs a number before
     #: the venue has been asked for anything, so the quote travels with the
