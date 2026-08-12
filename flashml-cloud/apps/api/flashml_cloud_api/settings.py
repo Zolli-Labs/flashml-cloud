@@ -68,6 +68,26 @@ def _int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _float_env(name: str, default: float) -> float:
+    """Read a float env var, falling back on anything unparseable.
+
+    A typo in a budget ceiling must not take the API down at startup — but
+    it must also not silently become zero, which for a spend ceiling would
+    refuse every acquisition rather than only the one that should trip it.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a number; using %s", name, raw, default
+        )
+        return default
+    return value if value > 0 else default
+
+
 def _with_default_scheme(url: str, scheme: str) -> str:
     """Prepend ``scheme://`` to `url` when it has none.
 
@@ -247,6 +267,23 @@ class Settings:
     oss_access_key_id: str = ""
     oss_access_key_secret: str = dc_field(default="", repr=False)
 
+    # --- Rented capacity budget gate ------------------------------------
+    #
+    # The check that stands between a bug in automatic GPU renting and the
+    # account. Two ceilings, because they answer different questions: the
+    # per-acquisition cap bounds ONE mistake, the rolling-window cap bounds
+    # a LOOP of correct-looking decisions, which is what actually empties
+    # an account. See `capacity/budget.py`.
+    #
+    #: Per-acquisition ceiling. One mistake cannot exceed this.
+    rented_usd_per_acquisition_max: float = 2.0
+    #: Rolling-window ceiling across ALL acquisitions. This is the one that
+    #: bounds a loop of correct-looking decisions. The standing operational
+    #: ceiling on rented spend is $10 total.
+    rented_usd_window_max: float = 10.0
+    #: Width of the rolling window the ceiling above is measured over.
+    rented_usd_window_hours: float = 24.0
+
     @property
     def fc_sandbox_configured(self) -> bool:
         """All four present. All-or-nothing, like the GitHub App.
@@ -378,6 +415,13 @@ class Settings:
         oss_access_key_id = os.environ.get("OSS_ACCESS_KEY_ID", "").strip()
         oss_access_key_secret = os.environ.get("OSS_ACCESS_KEY_SECRET", "").strip()
 
+        # Rented capacity budget gate.
+        rented_usd_per_acquisition_max = _float_env(
+            "RENTED_USD_PER_ACQUISITION_MAX", 2.0
+        )
+        rented_usd_window_max = _float_env("RENTED_USD_WINDOW_MAX", 10.0)
+        rented_usd_window_hours = _float_env("RENTED_USD_WINDOW_HOURS", 24.0)
+
         settings = cls(
             supabase_url=supabase_url,
             supabase_jwt_secret=supabase_jwt_secret,
@@ -406,6 +450,9 @@ class Settings:
             oss_region=oss_region,
             oss_access_key_id=oss_access_key_id,
             oss_access_key_secret=oss_access_key_secret,
+            rented_usd_per_acquisition_max=rented_usd_per_acquisition_max,
+            rented_usd_window_max=rented_usd_window_max,
+            rented_usd_window_hours=rented_usd_window_hours,
         )
 
         if require_auth:
