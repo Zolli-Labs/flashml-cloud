@@ -47,7 +47,7 @@ export default function Home() {
         <div data-surface="light" className="landing-surface-light">
           <RecoveryDemo />
         </div>
-        <div data-surface="light" className="landing-surface-light">
+        <div data-surface="sand" className="landing-surface-sand">
           <EvidenceBand />
         </div>
         <div data-surface="light" className="landing-surface-light">
@@ -57,13 +57,13 @@ export default function Home() {
           <PlatformSupport />
         </div>
         <div data-surface="dark" className="landing-surface-dark">
-          <SystemJourney />
-        </div>
-        <div data-surface="dark" className="landing-surface-dark">
           <SystemModules />
         </div>
         <div data-surface="sand" className="landing-surface-sand">
           <ProfessionalServices />
+        </div>
+        <div data-surface="dark" className="landing-surface-dark">
+          <SystemJourney />
         </div>
         <div data-surface="light" className="landing-surface-light">
           <Faq />

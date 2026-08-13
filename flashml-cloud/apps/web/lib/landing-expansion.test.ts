@@ -93,9 +93,9 @@ describe("proof-led Zolli landing", () => {
       'id="evidence"',
       'id="workloads"',
       'id="platform"',
-      'id="technical-workflow"',
       'id="architecture"',
       'id="services"',
+      'id="technical-workflow"',
       'id="faq"',
       'id="start"',
     ];
@@ -120,15 +120,22 @@ describe("proof-led Zolli landing", () => {
       ["network", "light"],
       ["how-it-works", "dark"],
       ["recover", "light"],
-      ["evidence", "light"],
+      ["evidence", "sand"],
       ["workloads", "light"],
       ["platform", "sand"],
-      ["technical-workflow", "dark"],
       ["architecture", "dark"],
       ["services", "sand"],
+      ["technical-workflow", "dark"],
       ["faq", "light"],
       ["start", "orange"],
     ]);
+    // The original design language never repeats a surface on adjacent
+    // sections; the alternation is what gives the page its chapter rhythm.
+    for (let index = 1; index < sections.length; index++) {
+      expect(sections[index][1], `section ${sections[index][0]}`).not.toBe(
+        sections[index - 1][1],
+      );
+    }
     expect(footer).toContain('data-surface="dark"');
     expect(markup.indexOf(footer)).toBeGreaterThan(markup.indexOf('id="start"'));
   });

@@ -107,12 +107,12 @@ describe("cinematic landing foundation", () => {
     expect(page).not.toMatch(/ScrollSmoother|addEventListener\(["']wheel/);
   });
 
-  it("uses light evidence and sand machine lanes without metric cards", () => {
+  it("uses sand evidence and sand machine lanes without metric cards", () => {
     const markup = renderLanding();
     const evidence = markup.match(/<section[^>]*id="evidence"[\s\S]*?<\/section>/)?.[0] ?? "";
     const platform = markup.match(/<section[^>]*id="platform"[\s\S]*?<\/section>/)?.[0] ?? "";
 
-    expect(evidence).toContain('data-surface="light"');
+    expect(evidence).toContain('data-surface="sand"');
     expect(platform).toContain('data-surface="sand"');
     expect(evidence.match(/data-evidence-value=/g)).toHaveLength(4);
     expect(evidence).toContain('data-layout="evidence-ledger"');
