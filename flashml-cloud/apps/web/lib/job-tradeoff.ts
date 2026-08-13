@@ -104,10 +104,18 @@ export const ADVICE_COPY: Record<AdviceCode, AdviceCopy> = {
     meaning: "This fleet finishes sooner than the one above it.",
     tone: "gain",
   },
+  // "Compared with the row directly above" is not decoration. Cost is
+  // rate x machines x the wall-clock the fleet is HELD, so a dominated row can
+  // cost more in USD than a better row further down: 0.24, 0.32, 0.20 is the
+  // correct column for a curve whose finish time steps down at the third of
+  // those. Every verdict here is pairwise against its predecessor and nothing
+  // else on the page says so, which leaves a reader scanning a falling price
+  // column to conclude the table is broken — and to discount the two refusals,
+  // which are the whole point of the panel.
   no_marginal_gain: {
     headline: "Costs more, finishes no sooner",
     meaning:
-      "One more machine than the row above, and the same finish time. The work does not divide any further at this fleet size, so this machine is paid for and idle.",
+      "Compared with the row directly above: one more machine, and the same finish time. The work does not divide any further at this fleet size, so this machine is paid for and idle.",
     tone: "no-gain",
   },
   beyond_task_count: {
@@ -231,14 +239,50 @@ export interface TradeoffPanel {
   owned: OwnedPanel | null;
   renting: RentingPanel | null;
   rows: TradeoffRow[];
-  /** The largest fleet that finishes sooner than the one before it. Nothing
-   * past it finishes sooner, which is the one sentence a buyer most needs and
-   * the reason this is a stop sign rather than a recommendation to spend.
-   * `null` when no row gains at all — a job no fleet can speed up. */
+  /** The largest SWEPT fleet that finishes sooner than the one before it.
+   * `null` when no swept row gains at all.
+   *
+   * This is a fact about the rows that arrived and nothing more. Whether it
+   * may be turned into "nothing past here helps" depends on `sweepComplete` —
+   * see it. */
   lastGain: TradeoffRow | null;
-  /** True when the route swept fleet sizes and none of them helps. The panel
-   * says so in words rather than showing a flat table and letting a reader
-   * conclude the page is broken. */
+  /** True when the sweep ran to the end of the range where renting could
+   * still matter, rather than being cut short.
+   *
+   * WHY THE PANEL CANNOT SKIP THIS. The route bounds its sweep three ways
+   * (`_tradeoff_rented_slots`), and two of them are limits on the ANSWER
+   * rather than on the world: `_TRADEOFF_MAX_RENTED_STEPS` caps it at 16
+   * rented machines, and this deployment's rolling USD ceiling caps it at what
+   * it could pay for. Both say so in `renting.slotsReason` — "this answer's
+   * size limit and not a fleet size where renting stops helping" — and a
+   * truncated curve therefore ends on a run of `no_marginal_gain` rows that
+   * mean *the answer ran out*, not *renting ran out*. Reading a ceiling off
+   * that tail states the OPPOSITE of the truth, and it does so worst on an
+   * HPO sweep of 17+ trials, which is the workload this product is pitched on.
+   *
+   * The test is the LAST ROW'S OWN VERDICT, and it needs no arithmetic of its
+   * own: the route sweeps `task_count + 1 - owned_slots` machines, so a sweep
+   * nothing truncated always ends past the task count (`beyond_task_count`) or
+   * on the single task no fleet divides (`no_parallelism`). Anything else at
+   * the end is a curve that stopped early. */
+  sweepComplete: boolean;
+  /** True when the route swept fleet sizes it could price, ran the sweep to
+   * the end, and none of them helps. The panel says so in words rather than
+   * showing a flat table and letting a reader conclude the page is broken.
+   *
+   * All three conditions are load-bearing, and two of them are guards against
+   * asserting a trade-off nobody computed:
+   *
+   *   at least one RENTED row  a sweep cut to zero rented machines for a
+   *                            non-arithmetic reason — a rate above
+   *                            `rented_usd_per_acquisition_max`, say — leaves
+   *                            a baseline-only curve. It never priced a
+   *                            machine; it refused to.
+   *   `sweepComplete`          a truncated sweep can be flat all the way
+   *                            across (20 owned slots against 40 tasks: every
+   *                            one of the 16 swept machines lands on the same
+   *                            `ceil(40 / slots) = 2` step) while the 21st
+   *                            machine, one past the cap, halves the job. */
   nothingHelps: boolean;
   /** The route's own notes, verbatim and in order. */
   notes: string[];
@@ -254,9 +298,17 @@ const EMPTY: TradeoffPanel = {
   renting: null,
   rows: [],
   lastGain: null,
+  sweepComplete: false,
   nothingHelps: false,
   notes: [],
 };
+
+/** The two verdicts a sweep NOTHING TRUNCATED ends on. See
+ * `TradeoffPanel.sweepComplete`. */
+const SWEPT_OUT: ReadonlySet<string> = new Set([
+  "beyond_task_count",
+  "no_parallelism",
+]);
 
 /** Which statement the route is making about renting.
  *
@@ -349,6 +401,11 @@ export function summariseTradeoff(read: TradeoffRead): TradeoffPanel {
     }
   }
 
+  // Whether the sweep ran out of useful fleet sizes or merely ran out of
+  // room. The last row's own verdict answers it — see `sweepComplete`.
+  const last = rows.length === 0 ? null : rows[rows.length - 1];
+  const sweepComplete = last != null && SWEPT_OUT.has(last.adviceCode);
+
   return {
     state: rows.length === 0 ? "empty" : "curve",
     detail: null,
@@ -367,9 +424,13 @@ export function summariseTradeoff(read: TradeoffRead): TradeoffPanel {
     renting: t.renting == null ? null : rentingPanel(t.renting),
     rows,
     lastGain,
-    // Only meaningful once something was swept: a curve with no rows at all
-    // is `empty`, and its notes already say why.
-    nothingHelps: rows.length > 0 && lastGain === null,
+    sweepComplete,
+    // Only meaningful once RENTED fleet sizes were swept and the sweep
+    // finished: a curve with no rented row priced nothing, and a truncated one
+    // can be flat across every row it managed to reach. Both are silence, not
+    // a verdict. See `nothingHelps`.
+    nothingHelps:
+      sweepComplete && rows.some((r) => r.rentedSlots > 0) && lastGain === null,
     notes,
   };
 }

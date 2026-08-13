@@ -139,7 +139,7 @@ export function TradeoffCard({
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {panel.rows.map((r) => (
+              {panel.rows.map((r, i) => (
                 <tr key={r.totalSlots}>
                   <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
                     {fleetLabel(r)}
@@ -149,12 +149,28 @@ export function TradeoffCard({
                       ? NOT_OBSERVED
                       : duration(r.finishSeconds)}
                   </td>
+                  {/* THE FIRST ROW HAS NOTHING TO HAVE SAVED AGAINST, and that
+                      is not a failed measurement. `savedSeconds` is the
+                      difference between this row's finish time and the row
+                      ABOVE it, and the top row has no row above it — so it
+                      gets an em dash, the absence of a comparison, and never
+                      NOT_OBSERVED, which this repo reserves for a figure
+                      nobody could establish. Stamping "not observed" beside a
+                      populated finish time in row one reads as a broken read.
+
+                      Keyed on the index rather than on `rentedSlots === 0`
+                      because those two agree only while the account owns
+                      capacity: reaching none at all, the route's first row is
+                      the first RENTED fleet size, and it has no predecessor
+                      either. */}
                   <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
-                    {r.savedSeconds == null
-                      ? NOT_OBSERVED
-                      : r.savedSeconds <= 0
-                        ? "nothing"
-                        : duration(r.savedSeconds)}
+                    {i === 0
+                      ? "—"
+                      : r.savedSeconds == null
+                        ? NOT_OBSERVED
+                        : r.savedSeconds <= 0
+                          ? "nothing"
+                          : duration(r.savedSeconds)}
                   </td>
                   <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
                     {r.zcCost.toFixed(2)}
@@ -195,24 +211,39 @@ export function TradeoffCard({
           ))}
         </ul>
 
+        {/* The sentence a buyer takes away, and the one place this card is
+            able to say something the route did not.
+
+            A ceiling may be claimed ONLY from a sweep that ran to the end of
+            the useful range (`panel.sweepComplete`). Cut short — by this
+            answer's 16-machine size limit, or by what this deployment's
+            rolling USD ceiling covers — the curve ends on a flat tail that
+            means the ANSWER ran out, and "nothing past 14 slots finishes this
+            job any sooner" about a job that finishes twice as fast on 20 is
+            the false claim this gate exists to remove. In that case the
+            route's own `slotsReason` takes the slot, in body text, rather than
+            sitting alone above the table at 11px while a fabricated ceiling
+            gets the size a reader remembers. */}
         {panel.nothingHelps ? (
           <p className="mt-3 max-w-prose text-sm leading-relaxed text-warning-foreground">
             No fleet size on this curve finishes sooner than the machines you
             already have. Buying capacity for this job would spend money and
             save nothing.
           </p>
-        ) : (
-          panel.lastGain && (
-            <p className="mt-3 max-w-prose text-sm leading-relaxed">
-              Nothing past{" "}
-              <span className="font-mono">
-                {panel.lastGain.totalSlots} slot
-                {panel.lastGain.totalSlots === 1 ? "" : "s"}
-              </span>{" "}
-              finishes this job any sooner.
-            </p>
-          )
-        )}
+        ) : panel.sweepComplete && panel.lastGain ? (
+          <p className="mt-3 max-w-prose text-sm leading-relaxed">
+            Nothing past{" "}
+            <span className="font-mono">
+              {panel.lastGain.totalSlots} slot
+              {panel.lastGain.totalSlots === 1 ? "" : "s"}
+            </span>{" "}
+            finishes this job any sooner.
+          </p>
+        ) : panel.renting?.slotsReason ? (
+          <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted-foreground">
+            {panel.renting.slotsReason}
+          </p>
+        ) : null}
       </div>
 
       <Notes notes={panel.notes} />

@@ -72,6 +72,63 @@ function fiveTaskCurve(): TradeoffPoint[] {
   });
 }
 
+/** A sweep the ROUTE CUT SHORT, built with the route's own arithmetic.
+ *
+ * `_TRADEOFF_MAX_RENTED_STEPS` is 16, so a 40-task job on one owned slot gets
+ * fleet sizes 1..17 and stops — nine machines short of the 41 where
+ * `ceil(task_count / slots)` reaches 1. The tail is flat (17 slots and 15
+ * slots both finish in three task-lengths) purely because the sweep ended
+ * there, and 20 slots would still finish sooner.
+ *
+ * `owned` and `tasks` are parameters because the same truncation produces two
+ * different false claims: a ceiling that is not one, and — with enough owned
+ * slots that no swept step gains at all — "nothing helps" about a curve that
+ * was never swept far enough to find out.
+ */
+function truncatedSweep(
+  { tasks, owned }: { tasks: number; owned: number } = { tasks: 40, owned: 1 }
+): TradeoffPoint[] {
+  const seconds = 90;
+  const rate = 0.16;
+  const steps = 16; // _TRADEOFF_MAX_RENTED_STEPS, as app.py sets it
+  const points: TradeoffPoint[] = [];
+  let previous: number | null = null;
+  for (let rented = 0; rented <= steps; rented += 1) {
+    const slots = owned + rented;
+    const finish = Math.ceil(tasks / slots) * seconds;
+    const code =
+      rented === 0
+        ? "baseline"
+        : tasks <= 1
+          ? "no_parallelism"
+          : slots > tasks
+            ? "beyond_task_count"
+            : previous != null && finish >= previous
+              ? "no_marginal_gain"
+              : "helps";
+    previous = finish;
+    const usd = Number((rented * rate * (finish / 3600)).toFixed(4));
+    points.push(
+      point({
+        total_slots: slots,
+        owned_slots: owned,
+        rented_slots: rented,
+        advice_code: code,
+        finish_seconds: finish,
+        usd_cost: usd,
+        total_usd_value: usd,
+      })
+    );
+  }
+  return points;
+}
+
+/** The route's own sentence when `_TRADEOFF_MAX_RENTED_STEPS` is what stopped
+ * the sweep. Verbatim from `_tradeoff_rented_slots`. */
+const SIZE_LIMIT_REASON =
+  "the sweep stops at 16 machines, which is this answer's size limit and not " +
+  "a fleet size where renting stops helping.";
+
 function price(over: Partial<TradeoffPrice> = {}): TradeoffPrice {
   return {
     provider: "runpod",
@@ -272,6 +329,145 @@ describe("summariseTradeoff — a one-task job", () => {
   it("reports that nothing on the curve helps", () => {
     expect(panel.lastGain).toBeNull();
     expect(panel.nothingHelps).toBe(true);
+  });
+});
+
+describe("summariseTradeoff — a sweep the route cut short", () => {
+  // THE DEMO-BLOCKING ONE. `_TRADEOFF_MAX_RENTED_STEPS` stops the sweep at 16
+  // rented machines and the route SAYS SO in `slots_reason`. An HPO sweep of
+  // 17+ trials — the workload this product is pitched on — therefore ends on a
+  // run of `no_marginal_gain` rows that mean "the answer ran out", not
+  // "renting ran out". Turning that tail into "nothing past 14 slots finishes
+  // this job any sooner" states the opposite of the truth: 20 slots finishes
+  // this curve in half the time and 40 in a quarter.
+  const panel = summariseTradeoff(
+    read({
+      tasks: 40,
+      task_seconds: 90,
+      renting: renting({ slots: 16, slots_reason: SIZE_LIMIT_REASON }),
+      points: truncatedSweep(),
+    })
+  );
+
+  it("ends on a flat tail that is the size limit, not a ceiling", () => {
+    const codes = panel.rows.map((r) => r.adviceCode);
+    expect(panel.rows).toHaveLength(17);
+    expect(codes[codes.length - 1]).toBe("no_marginal_gain");
+    // And the flatness really is only the tail: a bigger fleet off the end of
+    // the sweep still halves the finish time.
+    const last = panel.rows[panel.rows.length - 1];
+    expect(last.finishSeconds).toBe(Math.ceil(40 / 17) * 90);
+    expect(Math.ceil(40 / 20) * 90).toBeLessThan(last.finishSeconds!);
+  });
+
+  it("refuses to call a truncated sweep a complete one", () => {
+    expect(panel.sweepComplete).toBe(false);
+    // The data is unchanged — 14 IS the last gaining row that was swept. What
+    // changes is whether the panel is allowed to make a claim out of it.
+    expect(panel.lastGain!.totalSlots).toBe(14);
+  });
+
+  it("calls an untruncated sweep complete, on its last row's own verdict", () => {
+    // An untruncated sweep always ends past the useful range, because the
+    // route sweeps `task_count + 1 - owned_slots` machines.
+    const whole = summariseTradeoff(
+      read({ task_seconds: 60, points: fiveTaskCurve() })
+    );
+    expect(whole.rows[whole.rows.length - 1].adviceCode).toBe(
+      "beyond_task_count"
+    );
+    expect(whole.sweepComplete).toBe(true);
+
+    // A single-task job is the other honest ending: no fleet is faster, and
+    // the route sweeps one machine to show it.
+    const single = summariseTradeoff(
+      read({
+        tasks: 1,
+        task_seconds: 60,
+        points: [
+          point({ total_slots: 1, advice_code: "baseline", finish_seconds: 60 }),
+          point({
+            total_slots: 2,
+            advice_code: "no_parallelism",
+            finish_seconds: 60,
+          }),
+        ],
+      })
+    );
+    expect(single.sweepComplete).toBe(true);
+  });
+
+  it("never says nothing helps about a curve it never swept far enough", () => {
+    // 20 owned slots against 40 tasks: every one of the 16 swept machines
+    // lands on the same `ceil(40 / slots) = 2` step, so NOT ONE ROW GAINS.
+    // The 21st machine — one past the size limit — is the one that halves it.
+    const flat = summariseTradeoff(
+      read({
+        tasks: 40,
+        task_seconds: 90,
+        owned: owned({ machines: 20, slots: 20, reachable_machines: 20 }),
+        renting: renting({ slots: 16, slots_reason: SIZE_LIMIT_REASON }),
+        points: truncatedSweep({ tasks: 40, owned: 20 }),
+      })
+    );
+    expect(flat.rows.every((r) => r.tone !== "gain")).toBe(true);
+    expect(flat.lastGain).toBeNull();
+    expect(flat.sweepComplete).toBe(false);
+    expect(flat.nothingHelps).toBe(false);
+  });
+});
+
+describe("summariseTradeoff — a curve that priced no machine at all", () => {
+  // `nothingHelps` used to be `rows.length > 0 && lastGain === null`, which
+  // asserts a trade-off the route never computed. A sweep cut to zero rented
+  // machines for a NON-ARITHMETIC reason — the cheapest published rate above
+  // `rented_usd_per_acquisition_max`, say — leaves a baseline-only curve, and
+  // "buying capacity would spend money and save nothing" is a claim about
+  // machines nobody priced. It refused to price them.
+  const REFUSED_ON_RATE =
+    "no machine is swept: the cheapest published rate is $2.69/hr and this " +
+    "deployment refuses any single rental above $1.5/hr.";
+  const panel = summariseTradeoff(
+    read({
+      tasks: 5,
+      task_seconds: 300,
+      renting: renting({ slots: 0, slots_reason: REFUSED_ON_RATE }),
+      points: [
+        point({
+          total_slots: 1,
+          advice_code: "baseline",
+          finish_seconds: 1500,
+          usd_cost: 0,
+          total_usd_value: 0,
+        }),
+      ],
+    })
+  );
+
+  it("makes no claim about renting when no rented row exists", () => {
+    expect(panel.rows.some((r) => r.rentedSlots > 0)).toBe(false);
+    expect(panel.lastGain).toBeNull();
+    expect(panel.nothingHelps).toBe(false);
+  });
+
+  it("still says nothing helps when rented rows were swept and none did", () => {
+    // The guard must not swallow the true case: a one-task job's rented row
+    // exists, was priced, and buys nothing.
+    const single = summariseTradeoff(
+      read({
+        tasks: 1,
+        task_seconds: 60,
+        points: [
+          point({ total_slots: 1, advice_code: "baseline", finish_seconds: 60 }),
+          point({
+            total_slots: 2,
+            advice_code: "no_parallelism",
+            finish_seconds: 60,
+          }),
+        ],
+      })
+    );
+    expect(single.nothingHelps).toBe(true);
   });
 });
 
@@ -483,6 +679,79 @@ describe("TradeoffCard — the rendered page", () => {
     );
     expect(blank).toContain(NOT_OBSERVED);
     expect(blank).not.toContain(">0s<");
+  });
+
+  it("does not stamp a measurement failure on the row with no predecessor", () => {
+    // The baseline row's `savedSeconds` is null because there is no row above
+    // it to have saved anything against — NOT because a measurement failed.
+    // "not observed" beside a populated finish time reads, on a projector, as
+    // a broken read in row one.
+    const rows = Array.from(markup.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g));
+    const baseline = rows.find((r) => r[1].includes("What you already have"))!;
+    expect(baseline[1]).toContain("5m"); // its finish time WAS observed
+    expect(baseline[1]).not.toContain(NOT_OBSERVED);
+    expect(baseline[1]).toContain("—");
+
+    // And a row that DOES have a predecessor whose finish time was genuinely
+    // null still says so.
+    const unobserved = render(
+      summariseTradeoff(
+        read({
+          points: fiveTaskCurve().map((p) => ({ ...p, finish_seconds: null })),
+        })
+      )
+    );
+    expect(unobserved).toContain(NOT_OBSERVED);
+  });
+
+  it("says which row each refusal is measured against", () => {
+    // 0.24 -> 0.32 -> 0.20 down the USD column is correct — cost is rate x
+    // machines x wall-clock held — and reads as a broken table unless the
+    // legend says every verdict is pairwise against the row directly above.
+    expect(ADVICE_COPY.no_marginal_gain.meaning).toMatch(
+      /^Compared with the row directly above:/
+    );
+    expect(markup).toContain("Compared with the row directly above");
+  });
+
+  it("claims no ceiling when the sweep was cut short", () => {
+    // B1, on the page. The route's own `slots_reason` takes the slot the
+    // false sentence used to occupy.
+    const cut = render(
+      summariseTradeoff(
+        read({
+          tasks: 40,
+          task_seconds: 90,
+          renting: renting({ slots: 16, slots_reason: SIZE_LIMIT_REASON }),
+          points: truncatedSweep(),
+        })
+      )
+    );
+    expect(cut).not.toContain("finishes this job any sooner");
+    expect(cut).not.toContain("spend money and save nothing");
+    expect(cut).toContain("not a fleet size where renting stops helping");
+  });
+
+  it("makes no claim at all about a curve that priced no machine", () => {
+    const unpriced = render(
+      summariseTradeoff(
+        read({
+          renting: renting({
+            slots: 0,
+            slots_reason: "no machine is swept: the cheapest published rate.",
+          }),
+          points: [
+            point({
+              total_slots: 1,
+              advice_code: "baseline",
+              finish_seconds: 300,
+            }),
+          ],
+        })
+      )
+    );
+    expect(unpriced).not.toContain("spend money and save nothing");
+    expect(unpriced).not.toContain("finishes this job any sooner");
   });
 
   it("says a failed read failed, in the API's own words", () => {
