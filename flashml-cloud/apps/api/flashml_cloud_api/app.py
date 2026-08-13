@@ -99,6 +99,7 @@ from flashml_cloud_api import sandbox_orchestrator as orchmod
 from flashml_cloud_api import sandbox_sessions as ssmod
 from flashml_cloud_api import storage as storagemod
 from flashml_cloud_api import verify as verifymod
+from flashml_cloud_api.agent_identity import AgentPrincipal, InvalidScope, normalise_scopes
 from flashml_cloud_api.alibaba_oss import OSSArtifacts, OSSUnavailable
 from flashml_cloud_api.alibaba_sandbox import (
     E2BSandboxGateway,
@@ -1542,6 +1543,23 @@ def _jsonable(row: dict[str, Any]) -> dict[str, Any]:
         else:
             out[key] = str(value)
     return out
+
+
+def _agent_principal_public(principal: AgentPrincipal) -> dict[str, Any]:
+    """The agent principal's own public fields — never a token, never
+    ``owner_id`` (every read of one is already owner- or self-scoped).
+    Shared by the mint/list/whoami routes so the three cannot drift apart
+    on what a principal exposes about itself; ``_jsonable`` is not reused
+    here because ``scopes`` is a tuple, which ``_jsonable`` would stringify
+    (``"('read',)"``) rather than render as a JSON array."""
+    return {
+        "id": principal.id,
+        "label": principal.label,
+        "scopes": list(principal.scopes),
+        "pool_id": principal.pool_id,
+        "allowance_zc": principal.allowance_zc,
+        "status": principal.status,
+    }
 
 
 async def _send_decision_email(
@@ -3133,6 +3151,34 @@ def create_cloud_app(
             raise HTTPException(status_code=403, detail="admin required")
         return user_id
 
+    def agent_principal_from_token(request: Request) -> AgentPrincipal:
+        """The agent principal this request *is* (AG-6). 401 for anything
+        else — including a well-formed browser JWT, a CLI ``fmu_`` token,
+        and a machine's own ``fmk_`` token, none of which authenticate as an
+        agent principal. Mirrors ``current_machine``'s structure exactly.
+
+        Agent tokens are minted through the identical machinery a machine
+        token is (see 0027's header and ``agent_identity.py``'s), so both
+        share the ``fmk_`` prefix and ``looks_like_machine_token`` is a
+        correct, if generous, shape pre-check for either kind — the real
+        gate is the table lookup below, and a machine token simply is not a
+        row in ``agent_principals`` (nor is an agent token a row in
+        ``machines``), so the shared prefix costs nothing.
+        """
+        token = _bearer(request)
+        if not looks_like_machine_token(token):
+            raise HTTPException(status_code=401, detail="invalid agent token")
+        db = request.app.state.connect()
+        try:
+            principal = dbmod.authenticate_agent_token(db, token)
+        finally:
+            db.close()
+        if principal is None:
+            # Unknown token and a revoked principal's token give the same
+            # answer, on purpose — same doctrine as ``current_machine``.
+            raise HTTPException(status_code=401, detail="invalid agent token")
+        return principal
+
     async def proxy(
         request: Request,
         machine: Machine,
@@ -3730,6 +3776,137 @@ def create_cloud_app(
         if not dbmod.revoke_cli_credential_row(db, credential_id, user_id):
             raise HTTPException(status_code=404, detail="unknown credential")
         return {"revoked": True}
+
+    # -- browser-facing: agent principals (AG-6) -----------------------------
+    #
+    # An agent's own scoped, revocable identity, separate from the human's
+    # sign-in — see agent_identity.py's header and migration 0027's for the
+    # full argument. These four routes are the entire HTTP surface: mint,
+    # list, revoke, and a `whoami` an agent principal itself authenticates
+    # to prove the round trip actually works. Nothing below wires an agent
+    # principal onto the real submit/spend routes — that needs its own
+    # co-review per the AG-6 security report; `whoami` is the safe
+    # demonstrator.
+
+    @app.post("/v1alpha1/agent-principals", status_code=201, tags=["browser"])
+    async def create_agent_principal_route(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Mint an agent principal. ``admitted_user``, not ``current_user``
+        — minting is state creation, the same gate ``create_pool_route``
+        sits behind.
+
+        THE SECURITY FIX (opus review, HIGH finding). A ``submit``-scoped
+        principal acts into exactly the ``pool_id`` it names, and only that
+        pool (0027's header) — so minting one for a pool the caller cannot
+        even reach would hand an agent a door the human requesting it never
+        had. ``dbmod.create_agent_principal`` does NOT check pool
+        authorization itself; it only enforces that a ``pool_id`` is present
+        at all when ``submit`` is requested. This route is therefore the
+        ONLY guard between an admitted account and a ``submit`` token scoped
+        to a pool_id it merely guessed — an unchecked ``pool_id`` from the
+        body must never reach ``create_agent_principal`` directly, and it
+        does not: the membership check below runs first, against
+        ``fetch_pool_for_member``, and its result — never the raw body
+        value — is what decides whether minting proceeds. A missing
+        ``pool_id`` and "not a member of this pool" answer the identical
+        404, ``fetch_pool_for_member``'s own doctrine: a 403 for "exists but
+        isn't yours" would confirm a guessed id is real.
+        """
+        payload = await _json_object(request)
+
+        raw_label = payload.get("label")
+        if not isinstance(raw_label, str) or not raw_label.strip():
+            raise HTTPException(status_code=400, detail="label is required")
+        label = raw_label.strip()
+
+        try:
+            scopes = normalise_scopes(payload.get("scopes"))
+        except InvalidScope as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        pool_id = payload.get("pool_id")
+        if pool_id is not None and not isinstance(pool_id, str):
+            raise HTTPException(
+                status_code=400, detail="pool_id must be a string"
+            )
+
+        allowance_zc = payload.get("allowance_zc", 0)
+        if isinstance(allowance_zc, bool) or not isinstance(allowance_zc, int):
+            raise HTTPException(
+                status_code=400, detail="allowance_zc must be an integer"
+            )
+
+        if "submit" in scopes:
+            pool = None
+            if pool_id:
+                try:
+                    pool = dbmod.fetch_pool_for_member(db, pool_id, user_id)
+                except psycopg.errors.InvalidTextRepresentation:
+                    pool = None  # not even a uuid; same answer as "not found"
+            if pool is None:
+                raise HTTPException(status_code=404, detail="unknown pool")
+
+        try:
+            principal, token = dbmod.create_agent_principal(
+                db,
+                owner_id=user_id,
+                label=label,
+                scopes=scopes,
+                pool_id=pool_id,
+                allowance_zc=allowance_zc,
+            )
+        except InvalidScope as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        # The raw token is returned HERE, exactly once, and never again —
+        # no other route in this surface ever echoes it back.
+        return {**_agent_principal_public(principal), "token": token}
+
+    @app.get("/v1alpha1/agent-principals", tags=["browser"])
+    async def list_agent_principals_route(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Every agent principal this account has minted. ``current_user``,
+        not ``admitted_user`` — mirrors ``list_cli_credentials``: an account
+        must be able to see and revoke its own credentials regardless of
+        admission state. Never a token or a hash: see
+        ``_agent_principal_public``."""
+        return [
+            _agent_principal_public(p)
+            for p in dbmod.list_agent_principals(db, user_id)
+        ]
+
+    @app.post("/v1alpha1/agent-principals/{principal_id}/revoke", tags=["browser"])
+    async def revoke_agent_principal_route(
+        principal_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Revoke an agent principal. 404 — not 403 — for someone else's
+        principal or an unknown id, indistinguishably, same doctrine as
+        ``revoke_cli_credential``. Takes effect on the very next
+        ``authenticate_agent_token`` call: ``status`` is read on every call
+        and there is no cache in front of it."""
+        if not dbmod.revoke_agent_principal(
+            db, principal_id=principal_id, owner_id=user_id
+        ):
+            raise HTTPException(status_code=404, detail="unknown principal")
+        return {"revoked": True}
+
+    @app.get("/v1alpha1/agent/whoami", tags=["browser"])
+    async def agent_whoami_route(
+        principal: AgentPrincipal = Depends(agent_principal_from_token),
+    ):
+        """Who this agent token is, and nothing else — never the token
+        itself. The safe demonstrator that mint -> authenticate -> revoke
+        actually round-trips: a real agent-driven submit/spend route needs
+        its own co-review before this credential kind may drive one, per
+        the AG-6 security report."""
+        return _agent_principal_public(principal)
 
     # -- browser-facing: pools and invites -----------------------------------
     #
