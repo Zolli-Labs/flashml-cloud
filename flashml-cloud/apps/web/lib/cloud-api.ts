@@ -1704,6 +1704,56 @@ export function submitFromRepo(
   });
 }
 
+/** `POST /v1alpha1/preflight`'s answer — a verdict about a workload, not a
+ * status about a request.
+ *
+ * `ok` is `not any(level == "error")`, the same predicate `from-repo`
+ * refuses on. It is NOT a promise that submit succeeds: datasets are
+ * resolved, the fleet is measured and the spec compiled at submit time, and
+ * none of those can be answered without doing something.
+ *
+ * `config` is the parsed, normalized config back — `null` when the YAML did
+ * not parse, which is a different statement from an empty object and is why
+ * this is nullable rather than defaulted. Typed as an opaque record: it
+ * mirrors a Python dataclass this repo does not own, and spelling its fields
+ * out here would make an upstream addition a build break for a value the
+ * console only ever reads a couple of keys off. */
+export interface PreflightVerdict {
+  ok: boolean;
+  findings: PreflightFinding[];
+  config: Record<string, unknown> | null;
+}
+
+/** `POST /v1alpha1/preflight` — validate a `flashml.yaml` without pushing
+ * anything.
+ *
+ * **IT CREATES NOTHING.** No job row, no artifact, no coordinator call, no
+ * storage write, and it fetches nothing the caller names. That property is
+ * the whole reason a route this cheap to call is safe to issue from a
+ * textarea's button.
+ *
+ * A BAD CONFIG IS A 200, not a 4xx, and callers must not treat it as a
+ * failure: the caller asked for a verdict and got one. Only a malformed
+ * *request* errors — an absent or non-string config is 400, an unadmitted
+ * caller 403, a pool they cannot see 404 — which is why this function
+ * resolves for `ok: false` and rejects only for the request being wrong.
+ *
+ * `pool` rides in the body only when set, exactly like `submitFromRepo`'s.
+ * Nothing in preflight reads it; it is sent so that the API can refuse a
+ * workspace the caller cannot use, rather than blessing a config against a
+ * workspace they were never going to run it in. */
+export function preflightConfig(
+  config: string,
+  pool?: string
+): Promise<PreflightVerdict> {
+  const body: { config: string; pool?: string } = { config };
+  if (pool) body.pool = pool;
+  return request<PreflightVerdict>("/v1alpha1/preflight", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // -- onboarding and access -----------------------------------------------
 
 export interface OnboardingSubmission {
