@@ -2950,6 +2950,138 @@ def _tradeoff_rented_gate(spec: JobSpec) -> tuple[bool, str]:
     )
 
 
+# ---------------------------------------------------------------------------
+# PF-3: marketplace.can_cover's first HUMAN-path caller
+# ---------------------------------------------------------------------------
+#
+# AG-3 wired `can_cover` into the agent spend path (`agent_wallet.py`); it
+# had, before that, exactly zero production callers anywhere — defined,
+# tested, and never consulted before money moved. PF-3 closes the matching
+# human-path gap ("nothing refuses a submit an account cannot pay for") at
+# the one place every human submit funnels through before a byte reaches
+# the coordinator: `_human_spend_guard`, called once from `submit_job` (the
+# raw-spec route) and once from `_stage_compile_and_submit` (already the
+# single body shared by `/jobs/from-repo` and `/jobs/from-upload` — see its
+# own docstring). Two call sites, one implementation, never a third copy.
+#
+# **NON-BREAKING is not negotiable, and this ships accordingly.**
+# `_HUMAN_SPEND_GUARD_ENFORCE` is False: the guard runs, and `can_cover` is
+# genuinely consulted, on every submit whose tasks could ever land on a
+# rented machine (`_tradeoff_rented_gate` above, reused rather than
+# reimplemented) — but its answer only ever produces a 402 when this flag
+# is True. Off, the refusal statement is unreachable, not merely untriggered
+# by today's traffic: a live 3-machine demo is submitting against this
+# route right now, and "probably fine" is not the bar.
+#
+# **Why no active refusal ships yet.** The one number `can_cover` actually
+# needs — this job's real rented cost, `zc_per_hour` x `seconds` x `tasks`
+# — does not exist at submit time without running the full `_route_plan`
+# solver inline (job expansion, live asks, evidence-based duration
+# estimates, three price solvers — see its docstring above). That is
+# exactly the "heavy/invasive plumbing across all three routes" this task
+# says not to force onto a route a live demo depends on. So the check below
+# is the weakest TRUE statement reachable without it: can this account
+# cover ANY nonzero rented spend at all — one task, one second, at the
+# smallest positive rate the ledger can express (`hold_zc` rounds up, so
+# 1 zc_per_hour x 1 second already costs 1 millicredit). An account that
+# fails even that floor is provably insolvent for every real rented cost,
+# which is strictly larger; an account that passes it may still be unable
+# to afford the specific job it submitted, and closing that gap is future
+# work for whoever turns the flag on — not this change.
+#
+# **Fail open on everything this guard cannot determine — two separate
+# "cannot determine"s, neither of them guessed:**
+#   1. `_tradeoff_rented_gate` says this job can never touch a rented
+#      machine (owned/sandboxed capacity only) -> cost is 0 by
+#      construction. Never a candidate for refusal; `can_cover` is not
+#      even called.
+#   2. This account has no `credit_accounts` row at all yet. Prod's wallet
+#      tables are freshly migrated and empty for essentially every
+#      account (ground truth as of 2026-08-13): "no row" means "nobody has
+#      looked yet", not "we looked and found $0". Reading a missing row as
+#      an insolvent zero would refuse every rented-capable submit the
+#      moment enforcement is ever turned on. `marketplace.balances` folds
+#      a missing row to 0 by design — correct for a wallet PAGE ("zero is
+#      a real answer, not a 404") and exactly wrong for a refusal — so
+#      this guard reads `credit_accounts` directly instead of going
+#      through it; see `_spendable_zc_or_none`.
+_HUMAN_SPEND_GUARD_ENFORCE = False
+
+
+def _spendable_zc_or_none(db: psycopg.Connection, owner_id: str) -> int | None:
+    """This account's spendable millicredit balance, or ``None`` if it has
+    no ``credit_accounts`` row at all yet.
+
+    Deliberately not `marketplace.balances` (which folds a missing row to
+    0) — see the "fail open" note in the module comment above for why that
+    distinction is exactly what `_human_spend_guard` needs and a wallet
+    page does not. A plain read, never `marketplace.ensure_accounts`: that
+    would create the row as a side effect of what must stay a read-only
+    guard (OC-9's "every guard is a ledger read", the same discipline
+    `agent_wallet.py` holds its own two guards to).
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select balance_zc from public.credit_accounts"
+            " where owner_id = %s::uuid and kind = 'spendable'",
+            (owner_id,),
+        )
+        row = cur.fetchone()
+    return int(row["balance_zc"]) if row is not None else None
+
+
+def _human_spend_guard(db: psycopg.Connection, user_id: str, spec: JobSpec) -> None:
+    """PF-3: refuse a human submit only when it is a provable, floor-level
+    insolvency for a job that could commit the account to rented spend.
+
+    Called from both places a human submit reaches a compiled/validated
+    `JobSpec` before it is forwarded to the coordinator. See the module
+    comment above for the full design, and why this cannot refuse anything
+    while `_HUMAN_SPEND_GUARD_ENFORCE` is False.
+    """
+    could_rent, _reason = _tradeoff_rented_gate(spec)
+    if not could_rent:
+        # Owned/sandboxed capacity only — cost is 0 by construction.
+        return
+
+    spendable_zc = _spendable_zc_or_none(db, user_id)
+    if spendable_zc is None:
+        log.info(
+            json.dumps({
+                "text": "human spend guard: no credit_accounts row yet; "
+                         "cannot determine solvency, proceeding",
+                "user_id": user_id,
+            })
+        )
+        return
+
+    solvent = marketplacemod.can_cover(
+        spendable_zc, zc_per_hour=1, seconds=1, tasks=1
+    )
+    if solvent:
+        return
+
+    log.info(
+        json.dumps({
+            "text": "human spend guard: insolvent for the minimal rented "
+                     "floor",
+            "user_id": user_id,
+            "spendable_zc": spendable_zc,
+            "enforce": _HUMAN_SPEND_GUARD_ENFORCE,
+        })
+    )
+    if not _HUMAN_SPEND_GUARD_ENFORCE:
+        return
+    raise HTTPException(
+        status_code=402,
+        detail=(
+            "this account has no spendable credit and this job's tasks "
+            "could be placed on rented capacity; add credit before "
+            "submitting, or scope the job to owned/sandboxed capacity only"
+        ),
+    )
+
+
 def _venue_acquisition(venue_id: str | None) -> str | None:
     """How this API obtains capacity at ``venue_id``, or ``None`` if unknown.
 
@@ -4751,6 +4883,39 @@ def create_cloud_app(
                 status_code=400,
                 detail="pool jobs must be submitted via /v1alpha1/jobs/from-repo",
             )
+        # PF-3: can_cover's first human caller. Best-effort — a payload
+        # that does not even validate as a JobSpec is left exactly as
+        # before (the coordinator remains the one source of truth on
+        # whether it is a legal spec); the guard only ever runs against a
+        # payload that does, and even then cannot refuse anything unless
+        # `_HUMAN_SPEND_GUARD_ENFORCE` is flipped on. See its module note.
+        #
+        # The guard adds a real db read (`_spendable_zc_or_none`) to a
+        # route that did not touch the credit tables before. A transient
+        # failure in THAT read (or in `_tradeoff_rented_gate`, or anywhere
+        # else inside the guard) must never turn into a 500 for a submit
+        # that would otherwise have succeeded — that is a non-breaking
+        # violation exactly like an active refusal would be, just via a
+        # bug instead of a balance. Only the guard's OWN deliberate
+        # refusal (an `HTTPException`, and only ever raised when
+        # `_HUMAN_SPEND_GUARD_ENFORCE` is True) is allowed through; every
+        # other exception fails open.
+        try:
+            candidate_spec = JobSpec.model_validate(payload)
+        except Exception:
+            candidate_spec = None
+        if candidate_spec is not None:
+            try:
+                _human_spend_guard(db, user_id, candidate_spec)
+            except HTTPException:
+                raise  # the deliberate 402 (only when enforce is on)
+            except Exception:
+                log.warning(
+                    json.dumps({
+                        "text": "human spend guard failed open",
+                        "user_id": user_id,
+                    })
+                )
         r = await coordinator.forward(
             "POST",
             "/v1alpha1/jobs",
@@ -6016,6 +6181,38 @@ def create_cloud_app(
                 )
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
+
+        # PF-3: can_cover's first human caller, at the one point both
+        # from-repo and from-upload have a compiled, validated spec and
+        # have not yet staged an artifact, admitted a dataset, or
+        # contacted the coordinator — same "nothing written yet" moment
+        # every other refusal in this function keeps. Best-effort, exactly
+        # like `submit_job`'s wiring: a spec this module itself just
+        # compiled should always validate, but a validation surprise here
+        # must not become a new way for a submit to fail that did not
+        # before. See `_human_spend_guard`'s module note for why this
+        # cannot refuse anything unless `_HUMAN_SPEND_GUARD_ENFORCE` is on.
+        #
+        # Same fail-open rule as `submit_job`: the guard's own db read must
+        # never turn a transient failure into a 500 for a submit that would
+        # otherwise have succeeded. Only the guard's deliberate refusal (an
+        # `HTTPException`, only ever raised with enforcement on) propagates.
+        try:
+            candidate_spec = JobSpec.model_validate(spec)
+        except Exception:
+            candidate_spec = None
+        if candidate_spec is not None:
+            try:
+                _human_spend_guard(db, user_id, candidate_spec)
+            except HTTPException:
+                raise  # the deliberate 402 (only when enforce is on)
+            except Exception:
+                log.warning(
+                    json.dumps({
+                        "text": "human spend guard failed open",
+                        "user_id": user_id,
+                    })
+                )
 
         if manifests:
             refusal = _admit_datasets(
