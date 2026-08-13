@@ -6590,6 +6590,39 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown job")
         return [_jsonable(r) for r in dbmod.list_verifications_for_job(db, job_id)]
 
+    @app.get("/v1alpha1/trace/{correlation_id}", tags=["browser"])
+    async def get_trace(
+        correlation_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """AG-5's cloud-side trace surface: the whole D-4 correlation chain
+        — job(s), sandbox session(s) and attempts sharing one correlation
+        id — in one call.
+
+        Visibility is narrower than the sibling ``/contributions`` and
+        ``/verifications`` routes on purpose: a correlation id is minted
+        once, at exactly one submission, so it names ONE owner's work by
+        construction (unlike a job, which a pool can widen to every
+        teammate). ``dbmod.trace_by_correlation_id`` therefore checks
+        ownership directly rather than calling ``fetch_job_for_viewer``.
+
+        404, never 403, for every way this can fail to answer — a
+        ``correlation_id`` that is not a uuid, one no row carries, and one
+        that belongs to somebody else all come back identically ``None``
+        from the reader, so a stranger probing this endpoint cannot tell
+        "malformed" from "not yours" from "does not exist".
+        """
+        result = dbmod.trace_by_correlation_id(db, correlation_id, user_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="unknown trace")
+        return {
+            "correlation_id": result["correlation_id"],
+            "jobs": [_jsonable(r) for r in result["jobs"]],
+            "sandbox_sessions": [_jsonable(r) for r in result["sandbox_sessions"]],
+            "attempts": [_jsonable(r) for r in result["attempts"]],
+        }
+
     @app.post("/v1alpha1/jobs/{job_id}/cancel", tags=["browser"])
     async def cancel_job_route(
         job_id: str,

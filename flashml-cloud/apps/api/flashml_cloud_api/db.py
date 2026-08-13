@@ -62,7 +62,7 @@ from psycopg.types.json import Json
 from flashml_cloud_api import marketplace as marketplacemod
 from flashml_cloud_api.agent_identity import AgentPrincipal, InvalidScope, normalise_scopes
 from flashml_cloud_api.auth import hash_machine_token, new_machine_token
-from flashml_cloud_api.observability import require_correlation_id
+from flashml_cloud_api.observability import correlation_id_or_none, require_correlation_id
 from flashml_cloud_api.router.estimator import hardware_class
 from flashml_cloud_api.settings import Settings
 
@@ -3468,6 +3468,135 @@ def list_verifications_for_job(
             (job_id,),
         )
         return list(cur.fetchall())
+
+
+def trace_by_correlation_id(
+    db: psycopg.Connection, correlation_id: str, user_id: str
+) -> dict[str, Any] | None:
+    """AG-5's cloud-side trace surface: the whole D-4 chain sharing one
+    correlation id, in one call — the read path for
+    ``migrations/0026_correlation_id.sql``.
+
+    ``correlation_id`` is validated with :func:`correlation_id_or_none`
+    FIRST, never :func:`require_correlation_id`: a garbage value reaching
+    this function over HTTP is a caller mistake, not a bug to raise on, and
+    the route must be able to answer it with the SAME 404 an unknown-but-valid
+    id gets — a stranger fishing for real ids must not be able to tell "not a
+    uuid" apart from "no such trace" from the response alone.
+
+    **Ownership, not viewer-scoping — narrower than ``fetch_job_for_viewer``
+    on purpose.** A correlation id is minted exactly once, at exactly one of
+    the three edges named in ``observability.new_correlation_id`` (a job
+    submission, a sandbox session, an acquisition), so it names ONE owner's
+    work by construction — unlike a job id, which a pool can widen to every
+    teammate. The gate here is therefore ``owner_id = user_id``, checked
+    against ``jobs`` and ``sandbox_sessions`` directly, never against pool
+    membership. Owning neither answers ``None``, identically to an id that
+    exists for nobody and to one that fails to parse at all — three causes,
+    one answer, so the route's 404 tells a stranger nothing.
+
+    Once authorized, every list below is filtered on the correlation id
+    ALONE, never derived from the authorizing row's own ids — that filter is
+    the entire point of 0026: ``record_attempt`` copies ``correlation_id``
+    from the job an attempt is an attempt of, in the same INSERT, so it
+    cannot relate two unrelated pieces of work, and a row that carries this
+    exact id really did originate from the submission that was just
+    authorized. ``attempts`` has no ``owner_id`` of its own to join on — the
+    machine that claims a lease is very often not the job owner's machine at
+    all, that is the whole barter premise (see ``contributions_for_owner``)
+    — so it is scoped by correlation id alone, which is sound only because
+    that id was just proven to belong to this caller.
+
+    **Provenance (AS-16).** Every column selected here is an id, an
+    enum/state, or a timestamp this API wrote itself. Never
+    ``jobs.name``/``source``/``spec`` (submitter-authored); never
+    ``sandbox_sessions.share_token`` (a bearer capability) or
+    ``error_message`` (free text that routinely echoes a provider's
+    exception, per that column's own comment in 0014); never any column of
+    ``public.machines`` at all — a machine's ``name`` IS the hostname it
+    self-reported at enrolment (``observability.py``'s own docstring names
+    this exact leak). ``attempts`` carries no submitter text to begin with.
+
+    Ordered deterministically within each list so two calls against an
+    unchanged chain render identically.
+    """
+    parsed = correlation_id_or_none(correlation_id)
+    if parsed is None:
+        return None
+
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                select
+                    exists (
+                        select 1 from public.jobs
+                         where correlation_id = %s and owner_id = %s
+                    )
+                    or exists (
+                        select 1 from public.sandbox_sessions
+                         where correlation_id = %s and owner_id = %s
+                    ) as owned
+                """,
+                (parsed, user_id, parsed, user_id),
+            )
+            owned_row = cur.fetchone()
+            if owned_row is None or not owned_row["owned"]:
+                # No job or sandbox session on this thread belongs to this
+                # caller — either nobody owns it, or somebody else does.
+                # Indistinguishable on purpose: see the docstring.
+                return None
+
+            cur.execute(
+                """
+                select id, owner_id, pool_id, status, correlation_id,
+                       created_at
+                  from public.jobs
+                 where correlation_id = %s and owner_id = %s
+                 order by created_at, id
+                """,
+                (parsed, user_id),
+            )
+            jobs = list(cur.fetchall())
+
+            cur.execute(
+                """
+                select id, owner_id, pool_id, machine_id, training_job_id,
+                       evaluation_job_id, provider, region, template,
+                       external_sandbox_id, state, correlation_id,
+                       created_at, updated_at, terminated_at
+                  from public.sandbox_sessions
+                 where correlation_id = %s and owner_id = %s
+                 order by created_at, id
+                """,
+                (parsed, user_id),
+            )
+            sandbox_sessions = list(cur.fetchall())
+
+            cur.execute(
+                """
+                select lease_id, machine_id, job_id, task_id, claimed_at,
+                       accepted_at, resolved_at, outcome, lease_deadline,
+                       correlation_id
+                  from public.attempts
+                 where correlation_id = %s
+                 order by claimed_at, lease_id
+                """,
+                (parsed,),
+            )
+            attempts = list(cur.fetchall())
+    except psycopg.errors.InvalidTextRepresentation:
+        # A malformed uuid that somehow still reached the database (it
+        # should not, given the parse above) reads exactly like "no such
+        # trace" — mirroring revoke_cli_credential_row.
+        return None
+
+    return {
+        "correlation_id": parsed,
+        "jobs": jobs,
+        "sandbox_sessions": sandbox_sessions,
+        "attempts": attempts,
+    }
 
 
 def list_federated_jobs_for_owner(
