@@ -190,3 +190,99 @@ sandbox exists (so a `kill -9` of the script still leaves a human a list). The
 same double redaction as every other script in this directory — by pattern,
 and by substituting the literal value of every `E2B_*KEY*` / `OSS_*SECRET*`
 environment variable read. Nothing here is safe to publish unreviewed.
+
+## Elasticity probe (C-6.1)
+
+The requirement's own words: *bounded concurrent sandbox creation … report
+measured create rate, p50/p95 latency, failure rate, and the cap we chose and
+why. All killed in `finally`.*
+
+An ascending ladder of rungs — 1, 2, 4, 8 by default. Each rung creates its
+sandboxes concurrently (`asyncio` + `to_thread`, because the SDK is blocking
+httpx and calling it from a coroutine would serialise the very thing being
+measured), records a per-create latency, then kills **every** handle in a
+`finally` before the next rung starts. Rungs are independent samples, not a
+cumulative allocation: rung 8 is 8 concurrent creates, never 15 live sandboxes.
+
+**A 429 is the interesting result, not noise.** `throttle` and `quota` are
+their own failure classes and are never folded into a generic count —
+`classify_failure` documents the precedence (a 429 stays `throttle` even when
+its body also says quota, because the status is the platform's answer about
+*why now*) and the unit test pins it. A refusal nobody can name is `unknown`,
+never guessed into a ceiling.
+
+**Stop-ascending.** A rung at or above `--failure-threshold` (default 20%)
+stops the ladder. The reported cap is the highest rung that created *every*
+sandbox it attempted **and** confirmed cleanup of all of them — `degraded` is
+not `clean`, so a rung that dropped one create in ten is never offered as the
+concurrency we support. If nothing failed anywhere, the rationale says so in
+those words: *"the top of the ladder, not a measured ceiling — the ladder ran
+out before the platform did."*
+
+The 150-concurrent per-account cap from the integration spec §7 is carried in
+the evidence with `kind: "quoted"`. It is Alibaba's documentation, it has
+never been observed here, and the default ladder does not reach it.
+
+```bash
+python elasticity_probe.py --dry-run                       # plan + cost, no API
+python elasticity_probe.py --dry-run --concurrency 1,5,10,25 --per-level 30
+export E2B_API_KEY="<from the FC console>"                 # the live run
+python elasticity_probe.py --region ap-southeast-1 --concurrency 1,2,4,8
+```
+
+`--per-level 0` (the default) is one wave of exactly the rung's concurrency; a
+larger `--per-level` keeps the rung in flight and refills as creates land,
+which measures a sustained rate rather than a single burst. `--timeout-s` is
+the ceiling on **one create** (a hung create becomes a classified `timeout`
+failure, not a hung rung); `--sandbox-ttl-s` is the sandbox lifetime.
+
+**A live run against real sandboxes is owner-coordinated** (it spends voucher
+and needs the key); it was not run as part of landing this script. What was
+verified without a sandbox and without a key:
+
+```bash
+../../apps/api/.venv/bin/python -m pytest test_elasticity_probe.py -q
+```
+
+37 tests over the ladder parser, the nearest-rank percentiles, every failure
+class (including the 429-beats-quota precedence and the fail-safe `unknown`),
+the rung verdicts, `choose_cap`'s three rationales, the exit-code table, the
+scoped sweep, and `--dry-run` proving it reaches no API.
+
+### What it does not claim
+
+It measures **creation**, not a FlashNode inside each sandbox claiming a task
+— that half is `flashnode_in_sandbox_probe.py`, kept separate so an install
+time never lands inside a figure labelled "create latency". And it is a
+bounded probe on one account in one region, **not** Alibaba's published
+instances-per-minute headline reproduced. Both statements ride in the evidence
+JSON (`scope`, `caveat`), not only here.
+
+### Cleanup
+
+Every sandbox id is printed at birth and appended to
+`../../.evidence/alibaba-elasticity-<stamp>.sandboxes` before anything else
+happens to it. Each rung kills its own handles in a `finally`; a kill failure
+records the id **and** the error, unconfirms that rung, and forces exit 2. The
+end-of-run sweep is scoped two ways — ids this run recorded, plus anything
+carrying this run's exact `flashml_run` metadata tag, which is how a create
+that timed out client-side but succeeded server-side still gets killed. Exact
+tag equality only: a probe running beside this one is unreachable from here.
+
+### Reading the result
+
+| Exit | Meaning |
+|---|---|
+| **0** | The ladder ran, at least one rung was clean, every sandbox is accounted for. **A throttled top rung is still 0** — hitting the ceiling is the finding |
+| **2** | Cleanup could not be confirmed, the harness errored, or not one rung ran clean (reported as a negative finding, never as a cap) |
+| **1** | Missing `E2B_API_KEY`, or an unparseable ladder / threshold — a config problem, not a verdict |
+
+### Output
+
+`../../.evidence/alibaba-elasticity-<stamp>.json`: per-rung rows
+(`concurrency`, `attempted`, `created_ok`, `failed_by_class`, `creates_per_sec`,
+`latency_ms` p50/p95/min/mean/max, `cleanup_confirmed`, `verdict`), a summary
+carrying the chosen cap and its rationale, and a `provenance` map labelling
+every field **measured / derived / config / quoted** — a set-equality test
+means a new figure cannot ship unlabelled. Same double redaction as every
+other script here; gitignored, and not safe to publish unreviewed.
