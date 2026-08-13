@@ -3080,9 +3080,60 @@ def create_cloud_app(
     @app.post("/v1alpha1/machines/{machine_id}/revoke", tags=["browser"])
     async def revoke(
         machine_id: str,
+        force: bool = Query(
+            False,
+            description="Revoke a rented machine that is mid-task anyway. "
+                        "Its running work is lost and the sweep will destroy "
+                        "the hardware.",
+        ),
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
+        """Kill a machine's credential. Refuses a RENTAL that is mid-task.
+
+        For a laptop or a sandbox worker this is unconditional and always was:
+        the machine is the owner's, the cost of revoking one mid-task is their
+        own lost work, and they are the person deciding.
+
+        **A rented machine is not that**, and until this guard it was the same
+        button. A ``leased`` machine appears in the console fleet like any
+        other, so one click revoked a working rental's token — and
+        ``capacity/reconcile.py``'s ``REVOKED_CREDENTIAL`` branch, which is
+        deliberately unguarded because *a revoked token cannot work*, then
+        selected the rental with no allowance at all and destroyed the
+        hardware under the running task. That branch's safety argument is only
+        as true as this route: it rests entirely on nothing revoking a machine
+        that is working, and this route was the thing that did.
+
+        So a ``leased`` machine holding a live lease answers **409**, and the
+        test is ``capacity.reconcile.WORK_IN_FLIGHT_SQL`` itself rather than a
+        fifth copy of it.
+
+        ``force`` is an override rather than a flat refusal, deliberately.
+        Revoking is the *only* lever an owner has over a rented host this
+        control plane cannot address at the venue — an acquisition that died
+        before recording its ``provider_handle`` leaves a machine nothing here
+        can destroy, and refusing outright would leave them with none. It has
+        to be typed, though: the failure it buys back is a customer's task
+        destroyed silently by a click, and an explicit flag is the difference
+        between deciding and not noticing.
+        """
+        try:
+            working_lease = not force and capacitymod.leased_machine_has_work_in_flight(
+                db, machine_id=machine_id, owner_id=user_id
+            )
+        except psycopg.errors.InvalidTextRepresentation:
+            # Not even a uuid: nothing to be working, and the revoke below
+            # gives it the same 404 as a machine that is not yours.
+            working_lease = False
+        if working_lease:
+            raise HTTPException(
+                status_code=409,
+                detail="this rented machine is running a task right now, and "
+                       "revoking its credential would destroy that work and "
+                       "then the machine — retry with ?force=true to do it "
+                       "anyway, or wait for the lease to end",
+            )
         try:
             revoked = enrolment.revoke_machine(db, machine_id, user_id)
         except psycopg.errors.InvalidTextRepresentation:

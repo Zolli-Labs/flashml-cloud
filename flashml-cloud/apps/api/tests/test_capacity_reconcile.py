@@ -1430,6 +1430,115 @@ async def test_an_acquisition_still_in_flight_keeps_its_credential(
 
 
 @pytest.mark.asyncio
+async def test_an_orphan_holding_a_live_lease_keeps_its_credential(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The reproduction, on the deployment that ships.**
+
+    A lease minted by the real ``provision_rented_machine``, aged past
+    ``boot_grace_s``, holding an unresolved attempt with ten minutes still to
+    run. No rental row names it, so every rental-keyed query walks past — and
+    the orphan query, which is keyed on the machine, selected it and revoked
+    its token in ``dry_run`` mode, because this half runs outside the gate.
+
+    The revoke stops NO money. An orphan by definition has no rental row, so
+    there is no ``provider_handle`` to tell a venue anything with, and the pod
+    bills on regardless. Its entire effect is that the customer's task dies:
+    the token the machine is claiming and heartbeating with stops
+    authenticating on its very next request.
+
+    A working orphan is not a leaked token, it is an UNBILLED MACHINE an
+    operator has to reconcile at the venue console, and that is what the ERROR
+    line is for.
+    """
+    cred = _orphan_lease(db, an_owner, a_pool)
+    _attempt(db, cred.machine_id, job_id="job-orphan", claimed_s=300.0,
+             resolved=False, deadline_s=-600.0)
+
+    await reconcile_rented(db, {}, dry_run=True)
+
+    assert _machine_status(db, cred.machine_id) != "revoked"
+    assert dbmod.pool_ids_bound_to_machine(db, cred.machine_id) == [str(a_pool)]
+
+    # An armed pass makes no difference either: this half never consulted the
+    # flag, which is exactly why the defect reached the shipped default.
+    await reconcile_rented(db, {"fake": _Venue()})
+    assert _machine_status(db, cred.machine_id) != "revoked"
+    assert dbmod.pool_ids_bound_to_machine(db, cred.machine_id) == [str(a_pool)]
+
+    # ...and it is the LEASE that is holding it, not the age and not the
+    # lifecycle: resolve the attempt and the same orphan is revoked. Without
+    # this half the guard could be a `false` that never matches -- see
+    # `test_the_orphan_guard_reads_the_machine_not_a_null_alias`.
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts set resolved_at = now(), "
+            "outcome = 'accepted' where machine_id = %s", (cred.machine_id,)
+        )
+    db.commit()
+    await reconcile_rented(db, {}, dry_run=True)
+    assert _machine_status(db, cred.machine_id) == "revoked"
+    assert dbmod.pool_ids_bound_to_machine(db, cred.machine_id) == []
+
+
+def test_the_orphan_guard_reads_the_machine_not_a_null_alias(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The trap in splicing ``WORK_IN_FLIGHT_SQL`` into a machine-keyed query.
+
+    The fragment is written against ``rc.machine_id`` because every other
+    reader selects from ``public.rented_capacity`` — and a rental with no
+    machine bound matches no attempt row, so it evaluates ``false``, which is
+    what leaves ABANDONED rows sweepable. Spliced somewhere ``rc.machine_id``
+    is null or absent, that same ``false`` reads as "nothing in flight" and the
+    guard is a no-op nothing would notice: the query would go on revoking
+    exactly the machines it was added to protect.
+
+    So this asserts the flag on both sides for one machine, which is the only
+    way to tell a guard that reads the machine from a guard that reads nothing.
+    """
+    cred = _orphan_lease(db, an_owner, a_pool)
+    by_machine = {
+        str(r["machine_id"]): r for r in reconcile_mod.orphaned_leases(db)
+    }
+    assert by_machine[cred.machine_id]["work_in_flight"] is False
+
+    _attempt(db, cred.machine_id, job_id="job-orphan", claimed_s=300.0,
+             resolved=False, deadline_s=-600.0)
+    by_machine = {
+        str(r["machine_id"]): r for r in reconcile_mod.orphaned_leases(db)
+    }
+    # Still SELECTED -- the operator has to hear about an unbilled machine --
+    # and now flagged, which is what the revoke is guarded on.
+    assert by_machine[cred.machine_id]["work_in_flight"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_working_orphan_is_logged_at_error_with_its_node_id(
+    db, an_owner, a_pool, caplog  # noqa: F811
+):
+    """Skipping silently would be the worse half of the bug.
+
+    Nothing else in this system will ever find this machine: it is billing at a
+    venue under a handle no row records, so the only way it stops is an
+    operator reading this line and reconciling at the venue console. ``node_id``
+    embeds ``rented-{rental_id[:12]}``, which is the one correlation there is.
+    """
+    cred = _orphan_lease(
+        db, an_owner, a_pool, node_id=f"rented-{uuid.uuid4().hex[:12]}"
+    )
+    _attempt(db, cred.machine_id, job_id="job-orphan", claimed_s=300.0,
+             resolved=False, deadline_s=-600.0)
+
+    with caplog.at_level(logging.ERROR, logger="flashml_cloud_api.capacity.reconcile"):
+        await reconcile_rented(db, {}, dry_run=True)
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(cred.node_id in r.getMessage() for r in errors), errors
+    assert _machine_status(db, cred.machine_id) != "revoked"
+
+
+@pytest.mark.asyncio
 async def test_a_live_rental_is_never_an_orphan_however_old(
     db, an_owner, a_pool  # noqa: F811
 ):

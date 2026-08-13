@@ -71,15 +71,34 @@ now. That guard was added after a reproduction; see
 ``test_capacity_reconcile.py::test_a_finished_job_never_sweeps_a_machine_
 holding_a_live_lease``.
 
-**This module asked nothing of the kind until 2026-08-12, and that was the
-last known way an armed teardown could destroy a working machine.**
+**This module asked nothing of the kind until 2026-08-12.**
 ``rentals_for_jobs`` selected on ``job_id`` alone and ``release_capacity`` asks
-about liveness by design, so a page load observing job A finishing destroyed
-the machine rented for A **while it was mid-task on job B** in the same pool --
-the exact scenario the sweep was fixed for, on the one path the fix did not
-reach. The docstring below argues that a caller who has just watched a job
-finish knows something no heartbeat can tell us, and that is true of the JOB.
-It was never true of the MACHINE.
+NOTHING about liveness by design, so a page load observing job A finishing
+destroyed the machine rented for A **while it was mid-task on job B** in the
+same pool -- the exact scenario the sweep was fixed for, on the one path the
+fix did not reach.
+
+That sentence has twice carried the word "nothing" in the wrong place and once
+lost it altogether, which matters more here than it would anywhere else: read
+without it, this paragraph asserts that ``release_capacity`` screens for
+liveness, and a reader who believes that will add the next teardown path
+without a guard for the same reason.
+
+**This was NOT "the last known way an armed teardown could destroy a working
+machine", and that claim is retired rather than moved.** It was false when
+written -- ``reconcile.orphaned_leases`` revoked the credential of a lease
+holding a live attempt, which kills the task as surely as a destroy and did it
+in LOG-ONLY mode, outside the arming flag entirely -- and every previous
+version of this line was false in the same way, about a path nobody had looked
+at yet. Five rounds of this feature have each ended by naming the last one. The
+honest statement is the invariant instead: anything that can destroy a machine,
+or revoke the token one is working under, reads
+``reconcile.WORK_IN_FLIGHT_SQL``, and the way to know is to grep for its
+readers rather than to trust a sentence.
+
+The docstring below argues that a caller who has just watched a job finish
+knows something no heartbeat can tell us, and that is true of the JOB. It was
+never true of the MACHINE.
 
 ``rentals_for_jobs`` now carries the same ``public.attempts`` test, and carries
 it as literally the same text: ``reconcile.WORK_IN_FLIGHT_SQL``, spliced into

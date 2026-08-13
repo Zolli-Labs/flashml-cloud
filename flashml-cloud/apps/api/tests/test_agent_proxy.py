@@ -41,6 +41,7 @@ from psycopg.rows import dict_row
 from flashml_cloud_api import app as appmod
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
+from flashml_cloud_api import sandbox_identity
 from flashml_cloud_api.app import (
     AGENT_RETRY_DELAYS,
     DELEGATION_HEADER,
@@ -1078,6 +1079,140 @@ def test_owner_can_revoke_and_the_token_dies_at_once(client, db):
     assert r.status_code == 200
     assert client.post("/v1alpha1/leases/claim", content=b"{}",
                        headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+# -- ...and the one machine kind whose revoke is not the owner's alone -------
+#
+# Revoking a laptop mid-task costs its owner their own work on hardware nobody
+# is paying for. Revoking a RENTAL mid-task costs a customer their task AND
+# destroys the machine: `capacity/reconcile.py`'s `REVOKED_CREDENTIAL` branch
+# is deliberately unguarded, on the argument that a revoked token cannot work,
+# and that argument is only as true as this route. A `leased` machine shows up
+# in the console fleet like any other, so this was one click.
+
+
+def _rented(db, owner_id: str, node_id: str):
+    """A machine minted the way a RENTAL is, through the real function.
+
+    Not a hand-set `lifecycle` column: `provision_rented_machine` is the sole
+    writer of `leased`, and a test that writes it itself would prove only that
+    the guard matches what the test typed.
+    """
+    pool_id = str(
+        dbmod.create_pool(db, name=f"rented-{node_id}"[:60], owner_id=owner_id)["id"]
+    )
+    return sandbox_identity.provision_rented_machine(
+        db, owner_id=owner_id, pool_id=pool_id, node_id=node_id,
+        label="a rented host", platform="linux",
+    )
+
+
+def _holding_a_lease(db, machine_id: str, *, seconds_left: float = 600.0):
+    """One unresolved attempt whose lease deadline is still in the future —
+    the ledger's record of a task running right now."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.attempts
+                (lease_id, machine_id, job_id, task_id, claimed_at,
+                 lease_deadline)
+            values (%s, %s, 'job-mid-task', 't1', now(),
+                    now() + make_interval(secs => %s))
+            """,
+            (f"lease-{uuid.uuid4().hex[:12]}", str(machine_id), float(seconds_left)),
+        )
+
+
+def test_revoking_a_rented_machine_mid_task_is_refused(client, db):
+    """**The one-click kill.** 409, the token survives, and the machine goes
+    on claiming leases — which is the property that actually matters, since
+    the token dying is how the task dies."""
+    owner = _new_user(db)
+    cred = _rented(db, owner, _node_id("rented-mid-task"))
+    _holding_a_lease(db, cred.machine_id)
+
+    r = client.post(f"/v1alpha1/machines/{cred.machine_id}/revoke",
+                    headers={"Authorization": f"Bearer {_browser_jwt(owner)}"})
+    assert r.status_code == 409
+    assert "force" in r.json()["detail"]
+
+    assert client.post("/v1alpha1/leases/claim", content=b"{}",
+                       headers={"Authorization": f"Bearer {cred.raw_token}"}
+                       ).status_code == 200
+
+
+def test_a_rented_machine_between_tasks_is_revoked_as_before(client, db):
+    """The guard is about WORK, not about the lifecycle. A rental holding no
+    live lease revokes exactly as it did — otherwise the refusal would be a
+    machine kind an owner can never take back."""
+    owner = _new_user(db)
+    cred = _rented(db, owner, _node_id("rented-idle"))
+
+    r = client.post(f"/v1alpha1/machines/{cred.machine_id}/revoke",
+                    headers={"Authorization": f"Bearer {_browser_jwt(owner)}"})
+    assert r.status_code == 200
+    assert client.post("/v1alpha1/leases/claim", content=b"{}",
+                       headers={"Authorization": f"Bearer {cred.raw_token}"}
+                       ).status_code == 401
+
+
+def test_forcing_the_revoke_of_a_rented_machine_mid_task_is_allowed(client, db):
+    """The escape hatch, and why it is a typed flag rather than a refusal.
+
+    An acquisition that died before recording its `provider_handle` leaves a
+    machine this control plane cannot destroy at any venue, and revoking is
+    then the owner's only lever. Refusing outright would leave them none; the
+    flag is what makes it a decision instead of a click.
+    """
+    owner = _new_user(db)
+    cred = _rented(db, owner, _node_id("rented-forced"))
+    _holding_a_lease(db, cred.machine_id)
+
+    r = client.post(f"/v1alpha1/machines/{cred.machine_id}/revoke?force=true",
+                    headers={"Authorization": f"Bearer {_browser_jwt(owner)}"})
+    assert r.status_code == 200
+    assert client.post("/v1alpha1/leases/claim", content=b"{}",
+                       headers={"Authorization": f"Bearer {cred.raw_token}"}
+                       ).status_code == 401
+
+
+def test_a_laptop_mid_task_is_still_its_owners_to_revoke(client, db):
+    """The guard must not spread to the machines it was not written for. A
+    donated laptop running a task is its owner's, on hardware nobody is
+    billing us for, and this route has always been unconditional for it."""
+    owner = _new_user(db)
+    machine_id, token = _enrol(db, owner, _node_id("laptop-mid-task"))
+    _holding_a_lease(db, machine_id)
+
+    r = client.post(f"/v1alpha1/machines/{machine_id}/revoke",
+                    headers={"Authorization": f"Bearer {_browser_jwt(owner)}"})
+    assert r.status_code == 200
+    assert client.post("/v1alpha1/leases/claim", content=b"{}",
+                       headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+def test_the_mid_task_refusal_is_not_an_oracle_for_other_peoples_machines(
+    client, db
+):
+    """The 404 fold is older than this guard and outranks it. Alice asking
+    about Bob's busy rental must learn nothing — same status, same body, as
+    for an id that does not exist — and Bob's machine must go on working."""
+    alice = _new_user(db)
+    bob = _new_user(db)
+    cred = _rented(db, bob, _node_id("rented-bobs"))
+    _holding_a_lease(db, cred.machine_id)
+
+    r = client.post(f"/v1alpha1/machines/{cred.machine_id}/revoke",
+                    headers={"Authorization": f"Bearer {_browser_jwt(alice)}"})
+    assert r.status_code == 404
+    assert r.json() == client.post(
+        f"/v1alpha1/machines/{uuid.uuid4()}/revoke",
+        headers={"Authorization": f"Bearer {_browser_jwt(alice)}"},
+    ).json()
+
+    assert client.post("/v1alpha1/leases/claim", content=b"{}",
+                       headers={"Authorization": f"Bearer {cred.raw_token}"}
+                       ).status_code == 200
 
 
 def test_me_upserts_the_profile_on_first_sight(client, db):

@@ -74,10 +74,19 @@ things these windows say nobody is using. The old name for this,
 from acquisition, which is exactly the misreading that turns a sweep into a
 lifetime cap.
 
-None of this constrains the settle path: :func:`release_capacity` called
-directly with a ``rented_id`` destroys immediately and asks nothing about
-heartbeats, because a caller who has just watched a job finish knows
+None of these four WINDOWS constrains the settle path: :func:`release_capacity`
+called directly with a ``rented_id`` destroys immediately and asks nothing
+about heartbeats, because a caller who has just watched a job finish knows
 something the machine's liveness cannot tell us.
+
+**That is a claim about heartbeats and ages, and it is not a licence.** This
+paragraph read "none of this constrains the settle path" while the settle path
+was destroying machines mid-task, and the correction sat seventy lines further
+down where a reader who had already taken the general permission would never
+reach it. What the settle path DOES have to ask -- what every query in this
+system that can destroy a machine has to ask -- is :data:`WORK_IN_FLIGHT_SQL`,
+and ``settle.rentals_for_jobs`` carries it. Knowing the JOB is over says
+nothing about what the MACHINE is running, which is argued in full below.
 
 WHY LIVENESS ALONE IS A FAILURE BACKSTOP AND NOT A COST ONE
 ------------------------------------------------------------
@@ -174,6 +183,19 @@ worked on; ``ABANDONED`` selects rows with no machine bound, which can hold no
 attempts to be in flight. Guarding either would be a no-op at best and, for the
 revoked branch, would re-open the hole its own comment describes: pushing a row
 we are mid-way through releasing back out of the sweep.
+
+**``REVOKED_CREDENTIAL`` is the branch with no allowance at all, so its premise
+is load-bearing outside this file.** "A revoked token cannot work" is a claim
+about what revocation *implies*, and it holds only while nothing revokes a
+machine that IS working — at which point this branch destroys the hardware
+instantly, with no window to notice in. Two things could revoke one: this
+module's own orphan sweep, now guarded, and
+``POST /v1alpha1/machines/{id}/revoke``, which had no lifecycle filter and no
+in-flight test and is a button in the console fleet. It now refuses a ``leased``
+machine holding a live lease unless the caller passes ``force``
+(:func:`leased_machine_has_work_in_flight`). Anything else that learns to revoke
+a machine has to answer the same question first, or this branch becomes a
+one-click destroy again.
 
 **A null deadline is bounded, not eternal**, and that is a correction rather
 than a softening. "We never learned when this lease ends" must not read as "it
@@ -316,11 +338,34 @@ reach a lease that is ALREADY orphaned, and it does not even close the window
 it aims at — the row it repairs stays ``REQUESTED`` with no handle for ever,
 and the no-handle branch deliberately refuses to revoke that row's credential.
 
-Its one real hazard is the opposite mistake: revoking the token of an
-acquisition that is still in flight, which would kill a machine mid-boot. So
-the query is aged from ``machines.created_at`` by ``boot_grace_s`` — the same
-figure, and the same hazard, as the NEVER_SEEN branch above: how long a rented
-host may take to boot, pull a multi-gigabyte image and enrol.
+Its hazard is the opposite mistake, and it has TWO shapes, not the one this
+paragraph used to name.
+
+*Mid-boot.* Revoking the token of an acquisition that is still in flight kills
+a machine we have already paid to start. So the query is aged from
+``machines.created_at`` by ``boot_grace_s`` — the same figure, and the same
+hazard, as the NEVER_SEEN branch above: how long a rented host may take to
+boot, pull a multi-gigabyte image and enrol.
+
+*Mid-TASK*, which the age guard does nothing about and which shipped. A lease
+whose rental row never recorded it can still boot, enrol, claim a lease and
+work; ``boot_grace_s`` then makes that machine *more* selectable rather than
+less. A reviewer built exactly that — minted lease, aged past the grace,
+holding an unresolved attempt with ten minutes left on its deadline — and the
+LOG-ONLY sweep revoked its credential and unbound it from the pool, which is a
+customer's task destroyed on the shipped default. So the revoke is guarded on
+``work_in_flight``, the same expression every other destroying query reads.
+
+**Guarding it costs nothing an operator wanted.** The revoke stops no money
+here: an orphan by definition has no ``rented_capacity`` row naming it, and
+``machine_id`` and ``provider_handle`` are only ever written together, so
+there is no handle, nothing can be said to the venue, and the pod bills on
+whether or not we kill the token. A working orphan is therefore not a leaked
+credential to clean up — it is an **unbilled machine an operator must
+reconcile at the venue console**, and the only useful act is to say so loudly.
+:func:`reconcile_rented` logs it at ERROR with the ``node_id`` and leaves it
+alone; when the lease ends, the guard expires on its own and the next pass
+revokes it.
 
 **That half runs in log-only mode as well**, and it is the one thing here that
 does. ``dry_run`` exists because destroying a machine is irreversible and can
@@ -329,7 +374,15 @@ destroys nothing at any venue, touches only our own row and our own token, and
 is the entire mechanism keeping a lease from outliving the hardware. Leaving
 it behind the gate meant the shipped default — log only — disabled the only
 thing that ever ends a lease, on the exact deployment least likely to be
-watched. See :func:`reconcile_rented` for the line this draws.
+watched.
+
+**What being outside the gate does NOT license is revoking a token a machine
+is working under**, and that distinction is the whole of the correction above:
+"the rental is over" is a property of the finished-rental query and was never a
+property of the orphan one, which selects machines *no rental row describes at
+all*. Outside the gate means "no report to read first", not "safe by
+construction" — the second is true only where the row itself is evidence the
+work has ended. See :func:`reconcile_rented` for the line this draws.
 
 WHY A MISSING HANDLE IS THE DANGEROUS CASE, NOT THE EASY ONE
 ------------------------------------------------------------
@@ -386,6 +439,7 @@ __all__ = [
     "TERMINAL_JOB_STATES",
     "WORK_IN_FLIGHT_SQL",
     "finished_rentals_with_live_credentials",
+    "leased_machine_has_work_in_flight",
     "orphaned_leases",
     "reconcile_rented",
     "release_capacity",
@@ -410,15 +464,23 @@ _DETAIL_MAX = 2000
 #
 # There was a `SWEEPABLE = ("REQUESTED", "ACTIVE")` here, and it was deleted.
 # It named the invariant and changed nothing. Every site that depends on the
-# set carries its own SQL literal -- seven of them:
+# set carries its own SQL literal -- EIGHT of them:
 #
 #   * `unreleased_rows`, `_mark_released` and `orphaned_leases`, here;
 #   * `acquire._close_failed`, and `acquire._keep_sweepable` twice (state
 #     and `released_at`);
+#   * `settle.rentals_for_jobs`, a module away;
 #   * the partial index `rented_capacity_unreleased_idx` in migration 0022.
 #
+# This inventory said "seven" and listed seven while omitting the settle hook,
+# which is not a bookkeeping slip: `settle.rentals_for_jobs` is one of the TWO
+# queries in this system that can destroy a machine, and a reader counting the
+# sites that decide what may be torn down would have missed the more dangerous
+# half. It is the same omission that let that query ship without
+# `WORK_IN_FLIGHT_SQL`.
+#
 # `finished_rentals_with_live_credentials` then spells the COMPLEMENT,
-# ('RELEASED', 'FAILED'), which has to keep agreeing with all seven.
+# ('RELEASED', 'FAILED'), which has to keep agreeing with all eight.
 # `orphaned_leases` spells the set itself, negated -- a machine no sweepable
 # rental names -- so it is the site that would silently start revoking live
 # rentals if the set here ever grew a state and it was not updated.
@@ -432,7 +494,7 @@ _DETAIL_MAX = 2000
 # anything but a static fragment -- and it still could not reach the index,
 # in another language in another file, or the CHECK constraint beside it. So
 # the literals stay inline, this comment is what names the invariant, and
-# changing the set means changing all six sites and the complement together.
+# changing the set means changing all eight sites and the complement together.
 # The test that tells you if you missed one:
 # test_unreleased_rows_selects_only_what_is_still_billing_and_settled.
 
@@ -617,6 +679,67 @@ def work_in_flight_params() -> dict[str, float]:
     }
 
 
+def leased_machine_has_work_in_flight(
+    db: psycopg.Connection, *, machine_id: str, owner_id: str
+) -> bool:
+    """Is this owner's machine a LEASE that is holding a live lease right now?
+
+    The fourth reader of :data:`WORK_IN_FLIGHT_SQL`, and the first that is not
+    a sweep. ``POST /v1alpha1/machines/{id}/revoke`` had no lifecycle filter
+    and no in-flight test at all: a ``leased`` machine appears in the console
+    fleet like any other, so one click killed a working rental's token — and
+    the sweep's ``REVOKED_CREDENTIAL`` branch, which is deliberately unguarded
+    and correctly so, then destroyed the hardware with no allowance whatever.
+
+    **That branch's whole safety argument is "a revoked token cannot work",**
+    which is a statement about what revocation implies and therefore rests
+    entirely on nothing revoking a machine that IS working. This function is
+    what makes that true, so it belongs beside the constant that the branch's
+    siblings read rather than in the route — a fifth hand-written copy of this
+    predicate is the failure this module has now had three times.
+
+    ``leased`` is part of the question, not a detail. A laptop or a sandbox
+    worker mid-task is its owner's to revoke whenever they like: the cost is a
+    lost task on a machine we are not paying for, and the owner is the person
+    deciding. A rental is different in the one way that matters — revoking it
+    is what makes the sweep destroy the hardware.
+
+    **Owner-scoped so the route's 404 fold survives.** Another user's machine
+    answers ``False`` here and then fails the owner-scoped revoke, which is the
+    same "unknown machine" a stranger gets today. A predicate that answered
+    truthfully about a machine the caller does not own would turn this route
+    into an oracle for which machine ids are real and which are busy.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            # The CTE gives the spliced fragment the `rc.machine_id` it is
+            # written against, carrying the machine's own primary key -- see
+            # `orphaned_leases` for why a null or absent alias there would be a
+            # silently false guard rather than an error.
+            f"""
+            with lease as (
+              select m.id as machine_id
+                from public.machines m
+               where m.id = %(machine_id)s
+                 and m.owner_id = %(owner_id)s
+                 and m.lifecycle = %(leased)s
+                 and m.status <> 'revoked'
+            )
+            select exists (
+                     select 1 from lease rc where {WORK_IN_FLIGHT_SQL}
+                   ) as working
+            """,
+            {
+                "machine_id": str(machine_id),
+                "owner_id": str(owner_id),
+                "leased": sandbox_identity.LEASED_LIFECYCLE,
+                **work_in_flight_params(),
+            },
+        )
+        row = cur.fetchone()
+    return bool(row and row["working"])
+
+
 #: Written on a row the sweep could not act on because it names no machine.
 NO_HANDLE = "RECONCILE_NO_HANDLE"
 #: Written on a row whose machine the venue would not confirm destroying.
@@ -640,12 +763,20 @@ def unreleased_rows(
     The ``case`` is the whole design and is written as a case rather than a
     chain of ``or``s so that the allowances cannot silently overlap: each row
     is judged by exactly one of them, and which one is a fact about the
-    machine and its work, not about the row's age. **A machine that has
+    machine and its work, not about the row's age. A machine that has
     heartbeated within ``quiet_after_s`` matches no LIVENESS branch here at
-    all** — that is the clause standing between this sweep and a running
-    training job, and the two branches that can select such a machine anyway
+    all, and the two branches that can select such a machine anyway
     (``JOB_FINISHED`` and ``IDLE``) do it on evidence that the work is over,
     never on how long the rental has existed.
+
+    **The clause standing between this sweep and a running training job is
+    ``work_in_flight``, not the heartbeat one.** This docstring named the
+    heartbeat, and that was true only while ``QUIET`` and ``NEVER_SEEN`` were
+    the branches to fear: ``machines.last_seen_at`` is a best-effort display
+    write, it went a whole release meaning "not currently working" rather than
+    "alive", and both cost branches can select a heartbeating machine by
+    design. What no branch may do is select a machine holding a lease that
+    could still be live — see below.
 
     **``work_in_flight`` is computed once in the ``rental`` CTE and read by
     four of the six branches** — both cost branches and both liveness ones. A
@@ -1030,7 +1161,17 @@ def orphaned_leases(
     then a complete backstop rather than one that depends on that join being
     right, and :func:`reconcile_rented` revokes each machine once per pass.
 
-    ``boot_grace_s`` IS THE SAFETY PROPERTY, not a tuning knob. Measured from
+    **``work_in_flight`` is returned, not filtered on, and the revoke is what
+    is guarded** (:func:`reconcile_rented`). A selected row is *reported*
+    either way, because the two outcomes are different operator problems and
+    only one of them this process can solve: an idle orphan is a token to
+    revoke, a working one is an unbilled machine to reconcile at the venue
+    console. The module docstring argues why revoking the second stops no
+    money and kills a task; ``boot_grace_s``, below, is the OTHER half of the
+    same hazard and does nothing about this one.
+
+    ``boot_grace_s`` IS THE SAFETY PROPERTY for the mid-BOOT half, not a tuning
+    knob, and not the whole of the safety property. Measured from
     ``machines.created_at`` — the mint's own commit, which is exactly when the
     window opens — because an acquisition in flight looks identical to an
     abandoned one from here: both are a leased machine with no row naming it.
@@ -1051,23 +1192,43 @@ def orphaned_leases(
     """
     with db.cursor() as cur:
         cur.execute(
-            """
-            select m.id as machine_id, m.owner_id, m.node_id, m.created_at
-              from public.machines m
-             where m.lifecycle = %(leased)s
-               and m.created_at < now() - make_interval(secs => %(boot)s)
-               and (m.status <> 'revoked'
-                    or exists (select 1 from public.machine_pools mp
-                                where mp.machine_id = m.id))
-               and not exists (
-                     select 1 from public.rented_capacity rc
-                      where rc.machine_id = m.id
-                        and rc.state in ('REQUESTED', 'ACTIVE'))
-             order by m.created_at
+            # An f-string for the one reason `unreleased_rows` has: the shared
+            # `WORK_IN_FLIGHT_SQL`. Nothing else is interpolated.
+            #
+            # THE CTE EXISTS TO GIVE THAT FRAGMENT AN `rc` TO READ. It is
+            # written against `rc.machine_id` because every other reader
+            # selects from `public.rented_capacity`, and a rental with no
+            # machine bound matches no attempt row -- `false`, which is exactly
+            # what keeps ABANDONED rows sweepable. Spliced somewhere
+            # `rc.machine_id` is null or absent, that same `false` reads as
+            # "nothing in flight" and the guard silently protects nobody. So
+            # the machine-keyed row set is aliased `rc` and carries the
+            # machine's own PRIMARY KEY as `machine_id`, which is never null;
+            # the rental subquery below is aliased `live` rather than `rc` so
+            # it cannot shadow it.
+            f"""
+            with lease as (
+              select m.id as machine_id, m.owner_id, m.node_id, m.created_at
+                from public.machines m
+               where m.lifecycle = %(leased)s
+                 and m.created_at < now() - make_interval(secs => %(boot)s)
+                 and (m.status <> 'revoked'
+                      or exists (select 1 from public.machine_pools mp
+                                  where mp.machine_id = m.id))
+                 and not exists (
+                       select 1 from public.rented_capacity live
+                        where live.machine_id = m.id
+                          and live.state in ('REQUESTED', 'ACTIVE'))
+            )
+            select rc.machine_id, rc.owner_id, rc.node_id, rc.created_at,
+                   {WORK_IN_FLIGHT_SQL} as work_in_flight
+              from lease rc
+             order by rc.created_at
             """,
             {
                 "leased": sandbox_identity.LEASED_LIFECYCLE,
                 "boot": float(boot_grace_s),
+                **work_in_flight_params(),
             },
         )
         return [dict(r) for r in cur.fetchall()]
@@ -1488,26 +1649,39 @@ async def reconcile_rented(
     running one is a decision to keep paying while the report is read.
 
     **THE CREDENTIAL SWEEP RUNS EITHER WAY**, and it is the one exception.
-    Revoking the credential of a rental that is already RELEASED or FAILED
-    destroys nothing at any venue: it touches our own row and our own token,
-    both of which describe hardware we have already given up. There is no
-    irreversible act to hold back and no report to read first. Meanwhile it is
-    the ONLY thing in this system that ends a lease -- since D6 removed the
-    isolation assertion that used to make a leftover binding fail loudly, a
-    stale lease is silent -- so leaving it behind this gate meant the shipped
-    default disabled the mechanism entirely on the deployment least likely to
-    be watched. The gate is about destroying machines; it was never about
-    keeping dead identities alive.
+    There is no irreversible act to hold back and no report to read first, and
+    meanwhile the revoke is the ONLY thing in this system that ends a lease --
+    since D6 removed the isolation assertion that used to make a leftover
+    binding fail loudly, a stale lease is silent -- so leaving it behind this
+    gate meant the shipped default disabled the mechanism entirely on the
+    deployment least likely to be watched. The gate is about destroying
+    machines; it was never about keeping dead identities alive.
 
-    That sweep is TWO queries. :func:`finished_rentals_with_live_credentials`
-    is keyed on the rental, and :func:`orphaned_leases` on the machine, because
-    a lease whose rental row never recorded it is invisible to anything keyed
-    on the rental -- and a log-only deployment is exactly where a crashed
-    acquisition is likeliest to go unnoticed, so the second belongs on this
-    side of the gate for the same reason as the first. ``boot_grace_s`` reaches
-    it: an acquisition still in flight is indistinguishable from a dead one
-    here, so the orphan query will not touch a machine younger than the time a
-    rented host is allowed to spend booting.
+    That sweep is TWO queries, and **they do not have the same safety
+    argument.** This docstring asserted one property for both, and the half it
+    was false for destroyed a customer's task.
+
+    * :func:`finished_rentals_with_live_credentials` is keyed on the RENTAL and
+      selects only ``RELEASED``/``FAILED`` rows. Revoking there destroys
+      nothing at any venue: it touches our own row and our own token, both of
+      which describe hardware we have already given up. The ROW is the
+      evidence, which is why this one needs no further test.
+    * :func:`orphaned_leases` is keyed on the MACHINE, because a lease whose
+      rental row never recorded it is invisible to anything keyed on the
+      rental -- and a log-only deployment is exactly where a crashed
+      acquisition is likeliest to go unnoticed, so it belongs on this side of
+      the gate too. But there is no row here saying the work is over; there is
+      no row at all. Such a machine can be booting (``boot_grace_s`` covers
+      that) or **mid-task** (nothing covered that, and the log-only sweep
+      revoked it), so the revoke is guarded on ``work_in_flight`` and a
+      selected orphan holding a live lease is logged at ERROR and skipped.
+
+    Skipping it loses nothing: an orphan names no ``provider_handle``, so the
+    revoke could never have stopped its money in the first place -- it is an
+    unbilled machine for an operator to reconcile at the venue console, and
+    the ERROR line carries the ``node_id`` that correlates it back to an
+    acquisition. The guard expires with the lease, so the credential is
+    revoked by a later pass with no observer.
 
     The parameter defaults to ``False`` rather than ``True`` because this
     function's contract is "stop the money"; the DEPLOYMENT decides whether it
@@ -1567,9 +1741,34 @@ async def reconcile_rented(
     # logging a second, meaningless "already revoked".
     try:
         seen: set[str] = set()
-        orphans = await asyncio.to_thread(
+        found = await asyncio.to_thread(
             orphaned_leases, db, boot_grace_s=boot_grace_s
         )
+        # THE ORPHAN REVOKE IS GUARDED AND THE OTHER ONE IS NOT, and the two
+        # halves of this split are the fix for a machine-killer that shipped on
+        # the log-only default. A terminal rental row is evidence the work is
+        # over; an orphan has no row at all, so nothing here says the machine
+        # is not mid-task. See both docstrings.
+        working = [r for r in found if r.get("work_in_flight")]
+        orphans = [r for r in found if not r.get("work_in_flight")]
+        if working:
+            # ERROR, not warning, and it is the only output there is: this
+            # process cannot stop this money. An orphan names no
+            # `provider_handle` -- `machine_id` and `provider_handle` are only
+            # ever written together -- so there is nothing to tell a venue,
+            # revoking would have stopped no billing at all, and its whole
+            # effect would have been to kill the task the machine is running.
+            log.error(
+                "capacity reconcile: %d leased machine(s) that no live rental "
+                "names are HOLDING A LIVE LEASE -- NOT revoked, and this "
+                "process cannot stop their money: an orphan names no "
+                "provider_handle, so nothing here can address the venue and "
+                "the machine bills on. Revoking would only have destroyed the "
+                "running task. RECONCILE THESE AT THE VENUE CONSOLE. node_id "
+                "embeds the rental id (rented-<id[:12]>): %s",
+                len(working),
+                [str(r["node_id"]) for r in working],
+            )
         if orphans:
             # Worth a line of its own: each of these is a credential that
             # outlived the process that minted it, which means an acquisition

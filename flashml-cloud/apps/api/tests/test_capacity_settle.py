@@ -467,8 +467,16 @@ def test_a_running_jobs_rental_is_never_touched(db, an_owner, a_pool, venue):
 def test_a_finished_job_never_settles_a_machine_working_on_another(
     db, an_owner, a_pool, venue
 ):
-    """**The reproduction. The last known way an armed teardown could destroy
-    a machine that is doing a customer's work.**
+    """**The reproduction: an armed teardown destroying a machine that is
+    doing a customer's work.**
+
+    It called itself "the last known way" until 2026-08-12, when
+    ``reconcile.orphaned_leases`` turned out to be another — and one that
+    needed no arming at all, since the credential half runs in log-only
+    deployments. That phrase is retired here and in ``settle.py``: every round
+    of this feature has ended by naming the last hole, and the invariant is
+    the thing to check instead. Grep the readers of
+    ``reconcile.WORK_IN_FLIGHT_SQL``.
 
     Job A is over. Job B is mid-task on the same rented machine, in the same
     pool, with ten minutes left on its lease. ``rentals_for_jobs`` selected on
