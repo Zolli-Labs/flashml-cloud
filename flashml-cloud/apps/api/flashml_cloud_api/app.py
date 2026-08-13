@@ -1644,6 +1644,30 @@ PUBLIC_ID_SUFFIX_CHARS = 12
 DEFAULT_PUBLIC_RATE_LIMIT = 60
 DEFAULT_PUBLIC_RATE_WINDOW_S = 60.0
 
+#: ``GET /v1alpha1/public/prices`` is curated, scraped, vendor-catalogue
+#: data — identical for every visitor, nothing keyed on who is asking — so
+#: ONE cached response can serve everyone who hits the landing page inside
+#: this window. THIS cache, not a rate limiter, is what stops a route with
+#: no authentication check from being a Postgres round trip per pageview;
+#: see the route's own docstring for why that split is deliberate.
+PUBLIC_PRICES_CACHE_TTL_S = 60.0
+
+#: ``{"value": <payload or None>, "expires": <time.monotonic() deadline>}``.
+#: Module-level and process-wide on purpose — every ``create_cloud_app()``
+#: call shares it, the same way a real deployment's one process does. Tests
+#: that build more than one app in a run (``make_client()`` does, per test)
+#: must call :func:`reset_public_prices_cache` first or they will read back
+#: whatever an earlier test's request already cached.
+_public_prices_cache: dict[str, Any] = {"value": None, "expires": 0.0}
+
+
+def reset_public_prices_cache() -> None:
+    """Test-only hook. Production never calls this — the TTL alone is what
+    a real deployment relies on to expire a stale board."""
+    _public_prices_cache["value"] = None
+    _public_prices_cache["expires"] = 0.0
+
+
 #: How often the reconciler sweeps. The thing it is racing is money: an
 #: abandoned sandbox bills by the second, so this is minutes and not hours.
 #: Overridable with FLASHML_SANDBOX_RECONCILE_S; <= 0 runs the startup sweep
@@ -9030,6 +9054,51 @@ def create_cloud_app(
             "session": public_session_view(session),
             "events": [public_event_view(e) for e in events],
         }
+
+    # -- the landing price board: NO AUTHENTICATION, CACHED -----------------
+    #
+    # The marketing page is pre-auth, and this is the one route it calls: a
+    # curated slice of `prices.landing_rows` — scraped vendor catalogue
+    # quotes only, nothing this API knows about a signed-in account. See
+    # `public_prices`'s own docstring for the boundary and the cache.
+
+    @app.get("/v1alpha1/public/prices", tags=["public"])
+    async def public_prices(db: psycopg.Connection = Depends(db_conn)):
+        """The landing page's curated GPU price board. NO AUTHENTICATION.
+
+        Public on purpose: the marketing page is the one surface in this
+        product a visitor reaches before signing in, and every console
+        route redirects to sign-in the instant it is asked. What makes that
+        safe is what this route is BUILT NOT TO READ, not something it
+        filters out afterwards — `prices.landing_rows` touches only
+        `public.price_quotes`, the same append-only table of scraped vendor
+        prices the authenticated `GET /v1alpha1/prices` reads. No pool, no
+        wallet, no ZC ladder, no marketplace ask is fetched here at all.
+
+        THE CACHE IS THE DB-PROTECTION MEASURE, not a rate limiter — the
+        response is identical for every visitor, so a landing page under
+        real traffic costs at most one query per
+        `PUBLIC_PRICES_CACHE_TTL_S` seconds rather than one per pageview.
+        """
+        cached = _public_prices_cache["value"]
+        if (
+            cached is not None
+            and time.monotonic() < _public_prices_cache["expires"]
+        ):
+            return cached
+
+        now = datetime.now(timezone.utc)
+        payload = {
+            "generated_at": now.isoformat(timespec="seconds").replace(
+                "+00:00", "Z"
+            ),
+            "rows": pricesmod.landing_rows(db, now, pricesmod.LANDING_GPUS),
+        }
+        _public_prices_cache["value"] = payload
+        _public_prices_cache["expires"] = (
+            time.monotonic() + PUBLIC_PRICES_CACHE_TTL_S
+        )
+        return payload
 
     # -- agent-facing: machine token, forwarded with delegation ------------
     #
