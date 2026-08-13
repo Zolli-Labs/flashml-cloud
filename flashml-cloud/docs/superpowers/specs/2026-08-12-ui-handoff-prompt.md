@@ -73,8 +73,13 @@ npm test && npx tsc --noEmit && npm run lint && npm run build
 
 If you touch `app.py`: `cd flashml-cloud/apps/api && .venv/bin/python -m pytest -q`
 
-**Baselines to beat, never regress:** web **767 passed / 46 files** · api
-**2177 passed, 2 skipped, 3 deselected, 1 xfailed**.
+**Baselines to beat, never regress — measured 2026-08-12 21:53:** web **866
+passed / 52 files** · api **2633 passed, 2 skipped, 3 deselected, 1 xfailed**.
+
+**Measure these yourself before you rely on them, and stamp the time.** They
+previously read 767/46 and 2177 here — stale by ~100 web and ~450 api tests.
+Several sessions commit to this repo concurrently and the numbers move within
+the hour. A baseline you did not measure is a rumour.
 
 ## Environment
 

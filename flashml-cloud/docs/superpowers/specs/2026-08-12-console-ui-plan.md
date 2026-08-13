@@ -143,9 +143,17 @@ testable without rendering. `lib/job-routing.ts`, `lib/job-artifacts.ts` and
 
 **Verification gate for every change:** `npm test`, `npx tsc --noEmit`,
 `npm run lint`, `npm run build` (needs `flashml-cloud/.env.dev` sourced —
-`next.config.ts` hard-fails without `NEXT_PUBLIC_CLOUD_API`). Baselines to beat,
-not regress: **web 767 passed / 46 files**, **api 2177 passed, 2 skipped,
-3 deselected, 1 xfailed**.
+`next.config.ts` hard-fails without `NEXT_PUBLIC_CLOUD_API`).
+
+**Baselines to beat, not regress — measured 2026-08-12 21:53:** web **866
+passed / 52 files**; api **2633 passed, 2 skipped, 3 deselected, 1 xfailed**.
+
+> **Measure it yourself, and stamp when you measured.** This line previously read
+> 767/46 and 2177 — stale by ~100 web tests and ~450 api tests, because the
+> numbers were written once and then trusted. Both move several times a day
+> across concurrent sessions. A baseline you did not measure is a rumour, and
+> "do not regress the baseline" is worthless against a number that was never
+> right. Run the suite, write what it said, and date it.
 
 ## 6. §C — After the deadline
 
