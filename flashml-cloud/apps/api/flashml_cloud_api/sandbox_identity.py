@@ -21,7 +21,11 @@ Neither half of the sandbox's reasoning applies: being an eligible claimant
 alongside the user's other machines is the entire point of renting, and there
 is no session credential on the host to protect. It is a separate function
 with its own name rather than a flag on the first, so that no caller can skip
-the isolation assertion by passing the wrong argument. Everything else — the
+the isolation assertion by passing the wrong argument. What it does refuse is
+the one pool where a co-tenant is the hazard: a pool an evaluation session is
+still holding (:class:`PoolHasLiveSession`), because the session's own
+re-check runs at its mint and cannot see a machine that arrives afterwards.
+Everything else — the
 authorise-and-lock ordering, the ownership *and* membership requirement, and
 the mint-once-return-the-token-once discipline — is the same in both, and the
 duplication of those steps is the price of keeping the two decisions apart.
@@ -111,11 +115,13 @@ import psycopg
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api.auth import hash_machine_token, new_machine_token
 from flashml_cloud_api.enrolment import NodeAlreadyEnrolled
-from flashml_cloud_api.sandbox_sessions import DEFAULT_PROVIDER
+from flashml_cloud_api.sandbox_sessions import DEFAULT_PROVIDER, live_session_in_pool
 
 __all__ = [
     "EphemeralMachineCredential",
+    "MintedMachineCredential",
     "NodeAlreadyEnrolled",
+    "PoolHasLiveSession",
     "PoolNotFound",
     "PoolNotIsolated",
     "SandboxIdentityError",
@@ -150,6 +156,13 @@ SANDBOX_PLATFORM = DEFAULT_PROVIDER
 #: The lease is ENDED BY THE RENTAL, not by age: ``capacity/reconcile.py``
 #: revokes the credential on every path a rental ends, and
 #: ``finished_rentals_with_live_credentials`` retries that revoke for ever.
+#:
+#: This value is also the ONLY thing that can find a lease whose rental row
+#: never recorded it. ``rented_capacity.machine_id`` is written after this
+#: transaction commits, so a process that dies in between leaves a bound,
+#: unrevoked machine that every rental-keyed query walks past;
+#: ``reconcile.orphaned_leases`` selects on this column instead, for exactly
+#: that reason.
 LEASED_LIFECYCLE = "leased"
 
 #: How much of the raw token is kept for display. Matches what
@@ -184,21 +197,54 @@ class PoolNotIsolated(SandboxIdentityError):
     """
 
 
+class PoolHasLiveSession(SandboxIdentityError):
+    """A rental was aimed at a pool an evaluation session is still holding.
+
+    The mirror of :class:`PoolNotIsolated`, refused from the other side.
+    ``provision_rented_machine`` asserts nothing about the pool it mints into,
+    by design — but a pool that belongs to a session is the one pool where a
+    second claimant is exactly what the isolation rule forbids, and the
+    session's own re-check happens at ITS mint time, which is already over.
+    See :func:`provision_rented_machine`.
+    """
+
+
 @dataclass(frozen=True)
-class EphemeralMachineCredential:
-    """What one session's worker is handed. ``raw_token`` exists in this
-    process's memory and nowhere else — it is not in the database, it is not
-    recoverable, and re-reading it is not a feature that was omitted.
+class MintedMachineCredential:
+    """What a machine this control plane minted on its own authority is
+    handed. ``raw_token`` exists in this process's memory and nowhere else —
+    it is not in the database, it is not recoverable, and re-reading it is not
+    a feature that was omitted.
 
     ``repr=False`` on the token is not decoration. These objects end up in
     exception chains and debug logs, and a dataclass's generated ``__repr__``
     is the shortest path from "we never store the token" to a live credential
     sitting in a log aggregator.
+
+    **It used to be called ``EphemeralMachineCredential``, and that name is now
+    wrong in the one place it matters.** ``provision_rented_machine`` stamps
+    ``lifecycle = 'leased'`` precisely because the row must NOT be ephemeral —
+    ``expire_stale_ephemeral_machines`` would revoke a rented host that is
+    still pulling its image (:data:`LEASED_LIFECYCLE`). A type whose name says
+    "ephemeral" over a row that says "leased" is an invitation to add the
+    machine back into that sweep. The name says what is true of both paths
+    instead: this credential was minted here, and the ROW says how long it
+    lives.
     """
 
     machine_id: str
     node_id: str
     raw_token: str = field(repr=False)
+
+
+#: The old name, kept as an alias rather than replaced. It is the same class —
+#: ``isinstance`` and ``is`` both hold — so no caller, and no
+#: structurally-typed stand-in like ``sandbox_bootstrap``'s, has to change.
+#: The sandbox path still names it, and that path is deliberately untouched:
+#: the two functions are kept apart by having nothing in common but the
+#: machinery, and a rename that reached into one of them would be a diff in
+#: the function whose body is the security property.
+EphemeralMachineCredential = MintedMachineCredential
 
 
 def assert_pool_isolated(
@@ -332,7 +378,7 @@ def provision_rented_machine(
     node_id: str,
     label: str | None,
     platform: str | None = None,
-) -> EphemeralMachineCredential:
+) -> MintedMachineCredential:
     """Mint the identity of a GPU we rented into the submitter's own pool.
 
     The sibling of :func:`provision_sandbox_machine`, sharing its
@@ -358,6 +404,19 @@ def provision_rented_machine(
     :func:`assert_pool_isolated` is untouched and still means what it says;
     nothing here weakens it, and the sandbox path still calls it.
 
+    **What it does assert is the one pool where a co-tenant is the hazard.**
+    Asserting nothing about the pool is right for a workspace and wrong for an
+    isolation pool, and the difference is legible from the database: a pool an
+    evaluation session is still holding is refused outright
+    (:class:`PoolHasLiveSession`). Without it nothing refuses the mint at all —
+    the session's own ``assert_pool_isolated`` runs at ITS mint time, which is
+    already over by then, and the empty-pool gate a session opens with runs
+    before there is a session to find. The failure it leaves is a machine
+    sitting in an isolation pool as an eligible claimant for tasks running code
+    the submitter wrote, discovered at the session's *next* re-check if
+    anything re-checks at all. One query, inside the same lock as everything
+    else, so the answer cannot go stale between the read and the insert.
+
     **2. The identity is a lease, not a deed** (:data:`LEASED_LIFECYCLE`). A
     laptop's binding says whose machine this is, permanently. A rental's is
     true while we hold the hardware and false the moment we give it back, and
@@ -368,6 +427,15 @@ def provision_rented_machine(
     credential on every path a ``rented_capacity`` row ends, independently of
     the destroy, and retries for ever through
     ``finished_rentals_with_live_credentials``.
+
+    **3. The row is the only record of what was minted, and this function is
+    not what writes it.** ``rented_capacity.machine_id`` is written by the
+    caller *after* this transaction commits, so a process that dies in between
+    leaves a live, pool-bound, unrevoked lease that no rental row names. That
+    is why ``reconcile.orphaned_leases`` keys its query on
+    :data:`LEASED_LIFECYCLE` rather than on the rental: the machine row is the
+    only thing that always exists, because this transaction is what creates
+    it.
 
     **What is kept, because this path still needs all of it:**
 
@@ -408,6 +476,18 @@ def provision_rented_machine(
         if dbmod.lock_pool_for_owner(db, pool_id, owner_id) is None:
             raise PoolNotFound(pool_id)
 
+        # Inside the lock, so a session cannot open on this pool between the
+        # answer and the insert. Refusing costs one indexed read per rental
+        # and buys the one case where a co-tenant is what the isolation rule
+        # exists to forbid.
+        session = live_session_in_pool(db, pool_id)
+        if session is not None:
+            raise PoolHasLiveSession(
+                f"pool {pool_id} is held by evaluation session "
+                f"{session['id']} ({session['state']}); renting into it would "
+                "add a second eligible claimant for that session's tasks"
+            )
+
         try:
             machine_id = dbmod.insert_machine(
                 db,
@@ -427,7 +507,7 @@ def provision_rented_machine(
             db, machine_id, hash_machine_token(token), token[:TOKEN_PREFIX_LENGTH]
         )
 
-    return EphemeralMachineCredential(
+    return MintedMachineCredential(
         machine_id=str(machine_id), node_id=node_id, raw_token=token
     )
 

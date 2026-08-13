@@ -1105,6 +1105,13 @@ def test_the_isolation_assertion_cannot_be_switched_off_by_an_argument(db):
     claim. Two names cannot be confused by a keyword argument. If this ever
     fails because somebody added `assert_isolated=True` to the sandbox path,
     the question to answer first is what happens the day a caller passes False.
+
+    **Both signatures are asserted by list equality, and that is the whole
+    mechanism.** A `not in` test would have to guess the name the flag would be
+    given — and nobody would call it `assert_pool_isolated`; they would call it
+    `assert_isolated`, `isolated`, or `strict`, and the guess would pass while
+    the flag shipped. Equality catches every spelling on either path, which is
+    what makes this a test rather than a statement of intent.
     """
     import inspect
 
@@ -1112,10 +1119,159 @@ def test_the_isolation_assertion_cannot_be_switched_off_by_an_argument(db):
     assert sandbox == ["db", "owner_id", "pool_id", "node_id", "label"]
 
     rented = list(inspect.signature(si.provision_rented_machine).parameters)
-    assert "assert_pool_isolated" not in rented
+    assert rented == [
+        "db", "owner_id", "pool_id", "node_id", "label", "platform",
+    ]
     assert si.provision_rented_machine is not si.provision_sandbox_machine
     # Both are exported, so neither is the private half of the other.
     assert {"provision_sandbox_machine", "provision_rented_machine"} <= set(
         si.__all__
     )
     assert si.__all__ == sorted(si.__all__)
+
+
+def test_the_credential_type_does_not_contradict_the_row_it_creates(db):
+    """The type name and `machines.lifecycle` have to agree.
+
+    `provision_rented_machine` deliberately does NOT mint an ephemeral
+    machine — `expire_stale_ephemeral_machines` would revoke a rented host
+    still pulling its image — so a return type called
+    `EphemeralMachineCredential` said the opposite of the row it had just
+    written, which is how somebody later "fixes" the lifecycle to match the
+    type. The name is `MintedMachineCredential` now: true of both paths,
+    committing to neither lifetime, because the ROW is what states that.
+
+    The old name stays as an alias and this asserts it is the SAME class, not
+    a compatible copy — `sandbox_bootstrap` describes this shape structurally
+    and the sandbox path still constructs it under the old name.
+    """
+    owner = _user(db)
+    rental = _rent(db, owner, _pool(db, owner))
+    sandbox = _provision(db, owner, _pool(db, owner))
+
+    assert si.EphemeralMachineCredential is si.MintedMachineCredential
+    assert type(rental) is type(sandbox) is si.MintedMachineCredential
+    assert _machine_row(db, rental.machine_id)["lifecycle"] == "leased"
+    assert _machine_row(db, sandbox.machine_id)["lifecycle"] == "persistent"
+
+    # The token is still the one thing a repr cannot leak, on either path.
+    assert rental.raw_token not in repr(rental)
+
+
+# ---------------------------------------------------------------------------
+# Renting into a pool a session is still holding
+#
+# `provision_rented_machine` asserts nothing about the pool, and for a
+# workspace that is the point. An isolation pool is the exception: a second
+# machine there is precisely what `assert_pool_isolated` exists to forbid, and
+# the session's own re-check runs at ITS mint, which is already over.
+# ---------------------------------------------------------------------------
+
+
+def _session(db, owner_id: str, pool_id: str, machine_id: str | None = None):
+    return ss.create_session(
+        db,
+        owner_id=owner_id,
+        pool_id=pool_id,
+        training_job_id="job-train-1",
+        region="ap-southeast-1",
+        template="flashnode-base",
+        machine_id=machine_id,
+    )
+
+
+def test_a_pool_a_live_session_holds_is_refused_a_rental(db):
+    """The guard, and the refusal is total.
+
+    Raised inside the same transaction as everything else, so a pool that
+    fails it is left with no machine row, no binding and no credential — the
+    same shape `PoolNotIsolated` guarantees on the sandbox path.
+    """
+    owner = _user(db)
+    pool = _pool(db, owner)
+    sandbox = _provision(db, owner, pool)
+    session = _session(db, owner, pool, sandbox.machine_id)
+
+    with pytest.raises(si.PoolHasLiveSession) as refused:
+        _rent(db, owner, pool, node_id="rented-into-a-live-session")
+
+    assert str(session["id"]) in str(refused.value)
+    assert dbmod.machine_ids_bound_to_pool(db, pool) == [sandbox.machine_id]
+    with db.cursor() as cur:
+        cur.execute(
+            "select id from public.machines where node_id = %s",
+            ("rented-into-a-live-session",),
+        )
+        assert cur.fetchone() is None
+    # ...and the session's own invariant never had to catch it.
+    si.assert_pool_isolated(db, pool_id=pool, machine_id=sandbox.machine_id)
+
+
+def test_a_session_that_has_not_minted_yet_still_holds_its_pool(db):
+    """A REQUESTED session owns nothing at a provider and no machine at all,
+    and is exactly the window this guard is for: the empty-pool gate a session
+    opens with has already run, and its `assert_pool_isolated` has not."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    session = _session(db, owner, pool)
+    assert session["state"] == "REQUESTED"
+    assert session["machine_id"] is None
+
+    with pytest.raises(si.PoolHasLiveSession):
+        _rent(db, owner, pool)
+
+
+def test_a_settled_session_still_holds_its_pool_until_it_is_terminated(db):
+    """`TERMINAL_STATES` is `TERMINATED` alone, and this is why the guard uses
+    that set rather than `SETTLED_STATES`: a session whose run is over —
+    SUCCEEDED or FAILED — still owns a live sandbox until cleanup has been
+    observed, and a machine that can claim its tasks is a problem for exactly
+    that long. `unfinished_sessions` sweeps on the same set for the same
+    reason."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    session = _session(db, owner, pool)
+    assert ss.transition(db, session["id"], "REQUESTED", "FAILED")
+    assert "FAILED" in ss.SETTLED_STATES
+    assert "FAILED" not in ss.TERMINAL_STATES
+
+    with pytest.raises(si.PoolHasLiveSession):
+        _rent(db, owner, pool)
+
+
+def test_a_terminated_session_does_not_hold_its_pool_for_ever(db):
+    """Fail-closed must not mean fail-permanently. A pool whose session is
+    over is an ordinary pool again."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    session = _session(db, owner, pool)
+    assert ss.transition(db, session["id"], "REQUESTED", "TERMINATED")
+
+    cred = _rent(db, owner, pool)
+    assert dbmod.machine_ids_bound_to_pool(db, pool) == [cred.machine_id]
+
+
+def test_a_session_on_another_pool_refuses_nothing(db):
+    """The guard is scoped to the pool named by the session, not to the owner.
+    Somebody running an evaluation must still be able to rent into their own
+    workspace."""
+    owner = _user(db)
+    sandbox_pool = _pool(db, owner)
+    workspace = _pool(db, owner)
+    _session(db, owner, sandbox_pool)
+
+    cred = _rent(db, owner, workspace)
+    assert dbmod.machine_ids_bound_to_pool(db, workspace) == [cred.machine_id]
+
+
+def test_the_sandbox_path_is_not_governed_by_the_new_guard(db):
+    """`provision_sandbox_machine` is byte-identical and must stay that way:
+    a session mints its OWN machine into its own pool, so a guard that refused
+    a pool holding a live session would refuse every session its own worker.
+    What still protects that path is `assert_pool_isolated`, unchanged."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    _session(db, owner, pool)
+
+    cred = _provision(db, owner, pool)
+    si.assert_pool_isolated(db, pool_id=pool, machine_id=cred.machine_id)

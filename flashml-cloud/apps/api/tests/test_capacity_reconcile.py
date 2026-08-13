@@ -1204,6 +1204,219 @@ def test_a_bound_pool_alone_is_enough_to_come_back_for(
 
 
 # ---------------------------------------------------------------------------
+# ...and the half a rental row never recorded
+#
+# Everything above is keyed on `rented_capacity`. `provision_rented_machine`
+# COMMITS the machine, its binding and its token by itself, and
+# `rented_capacity.machine_id` is a later write — by `_move_to_active` on
+# success or `_record_evidence` on failure. Every exception in that window is
+# handled (`_abandon` catches BaseException); a process death is not, and what
+# it leaves is a leased, unrevoked, pool-bound machine no rental row names.
+#
+# These tests construct that state directly rather than trying to kill a
+# process: what matters is that the state is reachable by the sweep, not how
+# it came to exist.
+# ---------------------------------------------------------------------------
+
+
+def _orphan_lease(db, owner_id, pool_id, *, age_s=OLD, node_id=None):  # noqa: F811
+    """A lease exactly as a death between the mint and the row would leave it.
+
+    Minted through the REAL function — this must not be a hand-built machine
+    row, or it would prove only that the query matches what the test wrote.
+    Nothing then records it on a `rented_capacity` row, which is the whole
+    point: there is no row, or there is one that never learned the machine.
+    """
+    cred = sandbox_identity.provision_rented_machine(
+        db,
+        owner_id=str(owner_id),
+        pool_id=str(pool_id),
+        node_id=node_id or f"rented-{uuid.uuid4().hex[:12]}",
+        label="rented fake for job job-orphan",
+        platform="fake",
+    )
+    _age_machine(db, cred.machine_id, age_s)
+    return cred
+
+
+def _age_machine(db, machine_id, seconds):  # noqa: F811
+    """Push a machine's `created_at` back. The orphan query measures the
+    in-flight allowance from there, because that is when the mint committed."""
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set created_at = "
+            "now() - make_interval(secs => %s) where id = %s",
+            (float(seconds), str(machine_id)),
+        )
+    db.commit()
+
+
+def _orphan_ids(db, **kwargs):  # noqa: F811
+    """Machine-keyed, so these assertions name a machine rather than counting
+    rows: the query is global and the session Postgres is shared."""
+    return {
+        str(r["machine_id"])
+        for r in reconcile_mod.orphaned_leases(db, **kwargs)
+    }
+
+
+def _rentals_naming(db, machine_id):  # noqa: F811
+    with db.cursor() as cur:
+        cur.execute(
+            "select count(*) as n from public.rented_capacity"
+            " where machine_id = %s",
+            (str(machine_id),),
+        )
+        return cur.fetchone()["n"]
+
+
+@pytest.mark.asyncio
+async def test_a_lease_no_rental_row_names_is_reachable_and_ends(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The bug, and the whole of the fix.
+
+    Every rental-keyed query walks past this machine — the finished-rental
+    query inner-joins `rc.machine_id`, `unreleased_rows` has no row to select
+    at all, and `expire_stale_ephemeral_machines` excludes `leased` by design.
+    Before `orphaned_leases` this was a working machine token, bound to a live
+    workspace, that nothing in the system could ever find.
+    """
+    cred = _orphan_lease(db, an_owner, a_pool)
+
+    # Unreachable from everything keyed on the rental: there is no rental.
+    assert _rentals_naming(db, cred.machine_id) == 0
+    assert cred.machine_id not in {
+        str(r["machine_id"]) for r in finished_rentals_with_live_credentials(db)
+    }
+
+    # ...and found by the query keyed on the machine.
+    assert cred.machine_id in _orphan_ids(db)
+
+    await reconcile_rented(db, {"fake": _Venue()})
+    assert _machine_status(db, cred.machine_id) == "revoked"
+    assert dbmod.pool_ids_bound_to_machine(db, cred.machine_id) == []
+
+
+@pytest.mark.asyncio
+async def test_an_orphaned_lease_ends_in_a_log_only_deployment(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The deployment this has to work on is the one that ships.**
+
+    `dry_run` is the default in `app.py`, and revoking the credential of a
+    machine no rental names destroys nothing at any venue — it touches our own
+    token and our own binding. A fix that only ran armed would be absent from
+    exactly the deployment where a crashed acquisition is least likely to be
+    noticed. The provider registry is empty here on purpose: no venue is
+    configured, nothing could be destroyed even if it wanted to be.
+    """
+    cred = _orphan_lease(db, an_owner, a_pool)
+
+    await reconcile_rented(db, {}, dry_run=True)
+
+    assert _machine_status(db, cred.machine_id) == "revoked"
+    assert dbmod.pool_ids_bound_to_machine(db, cred.machine_id) == []
+
+
+@pytest.mark.asyncio
+async def test_an_acquisition_still_in_flight_keeps_its_credential(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The hazard the age guard exists for, and the reason it is the boot
+    grace.**
+
+    A live acquisition and a dead one are the same row here: a leased machine
+    with nothing naming it. `provider.acquire` returns only once the machine
+    is claiming leases, so between the mint and that return sits a boot, a
+    multi-gigabyte image pull and an enrolment — the exact interval
+    `DEFAULT_BOOT_GRACE_S` measures. Revoking inside it kills a machine we
+    have already paid to start.
+    """
+    fresh = _orphan_lease(db, an_owner, a_pool, age_s=YOUNG)
+
+    assert fresh.machine_id not in _orphan_ids(db)
+    await reconcile_rented(db, {"fake": _Venue()})
+    assert _machine_status(db, fresh.machine_id) != "revoked"
+    assert dbmod.pool_ids_bound_to_machine(db, fresh.machine_id) == [str(a_pool)]
+
+    # It is the AGE that is holding it, nothing else: the same machine, past
+    # the allowance, is an orphan.
+    _age_machine(db, fresh.machine_id, OLD)
+    assert fresh.machine_id in _orphan_ids(db)
+
+
+@pytest.mark.asyncio
+async def test_a_live_rental_is_never_an_orphan_however_old(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The other direction, and the one that would cost a customer's job.
+
+    A real acquisition, aged past every window: its machine is named by an
+    ACTIVE row, which is what "the lease is current" means here. Age is not
+    evidence of anything on its own — the whole module is written around that
+    — so the orphan query asks about the rental's state and only uses age to
+    decide when an *unnamed* machine has waited long enough.
+    """
+    venue = _Venue()
+    rid = await acquire_for_job(
+        db, venue, _Settings(), request=_request(an_owner, a_pool)
+    )
+    machine_id = str(_row(db, rid)["machine_id"])
+    _age_machine(db, machine_id, OLD)
+    _seen(db, machine_id, 5.0)  # heartbeating: not swept for money either
+
+    assert machine_id not in _orphan_ids(db)
+    await reconcile_rented(db, {"fake": venue})
+    assert _machine_status(db, machine_id) != "revoked"
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [machine_id]
+    assert _row(db, rid)["state"] == "ACTIVE"
+
+
+def test_a_crashed_revoke_of_an_orphan_is_still_come_back_for(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The same half-done state `test_a_bound_pool_alone_is_enough_to_come_back
+    _for` pins next door, on the path where no rental row exists to notice it.
+    `revoke_sandbox_machine` unbinds on every call, so a revoke that died
+    between the two writes leaves a revoked row still bound to a workspace —
+    and for an orphan there is nothing else that would ever unbind it."""
+    cred = _orphan_lease(db, an_owner, a_pool)
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set status = 'revoked' where id = %s",
+            (cred.machine_id,),
+        )
+    db.commit()
+
+    assert cred.machine_id in _orphan_ids(db)
+    assert sandbox_identity.revoke_sandbox_machine(
+        db, machine_id=cred.machine_id, owner_id=str(an_owner)
+    ) is False
+    assert dbmod.pool_ids_bound_to_machine(db, cred.machine_id) == []
+    # ...and once it is fully revoked and unbound there is nothing left to do.
+    assert cred.machine_id not in _orphan_ids(db)
+
+
+def test_only_leases_are_swept_by_the_machine_keyed_query(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """`lifecycle` is the membership test, and it has to be: a laptop, a
+    device-code rental session and an evaluation sandbox worker all sit in
+    pools with no `rented_capacity` row naming them, for ever, legitimately.
+    Only `provision_rented_machine` writes `leased`."""
+    laptop = _machine(db, an_owner, status="active", pool_id=a_pool)
+    _age_machine(db, laptop, OLD)
+    orphan = _orphan_lease(db, an_owner, a_pool)
+
+    orphans = _orphan_ids(db)
+    assert orphan.machine_id in orphans
+    assert laptop not in orphans
+    assert _lifecycle(db, laptop) == "persistent"
+    assert _lifecycle(db, orphan.machine_id) == "leased"
+
+
+# ---------------------------------------------------------------------------
 # the COST backstop: stopping a rental that WORKED
 #
 # Everything above this line stops a rental that broke. A rental that boots,

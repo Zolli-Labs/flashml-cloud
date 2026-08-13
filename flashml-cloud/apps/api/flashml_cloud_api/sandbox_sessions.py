@@ -1011,3 +1011,40 @@ def unfinished_sessions(db: psycopg.Connection) -> list[dict[str, Any]]:
             (sorted(TERMINAL_STATES),),
         ).fetchall()
     )
+
+
+def live_session_in_pool(
+    db: psycopg.Connection, pool_id: str
+) -> dict[str, Any] | None:
+    """The oldest session still holding this pool, or ``None``.
+
+    Asked by :func:`sandbox_identity.provision_rented_machine` before it mints
+    into a pool, and the reason it is asked *there* is that nothing else asks
+    it in time. An evaluation session's pool is isolated on purpose — exactly
+    one machine, so no other node is an eligible claimant for the code the
+    submitter wrote — and the session re-checks that with
+    ``assert_pool_isolated`` at its own mint. A rental arriving afterwards
+    breaks the invariant with nothing watching until the session's *next*
+    re-check, which may be after tasks have been placed.
+
+    :data:`TERMINAL_STATES`, the same set :func:`unfinished_sessions` sweeps
+    on, and for the same reason: it is ``TERMINATED`` alone, so a SUCCEEDED or
+    FAILED session still counts. Its sandbox is alive until cleanup has been
+    observed, and a machine that can claim its tasks is a problem for exactly
+    as long.
+
+    Unlike :func:`unfinished_sessions` this does NOT require an
+    ``external_sandbox_id``: a REQUESTED session that has not yet heard back
+    from the provider owns the pool just as much, and may be seconds away from
+    minting into it.
+    """
+    return db.execute(
+        f"""
+        select {_SESSION_SELECT} from public.sandbox_sessions
+         where pool_id = %s::uuid
+           and state <> all (%s::text[])
+         order by created_at, id
+         limit 1
+        """,
+        (str(pool_id), sorted(TERMINAL_STATES)),
+    ).fetchone()

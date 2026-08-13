@@ -101,6 +101,70 @@ def test_machine_status_is_constrained():
     assert re.search(r"status.*check.*pending.*active.*revoked", SQL, re.I | re.S)
 
 
+def test_machine_lifecycle_admits_leased_and_still_refuses_anything_else(db):
+    """0023 widened `machines.lifecycle` to accept `'leased'`, and nothing
+    asserted the widening directly — it was proved only by rentals inserting
+    successfully somewhere else, which is a test of `provision_rented_machine`
+    that happens to touch this constraint.
+
+    Both halves matter and they fail differently. If the migration had not
+    applied, every rental would be refused at mint time and the failure would
+    at least be loud. If the constraint had been dropped rather than widened —
+    `drop constraint if exists` runs first, and a typo in the `add` after it is
+    a legal file — nothing would refuse a lifecycle at all, and a value no
+    sweep in this schema selects would be writable: `expire_stale_ephemeral_
+    machines` reads `'ephemeral'`, `reconcile.orphaned_leases` reads
+    `'leased'`, and a machine filed as neither is a credential nothing ever
+    ends. That failure is silent, which is why this asserts the refusal too.
+
+    Against the real database rather than the SQL text, for the reason given
+    at the top of this file: only an insert proves the migration *applied*.
+    `test_machine_status_is_constrained` is the same invariant one column
+    over.
+    """
+    owner = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into auth.users (id, email) values (%s::uuid, %s)",
+            (owner, f"{owner}@example.test"),
+        )
+        cur.execute("insert into public.profiles (id) values (%s::uuid)", (owner,))
+
+    def _insert(lifecycle: str) -> None:
+        db.execute(
+            "insert into public.machines (owner_id, node_id, lifecycle)"
+            " values (%s::uuid, %s, %s)",
+            (owner, f"node-{lifecycle}-{owner[:8]}", lifecycle),
+        )
+
+    try:
+        # The three the schema knows, all still accepted: 0023 REPLACED the
+        # constraint, so a widening that dropped the two 0020 values would be
+        # just as broken as one that never added the third.
+        for lifecycle in ("persistent", "ephemeral", "leased"):
+            _insert(lifecycle)
+
+        with db.cursor() as cur:
+            cur.execute(
+                "select lifecycle from public.machines where owner_id = %s::uuid"
+                " order by lifecycle",
+                (owner,),
+            )
+            assert [r["lifecycle"] for r in cur.fetchall()] == [
+                "ephemeral", "leased", "persistent",
+            ]
+
+        # ...and nothing else. 'rented' is the plausible near-miss — it is what
+        # the feature is called everywhere except in this column.
+        for garbage in ("rented", "Leased", "leased "):
+            with pytest.raises(psycopg.errors.CheckViolation):
+                with db.transaction():
+                    _insert(garbage)
+    finally:
+        with db.cursor() as cur:
+            cur.execute("delete from auth.users where id = %s::uuid", (owner,))
+
+
 def test_owner_columns_cascade_from_profiles():
     assert SQL.lower().count("references public.profiles(id)") >= 2
 

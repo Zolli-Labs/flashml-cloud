@@ -224,6 +224,43 @@ that failed on the one call that mattered would never be retried — the row is
 RELEASED and out of :func:`unreleased_rows` for good, and no other sweep in
 this system looks at a leased machine at all.
 
+A LEASE NO RENTAL ROW EVER NAMED IS FOUND BY THE MACHINE, NOT BY THE RENTAL
+----------------------------------------------------------------------------
+Every query above keys on ``rented_capacity``, and there is a window in which
+the row does not name the machine yet. ``provision_rented_machine`` COMMITS
+the machine, its pool binding and its token in a transaction of its own;
+``rented_capacity.machine_id`` is written afterwards, by
+``acquire._move_to_active`` on success or ``acquire._record_evidence`` on
+failure. Every *exception* in that window is covered — ``_abandon`` catches
+``BaseException`` — but a process death is not, and what it leaves is a
+``leased``, unrevoked, pool-bound machine named on no rental row at all.
+
+Nothing above can reach it. :func:`finished_rentals_with_live_credentials`
+inner-joins ``rc.machine_id`` and cannot select it; :func:`unreleased_rows`
+sees a null machine and calls the rental ABANDONED, where
+:func:`release_capacity` stops at the no-handle branch — and even past that,
+:func:`_revoke_credential` returns early on a falsy ``machine_id``;
+``expire_stale_ephemeral_machines`` excludes ``leased`` by design. The benign
+version of this leaves a token nobody holds. The bad version — death after the
+venue answered — leaves a live pod holding a live token, with neither the
+handle nor the machine named anywhere.
+
+:func:`orphaned_leases` is the answer, and it is keyed on the MACHINE:
+``lifecycle = 'leased'`` with no ``REQUESTED``/``ACTIVE`` rental pointing at
+it. The machine row is the only thing that always exists, because the mint's
+own transaction is what creates it. Writing ``machine_id`` onto the rental
+inside that transaction was the other candidate and it is a weaker fix: it
+would make the identity module write the capacity module's table, it could not
+reach a lease that is ALREADY orphaned, and it does not even close the window
+it aims at — the row it repairs stays ``REQUESTED`` with no handle for ever,
+and the no-handle branch deliberately refuses to revoke that row's credential.
+
+Its one real hazard is the opposite mistake: revoking the token of an
+acquisition that is still in flight, which would kill a machine mid-boot. So
+the query is aged from ``machines.created_at`` by ``boot_grace_s`` — the same
+figure, and the same hazard, as the NEVER_SEEN branch above: how long a rented
+host may take to boot, pull a multi-gigabyte image and enrol.
+
 **That half runs in log-only mode as well**, and it is the one thing here that
 does. ``dry_run`` exists because destroying a machine is irreversible and can
 take a running job with it; ending the lease of a rental that is already over
@@ -286,6 +323,7 @@ __all__ = [
     "DEFAULT_UNKNOWN_DEADLINE_MAX_S",
     "TERMINAL_JOB_STATES",
     "finished_rentals_with_live_credentials",
+    "orphaned_leases",
     "reconcile_rented",
     "release_capacity",
     "teardown_plan",
@@ -308,15 +346,18 @@ _DETAIL_MAX = 2000
 #
 # There was a `SWEEPABLE = ("REQUESTED", "ACTIVE")` here, and it was deleted.
 # It named the invariant and changed nothing. Every site that depends on the
-# set carries its own SQL literal -- six of them:
+# set carries its own SQL literal -- seven of them:
 #
-#   * `unreleased_rows` and `_mark_released`, here;
+#   * `unreleased_rows`, `_mark_released` and `orphaned_leases`, here;
 #   * `acquire._close_failed`, and `acquire._keep_sweepable` twice (state
 #     and `released_at`);
 #   * the partial index `rented_capacity_unreleased_idx` in migration 0022.
 #
 # `finished_rentals_with_live_credentials` then spells the COMPLEMENT,
-# ('RELEASED', 'FAILED'), which has to keep agreeing with all six.
+# ('RELEASED', 'FAILED'), which has to keep agreeing with all seven.
+# `orphaned_leases` spells the set itself, negated -- a machine no sweepable
+# rental names -- so it is the site that would silently start revoking live
+# rentals if the set here ever grew a state and it was not updated.
 #
 # Editing the constant moved none of that and left the suite green, which is
 # worse than having no constant at all: the next reader edits it, runs the
@@ -692,6 +733,76 @@ def finished_rentals_with_live_credentials(
         return [dict(r) for r in cur.fetchall()]
 
 
+def orphaned_leases(
+    db: psycopg.Connection, *, boot_grace_s: float = DEFAULT_BOOT_GRACE_S
+) -> list[dict]:
+    """Leases no rental row still claims — INCLUDING the ones none ever named.
+
+    The sibling of :func:`finished_rentals_with_live_credentials`, keyed on the
+    machine instead of the rental, and that is the whole of it: a rental-keyed
+    query cannot see a machine the rental never recorded. ``machines`` is where
+    a lease is always written, because ``provision_rented_machine`` commits the
+    machine, the binding and the token together; ``rented_capacity.machine_id``
+    is a separate, later write, and a process death between the two leaves a
+    live credential nothing else in this system can reach. The module docstring
+    argues why this shape was chosen over closing the window at the mint.
+
+    ``lifecycle = 'leased'`` is the only membership test that matters —
+    ``provision_rented_machine`` is the sole writer of that value, so every row
+    it selects is a lease this control plane minted, and no laptop, no sandbox
+    worker and no device-code enrolment can appear here.
+
+    A live rental is excluded by the one predicate that is really a claim about
+    the world: a ``REQUESTED`` or ``ACTIVE`` row naming this machine means the
+    lease is current. Anything else — a terminal row, or NO row — means it is
+    not. The terminal case overlaps
+    :func:`finished_rentals_with_live_credentials` on purpose: this query is
+    then a complete backstop rather than one that depends on that join being
+    right, and :func:`reconcile_rented` revokes each machine once per pass.
+
+    ``boot_grace_s`` IS THE SAFETY PROPERTY, not a tuning knob. Measured from
+    ``machines.created_at`` — the mint's own commit, which is exactly when the
+    window opens — because an acquisition in flight looks identical to an
+    abandoned one from here: both are a leased machine with no row naming it.
+    Revoking a machine whose ``provider.acquire`` is still waiting for it to
+    register kills it mid-boot, on hardware already paid for, which is the
+    hazard ``DEFAULT_BOOT_GRACE_S`` already exists to measure. Cheaper to be
+    slow: an orphan costs a token, and killing a live acquisition costs a boot.
+
+    Half-revoked counts, the same as next door: ``revoke_sandbox_machine``
+    unbinds on every call, so a crashed revoke leaves a revoked row still bound
+    to a pool, and for an orphan there is nothing else that would ever unbind
+    it.
+
+    ``node_id`` is returned because it is the only correlation there is: the
+    acquisition names it ``rented-{rented_id[:12]}``, so an operator reading
+    the log can find the rental row that should have named this machine.
+    Oldest first.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select m.id as machine_id, m.owner_id, m.node_id, m.created_at
+              from public.machines m
+             where m.lifecycle = %(leased)s
+               and m.created_at < now() - make_interval(secs => %(boot)s)
+               and (m.status <> 'revoked'
+                    or exists (select 1 from public.machine_pools mp
+                                where mp.machine_id = m.id))
+               and not exists (
+                     select 1 from public.rented_capacity rc
+                      where rc.machine_id = m.id
+                        and rc.state in ('REQUESTED', 'ACTIVE'))
+             order by m.created_at
+            """,
+            {
+                "leased": sandbox_identity.LEASED_LIFECYCLE,
+                "boot": float(boot_grace_s),
+            },
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def _plan_entries(
     rows: list[dict], providers: dict[str, ResourceProvider]
 ) -> list[dict]:
@@ -907,7 +1018,13 @@ async def _revoke_credential(db: psycopg.Connection, row: dict) -> None:
     Best effort by construction. It is a second liability, not the guarantee:
     losing it must not make a destroyed machine look undestroyed, so it is
     logged and never raised. :func:`finished_rentals_with_live_credentials` is
-    what comes back for the ones this loses.
+    what comes back for the ones this loses, and :func:`orphaned_leases` for
+    the ones no rental row names.
+
+    ``row`` is a rental row on every path but one: :func:`orphaned_leases`
+    returns machine rows, which carry no rental ``id`` because there is no
+    rental to carry — hence the ``node_id`` fallback in the failure log, which
+    is what an operator can correlate back to an acquisition.
     """
     machine_id = row.get("machine_id")
     if not machine_id:
@@ -922,7 +1039,7 @@ async def _revoke_credential(db: psycopg.Connection, row: dict) -> None:
     except Exception:  # noqa: BLE001 - logged, never masking the destroy
         log.error(
             "capacity reconcile: could not revoke machine %s for %s",
-            machine_id, row["id"], exc_info=True,
+            machine_id, row.get("id") or row.get("node_id"), exc_info=True,
         )
 
 
@@ -1112,6 +1229,16 @@ async def reconcile_rented(
     be watched. The gate is about destroying machines; it was never about
     keeping dead identities alive.
 
+    That sweep is TWO queries. :func:`finished_rentals_with_live_credentials`
+    is keyed on the rental, and :func:`orphaned_leases` on the machine, because
+    a lease whose rental row never recorded it is invisible to anything keyed
+    on the rental -- and a log-only deployment is exactly where a crashed
+    acquisition is likeliest to go unnoticed, so the second belongs on this
+    side of the gate for the same reason as the first. ``boot_grace_s`` reaches
+    it: an acquisition still in flight is indistinguishable from a dead one
+    here, so the orphan query will not touch a machine younger than the time a
+    rented host is allowed to spend booting.
+
     The parameter defaults to ``False`` rather than ``True`` because this
     function's contract is "stop the money"; the DEPLOYMENT decides whether it
     is armed, and there is exactly one production caller (``app.py``) which
@@ -1161,10 +1288,36 @@ async def reconcile_rented(
     # venue, and it is the only mechanism that ends one at all; gating it on
     # the destroy flag made the shipped default a deployment where leases
     # never end.
+    #
+    # TWO QUERIES, ONE REVOKE PER MACHINE. The first is keyed on the rental and
+    # the second on the machine, because a lease whose rental row never
+    # recorded it is invisible to the first -- see the module docstring. They
+    # overlap deliberately (a terminal rental's machine satisfies both), so the
+    # pass keeps the set it has already acted on rather than revoking twice and
+    # logging a second, meaningless "already revoked".
     try:
-        for row in await asyncio.to_thread(
-            finished_rentals_with_live_credentials, db
-        ):
+        seen: set[str] = set()
+        orphans = await asyncio.to_thread(
+            orphaned_leases, db, boot_grace_s=boot_grace_s
+        )
+        if orphans:
+            # Worth a line of its own: each of these is a credential that
+            # outlived the process that minted it, which means an acquisition
+            # died between the mint and recording it on the row.
+            log.warning(
+                "capacity reconcile: %d leased machine(s) that no live rental "
+                "names -- revoking. node_id embeds the rental id "
+                "(rented-<id[:12]>): %s",
+                len(orphans),
+                [str(r["node_id"]) for r in orphans],
+            )
+        for row in (
+            await asyncio.to_thread(finished_rentals_with_live_credentials, db)
+        ) + orphans:
+            machine_id = str(row.get("machine_id") or "")
+            if machine_id in seen:
+                continue
+            seen.add(machine_id)
             await _revoke_credential(db, row)
     except Exception:  # noqa: BLE001 - the money half already happened
         log.error(
