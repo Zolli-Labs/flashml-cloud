@@ -131,9 +131,9 @@ def _with_default_scheme(url: str, scheme: str) -> str:
 @dataclass
 class Settings:
     supabase_url: str
-    supabase_service_key: str
+    supabase_service_key: str = dc_field(repr=False)
     coordinator_url: str
-    coordinator_operator_token: str
+    coordinator_operator_token: str = dc_field(repr=False)
     require_auth: bool
     #: LEGACY, and optional. Only projects still issuing HS256 tokens from a
     #: shared secret need this. Our project rotated to ECC (P-256) and every
@@ -141,7 +141,7 @@ class Settings:
     #: which is why this is not in the require_auth check below. Left set, it
     #: keeps not-yet-expired tokens signed by the PREVIOUS key working
     #: through a rotation.
-    supabase_jwt_secret: str = ""
+    supabase_jwt_secret: str = dc_field(default="", repr=False)
     database_url: str = ""
     #: Public base URL of the browser console, used to build the
     #: `verification_uri` a machine prints during device-code enrolment.

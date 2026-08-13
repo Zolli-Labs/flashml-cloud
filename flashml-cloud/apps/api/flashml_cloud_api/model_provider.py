@@ -166,7 +166,7 @@ class ModelTerminalError(ModelError):
 #: explicit secret passed to `redact()` on every call: a provider error body
 #: can echo a header we do not hold a copy of.
 _SECRET_SHAPES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9]{8,}"),
+    re.compile(r"\bsk-[A-Za-z0-9]{8,}"),
 )
 
 #: `X-API-KEY: abc`, `api_key='abc'`, `authorization: Bearer abc`. Copied
