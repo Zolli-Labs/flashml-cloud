@@ -23,6 +23,7 @@ __pycache__/
 **/node_modules/
 **/.next/
 **/.superpowers/
+.worktrees/
 
 # Build artifacts and local databases. flashml-cloud.db and
 # apps/api/*.egg-info were tracked by accident; egg-info in particular goes
