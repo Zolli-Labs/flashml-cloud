@@ -87,12 +87,35 @@ before it improvises the unsafe one:
 |---|---|
 | "Was this error pre-existing?" | `git show <ref>:<path>` — never stash to find out |
 | "What did this look like before my change?" | `git show HEAD:<path>` |
-| "Is this diff mine?" | `git log -1 --format=%s -- <path>`, or ask the other session |
+| "Is this diff mine?" | `git log -1 --format=%s -- <path>`, or ask the other session. **Never infer ownership from `git status`** — a file being modified in a shared checkout says nothing about who modified it |
+| "What has my branch actually changed?" | `git diff main...HEAD` — **three dots**, see below |
 | "Is my work intact after an incident?" | **Run the suite.** Presence is not integrity — a green typecheck and a passing suite over the exact files is evidence a file listing cannot give |
+
+**`git diff A..B` and `git diff A...B` differ by one character and by which
+question they answer.** Two-dot compares the two tips; three-dot compares
+against the **merge base**, i.e. what *your branch* changed.
+
+On 2026-08-12 a session checked its branch with `develop..HEAD` and saw **838
+deletions of another session's G-1 test file** — reading, cold, as *"my branch
+deleted the disqualification-gate test."* It had touched no API file at all.
+`develop` had simply moved past its merge base, and two-dot renders *"develop
+has something I don't"* **identically to** *"I deleted it."* Three-dot showed
+zero API changes.
+
+That trap is worse than an ordinary wrong answer, because the wrong answer is
+specific, plausible, and **accuses a colleague**. Use three dots whenever the
+question is "what did I change"; two dots only when you genuinely mean "how do
+these two tips differ".
 
 **Work in a worktree when your task is broad** (`.worktrees/` is gitignored).
 That removes the whole class — but only if your agents are also told which
 checkout they may run git in.
+
+**A worktree also means your work has never met the other suite.** A branch
+built in `apps/web` runs the web tests and nothing else; the API suite has
+never seen it. Before landing, merge the base branch **in** and run **both** —
+a green measured before the merge is a green about a tree that no longer
+exists.
 
 ## Dependency direction
 
