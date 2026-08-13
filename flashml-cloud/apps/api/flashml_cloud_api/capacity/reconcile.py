@@ -26,6 +26,21 @@ same kind of doubt:
   stopped. The rental is dead and the money is not, so this needs no help
   from the row's own age: a rental five minutes old whose machine went quiet
   is swept, and a rental five hours old whose machine is talking is not.
+
+  **This branch shipped a machine-killer, and the reason is worth carrying.**
+  Until 2026-08-12 ``machines.last_seen_at`` was written by the node-heartbeat
+  route ALONE, and ``flashnode`` calls ``_maybe_node_heartbeat()`` at the top
+  of its claim loop and then blocks inside ``execute_one(lease)`` for the whole
+  task — download, run, upload, commit. During execution only
+  ``_AttemptHeartbeat`` runs, against a route that wrote nothing here. So the
+  column did not mean "alive", it meant "not currently working": any rented
+  machine on a task longer than ``quiet_after_s`` matched this branch BECAUSE
+  it was busy, and this branch is evaluated before ``IDLE``, so the cost
+  branch's careful work-in-flight test never ran. Two things fixed it, and both
+  are load-bearing: ``app.attempt_heartbeat`` now calls
+  ``db.touch_machine_last_seen`` as well, and this branch is guarded on
+  ``work_in_flight`` — see below for why that guard is affordable now and was
+  not before.
 * **Never seen at all** (``boot_grace_s``), measured from acquisition. A
   rented host has no ``last_seen_at`` until it has booted, pulled a
   multi-gigabyte image and enrolled. This allowance is deliberately the
@@ -102,8 +117,8 @@ both governed by one window, ``idle_after_s``:
   matches no branch in this query and bills for ever, which is the same hole
   in a different corner. One without the other is a bug either way.
 
-WORK IN FLIGHT GOVERNS **BOTH** COST BRANCHES
-----------------------------------------------
+WORK IN FLIGHT GOVERNS EVERY BRANCH THAT COULD BE WRONG ABOUT A LIVE TASK
+--------------------------------------------------------------------------
 **The dangerous half of IDLE is the long task**, and it is why "no claim for N
 minutes" alone would be a machine-killer: a task that runs for three hours
 claims once and then says nothing. The guard is the unresolved-attempt test —
@@ -126,12 +141,29 @@ about "the job we rented it for" bounds what the machine may be running now.
 The test is therefore computed once, as ``work_in_flight``, and read by both
 cost branches.
 
-It deliberately does **not** govern the liveness branches. A machine that has
-been silent for ``quiet_after_s``, or whose credential is revoked, is not doing
-the work its unresolved attempt describes — that attempt is the wreckage of
-it, and ``reconcile_expired_attempts`` will resolve it as expired. Extending
-the guard there would exempt precisely the rentals that broke mid-task, which
-is the case this sweep was written for first.
+**It now governs ``QUIET`` and ``NEVER_SEEN`` as well, and that is a reversal.**
+It used to be argued the other way: a machine silent for ``quiet_after_s`` is
+not doing the work its unresolved attempt describes, that attempt is the
+wreckage of it, and guarding the liveness branches would exempt precisely the
+rentals that broke mid-run. **That argument was sound before ``work_in_flight``
+was bounded and is not sound after.** An unresolved attempt used to be able to
+mean "for ever" — a null ``lease_deadline`` made a rental unsweepable at any
+window — so a guard there really would have been an eternal exemption. Today
+the guard expires on its own: a machine that dies stops renewing, its recorded
+``lease_deadline`` plus ``EXPIRY_GRACE_SECONDS`` passes, and the rental is
+selected on the next pass with no observer, no page load and no coordinator
+call. The unmeasurable case is capped by ``DEFAULT_UNKNOWN_DEADLINE_MAX_S``. So
+what the guard buys is no longer an exemption, it is a delay of at most one
+lease window plus a grace — paid to avoid destroying a customer's running task
+on the strength of a best-effort display write that may simply have failed.
+
+``REVOKED_CREDENTIAL`` and ``ABANDONED`` stay unguarded, and they are not the
+same case. A revoked token cannot heartbeat its attempt through this proxy at
+all, so an unresolved attempt on a revoked machine is by construction not being
+worked on; ``ABANDONED`` selects rows with no machine bound, which can hold no
+attempts to be in flight. Guarding either would be a no-op at best and, for the
+revoked branch, would re-open the hole its own comment describes: pushing a row
+we are mid-way through releasing back out of the sweep.
 
 **A null deadline is bounded, not eternal**, and that is a correction rather
 than a softening. "We never learned when this lease ends" must not read as "it
@@ -144,8 +176,8 @@ the system could stop that machine billing. So a null-deadline attempt counts
 as work in flight only until ``claimed_at`` passes
 ``DEFAULT_UNKNOWN_DEADLINE_MAX_S``, which is argued at that constant.
 
-IDLE ALSO ASKS WHETHER THE JOB IS STILL RUNNING, AND THAT COSTS SOMETHING
---------------------------------------------------------------------------
+IDLE HAS TWO WINDOWS, BECAUSE THE JOB-STATE GUARD IS A CACHE AND NOT A FACT
+----------------------------------------------------------------------------
 The in-flight test protects a machine *holding* a lease. A machine waiting for
 its next one holds nothing, and there are ordinary reasons to wait longer than
 ``idle_after_s``: federated aggregation between rounds, a long checkpoint
@@ -153,33 +185,43 @@ upload, a straggler barrier, a coordinator with nothing queued this instant.
 Reproduced before this guard existed — one attempt claimed twenty minutes ago
 and resolved, ``public.jobs`` still ``RUNNING`` — the machine was selected as
 IDLE and, armed, destroyed between two tasks of a job that was still going.
-So IDLE now also requires that ``rc.job_id`` name no job in a non-terminal
-state.
+So IDLE consults ``public.jobs`` for the state of ``rc.job_id``.
 
-**The price is real and it is paid in money.** ``public.jobs.status`` is a
-cache written only when somebody looks (``db.sync_observed_job_states``, from
-the two job routes and ``app._require_stopped``), and that staleness is the
-very thing IDLE was invented to route around: a job that finished at 3am with
-nobody watching reads ``RUNNING`` for ever. With this guard such a rental is no
-longer caught by IDLE, and it is not caught by ``JOB_FINISHED`` either, since
-that reads the same stale column. What still catches it: anybody opening the
-console (both routes settle *and* sync), the machine going quiet, or its
-credential being revoked. What does not: nothing else. A rental for a
-never-observed finished job bills until one of those happens.
+**As a veto that was unbounded, and its own test called it bounded.**
+``public.jobs.status`` is a cache written only when somebody looks
+(``db.sync_observed_job_states``, from the two job routes and
+``app._require_stopped``), and that staleness is the very thing IDLE was
+invented to route around: a job that finished at 3am with nobody watching reads
+``RUNNING`` for ever, and so does one stuck at ``PENDING`` that was never
+scheduled at all — the exemption was never limited to "a finished job nobody
+observed". Vetoed by that column, such a rental was caught by nothing:
+``JOB_FINISHED`` reads the same stale value, ``QUIET`` never fires because the
+machine goes on heartbeating after its job ends, and revocation would need a
+release the sweep is no longer performing. The one remaining escape was
+somebody opening the console — the exact observer IDLE exists to route around.
 
-That is the trade, taken deliberately in the one direction this module can
-take it. Destroying a machine under a running task is silent, irreversible,
-and takes a customer's job with it; over-paying is loud — the rental is a row
-anybody can list, and one page load ends it. Between a failure that announces
-itself and one that does not, this module takes the one that does. But it is
-a real bill and it is not bounded by anything here, which is why it is written
-down rather than left implied. The clean way to buy both back is to make the
-column fresh rather than to stop reading it — have the deployed loop ask the
-coordinator for the state
-of the jobs named by unreleased rentals before it sweeps (a handful of ids,
-once per interval), at which point ``JOB_FINISHED`` needs no observer either.
-That is a change to ``app.py``'s loop, not to this predicate, and it is not
-done yet.
+So the veto is a **second, longer window** instead:
+
+* the job row is terminal, or names no ``public.jobs`` row at all (a
+  coordinator-side id this API never recorded) — ``idle_after_s``, fifteen
+  minutes, unchanged;
+* the job row says the job is still going — ``DEFAULT_LIVE_JOB_IDLE_AFTER_S``,
+  six hours, measured over the same claim history and over ``billing_since``
+  for a machine that never claimed at all.
+
+The trade is still taken in the same direction — destroying a machine under a
+running task is silent and irreversible, while over-paying is a row anybody can
+list — but the bill is now a number multiplied by an hourly rate rather than
+"until somebody looks". Six hours is far beyond any legitimate gap between two
+tasks of a live job and far short of for ever, and it costs no migration and no
+coordinator round trip.
+
+The clean way to buy the last of it back is still to make the column fresh
+rather than to read it more patiently: have the deployed loop ask the
+coordinator for the state of the jobs named by unreleased rentals before it
+sweeps (a handful of ids, once per interval), at which point ``JOB_FINISHED``
+needs no observer either and this window can go back to one. That is a change
+to ``app.py``'s loop, not to this predicate, and it is not done yet.
 
 **What IDLE still cannot survive**, stated plainly because it is the residual
 risk of this whole module: ``db.record_attempt`` is best effort on the claim
@@ -319,6 +361,7 @@ __all__ = [
     "DEFAULT_ABANDONED_AFTER_S",
     "DEFAULT_BOOT_GRACE_S",
     "DEFAULT_IDLE_AFTER_S",
+    "DEFAULT_LIVE_JOB_IDLE_AFTER_S",
     "DEFAULT_QUIET_AFTER_S",
     "DEFAULT_UNKNOWN_DEADLINE_MAX_S",
     "TERMINAL_JOB_STATES",
@@ -398,7 +441,46 @@ DEFAULT_ABANDONED_AFTER_S = 30 * 60.0
 #: ``DEFAULT_QUIET_AFTER_S`` and ``db.EXPIRY_GRACE_SECONDS`` so an operator
 #: carries one number rather than three, and bounding the waste after a
 #: finished job to a quarter-hour of one machine's rate.
+#:
+#: It is the SHORT of ``IDLE``'s two windows, and it applies when the cached
+#: ``public.jobs`` row is terminal or missing — that is, when nothing claims the
+#: job is still going. ``DEFAULT_LIVE_JOB_IDLE_AFTER_S`` is the other one.
 DEFAULT_IDLE_AFTER_S = 15 * 60.0
+
+#: The SECOND idle window: how long a rental whose job row still reads
+#: non-terminal is given before ``IDLE`` takes it anyway.
+#:
+#: ``IDLE`` refuses to act while ``public.jobs`` says the job is running,
+#: because a machine between two tasks holds no lease and fifteen minutes of
+#: waiting is ordinary. But that column is a CACHE written only when somebody
+#: looks (``db.sync_observed_job_states``), so "still running" is not a fact
+#: about the world, it is a fact about who opened a page. Read as a veto, it
+#: exempted the rental FOR EVER: nothing else catches it either — a machine
+#: that finished its job goes on heartbeating, so QUIET never fires, and
+#: revocation would need a release the sweep is no longer performing. The
+#: escape hatch was "somebody opens the console", which is the exact observer
+#: ``IDLE`` exists to route around. It is also wider than a job that finished
+#: unobserved: ANY non-terminal cached status qualifies, including a ``PENDING``
+#: row for a job that was never scheduled at all.
+#:
+#: So the veto became a longer window, and this is that window. SIX HOURS, and
+#: the number is about what a *live* job legitimately does between two of its
+#: tasks: federated aggregation between rounds, a checkpoint upload, a
+#: straggler barrier, a coordinator with nothing queued this instant. Those are
+#: minutes, sometimes tens of minutes — never hours. A machine attached to a
+#: genuinely running job and handed nothing for six hours is not waiting for
+#: work, it is being paid to sit still.
+#:
+#: It equals ``DEFAULT_UNKNOWN_DEADLINE_MAX_S`` by coincidence of scale, not by
+#: derivation: that one bounds how long an unmeasurable attempt counts as work,
+#: this one bounds how long a stale job row defers a cost sweep. Moving one is
+#: not a reason to move the other.
+#:
+#: Not a parameter of :func:`unreleased_rows`, for
+#: ``DEFAULT_UNKNOWN_DEADLINE_MAX_S``'s reason: it is not a window an operator
+#: tunes per sweep, it is how long this module is willing to believe a column
+#: nobody has refreshed. One number, argued once, at the constant.
+DEFAULT_LIVE_JOB_IDLE_AFTER_S = 6 * 60 * 60.0
 
 #: How long an unresolved attempt whose ``lease_deadline`` was never recorded
 #: counts as work in flight, measured from ``claimed_at``.
@@ -464,11 +546,18 @@ def unreleased_rows(
     all** — that is the clause standing between this sweep and a running
     training job, and the two branches that can select such a machine anyway
     (``JOB_FINISHED`` and ``IDLE``) do it on evidence that the work is over,
-    never on how long the rental has existed. Both of them are governed by
-    ``work_in_flight``, computed once in the ``rental`` CTE: a rental whose
-    machine holds a lease that could still be live is not swept for cost, for
-    any job, whatever its own job's state says. See the module docstring for
-    what each window means and why they differ.
+    never on how long the rental has existed.
+
+    **``work_in_flight`` is computed once in the ``rental`` CTE and read by
+    four of the six branches** — both cost branches and both liveness ones. A
+    rental whose machine holds a lease that could still be live is not swept,
+    for any job, whatever its own job's state says and whatever its heartbeat
+    column says. The two branches that ignore it cannot be wrong about a live
+    task: ``REVOKED_CREDENTIAL`` (a revoked token cannot heartbeat an attempt
+    through this proxy) and ``ABANDONED`` (no machine bound, so no attempts).
+    See the module docstring for what each window means and why they differ,
+    and for why guarding the liveness branches became correct only once
+    ``work_in_flight`` itself stopped meaning "for ever".
 
     It returns the reason as ``sweep_reason`` rather than a bare boolean, and
     that is not decoration: it is the whole content of a log-only deployment's
@@ -494,11 +583,13 @@ def unreleased_rows(
                      m.status as machine_status, m.last_seen_at,
                      coalesce(rc.acquired_at, rc.created_at) as billing_since,
                      -- WORK IN FLIGHT. Computed once here rather than inside a
-                     -- branch, because it governs BOTH cost branches and
-                     -- writing it twice is how one of them loses it: it lived
-                     -- in IDLE alone for a revision, and JOB_FINISHED
-                     -- destroyed machines holding a live lease for another
-                     -- job in that pool. See the module docstring.
+                     -- branch, because it now governs FOUR of the six and
+                     -- writing it per-branch is how one of them loses it: it
+                     -- lived in IDLE alone for a revision, and JOB_FINISHED
+                     -- destroyed machines holding a live lease for another job
+                     -- in that pool. QUIET and NEVER_SEEN read it too as of
+                     -- 2026-08-12 -- the branch comments below say why that
+                     -- reversed. See the module docstring.
                      --
                      -- A recorded deadline is the coordinator's own instant
                      -- and is trusted until `lease_grace` past it. A NULL
@@ -531,6 +622,19 @@ def unreleased_rows(
                           and a.claimed_at
                               > now() - make_interval(secs => %(idle)s)
                      ) as claimed_recently,
+                     -- ...and anything at all within the LONG idle window,
+                     -- which is the one that applies while `public.jobs` still
+                     -- reads non-terminal. Two columns rather than one
+                     -- comparison against a chosen window, because which
+                     -- window applies is decided in the case expression below
+                     -- and computing the answer there would put the same
+                     -- interval arithmetic in two branches.
+                     exists (
+                       select 1 from public.attempts a
+                        where a.machine_id = rc.machine_id
+                          and a.claimed_at
+                              > now() - make_interval(secs => %(idle_live)s)
+                     ) as claimed_recently_live,
                      -- The coordinator's verdict, as last observed: over.
                      exists (
                        select 1 from public.jobs j
@@ -593,17 +697,63 @@ def unreleased_rows(
                               and r.billing_since < now()
                                   - make_interval(secs => %(abandoned)s)
                            then 'ABANDONED'
-                         -- It spoke, and then it stopped. Deliberately NOT
-                         -- guarded on work_in_flight: an unresolved attempt on
-                         -- a machine that has been silent for a quarter of an
-                         -- hour is the wreckage of the task, not the task.
+                         -- It spoke, and then it stopped. GUARDED on
+                         -- work_in_flight since 2026-08-12, and the reversal is
+                         -- the whole of the defect this branch shipped.
+                         --
+                         -- The old comment said an unresolved attempt on a
+                         -- machine silent for a quarter of an hour is the
+                         -- wreckage of the task rather than the task. That was
+                         -- an argument about a column that did not mean what it
+                         -- said: `machines.last_seen_at` was written by the NODE
+                         -- heartbeat only, and flashnode beats that route at the
+                         -- top of its claim loop and then blocks inside
+                         -- `execute_one` for the whole task. So silence for
+                         -- fifteen minutes was not evidence of death, it was
+                         -- evidence of WORK -- every rented machine on a task
+                         -- longer than `quiet_after_s` matched here, and QUIET
+                         -- is evaluated before IDLE, so the cost branch's
+                         -- careful in-flight test never even ran. An armed sweep
+                         -- destroyed exactly the machines that were earning.
+                         --
+                         -- `app.attempt_heartbeat` now writes the column too, so
+                         -- it means liveness. This guard is the second half:
+                         -- that write is best effort by contract, and a sweep
+                         -- that destroys a customer's job whenever a display
+                         -- column fails to write is not a backstop.
+                         --
+                         -- What it costs is bounded, which is why it is
+                         -- affordable now and was not before `work_in_flight`
+                         -- itself was bounded. A machine that really died stops
+                         -- renewing; `lease_deadline` + EXPIRY_GRACE_SECONDS
+                         -- passes with no observer, no page load and no
+                         -- coordinator call, and the rental lands here on the
+                         -- next pass. The worst case is an attempt whose
+                         -- deadline was never recorded at all, capped by
+                         -- DEFAULT_UNKNOWN_DEADLINE_MAX_S. A bounded delay
+                         -- against an irreversible destruction, taken in the
+                         -- same direction as every other trade in this module.
                          when r.machine_row_id is not null
+                              and not r.work_in_flight
                               and r.last_seen_at is not null
                               and r.last_seen_at
                                   < now() - make_interval(secs => %(quiet)s)
                            then 'QUIET'
                          -- It has never spoken: still booting, or never will.
+                         -- Guarded for the same reason, though this one is a
+                         -- narrow residual rather than the shipped bug: with
+                         -- `_last_node_hb = 0.0` flashnode heartbeats before its
+                         -- first claim, so a machine holding a live lease with
+                         -- last_seen_at still NULL means the best-effort write
+                         -- was lost on the very first beat and every beat since.
+                         -- Guarding costs nothing in the case this branch exists
+                         -- for -- a host that never came up claims nothing, so
+                         -- there is no attempt to be in flight -- and refuses to
+                         -- destroy a machine that is demonstrably holding a
+                         -- lease. Free in one direction, load-bearing in the
+                         -- other.
                          when r.machine_row_id is not null
+                              and not r.work_in_flight
                               and r.last_seen_at is null
                               and r.billing_since
                                   < now() - make_interval(secs => %(boot)s)
@@ -626,34 +776,56 @@ def unreleased_rows(
                          -- * nothing in flight. This is what keeps a
                          --   three-hour task -- one claim, then silence --
                          --   from reading as an idle machine.
-                         -- * the job is not still running. A machine BETWEEN
-                         --   two tasks holds no lease at all, so the in-flight
-                         --   test cannot see it, and fifteen minutes of
-                         --   waiting is ordinary: federated aggregation
-                         --   between rounds, a long checkpoint upload, a
-                         --   straggler barrier, a coordinator with nothing
-                         --   queued. Without this, IDLE destroys a machine
-                         --   mid-job -- reproduced, and the reason this line
-                         --   exists.
+                         -- * nothing claimed lately. The actual idleness --
+                         --   and it is asked over ONE OF TWO WINDOWS, which
+                         --   is the shape of the whole job-state guard now.
                          --
-                         --   AND IT COSTS: `jobs.status` is written only when
-                         --   somebody looks, so a job that finished with
-                         --   nobody watching reads RUNNING for ever and its
-                         --   rental is now caught by neither cost branch --
-                         --   the exact staleness IDLE was invented to route
-                         --   around. A bill that one page load ends, against
-                         --   a destruction that nothing undoes; taken
-                         --   deliberately, argued at length in the module
-                         --   docstring, which also names the fix that buys
-                         --   both back.
-                         -- * nothing claimed lately. The actual idleness.
+                         --   A machine BETWEEN two tasks holds no lease at
+                         --   all, so the in-flight test cannot see it, and
+                         --   fifteen minutes of waiting is ordinary:
+                         --   federated aggregation between rounds, a long
+                         --   checkpoint upload, a straggler barrier, a
+                         --   coordinator with nothing queued. Destroying such
+                         --   a machine mid-job was reproduced, and it is why
+                         --   `job_still_live` is consulted at all.
+                         --
+                         --   But it was consulted as a VETO, and a veto here
+                         --   is unbounded. `jobs.status` is a cache written
+                         --   only when somebody looks, so a job that finished
+                         --   at 3am unobserved reads RUNNING for ever -- as
+                         --   does one stuck at PENDING that was never
+                         --   scheduled -- and nothing else closes the row:
+                         --   the machine goes on heartbeating so QUIET never
+                         --   fires, and revocation needs a release this sweep
+                         --   is not performing. The only escape was "somebody
+                         --   opens the console", the exact observer IDLE
+                         --   exists to route around.
+                         --
+                         --   So: `idle_after_s` when the job row is terminal
+                         --   or absent, and DEFAULT_LIVE_JOB_IDLE_AFTER_S when
+                         --   it says the job is still going. The stale-column
+                         --   bill is now a number an operator can multiply by
+                         --   an hourly rate instead of "until somebody looks",
+                         --   and it costs no migration and no round trip to
+                         --   the coordinator. `billing_since` is in the long
+                         --   arm as well as the claim window because a machine
+                         --   that has NEVER claimed has no last-claim instant
+                         --   to measure from: without it, a rental for a live
+                         --   job that was handed nothing would be swept at
+                         --   `boot_grace_s` on the strength of an empty
+                         --   attempts table, which is the short window wearing
+                         --   the long one's name.
                          when r.machine_id is not null
                               and (r.has_ever_claimed
                                    or r.billing_since < now()
                                       - make_interval(secs => %(boot)s))
                               and not r.work_in_flight
-                              and not r.job_still_live
                               and not r.claimed_recently
+                              and (not r.job_still_live
+                                   or (not r.claimed_recently_live
+                                       and r.billing_since < now()
+                                           - make_interval(
+                                               secs => %(idle_live)s)))
                            then 'IDLE'
                        end as sweep_reason
                   from rental r
@@ -677,11 +849,19 @@ def unreleased_rows(
             # opposite reason: it is not a window an operator tunes per sweep,
             # it is how long this module is willing to call an unmeasurable
             # attempt live. One number, argued once, at the constant.
+            #
+            # `idle_live` is the same kind of number as `unknown_deadline` and
+            # is fixed for the same reason: it is how long this module will
+            # believe a `public.jobs.status` nobody has refreshed, not a
+            # per-deployment policy. Tuning it down would not make the sweep
+            # more aggressive in any useful direction -- it would make it
+            # aggressive precisely where the column is least trustworthy.
             {
                 "abandoned": float(abandoned_after_s),
                 "quiet": float(quiet_after_s),
                 "boot": float(boot_grace_s),
                 "idle": float(idle_after_s),
+                "idle_live": float(DEFAULT_LIVE_JOB_IDLE_AFTER_S),
                 "lease_grace": float(dbmod.EXPIRY_GRACE_SECONDS),
                 "unknown_deadline": float(DEFAULT_UNKNOWN_DEADLINE_MAX_S),
                 "terminal": list(TERMINAL_JOB_STATES),

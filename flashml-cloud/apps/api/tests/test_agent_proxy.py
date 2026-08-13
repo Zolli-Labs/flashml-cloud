@@ -1525,6 +1525,76 @@ def test_heartbeat_records_last_seen_so_the_console_can_show_online(client, mach
     assert after is not None, "the console can never show this machine as online"
 
 
+def test_an_attempt_heartbeat_records_last_seen_because_a_busy_node_sends_no_other(
+    client, machine, db, transport
+):
+    """**The route above is not enough, and believing it was destroyed
+    machines.**
+
+    `flashnode` calls `_maybe_node_heartbeat()` at the TOP of its claim loop
+    (`executor/loop.py`) and then blocks inside `execute_one(lease)` for the
+    whole task — download, run, upload, commit. While a task runs, the node
+    route is not called at all; the only beat leaving the agent is
+    `_AttemptHeartbeat`, which lands here. So with only the node route writing
+    the column, `machines.last_seen_at` did not mean "this machine is alive",
+    it meant "this machine is not currently working", and every rented machine
+    on a task longer than `capacity.reconcile`'s `quiet_after_s` aged out of
+    "online" PRECISELY BECAUSE it was busy.
+
+    The console calling a working GPU offline is the cheap half. The expensive
+    half is that `unreleased_rows`' QUIET branch reads the same column and is
+    evaluated before the cost branches, so an armed sweep destroyed exactly the
+    machines that were earning — mid-task, silently, irreversibly.
+
+    **Asserted through a 410**, which is the coordinator saying the lease is
+    already dead. The fact being recorded is "this machine's token just spoke
+    to us", and that is true whatever the coordinator answers: a coordinator
+    having a bad day must not make the whole rented fleet look dead to the
+    reconciler. Same reason the write happens before the forward.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set last_seen_at = null where id = %s",
+            (machine["id"],),
+        )
+    assert _fetch_machine(db, machine["id"])["last_seen_at"] is None
+
+    transport.status_code = 410
+    transport.payload = {"detail": "lease expired"}
+    res = client.post(
+        f"/v1alpha1/attempts/lease-{uuid.uuid4().hex[:12]}/heartbeat",
+        json={},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    )
+    assert res.status_code == 410
+
+    assert _fetch_machine(db, machine["id"])["last_seen_at"] is not None, (
+        "a machine mid-task looks dead to capacity/reconcile.py"
+    )
+
+
+def test_a_liveness_write_that_breaks_never_fails_an_attempt_heartbeat(
+    client, machine, transport, monkeypatch
+):
+    """Best effort at BOTH call sites, and this is the one that runs while a
+    task is in flight. A heartbeat is how a working lease stays alive; a
+    display column must never be the reason one is refused. The reconciler is
+    guarded against losing this write in the other direction too — its QUIET
+    and NEVER_SEEN branches will not touch a machine holding a live lease — so
+    failing here costs a stale "Offline" badge and nothing else."""
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the ledger is down")
+
+    monkeypatch.setattr(dbmod, "touch_machine_last_seen", explode)
+    transport.status_code = 200
+
+    assert client.post(
+        f"/v1alpha1/attempts/lease-{uuid.uuid4().hex[:12]}/heartbeat",
+        json={},
+        headers={"Authorization": f"Bearer {machine['token']}"},
+    ).status_code == 200
+
+
 def _fetch_machine(db, machine_id):
     with db.cursor() as cur:
         cur.execute("select * from public.machines where id = %s", (machine_id,))

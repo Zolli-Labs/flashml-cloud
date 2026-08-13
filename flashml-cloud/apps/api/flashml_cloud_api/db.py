@@ -606,13 +606,25 @@ def touch_machine_last_seen(db: psycopg.Connection, machine_id: str) -> None:
     * **Write it for a machine that is not really speaking** and a rental
       billing for nothing looks alive for ever.
 
-    Deliberately best-effort at the call site even so: a machine's work must
-    not fail because this could not be written, and the failure mode of the
-    first kind is bounded by `capacity.reconcile`'s other inputs (a job in a
-    terminal state, or a machine claiming no leases) which do not read this
-    column at all. That is why the cost backstop was not built on liveness.
-    Anything that changes when or whether this is written belongs in the same
-    conversation as `capacity/reconcile.py`.
+    **TWO ROUTES CALL THIS, AND THE SECOND ONE IS WHY THE COLUMN MEANS
+    LIVENESS.** `POST /v1alpha1/nodes/{id}/heartbeat` was the only writer until
+    2026-08-12, and that made this column a "not currently working" signal
+    rather than a liveness one: `flashnode` beats the node route at the top of
+    its claim loop and then blocks inside `execute_one` for the whole task, so a
+    machine on anything longer than `quiet_after_s` stopped touching this column
+    *because it was busy*. `POST /v1alpha1/attempts/{id}/heartbeat` now calls
+    this too, which is the beat a working machine actually sends. Removing
+    either call re-opens the first failure above for a different population:
+    the node route covers a machine between tasks, the attempt route covers a
+    machine on one.
+
+    Deliberately best-effort at both call sites even so: a machine's work must
+    not fail because this could not be written. The first failure mode is no
+    longer bounded only by `capacity.reconcile`'s other inputs — its QUIET and
+    NEVER_SEEN branches are now guarded by work in flight, so an attempt with a
+    live lease deadline keeps a machine alive to the sweep even if every write
+    here is lost. Anything that changes when or whether this is written belongs
+    in the same conversation as `capacity/reconcile.py`.
     """
     with db.cursor() as cur:
         cur.execute(

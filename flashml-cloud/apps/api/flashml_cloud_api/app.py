@@ -4453,10 +4453,15 @@ def create_cloud_app(
         )
         # THE SETTLE HOOK, list half. A rented machine keeps billing after the
         # job it was rented for ends — flashnode goes on heartbeating, so no
-        # liveness check can notice — and this is one of the two places this
-        # API ever learns a job stopped. One batched query for the whole page,
-        # for the same reason the state sync above is batched: this route is
-        # polled every two seconds.
+        # liveness check can notice — and this is one of the FOUR places this
+        # API ever learns a job stopped: here, the detail route below,
+        # `_require_stopped` behind DELETE .../artifacts, and `fedavg._finish`
+        # (which is deliberately not hooked). It said "two" until 2026-08-12,
+        # when the delete route was found and the inventory was corrected in
+        # `capacity/settle.py` — which is where the full list and the argument
+        # for it live — and not here. One batched query for the whole page, for
+        # the same reason the state sync above is batched: this route is polled
+        # every two seconds.
         #
         # It is an OPTIMISATION, not the guarantee. Nobody has to open this
         # page; `capacity.reconcile`'s JOB_FINISHED and IDLE branches are what
@@ -4540,12 +4545,12 @@ def create_cloud_app(
         )
         job["submitted_by"] = dbmod.display_name_for(db, row["owner_id"])
 
-        # THE RECORDING HOOK, Mode A half — and the only place in this API
-        # where a non-federated job is ever observed to have stopped. The
-        # coordinator's answer is already in hand, so noticing costs
-        # nothing; both writes below are guarded on a column of the row
-        # fetched for the visibility check above, so a page left polling a
-        # finished job re-runs neither.
+        # THE RECORDING HOOK, Mode A half — the place in this API where a
+        # non-federated job is observed to have stopped by the POLL that a
+        # user's open page generates. The coordinator's answer is already in
+        # hand, so noticing costs nothing; both writes below are guarded on a
+        # column of the row fetched for the visibility check above, so a page
+        # left polling a finished job re-runs neither.
         #
         # The three are separate on purpose. Recording the STATE is a cheap
         # local write and is what `GET /me/metrics` counts outcomes from,
@@ -4562,13 +4567,25 @@ def create_cloud_app(
         # such a failure permanently unretried — 0016's comment is the long
         # version.
         #
-        # THIS IS THE ONLY PLACE A NON-FEDERATED JOB IS EVER OBSERVED TO
-        # HAVE STOPPED, which is exactly why the mirror hangs here and not
-        # on the commit path: a volunteer's commit is accepted by the
-        # coordinator with no knowledge of this API, and that is the
+        # A NON-FEDERATED JOB'S END IS ONLY EVER OBSERVED, NEVER REPORTED,
+        # which is exactly why the mirror hangs on an observation like this
+        # one and not on the commit path: a volunteer's commit is accepted by
+        # the coordinator with no knowledge of this API, and that is the
         # property that keeps running leases alive when this process dies.
-        # The copy happens after the fact, on an observation, and cannot
-        # turn a finished job into a failed one.
+        # The copy happens after the fact and cannot turn a finished job into
+        # a failed one.
+        #
+        # This read "THIS IS THE ONLY PLACE A NON-FEDERATED JOB IS EVER
+        # OBSERVED TO HAVE STOPPED" until 2026-08-12, unqualified, and it is
+        # not: the list route above observes the same fact for a whole page,
+        # `_require_stopped` behind DELETE .../artifacts asks the coordinator
+        # outright, and `fedavg._finish` observes federated runs. Four sites,
+        # inventoried with the argument for them in `capacity/settle.py` —
+        # which was corrected then while this site was not. What is true here
+        # is narrower and is what the three guarded writes below actually need:
+        # this is the only hook that observes ONE job's end with that job's own
+        # detail response in hand, so it is the only one where measuring and
+        # mirroring cost no extra coordinator round trip per job.
         if is_terminal_state(job.get("state")):
             dbmod.sync_observed_job_states(db, [(job_id, str(job["state"]))])
             if row.get("artifact_bytes_recorded_at") is None:
@@ -6598,6 +6615,40 @@ def create_cloud_app(
     async def attempt_heartbeat(
         lease_id: str, request: Request, machine: Machine = Depends(current_machine)
     ):
+        # LIVENESS IS RECORDED HERE TOO, and it is the only reason
+        # `machines.last_seen_at` means what everything downstream assumes.
+        #
+        # `flashnode` calls `_maybe_node_heartbeat()` at the TOP of its claim
+        # loop (`executor/loop.py`) and then blocks inside `execute_one(lease)`
+        # for the whole task — download, run, upload, commit. Nothing beats the
+        # node route while a task is running; only `_AttemptHeartbeat` runs, and
+        # it lands here. So while this route wrote nothing, `last_seen_at` was
+        # not a liveness signal at all, it was a "not currently working" signal:
+        # every machine on a task longer than `capacity.reconcile`'s
+        # `quiet_after_s` (15 minutes) aged out of "online" precisely BECAUSE it
+        # was busy. The console called a working GPU offline, and — far more
+        # expensively — an armed sweep matched it as QUIET and destroyed it
+        # mid-task. `db.touch_machine_last_seen`'s own docstring already named
+        # that failure mode; this write is what makes it false.
+        #
+        # BEFORE the proxy, exactly as the node-heartbeat route does it. The
+        # fact being recorded is "this machine's token just spoke to us", which
+        # is already true and cannot become untrue depending on what the
+        # coordinator answers: a 410 (lease gone) is a live machine being told
+        # its lease is dead, and a coordinator having a bad day must not make
+        # every rented machine in the fleet look dead too.
+        #
+        # Best effort, its own try, logged and continued — the contract every
+        # accounting write on these routes follows, and the one
+        # `touch_machine_last_seen` documents. A machine's task must never fail
+        # because a display column could not be written.
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                dbmod.touch_machine_last_seen(conn, machine.id)
+        except Exception:
+            log.warning(
+                "could not record last_seen_at for machine %s", machine.id
+            )
         response = await proxy(
             request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/heartbeat"
         )

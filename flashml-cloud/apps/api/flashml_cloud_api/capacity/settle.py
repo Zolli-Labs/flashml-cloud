@@ -15,10 +15,12 @@ every one of them is somebody's request:
 
 * ``GET /v1alpha1/jobs`` and ``GET /v1alpha1/jobs/{id}`` in ``app.py``, where
   the coordinator's own answer is already in hand -- which is why
-  ``db.sync_observed_job_states`` exists at all, and why ``app.py`` says of the
-  detail route that it is "THE ONLY PLACE A NON-FEDERATED JOB IS EVER OBSERVED
-  TO HAVE STOPPED" (true of the *poll-driven* hooks; the two below are not
-  polls);
+  ``db.sync_observed_job_states`` exists at all. The detail route used to call
+  itself "THE ONLY PLACE A NON-FEDERATED JOB IS EVER OBSERVED TO HAVE STOPPED";
+  that claim was annotated here and left standing there until 2026-08-12, and
+  both sites now say the narrower true thing: it is the only hook that sees one
+  job's end with that job's own detail body in hand, which is what its
+  footprint and mirror writes need and the list route cannot give them;
 * ``app._require_stopped``, behind ``DELETE /v1alpha1/jobs/{id}/artifacts``,
   which asks the coordinator directly *because* the local column is a cache
   and then writes what it learned. It is hooked here too: a caller deleting a
@@ -39,14 +41,46 @@ So the settle hook is only as reliable as somebody's browser. That is a fine
 property for recording a status and a hopeless one for stopping money: a job
 that finishes at 3am with nobody watching would bill until somebody opened the
 console. The cost backstop therefore does NOT live here -- it lives in
-``reconcile.unreleased_rows``'s ``JOB_FINISHED`` and ``IDLE`` branches, which
-need no observer. This module is the optimisation; the sweep is the promise.
+``reconcile.unreleased_rows``'s ``JOB_FINISHED`` and ``IDLE`` branches. This
+module is the optimisation; the sweep is the promise.
+
+**Only one of those two branches needs no observer, and this line used to claim
+both did.** ``JOB_FINISHED`` reads ``public.jobs.status``, the same cache the
+hooks above write, so it fires only for a job somebody already looked at -- it
+buys promptness over this module, not independence from it. ``IDLE`` is the one
+that needs nobody: it reads the machine's own traffic through this API. It
+consults the cached job status too, but since 2026-08-12 as a longer window
+rather than as a veto (``reconcile.DEFAULT_LIVE_JOB_IDLE_AFTER_S``), so a
+rental whose job row is stale is delayed by hours and not exempted for ever.
+The distinction matters here because it is the answer to "what happens if
+nobody ever opens the console again": ``IDLE``, at six hours, and nothing else.
 
 (The federated driver, ``fedavg._finish``, observes its own runs ending
 without any page being open. It is deliberately not hooked here: it runs in a
 daemon thread with its own connection and no event loop, and the sweep covers
 its rentals within ``idle_after_s`` anyway. If federated runs ever rent
 capacity in volume, that is where the second hook goes.)
+
+THIS PATH HAS NO WORK-IN-FLIGHT GUARD, AND THAT IS A KNOWN HAZARD
+------------------------------------------------------------------
+**Not a decision this file is entitled to keep making quietly, so it is
+written down.** ``reconcile.unreleased_rows``' ``JOB_FINISHED`` branch refuses
+to sweep a rental whose machine holds a lease that could still be live, because
+a rented machine sits in the submitter's own pool and the runtime is pull-based
+-- "the job we rented it for is over" says nothing about what the machine is
+running now. That guard was added after a reproduction; see
+``test_capacity_reconcile.py::test_a_finished_job_never_sweeps_a_machine_
+holding_a_live_lease``.
+
+This module asks nothing of the kind. Armed, a page load that observes job A
+finishing destroys the machine rented for A **while it is mid-task on job B**
+in the same pool. The docstring below argues that a caller who has just watched
+a job finish knows something no heartbeat can tell us, and that is true of the
+JOB -- it is not true of the MACHINE. Closing it means the same
+``public.attempts`` test the sweep uses, in ``rentals_for_jobs``' predicate;
+until then, this is the reason an armed deployment can still lose a running
+task, and the sweep's own guards do not cover it because this path never
+consults them.
 
 EVERY CALL IS IDEMPOTENT AND EVERY CALL IS BEST EFFORT
 ------------------------------------------------------
