@@ -702,7 +702,8 @@ def reactivate_machine(
     platform: str | None,
     lifecycle: str = "persistent",
 ) -> str:
-    """Return a revoked machine to 'pending' so it can redeem a fresh token.
+    """Return a revoked or deleted machine to 'pending' so it can redeem a
+    fresh token.
 
     Reuses the existing row rather than inserting a second one: contributions
     reference this machine id, and a duplicate would split one machine's
@@ -712,7 +713,10 @@ def reactivate_machine(
     re-enrolment issues a new one through the normal redeem path, and anything
     still holding the old token remains locked out. `revoked_at` is left as it
     is: it records that a revocation happened, which is worth keeping even
-    after the machine returns.
+    after the machine returns. `deleted_at` is left for the same reason, and
+    `capabilities` stays as `delete_machine_row` scrubbed it until the
+    register proxy reports a fresh snapshot — exactly the state a machine
+    enrolling for the first time is in.
 
     `name` and `platform` are refreshed from the new enrolment, so a machine
     that was renamed or reinstalled reports its current identity.
@@ -936,12 +940,20 @@ def list_machines_for_owner(
     somebody else now has. A revoked ``persistent`` machine is the opposite
     case and stays: a laptop its owner revoked on purpose is still theirs, and
     hiding it would hide the evidence that they did.
+
+    **A ``deleted`` machine is gone from here whatever its lifecycle**, and
+    that is the whole point of the status (migration 0028): the owner asked
+    for the row to stop appearing, and the tombstone exists only so the
+    history that references it keeps resolving. This filter and
+    ``delete_machine_row``'s scrub are the two halves of one answer — the row
+    carries no device detail to show, and it is not shown.
     """
     columns = ", ".join(MACHINE_PUBLIC_COLUMNS)
     with db.cursor() as cur:
         cur.execute(
             f"select {columns} from public.machines "
             "where owner_id = %s "
+            "and status <> 'deleted' "
             "and not (lifecycle in ('ephemeral', 'leased') "
             "         and status = 'revoked') "
             "order by created_at",
@@ -968,6 +980,11 @@ def expire_stale_ephemeral_machines(
     ``public.rented_capacity`` row that opened it (``capacity/reconcile.py``),
     never by age. Adding ``'leased'`` to the predicate below would break every
     slow-booting rental; see migration 0023.
+
+    ``deleted`` is excluded beside ``revoked``: a tombstone has no credential
+    left to kill, and moving one back to ``revoked`` would undo a terminal
+    state on a timer — the one way a machine its owner deleted could reappear
+    without anybody asking for it.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -976,7 +993,7 @@ def expire_stale_ephemeral_machines(
                 update public.machines
                    set status = 'revoked', revoked_at = now()
                  where lifecycle = 'ephemeral'
-                   and status <> 'revoked'
+                   and status not in ('revoked', 'deleted')
                    and coalesce(last_seen_at, created_at)
                        < now() - make_interval(secs => %s)
                 returning id
@@ -997,13 +1014,88 @@ def revoke_machine_row(
 ) -> bool:
     """Owner-scoped revoke. Returns True only if a row belonging to
     owner_id was actually updated — a bad machine_id and a machine_id
-    owned by someone else both return False, indistinguishably."""
+    owned by someone else both return False, indistinguishably.
+
+    A ``deleted`` machine answers False too, and for a reason worth spelling
+    out: ``deleted`` is terminal (migration 0028), so revoking one would move
+    a tombstone BACK to ``revoked`` and put a row its owner retired — name and
+    capabilities already scrubbed — back into ``list_machines_for_owner`` as a
+    blank entry nobody asked for. Every revoke in this codebase funnels
+    through here (``enrolment.revoke_machine``,
+    ``sandbox_identity.revoke_sandbox_machine``, and the reconcile sweep
+    behind it), so this one predicate is the whole guarantee."""
     with db.cursor() as cur:
         cur.execute(
             """
             update public.machines
                set status = 'revoked', revoked_at = now()
-             where id = %s and owner_id = %s and status != 'revoked'
+             where id = %s and owner_id = %s
+               and status not in ('revoked', 'deleted')
+            returning id
+            """,
+            (machine_id, owner_id),
+        )
+        return cur.fetchone() is not None
+
+
+def delete_machine_row(
+    db: psycopg.Connection, machine_id: str, owner_id: str
+) -> bool:
+    """Owner-scoped delete: tombstone an already-revoked machine.
+
+    **The row is not removed, and it must not be.** Six tables reference
+    ``public.machines(id)`` with ``on delete cascade`` — ``contributions``,
+    ``attempts``, ``verifications``, ``machine_pools``, ``listings`` and
+    ``matches`` — so a real ``DELETE`` would take the accepted-work credit
+    ledger and the attempt evidence with it (hard rules 3 and 4). A person's
+    contribution total would FALL because they tidied their fleet.
+    ``contributions_for_owner`` predicted this exact route and said so.
+
+    What the owner is actually asking to be rid of is the DETAIL: a revoked
+    laptop sitting in "My machines" for ever with its hostname, platform,
+    capability snapshot, token prefix and last heartbeat. So this scrubs every
+    column that describes the device, in the same UPDATE that sets the status,
+    and ``list_machines_for_owner`` stops returning the row at all. There is
+    no window in which a row is half-deleted.
+
+    ``node_id`` survives the scrub. It is the agent's own opaque
+    ``fn-<hex>`` identity, not device detail, and it is what
+    ``enrolment.approve_device_code`` matches when the same machine enrols
+    again — clearing it would insert a second row and split one machine's
+    history in two, the thing that branch exists to prevent.
+
+    ``created_at`` and ``revoked_at`` survive too: they are the lifecycle
+    record, not a description of the hardware, and ``deleted_at`` joins them.
+
+    Only from ``revoked``. An active machine is refused here as well as at the
+    route, so the rule holds for any caller: killing the credential is a
+    separate, reversible decision the owner has to make first, and it is the
+    one that stops the machine claiming work.
+
+    Returns True only if this call performed the deletion. False covers an
+    unknown machine, someone else's machine, one that is not revoked, and one
+    already deleted — indistinguishably, ``revoke_machine_row``'s convention,
+    so a caller cannot enumerate other people's machine ids with it. That also
+    makes a repeated delete answer the same 404 as an absent one rather than
+    reporting a second success.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            update public.machines
+               set status = 'deleted',
+                   deleted_at = now(),
+                   name = null,
+                   platform = null,
+                   capabilities = '{}'::jsonb,
+                   token_hash = null,
+                   token_prefix = null,
+                   last_seen_at = null,
+                   sandbox_capable = false,
+                   argv_capable = false,
+                   unsandboxed_argv_capable = false,
+                   module_capable = false
+             where id = %s and owner_id = %s and status = 'revoked'
             returning id
             """,
             (machine_id, owner_id),

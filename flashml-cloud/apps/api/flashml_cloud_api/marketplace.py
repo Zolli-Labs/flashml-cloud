@@ -1433,12 +1433,20 @@ def create_listing(
     with db.transaction():
         with db.cursor() as cur:
             cur.execute(
-                "select capabilities from public.machines"
+                "select capabilities, status from public.machines"
                 " where id = %s::uuid and owner_id = %s::uuid",
                 (machine_id, owner_id),
             )
             machine = cur.fetchone()
-            if machine is None:
+            # A deleted machine reads as absent, not as a machine with an
+            # empty capability snapshot. `delete_machine_row` scrubs
+            # `capabilities` to `{}`, and `capability_class({})` is a
+            # perfectly good `cpu-small` — so without this line the owner
+            # could post a fresh ask against a machine they had retired, and
+            # the book would carry an offer nothing can ever fill. Same 404
+            # the route gives an id that was never real: a tombstone is not a
+            # machine.
+            if machine is None or machine["status"] == "deleted":
                 raise LookupError("no such machine for this owner")
 
             klass = capability_class(machine["capabilities"])

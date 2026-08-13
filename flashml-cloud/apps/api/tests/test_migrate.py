@@ -290,7 +290,14 @@ def test_baseline_through_then_apply_runs_only_the_remainder(postgres_dsn):
         # outcome; the bad one is `--baseline` over a migration that creates
         # nothing later code references, where the gap stays invisible.
         conn.execute("create table public.profiles (id uuid primary key)") # 0001, for 0007
-        conn.execute("create table public.machines (id uuid primary key)")   # 0001, for 0004
+        # 0028 widens the `status` CHECK and comments the column, so the
+        # stand-in needs `status` to exist for either to have something to
+        # bind to — the same reason `device_codes` below carries `node_id`.
+        conn.execute(                                                        # 0001, for 0004 + 0028
+            "create table public.machines ("
+            "  id uuid primary key,"
+            "  status text not null default 'pending')"
+        )
         conn.execute("create table public.jobs (id text primary key)")       # 0001, for 0007
         conn.execute("create table public.job_rounds (id uuid primary key)") # 0002, for 0005
         # 0012 adds `kind`/`credential_id` and relaxes `node_id`, so the
