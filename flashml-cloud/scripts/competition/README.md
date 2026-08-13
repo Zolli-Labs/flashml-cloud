@@ -135,3 +135,58 @@ human with a list and a console. Each cell kills its own sandbox in a `finally`,
 the run then sweeps by id — only ids it created, never a blanket sweep that
 would reach into a probe running beside it — and the last thing it prints is
 what is still alive.
+
+## Isolation probe (C-6.2)
+
+The requirement's own words: *a task that attempts and fails to read outside
+its workspace, reach a forbidden host, and see host processes.* One sandbox,
+three attempts, each judged honestly — `denied: true` means isolation HELD
+(the desired outcome), and **a leak is never encoded as denied.**
+
+| attempt | what it tries | proves isolation held when |
+|---|---|---|
+| `filesystem_escape` | `cat /etc/shadow`, then `touch /flashml_escape_probe` above the workspace | BOTH the read and the write fail |
+| `forbidden_host` | reach Alibaba's ECS metadata IP (`100.100.100.200`) and the generic link-local metadata address (`169.254.169.254`) | BOTH are refused, time out, or answer anything but 2xx — timeout and refusal are recorded as distinct signals, never conflated |
+| `host_processes` | read `/proc`'s own numeric entries and `/proc/1/cmdline` | the process table is small AND PID 1 is not a real host init (`/sbin/init`, systemd, …) — a pure, unit-tested rule (`classify_host_processes`), because this one is a judgment on the output, not an exit code |
+
+`ps aux` is captured too, but only as supplementary evidence in the printed
+signal — this template is documented (see `hibernation_modes_probe.py`) as
+shipping no procps, so `ps` output is never the classifier's input.
+
+### Run
+
+```bash
+export E2B_API_KEY="<from the FC console>"
+python isolation_probe.py --region ap-southeast-1
+```
+
+**A live run against a real sandbox is owner-coordinated** (it spends voucher
+and needs the key); it was not run as part of landing this script. What was
+verified without a sandbox and without a key:
+
+```bash
+../../apps/api/.venv/bin/python -m pytest test_isolation_probe.py -q
+```
+
+covering the AND-over-attempts contract, `classify_host_processes`'s leak
+rule (including the two "one signal lies" cases — a small table with a real
+host init, and a large table with a sandbox init — both must still read as a
+leak), the curl timeout-vs-refusal-vs-2xx classification, `redact()`, and the
+three shell commands parsed with `/bin/sh -n`.
+
+### Reading the result
+
+| Exit | Meaning |
+|---|---|
+| **0** | GO — all three attempts denied, sandbox killed, nothing left live |
+| **2** | NO-GO — a leak was observed on at least one attempt, cleanup could not be confirmed, or the run hit an allowlist block. The report says honestly which |
+| **1** | Missing `E2B_API_KEY` — a harness problem, not a verdict |
+
+### Output
+
+Redacted JSON in `../../.evidence/alibaba-isolation-<stamp>.json`, plus the
+sandbox id file `alibaba-isolation-<stamp>.sandboxes` written the instant the
+sandbox exists (so a `kill -9` of the script still leaves a human a list). The
+same double redaction as every other script in this directory — by pattern,
+and by substituting the literal value of every `E2B_*KEY*` / `OSS_*SECRET*`
+environment variable read. Nothing here is safe to publish unreviewed.
