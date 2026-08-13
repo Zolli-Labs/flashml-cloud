@@ -196,14 +196,35 @@ def test_the_fake_is_never_the_default_anywhere():
     DEFINED and therefore the one file that legitimately contains its name
     — the same exclusion `test_alibaba_sandbox.py` makes for
     `alibaba_sandbox.py` and `FakeSandboxGateway`.
+
+    Detects a *code* reference — an import, a bare name, or an attribute
+    access — via the AST, not a raw substring. A neighbouring module that
+    merely NAMES the fake in a docstring (e.g. `agent_loop.py` explaining
+    that its own tests use it) is documentation, not a wiring, and must not
+    trip this. Docstrings and string literals are `ast.Constant` nodes, so
+    the walk below never sees them.
     """
+    import ast
     import pathlib
+
+    def references_fake_in_code(path: pathlib.Path) -> bool:
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "FakeModelProvider":
+                return True
+            if isinstance(node, ast.Attribute) and node.attr == "FakeModelProvider":
+                return True
+            if isinstance(node, ast.ImportFrom) and any(
+                alias.name == "FakeModelProvider" for alias in node.names
+            ):
+                return True
+        return False
 
     pkg = pathlib.Path(__file__).resolve().parents[1] / "flashml_cloud_api"
     hits = [
         p.name
         for p in sorted(pkg.rglob("*.py"))
-        if p.name != "model_provider.py" and "FakeModelProvider" in p.read_text()
+        if p.name != "model_provider.py" and references_fake_in_code(p)
     ]
     assert hits == []
 
