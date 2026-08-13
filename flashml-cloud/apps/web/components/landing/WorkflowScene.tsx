@@ -3,6 +3,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import type { CSSProperties } from "react";
 import { useLandingMotion } from "@/components/landing/motion/LandingMotionProvider";
+import { DURATIONS, EASINGS, TRAVEL, seconds } from "@/lib/motion/timing";
 import type {
   WorkflowEvent,
   WorkflowStepId,
@@ -178,8 +179,16 @@ export function WorkflowScene({
         className="workflow-scene"
         initial={false}
         animate={{ opacity: 1, y: 0 }}
-        exit={reduced ? { opacity: 1 } : { opacity: 0, y: -10 }}
-        transition={reduced ? { duration: 0 } : { duration: 0.28, ease: "easeOut" }}
+        exit={reduced ? { opacity: 1 } : { opacity: 0, y: -TRAVEL.base }}
+        // A step swapping for the next one is a state change, so it runs at
+        // the table's `state` rung on the same `settle` curve every GSAP
+        // reveal beside it now uses — `"easeOut"` was `motion/react`'s own
+        // default and agreed with nothing else on the page.
+        transition={
+          reduced
+            ? { duration: 0 }
+            : { duration: seconds(DURATIONS.state), ease: EASINGS.settle.bezier }
+        }
       >
         <header className="workflow-scene-header">
           <div>
