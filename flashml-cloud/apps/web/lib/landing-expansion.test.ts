@@ -257,19 +257,24 @@ describe("proof-led Zolli landing", () => {
     ].map(([, value]) => value);
 
     // Documented engineering benchmarks, pinned so they cannot drift.
-    expect(evidenceValues).toEqual(["24", "<0.25%", "47%", "3.7×"]);
+    // Countable facts, not performance comparisons. The set this replaced
+    // pinned "47%" — the second-best of seven runs of a benchmark ranging
+    // -189.9% to +48.3%, whose two ten-repeat runs say +42.6% and +37.5%.
+    // Pinning a cherry-picked number in a test is how it stops looking like
+    // a choice and starts looking like a fact.
+    expect(evidenceValues).toEqual(["30", "2", "5", "1"]);
     expect(text).not.toMatch(
       /\b\d[\d,]*(?:\.\d+)?\s+(?:customers?|companies|teams?)\b/i,
     );
     for (const claim of [
-      "24 attacks blocked",
-      "The sandboxed Docker host agent rejected file, network, and resource-exhaustion attacks.",
-      "<0.25% host memory overhead",
-      "The agent measures below a quarter percent of a 16 GB host while jobs run.",
-      "47% faster batch completion",
-      "Pull-based scheduling beat static assignment on the same workers.",
-      "3.7× worker speed range",
-      "Faster machines claimed more jobs across a 3.7× speed spread.",
+      "30 production attempts",
+      "Recorded across the first two contributing hosts.",
+      "2 proven architectures",
+      "macOS arm64 and Linux x86_64.",
+      "5 steps lost, not 35",
+      "Recovered from the last verified checkpoint.",
+      "1 accepted result per task",
+      "Idempotent commits reject duplicate outcomes.",
       "macOS arm64",
       "Linux x86_64",
       "Windows 11",
