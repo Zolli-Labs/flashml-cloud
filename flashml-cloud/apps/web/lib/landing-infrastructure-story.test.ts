@@ -1379,6 +1379,7 @@ describe("the platform support section", () => {
 
     expect(markup).not.toContain("data-machine-result");
     expect(markup).toContain("Check this browser");
+    expect(markup).toContain("It cannot verify CPU architecture, Docker, or GPU availability.");
   });
 
   it("reads navigator only after Check this browser is clicked, then announces a polite host-family hint", async () => {
@@ -1483,6 +1484,13 @@ describe("the supporting landing story", () => {
     expect(WORKLOADS).toHaveLength(5);
     expect(WORKLOADS.every(({ machineContext }) => machineContext.length > 0)).toBe(true);
     expect(markup.match(/data-workload-machines/g) ?? []).toHaveLength(WORKLOADS.length);
+    for (const machineContext of [
+      "Suitable machines: Laptops, CPU workstations, or rented GPUs.",
+      "Suitable machines: CPU or GPU machines across a team.",
+      "Suitable machines: Supported macOS, Linux, and compatible cloud machines.",
+      "Suitable machines: Mixed personal, lab, and cloud machines.",
+      "Suitable machines: Linux machines with supported NVIDIA GPUs.",
+    ]) expect(markup).toContain(machineContext);
   });
 
   it("limits the architecture trace to lease, checkpoint, and recovery", () => {
