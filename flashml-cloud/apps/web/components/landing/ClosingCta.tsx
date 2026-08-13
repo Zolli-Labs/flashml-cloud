@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, ArrowUpRight } from "@phosphor-icons/react/dist/ssr";
+import { ArrowRight } from "@phosphor-icons/react/dist/ssr";
 import { Wordmark } from "@/components/brand/Mark";
 import { CommitSignal } from "@/components/landing/CommitSignal";
 import { MARKETING } from "@/lib/marketing";
@@ -18,34 +18,34 @@ export function ClosingCta() {
               Zolli Cloud
             </p>
             <h2 className="mt-4 max-w-[800px] text-[clamp(3rem,6vw,5.25rem)] font-semibold leading-[0.96] tracking-[-0.055em]">
-              Bring the fleet. <span className="text-muted-foreground">Keep the progress.</span>
+              Join the open <span className="text-muted-foreground">compute network.</span>
             </h2>
           </div>
 
           <div className="border-t border-[var(--z-border-strong)] pt-6">
             <p className="max-w-[42ch] text-[15px] leading-relaxed text-muted-foreground">
-              Connect the machines you already have. Zolli handles bounded leases,
-              checkpoint verification, and deterministic recovery.
+              Access compute from more sources, or make a machine available to the network.
+              Zolli is currently in early access.
             </p>
             <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2.5">
               <Link
                 href={MARKETING.consolePath}
                 className="interactive inline-flex min-h-10 items-center gap-2 rounded-[7px] border border-[var(--landing-graphite)] bg-[var(--landing-graphite)] px-5 text-[13px] font-semibold text-[#f3f1ec] hover:bg-[#1b1f20]"
               >
-                Open console
+                I need compute
                 <ArrowRight weight="bold" className="h-4 w-4" />
               </Link>
-              <a
-                href={MARKETING.calendlyUrl}
-                target="_blank"
-                rel="noreferrer"
-                aria-label="Talk to Zolli (opens in a new tab)"
+              <Link
+                href={MARKETING.machinesPath}
                 className="interactive inline-flex min-h-10 items-center gap-2 text-[13px] font-semibold text-foreground underline decoration-[var(--z-border-strong)] underline-offset-4 hover:decoration-foreground"
               >
-                Talk to Zolli
-                <ArrowUpRight weight="bold" className="h-4 w-4" />
-              </a>
+                I want to provide compute
+                <ArrowRight weight="bold" className="h-4 w-4" />
+              </Link>
             </div>
+            <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
+              Host cash payout is not live; early testing uses Zolli credits.
+            </p>
           </div>
         </div>
         <div className="mx-auto max-w-[1240px]">

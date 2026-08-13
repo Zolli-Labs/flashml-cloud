@@ -2,39 +2,44 @@ import { MARKETING } from "@/lib/marketing";
 
 const FAQS = [
   {
-    question: "What does Zolli coordinate?",
+    question: "What is Zolli?",
     answer:
-      "Zolli coordinates jobs, tasks, leases, checkpoints, recovery, and accepted results across the machines in a workspace.",
+      "Zolli is an allocation network across owned, community, and rented compute. It coordinates supported work across compatible machines.",
   },
   {
-    question: "Which machines are supported?",
+    question: "Is Zolli another cloud provider?",
     answer:
-      "macOS arm64 and Linux x86_64 are production-proven hosts. Windows 11 with Docker Desktop and the WSL2 backend is currently preview support.",
+      "No. Zolli is not another single cloud provider; it helps work move across capacity from more than one source.",
   },
   {
-    question: "What happens when a machine disappears?",
+    question: "Can machine owners earn money today?",
     answer:
-      "A missing heartbeat expires that machine’s ownership of the task. The task is requeued and another worker resumes from the last verified checkpoint.",
+      "Early testing uses Zolli credits. Cash payout is not live.",
   },
   {
-    question: "Does every machine need Docker?",
+    question: "Will Zolli always be cheaper?",
     answer:
-      "No. Subprocess execution is available for trusted pools, while allowlisted Docker containers are the isolation path for shared machines.",
+      "No. Competition creates choices, but Zolli cannot guarantee every job is cheaper.",
   },
   {
-    question: "How are code, artifacts, and credentials handled?",
+    question: "Which machines work?",
     answer:
-      "Task environments are scrubbed, machine writes are authenticated and lease-scoped, and artifacts and checkpoints are hash-verified. Deployment configuration still matters to the security boundary.",
+      "Proven hosts are macOS Apple silicon, Linux x86_64, and tested RunPod NVIDIA GPUs. Windows 11 is in Preview.",
   },
   {
-    question: "How is Zolli priced?",
+    question: "Which workloads fit?",
     answer:
-      "Pricing is not published during early access. Schedule a conversation or email Zolli to agree the scope directly.",
+      "Divisible or checkpointable work fits. Tightly synchronized multi-machine training is not the current target.",
   },
   {
-    question: "What support is available during early access?",
+    question: "What happens if a machine disappears?",
     answer:
-      "Early-access support can cover onboarding, workload integration, deployment, and recovery design by agreement. No service-level agreement is offered or implied.",
+      "Supported work can be reallocated and resumed from recorded progress on another compatible machine.",
+  },
+  {
+    question: "How mature is the network?",
+    answer:
+      "Zolli is early, with verified cross-machine runs and a growing network.",
   },
 ] as const;
 

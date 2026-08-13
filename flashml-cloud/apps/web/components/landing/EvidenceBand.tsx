@@ -1,19 +1,19 @@
 import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 
 const EVIDENCE = [
-  ["30", "production attempts", "Recorded across the first two contributing hosts."],
-  ["2", "proven architectures", "macOS arm64 and Linux x86_64."],
-  ["5", "steps lost, not 35", "Recovered from the last verified checkpoint."],
-  ["1", "accepted result per task", "Idempotent commits reject duplicate outcomes."],
+  ["24", "attacks blocked", "The sandboxed Docker host agent rejected file, network, and resource-exhaustion attacks."],
+  ["<0.25%", "host memory overhead", "The agent measures below a quarter percent of a 16 GB host while jobs run."],
+  ["47%", "faster batch completion", "Pull-based scheduling beat static assignment on the same workers."],
+  ["3.7×", "worker speed range", "Faster machines claimed more jobs across a 3.7× speed spread."],
 ] as const;
 
 export function EvidenceBand() {
   return (
     <section
       id="evidence"
-      data-surface="light"
+      data-surface="sand"
       data-layout="evidence-ledger"
-      className="landing-surface-light scroll-mt-20 border-b border-border py-20 md:py-28"
+      className="landing-surface-sand scroll-mt-20 border-b border-border py-20 md:py-28"
     >
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
         <div className="grid gap-8 lg:grid-cols-[.72fr_1.28fr] lg:gap-12">
@@ -22,11 +22,11 @@ export function EvidenceBand() {
               Product evidence
             </p>
             <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              Verified runs, <span className="text-muted-foreground">not scale claims.</span>
+              Proven with <span className="text-muted-foreground">real work.</span>
             </h2>
           </div>
           <p className="max-w-[55ch] self-end text-base leading-relaxed text-muted-foreground">
-            These figures are verified product evidence from documented runs, rather than scale metrics.
+            Measured in documented runs and benchmarks — not scale claims.
           </p>
         </div>
 

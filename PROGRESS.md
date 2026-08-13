@@ -254,6 +254,74 @@ in `acquire.py`/`reconcile.py` asserted the old behaviour and were corrected.
 Next: wire `acquire_for_job` to a caller (it still has none) with the total-
 dollar ceiling the spec flags as the largest open risk. Parking lot: surfacing
 `lifecycle` in `MACHINE_PUBLIC_COLUMNS` so the console can label a rented GPU.
+### 2026-08-12 — Classify workloads by mode and show the real runtime lanes (flashml-cloud, web landing)
+What/why: User feedback on two sections. Workload fit: the staggered rows read
+misaligned and the marquee rail duplicated the list — replaced with a
+mode-classified task list directly under the header (Mode / Divide: four
+independent-piece workloads; Mode / Resume: checkpointable training), aligned
+rows with machine context, rail deleted. Technical depth: the abstract
+three-curve "runtime signal" said nothing and the Control/Execution/Integrity
+cards didn't describe the real stack — replaced with equal aligned lanes
+01 Host (flashnode, allowlisted Docker images, --network none, read-only
+rootfs, cpu/mem caps), 02 Runtime (independent tasks across machines, DDP /
+FSDP inside one machine, per M1_DECISIONS D6), 03 Recovery (checkpoint
+manifests, heartbeat expiry, one accepted commit); ArchitectureSignal and
+WorkloadVelocityRail components deleted.
+How verified: `npm test` — 823 tests passed; `npx tsc --noEmit --incremental
+  false`, `npm run lint`, canonical-environment `npx next typegen` and
+  `npm run build` exited 0; frozen-SVG diff against develop empty. Structure
+  and copy verified via SSR markup tests (data-mode groups, lane labels,
+  sandbox contract line, five workload rows with machine context).
+Gotchas: Mid-page pixel verification still blocked by the pre-existing
+  `/#anchor` deep-link crash (also on develop); visual confirmation deferred
+  to a real-browser scroll at :3025.
+Next: Real-browser review of the two redesigned sections; then decide whether
+  to fix the anchor deep-link crash.
+
+### 2026-08-12 — Restore the landing's original visual system (flashml-cloud, web landing Part II)
+What/why: Design-quality pass over the vision-led landing after user feedback
+that Part I broke the original style: the H1 clipped under the map panel,
+three light sections sat in a row, the new sections had no scroll motion, and
+headlines/bodies grew verbose. Part II fixed the hero type scale and column
+ratio, restored the strict dark/light/sand alternation (EvidenceBand moved to
+sand; SystemModules/ProfessionalServices/SystemJourney reordered because the
+two dark-only components cannot be re-skinned), wrapped MarketStory and
+SimpleJourney in the existing SectionReveal, and rewrote headlines to the
+short two-tone pattern with one-sentence bodies.
+How verified: `npm test` — 826 tests passed; `npx tsc --noEmit --incremental
+  false`, `npm run lint`, canonical-environment `npx next typegen`, and
+  `npm run build` all exited 0. Frozen-SVG diff against develop printed
+  nothing; `git diff --check` clean. Headless Chrome (1440x900, reduced
+  motion) verified the hero: both H1 lines sit inside the copy column with
+  clear air before the map panel, and the market switch stacks both roles.
+Gotchas: Direct loads of `/#<anchor>` (e.g. `/#evidence`) trip the app error
+  boundary in headless Chrome — reproduced identically on the develop server,
+  so it is a pre-existing deep-link crash, not a Part II regression; it also
+  blocks headless section screenshots, so mid-page visuals are verified via
+  SSR markup tests (surface rhythm, reveal markers, copy) instead of pixels.
+  Tall headless viewports are unusable for full-page shots because the hero
+  track is `220svh` and stretches with the viewport.
+Next: Fix the pre-existing anchor deep-link crash (separate slice), then give
+  the page a real-browser scroll-through before release.
+
+### 2026-08-12 — Verify the vision-led Zolli landing (flashml-cloud, web verification)
+What/why: Verified the completed vision-led landing slices: the coordinator-map
+SVG/source boundary remains unchanged, the landing distinguishes current early
+testing (Zolli credits; no host cash payout) from the network vision, and both
+conversion paths remain routed to the existing console and machine flows.
+How verified: `npm test` — 50 files / 825 tests passed; `npx tsc --noEmit
+  --incremental false`; `npm run lint`; canonical-environment `npx next
+  typegen`; and canonical-environment `npm run build` (32/32 static pages)
+  all exited 0. `git diff --name-only $(git merge-base develop HEAD)..HEAD --
+  flashml-cloud/apps/web/components/landing/coordinator-map
+  flashml-cloud/apps/web/lib/coordinator-map.ts` printed nothing, and `git
+  diff --check` passed. Chrome inspection at effective 1600x1000 desktop and
+  433x938 mobile found readable copy, stable H1/map geometry, no horizontal
+  overflow, the unchanged map, and `/workspaces` plus `/account/machines`
+  closing routes. The browser could not emulate reduced motion, so that visual
+  state was not claimed; its CSS/test coverage is recorded in the task report.
+Next: Perform a real OS-level reduced-motion visual check before release, then
+  deploy the approved landing when the product owner is ready.
 
 ### 2026-08-12 — Define the vision-led Zolli landing story (flashml-cloud, web design)
 What/why: Reframed the landing from fault-tolerance mechanics to the open

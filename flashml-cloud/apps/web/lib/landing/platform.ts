@@ -81,19 +81,24 @@ export const RUNTIME_SUPPORT = [
 
 export const HOST_SUPPORT = [
   {
-    platform: "macOS arm64",
+    platform: "macOS Apple silicon",
     state: "Proven",
-    body: "The browser cannot verify CPU architecture.",
+    body: "Verified on macOS arm64 machines.",
   },
   {
     platform: "Linux x86_64",
     state: "Proven",
-    body: "The browser cannot verify CPU architecture.",
+    body: "Verified on Linux CPU and compatible GPU hosts.",
+  },
+  {
+    platform: "RunPod NVIDIA GPUs",
+    state: "Proven",
+    body: "Verified with RTX 3090, RTX 4090, and RTX 4000 Ada machines.",
   },
   {
     platform: "Windows 11",
     state: "Preview",
-    body: "Preview through Docker Desktop + WSL2. The browser cannot verify prerequisites.",
+    body: "Preview through Docker Desktop and WSL2.",
   },
 ] as const satisfies readonly HostSupportItem[];
 

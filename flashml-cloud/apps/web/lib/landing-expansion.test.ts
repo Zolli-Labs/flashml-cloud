@@ -14,7 +14,7 @@ const renderPlatformSupport = () =>
 const renderRecoveryDemo = () =>
   renderToStaticMarkup(createElement(RecoveryDemo));
 const visibleText = (markup: string) =>
-  markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  markup.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
 const anchorTags = (markup: string) => markup.match(/<a\b[^>]*>[\s\S]*?<\/a>/g) ?? [];
 const anchorForText = (markup: string, label: string) =>
   anchorTags(markup).find((anchor) => visibleText(anchor).startsWith(label));
@@ -29,6 +29,7 @@ describe("proof-led Zolli landing", () => {
   it("uses one canonical console, schedule, runtime, and contact destination", () => {
     expect(MARKETING).toEqual({
       consolePath: "/workspaces",
+      machinesPath: "/account/machines",
       calendlyUrl: "https://calendly.com/phongct1105/zolli-ai",
       contactEmail: "phongct1105@gmail.com",
       runtimeRepo: "https://github.com/Zolli-Labs/flashml",
@@ -39,7 +40,7 @@ describe("proof-led Zolli landing", () => {
     const calendlyAnchors = anchorTags(markup).filter((anchor) =>
       anchor.includes("calendly.com"),
     );
-    expect(calendlyAnchors).toHaveLength(4);
+    expect(calendlyAnchors).toHaveLength(2);
     for (const anchor of calendlyAnchors) {
       expect(anchor).toContain(`href="${MARKETING.calendlyUrl}"`);
       expect(anchor).toContain('target="_blank"');
@@ -86,14 +87,17 @@ describe("proof-led Zolli landing", () => {
   it("orders evaluation content from proof through conversion", () => {
     const markup = renderLanding();
     const anchors = [
-      'id="evidence"',
-      'id="platform"',
+      'id="network"',
       'id="how-it-works"',
-      'id="workloads"',
-      'id="architecture"',
       'id="recover"',
+      'id="evidence"',
+      'id="workloads"',
+      'id="platform"',
+      'id="architecture"',
       'id="services"',
+      'id="technical-workflow"',
       'id="faq"',
+      'id="start"',
     ];
 
     anchors.reduce((previous, anchor) => {
@@ -103,7 +107,7 @@ describe("proof-led Zolli landing", () => {
     }, -1);
   });
 
-  it("keeps the approved ten-section surface rhythm followed by a dark footer", () => {
+  it("keeps the approved twelve-section surface rhythm followed by a dark footer", () => {
     const markup = renderLanding();
     const sections = (markup.match(/<section\b[^>]*>/g) ?? []).map((tag) => [
       tag.match(/\bid="([^"]+)"/)?.[1],
@@ -113,22 +117,61 @@ describe("proof-led Zolli landing", () => {
 
     expect(sections).toEqual([
       ["hero", "dark"],
-      ["evidence", "light"],
-      ["platform", "sand"],
+      ["network", "light"],
       ["how-it-works", "dark"],
-      ["workloads", "light"],
-      ["architecture", "dark"],
       ["recover", "light"],
+      ["evidence", "sand"],
+      ["workloads", "light"],
+      ["platform", "sand"],
+      ["architecture", "dark"],
       ["services", "sand"],
+      ["technical-workflow", "dark"],
       ["faq", "light"],
       ["start", "orange"],
     ]);
+    // The original design language never repeats a surface on adjacent
+    // sections; the alternation is what gives the page its chapter rhythm.
+    for (let index = 1; index < sections.length; index++) {
+      expect(sections[index][1], `section ${sections[index][0]}`).not.toBe(
+        sections[index - 1][1],
+      );
+    }
     expect(footer).toContain('data-surface="dark"');
     expect(markup.indexOf(footer)).toBeGreaterThan(markup.indexOf('id="start"'));
   });
 
-  it("explains the complete machine-to-result workflow in order", () => {
-    const journey = scopedSection(renderLanding(), "how-it-works");
+  it("explains the compute market and a three-step path before mechanics", () => {
+    const markup = renderLanding();
+    const network = scopedSection(markup, "network");
+    const journey = scopedSection(markup, "how-it-works");
+    const humanSteps = [...journey.matchAll(/\bdata-human-step="([^\"]+)"/g)].map(
+      ([, step]) => step,
+    );
+
+    expect(network).toContain('data-surface="light"');
+    // The market story reveals on scroll like every other original section.
+    expect(network.match(/data-motion="section-reveal"/g) ?? []).toHaveLength(3);
+    expect(journey).toContain('data-motion="section-reveal"');
+    for (const copy of [
+      "Compute is everywhere. Access is not.",
+      "From isolated machines to an open compute network.",
+      "One request puts every source to work — your machines, community hosts, RunPod, and Alibaba Cloud compete on price.",
+      "Idle machines already cost you. Connect them and earn when they complete useful work.",
+      "Early network",
+      "Early testing uses Zolli credits. Cash payout is not live.",
+    ]) expect(visibleText(network)).toContain(copy);
+
+    expect(journey).toContain('data-surface="dark"');
+    expect(humanSteps).toEqual(["1", "2", "3"]);
+    expect([...journey.matchAll(/<h3[^>]*>([\s\S]*?)<\/h3>/g)].map(([, title]) => visibleText(title))).toEqual([
+      "Tell Zolli what you need.",
+      "The network finds suitable machines.",
+      "Your work continues as capacity changes.",
+    ]);
+  });
+
+  it("explains the complete machine-to-result technical workflow in order", () => {
+    const journey = scopedSection(renderLanding(), "technical-workflow");
     const steps = [...journey.matchAll(/\bdata-workflow-step="([^"]+)"/g)].map(
       ([, key]) => key,
     );
@@ -188,7 +231,7 @@ describe("proof-led Zolli landing", () => {
   });
 
   it("keeps each workflow scene small and removes the old topology ticker", () => {
-    const journey = scopedSection(renderLanding(), "how-it-works");
+    const journey = scopedSection(renderLanding(), "technical-workflow");
 
     expect(journey.match(/\bdata-workflow-scene=/g) ?? []).toHaveLength(7);
     expect(journey).not.toContain("workflow / topology");
@@ -198,12 +241,12 @@ describe("proof-led Zolli landing", () => {
   });
 
   it("keeps meaningful workflow labels above the flagged contrast floor", () => {
-    const journey = scopedSection(renderLanding(), "how-it-works");
+    const journey = scopedSection(renderLanding(), "technical-workflow");
 
     expect(journey).not.toMatch(/\btext-white\/(?:35|38|42)\b/);
   });
 
-  it("enforces the exact approved evidence-band values and rejects unsupported comparisons", () => {
+  it("enforces the approved outcome-level evidence and rejects unsupported comparisons", () => {
     const markup = renderLanding();
     const text = visibleText(markup);
     const evidenceSection = markup.match(
@@ -213,17 +256,20 @@ describe("proof-led Zolli landing", () => {
       ...(evidenceSection ?? "").matchAll(/\bdata-evidence-value="([^"]*)"/g),
     ].map(([, value]) => value);
 
-    expect(evidenceValues).toEqual(["30", "2", "5", "1"]);
-    expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?%/);
-    expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?(?:×|x)(?!\w)/i);
+    // Documented engineering benchmarks, pinned so they cannot drift.
+    expect(evidenceValues).toEqual(["24", "<0.25%", "47%", "3.7×"]);
     expect(text).not.toMatch(
       /\b\d[\d,]*(?:\.\d+)?\s+(?:customers?|companies|teams?)\b/i,
     );
     for (const claim of [
-      "30 production attempts",
-      "2 proven architectures",
-      "5 steps lost, not 35",
-      "1 accepted result per task",
+      "24 attacks blocked",
+      "The sandboxed Docker host agent rejected file, network, and resource-exhaustion attacks.",
+      "<0.25% host memory overhead",
+      "The agent measures below a quarter percent of a 16 GB host while jobs run.",
+      "47% faster batch completion",
+      "Pull-based scheduling beat static assignment on the same workers.",
+      "3.7× worker speed range",
+      "Faster machines claimed more jobs across a 3.7× speed spread.",
       "macOS arm64",
       "Linux x86_64",
       "Windows 11",
@@ -234,21 +280,23 @@ describe("proof-led Zolli landing", () => {
   });
 
   it("rejects universal support, customer, provider, and unverified performance claims", () => {
-    const text = visibleText(renderLanding());
+    const markup = renderLanding();
+    const text = visibleText(markup);
+    const nonFaqText = visibleText(markup.replace(scopedSection(markup, "faq"), ""));
 
     expect(text).not.toMatch(/\b(?:trusted by|used by)\b|\bcustomers?\b/i);
     expect(text).not.toMatch(/\b(?:all|every) (?:cloud )?providers?\b/i);
     expect(text).not.toMatch(/\b(?:supports?|works on|available on) (?:all|every)\b/i);
-    expect(text).not.toMatch(/\b(?:RunPod|Together AI|Lambda Labs|Vast\.ai)\b/i);
-    expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?(?:%|×|x)(?!\w)/i);
-    expect(text).not.toMatch(/\bguarantee(?:d|s)?\b/i);
+    expect(text).not.toMatch(/\b(?:Together AI|Lambda Labs|Vast\.ai)\b/i);
+    expect(nonFaqText).not.toMatch(/\bguarantee(?:d|s)?\b/i);
   });
 
   it("qualifies platform compatibility without overstating Windows", () => {
     const text = visibleText(renderLanding());
-    expect(text).toContain("Production-proven hosts");
-    expect(text).toContain("macOS arm64 Proven");
+    expect(text).toContain("Proven today");
+    expect(text).toContain("macOS Apple silicon Proven");
     expect(text).toContain("Linux x86_64 Proven");
+    expect(text).toContain("RunPod NVIDIA GPUs Proven");
     expect(text).toContain("Windows 11 Preview");
     expect(text).toContain("Docker");
     expect(text).toContain("GitHub");
@@ -259,7 +307,7 @@ describe("proof-led Zolli landing", () => {
     const markup = renderPlatformSupport();
 
     expect(markup.match(/data-runtime-button="[^"]*"/g) ?? []).toHaveLength(9);
-    expect(markup.match(/data-host-card="[^"]*"/g) ?? []).toHaveLength(3);
+    expect(markup.match(/data-host-card="[^"]*"/g) ?? []).toHaveLength(4);
     expect(markup).not.toContain("Python workloads");
     expect(markup).not.toContain("Local/cloud machine supply");
     expect(markup).not.toContain("data-machine-result");
@@ -269,37 +317,39 @@ describe("proof-led Zolli landing", () => {
     ]) expect(visibleText(markup)).toContain(label);
   });
 
-  it("names four workloads already represented in the project", () => {
+  it("names five workloads with their supported machine context", () => {
     const text = visibleText(renderLanding());
     for (const workload of [
-      "Federated training",
-      "Hyperparameter search",
-      "Shared data processing",
+      "Model configuration search",
+      "AI model evaluation",
+      "Independent file processing",
+      "Simulations and research trials",
       "Checkpointable model training",
     ]) expect(text).toContain(workload);
   });
 
-  it("keeps one semantic workload list while the duplicated velocity labels stay hidden", () => {
+  it("lists every workload once under its mode", () => {
     const workloads = scopedSection(renderLanding(), "workloads");
 
-    expect(workloads).toContain('aria-label="Supported workloads"');
-    expect(workloads).toContain('aria-hidden="true"');
-    expect(workloads.match(/<li\b/g) ?? []).toHaveLength(4);
+    expect(workloads).toContain('aria-label="Supported workloads — Divide mode"');
+    expect(workloads).toContain('aria-label="Supported workloads — Resume mode"');
+    expect(workloads.match(/<li\b/g) ?? []).toHaveLength(5);
   });
 
-  it("groups the runtime into control, execution, and integrity layers", () => {
+  it("groups the runtime into host, runtime, and recovery lanes", () => {
     const text = visibleText(renderLanding());
-    for (const layer of ["01 Control", "02 Execution", "03 Integrity"])
-      expect(text).toContain(layer);
+    for (const lane of ["01 Host", "02 Runtime", "03 Recovery"])
+      expect(text).toContain(lane);
     for (const moduleName of ["Coordinate", "Enroll", "Execute", "Checkpoint", "Recover", "Verify"])
       expect(text).toContain(moduleName);
   });
 
-  it("connects the recovery ledger to the verified five-step result", () => {
+  it("connects the recovery ledger to the documented recovery outcome", () => {
     const text = visibleText(renderLanding());
-    expect(text).toContain("Failure at step 35");
-    expect(text).toContain("Checkpoint at step 30");
-    expect(text).toContain("5 steps of work lost");
+    expect(text).toContain("Machines disappear. Progress doesn't.");
+    expect(text).toContain("RTX 4090 machine destroyed");
+    expect(text).toContain("Resumed on an RTX 3090");
+    expect(text).toContain("58 epochs preserved");
     expect(text).toContain("sample data");
   });
 
@@ -326,7 +376,7 @@ describe("proof-led Zolli landing", () => {
       "Runtime and job-spec integration",
       "Private deployment and recovery design",
     ]);
-    expect(markup.indexOf("Open console")).toBeLessThan(markup.indexOf("Talk to Zolli"));
+    expect(text).toContain("Start with the machines and workloads you already have.");
   });
 
   it("uses editorial services instead of four equal cards", () => {
@@ -339,58 +389,38 @@ describe("proof-led Zolli landing", () => {
     expect(services.match(/<article\b/g) ?? []).toHaveLength(4);
   });
 
-  it("answers the seven buyer questions with native disclosures", () => {
+  it("answers the eight market-fit questions with native disclosures", () => {
     const markup = renderLanding();
     const disclosures = markup.match(/<details\b[^>]*>[\s\S]*?<\/details>/g) ?? [];
     const expectedFaqs = [
-      {
-        question: "What does Zolli coordinate?",
-        clauses: ["jobs", "tasks", "leases", "checkpoints", "recovery", "accepted results"],
-      },
-      {
-        question: "Which machines are supported?",
-        clauses: ["macOS arm64", "Linux x86_64", "production-proven", "Windows 11", "preview"],
-      },
-      {
-        question: "What happens when a machine disappears?",
-        clauses: ["missing heartbeat", "expires", "ownership", "requeued", "last verified checkpoint"],
-      },
-      {
-        question: "Does every machine need Docker?",
-        clauses: ["Subprocess execution", "trusted pools", "allowlisted Docker", "isolation path", "shared machines"],
-      },
-      {
-        question: "How are code, artifacts, and credentials handled?",
-        clauses: [
-          "Task environments are scrubbed",
-          "machine writes are authenticated and lease-scoped",
-          "artifacts and checkpoints are hash-verified",
-          "Deployment configuration still matters",
-        ],
-      },
-      {
-        question: "How is Zolli priced?",
-        clauses: ["Pricing is not published during early access", "Schedule", "email Zolli", "scope"],
-      },
-      {
-        question: "What support is available during early access?",
-        clauses: [
-          "onboarding",
-          "workload integration",
-          "deployment",
-          "recovery design by agreement",
-          "No service-level agreement",
-        ],
-      },
+      "What is Zolli?",
+      "Is Zolli another cloud provider?",
+      "Can machine owners earn money today?",
+      "Will Zolli always be cheaper?",
+      "Which machines work?",
+      "Which workloads fit?",
+      "What happens if a machine disappears?",
+      "How mature is the network?",
     ] as const;
 
     expect(disclosures).toHaveLength(expectedFaqs.length);
     disclosures.forEach((disclosure, index) => {
       const text = visibleText(disclosure);
-      const expected = expectedFaqs[index];
-      expect(text).toContain(expected.question);
-      for (const clause of expected.clauses) expect(text).toContain(clause);
+      expect(text).toContain(expectedFaqs[index]);
     });
+    const text = visibleText(markup);
+    expect(text).toContain("Cash payout is not live");
+    expect(text).toContain("cannot guarantee every job is cheaper");
+    expect(text).toContain("Tightly synchronized multi-machine training is not the current target");
+  });
+
+  it("ends with the demand choice before the provider choice", () => {
+    const start = scopedSection(renderLanding(), "start");
+
+    expect(visibleText(start)).toContain("Join the open compute network.");
+    expect(anchorForText(start, "I need compute")).toContain(`href="${MARKETING.consolePath}"`);
+    expect(anchorForText(start, "I want to provide compute")).toContain(`href="${MARKETING.machinesPath}"`);
+    expect(start.indexOf("I need compute")).toBeLessThan(start.indexOf("I want to provide compute"));
   });
 
   it("provides complete product, resource, company, and legal navigation", () => {

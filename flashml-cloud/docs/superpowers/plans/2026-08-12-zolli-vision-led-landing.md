@@ -127,6 +127,7 @@ behavior assertions:
 
 ```ts
 const markup = renderToStaticMarkup(createElement(Hero));
+const roleMarkup = renderToStaticMarkup(createElement(HeroMarketSwitch));
 const text = markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
 expect(text).toContain("Computing power, without the lock-in.");
@@ -136,7 +137,7 @@ expect(text).toContain("Have unused computing power?");
 expect(text).toContain("Host it and earn from the work it completes.");
 expect(markup).toContain('data-market-role="demand"');
 expect(markup).toContain('data-market-role="supply"');
-expect(markup).not.toContain("aria-live");
+expect(roleMarkup).not.toContain("aria-live");
 expect(markup).toContain('href="/workspaces"');
 expect(markup).toContain('href="/account/machines"');
 expect(markup.indexOf("Get early access")).toBeLessThan(
@@ -896,4 +897,415 @@ the next useful action.
 ```bash
 git add PROGRESS.md
 git commit -m "docs: record the vision-led landing verification"
+```
+
+---
+
+## Part II — Design-quality pass: restore the original visual system
+
+**Why Part II exists.** Part I shipped the approved story, but a side-by-side
+visual audit (2026-08-12, desktop 1440×900, new build on `:3025` vs the
+original on `:3000`) showed four regressions against the original design
+language:
+
+1. **Hero H1 clips.** `Computing power, / without the lock-in.` is longer
+   than the original `Compute that / finishes the job.` and, at the same
+   type scale and column widths, overflows the copy column and slides under
+   the map panel at 1440 px.
+2. **Surface rhythm broken.** The original never repeated a surface on
+   adjacent sections (`dark → light → sand → dark → light → dark → light →
+   sand → light → orange`). Part I produced three consecutive light sections
+   (RecoveryDemo, EvidenceBand, WorkloadFit) and two consecutive dark
+   sections (SystemJourney, SystemModules), which reads as flat, unstructured
+   blocks.
+3. **Missing motion.** Every original section animates on scroll through
+   `SectionReveal` (line clip + content rise) or `motion/react` whileInView.
+   The two new sections, `MarketStory` and `SimpleJourney`, are completely
+   static text blocks.
+4. **Verbose copy, broken headline pattern.** The original display headlines
+   are short two-tone pairs (`Verified runs, <muted>not scale claims.</muted>`).
+   Part I headlines are long single-tone sentences that wrap 3–4 lines
+   (`A growing network, proven with real work.`, `Affordable capacity matters
+   only if the work finishes.`), and several bodies grew to 2–3 lines of
+   prose, diluting the vision.
+
+**Part II constraints (added to Global Constraints).**
+
+- No two adjacent sections may share the same surface.
+- Every section headline uses the two-tone pattern: short lead plus a
+  `text-muted-foreground` contrast span. Headlines must render in at most two
+  lines at `lg` and above (≈40 characters total budget).
+- Section bodies are one sentence, ≤ 25 words.
+- Every section reveals on scroll with the existing primitives only
+  (`SectionReveal`, or `motion/react` `whileInView` gated by
+  `useLandingMotion`). No new animation systems; reduced-motion behavior
+  inherits from those primitives.
+- The approved story, section ids, honesty disclosures, and the frozen
+  coordinator-map boundary are unchanged.
+
+**Section order and surfaces.** `SystemJourney` and `SystemModules` are
+dark-only by construction (hard-coded `#111416` cards, `white/xx` rules,
+pinned dark scenes), so the rhythm cannot be restored by re-skinning them.
+The minimal deviation from the approved order that restores the original
+alternation is moving `SystemModules` before `ProfessionalServices` and
+`SystemJourney` after it, and rendering `EvidenceBand` on sand (it is fully
+token-based and renders correctly there):
+
+| # | Section              | Surface |
+|---|----------------------|---------|
+| 1 | Hero                 | dark    |
+| 2 | MarketStory          | light   |
+| 3 | SimpleJourney        | dark    |
+| 4 | RecoveryDemo         | light   |
+| 5 | EvidenceBand         | sand    |
+| 6 | WorkloadFit          | light   |
+| 7 | PlatformSupport      | sand    |
+| 8 | SystemModules        | dark    |
+| 9 | ProfessionalServices | sand    |
+| 10| SystemJourney        | dark    |
+| 11 | Faq                  | light   |
+| 12 | ClosingCta           | orange  |
+
+Narratively this still reads correctly: compatibility (7) flows into the
+machinery that makes it trustworthy (8), services bridge to conversion (9),
+and the pinned seven-scene runtime journey (10) becomes the final technical
+set-piece before FAQ and closing.
+
+---
+
+### Task 6: Fix the hero composition and tighten hero copy
+
+**Files:**
+
+- Modify: `flashml-cloud/apps/web/components/landing/Hero.tsx`
+- Test: `flashml-cloud/apps/web/lib/landing-cinematic.test.ts`
+
+**Interfaces:**
+
+- Changes: H1 type scale and grid ratio so both nowrap lines fit the copy
+  column from `xl` upward.
+- Preserves: eyebrow, H1 copy, `HeroMarketSwitch`, CTAs, and the unchanged
+  `CoordinatorMap` invocation.
+
+- [ ] **Step 1: Update the hero fit assertion**
+
+In `landing-cinematic.test.ts`, keep the existing hero content assertions and
+add copy-length guards that make overflow unlikely to regress silently:
+
+```ts
+expect(text).toContain("One open network connecting people who need compute with machines ready to work.");
+```
+
+- [ ] **Step 2: Run the focused test and verify the expected failure**
+
+```bash
+npm test -- lib/landing-cinematic.test.ts
+```
+
+Expected: FAIL on the new explanation copy.
+
+- [ ] **Step 3: Fix the H1 fit**
+
+In `Hero.tsx`:
+
+- H1 class: `text-[clamp(2.5rem,4.9vw,5rem)]` (was
+  `text-[clamp(2.75rem,5.6vw,5.7rem)]`); keep `leading-[0.93]`,
+  `tracking-[-0.058em]`, and both `lg:whitespace-nowrap` spans.
+- Grid class: `xl:grid-cols-[minmax(30rem,1fr)_minmax(0,1fr)]` (was
+  `minmax(28rem,.9fr)_minmax(0,1.1fr)`), keeping the existing gaps.
+- Replace the explanation paragraph with the single sentence
+  `One open network connecting people who need compute with machines ready to
+  work.`
+
+At 1024–1920 px this keeps `without the lock-in.` inside the copy column
+(≈443 px needed vs ≈444 px available at 1024; ≈625 px vs ≈652 px at 1440).
+
+- [ ] **Step 4: Run the focused suite**
+
+```bash
+npm test -- lib/landing-cinematic.test.ts lib/landing-infrastructure-story.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit Task 6**
+
+```bash
+git add flashml-cloud/apps/web/components/landing/Hero.tsx \
+  flashml-cloud/apps/web/lib/landing-cinematic.test.ts
+git commit -m "fix(web): keep the vision headline inside its column"
+```
+
+---
+
+### Task 7: Restore the surface rhythm and section order
+
+**Files:**
+
+- Modify: `flashml-cloud/apps/web/app/(marketing)/page.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/EvidenceBand.tsx`
+  (surface token only)
+- Test: `flashml-cloud/apps/web/lib/landing-expansion.test.ts`
+
+**Interfaces:**
+
+- Produces: the 12-section order/surface table above.
+- Changes: `EvidenceBand` renders on sand; its `SectionReveal` line classes
+  are token-based (`bg-[var(--z-border-strong)]`) and need no other edit.
+
+- [ ] **Step 1: Write failing rhythm tests**
+
+Replace the anchor-order assertion with:
+
+```ts
+const anchors = [
+  'id="network"',
+  'id="how-it-works"',
+  'id="recover"',
+  'id="evidence"',
+  'id="workloads"',
+  'id="platform"',
+  'id="architecture"',
+  'id="services"',
+  'id="technical-workflow"',
+  'id="faq"',
+  'id="start"',
+];
+```
+
+Add a rhythm assertion over the page wrapper sequence:
+
+```ts
+const surfaces = [...markup.matchAll(/data-surface="([a-z]+)" class="landing-surface/g]
+  .map((match) => match[1]);
+for (let i = 1; i < surfaces.length; i++) {
+  expect(surfaces[i]).not.toBe(surfaces[i - 1]);
+}
+```
+
+- [ ] **Step 2: Run the focused test and verify the expected failure**
+
+```bash
+npm test -- lib/landing-expansion.test.ts
+```
+
+Expected: FAIL on order and adjacent-surface assertions.
+
+- [ ] **Step 3: Reorder the page**
+
+Set the page component order to:
+
+```tsx
+<Hero />
+<MarketStory />
+<SimpleJourney />
+<RecoveryDemo />
+<EvidenceBand />
+<WorkloadFit />
+<PlatformSupport />
+<SystemModules />
+<ProfessionalServices />
+<SystemJourney />
+<Faq />
+<ClosingCta />
+```
+
+with wrapper surfaces `dark, light, dark, light, sand, light, sand, dark,
+sand, dark, light, orange` respectively. Move the existing hero-track comment
+with the hero.
+
+- [ ] **Step 4: Put EvidenceBand on sand**
+
+In `EvidenceBand.tsx` change `data-surface="light"` and
+`landing-surface-light` to `data-surface="sand"` and `landing-surface-sand`.
+No other edit; all colors inside are semantic tokens.
+
+- [ ] **Step 5: Run the focused landing suites**
+
+```bash
+npm test -- lib/landing-expansion.test.ts lib/landing-cinematic.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit Task 7**
+
+```bash
+git add 'flashml-cloud/apps/web/app/(marketing)/page.tsx' \
+  flashml-cloud/apps/web/components/landing/EvidenceBand.tsx \
+  flashml-cloud/apps/web/lib/landing-expansion.test.ts
+git commit -m "fix(web): restore the landing surface rhythm"
+```
+
+---
+
+### Task 8: Restore motion, the two-tone headline pattern, and tight copy
+
+**Files:**
+
+- Modify: `flashml-cloud/apps/web/components/landing/MarketStory.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/SimpleJourney.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/RecoveryDemo.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/EvidenceBand.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/SystemModules.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/WorkloadFit.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/PlatformSupport.tsx`
+- Modify: `flashml-cloud/apps/web/components/landing/ClosingCta.tsx`
+- Test: `flashml-cloud/apps/web/lib/landing-infrastructure-story.test.ts`
+- Test: `flashml-cloud/apps/web/lib/landing-expansion.test.ts`
+
+**Interfaces:**
+
+- Produces: `data-motion="section-reveal"` present in `MarketStory` and
+  `SimpleJourney` markup.
+- Produces: two-tone headlines and one-sentence bodies per the copy table
+  below.
+- Preserves: all section ids, disclosures, workload/machine data, and the
+  demand/supply value sentences.
+
+Copy table (lead + muted span; bodies ≤ 25 words):
+
+| Section | Headline | Body |
+|---|---|---|
+| MarketStory row 1 | `Compute is everywhere.` + `Access is not.` | `Useful machines sit idle while teams wait for capacity.` |
+| MarketStory row 2 | `From isolated machines to` + `an open compute network.` | `One allocation path across owned, community, and rented capacity.` |
+| SimpleJourney | `From a compute need` + `to finished work.` | step bodies below |
+| RecoveryDemo | `Machines disappear.` + `Progress doesn't.` | `When capacity vanishes, Zolli resumes supported work from recorded progress on another compatible machine.` |
+| EvidenceBand | `Proven with` + `real work.` | `Figures from documented runs, not scale claims.` |
+| SystemModules | `The machinery behind` + `a reliable market.` | `Allocation, execution, and integrity stay separate, so changing capacity still yields one accepted outcome.` |
+| WorkloadFit | (keep) | fit rule: `Zolli fits work that can be divided or resumed.` |
+| PlatformSupport | (keep) | intro: `What is proven today, what is in preview, and where the network expands.` |
+| ClosingCta | `Join the open` + `compute network.` | (keep) |
+
+SimpleJourney step bodies:
+
+1. `Describe the work and what matters—price, speed, or hardware.`
+2. `Zolli matches it to owned, community, and rented capacity.`
+3. `Recorded progress lets supported work continue on another machine.`
+
+- [ ] **Step 1: Write failing copy and motion tests**
+
+In `landing-infrastructure-story.test.ts` assert the rendered `MarketStory`
+and `SimpleJourney` markup contains `data-motion="section-reveal"`, and
+replace superseded headline assertions with the two-tone strings above
+(plain-text form, e.g. `Compute is everywhere. Access is not.`).
+
+- [ ] **Step 2: Run the focused tests and verify the expected failure**
+
+```bash
+npm test -- lib/landing-infrastructure-story.test.ts lib/landing-expansion.test.ts
+```
+
+Expected: FAIL on missing reveal markers and old copy.
+
+- [ ] **Step 3: Add motion to MarketStory**
+
+Wrap each of the three editorial rows' right-column content in its own
+`SectionReveal`, using light-surface line classes
+`h-px w-full bg-[var(--z-border-strong)]` (top line only for rows 2–3, since
+the section borders already draw rules). Keep the grid, borders, and the
+demand/supply articles unchanged.
+
+- [ ] **Step 4: Add motion to SimpleJourney**
+
+Wrap the header grid and the `<ol>` each in a `SectionReveal` with dark
+line classes `h-px w-full bg-white/18`. Apply the two-tone headline and the
+tightened step bodies. No other layout change.
+
+- [ ] **Step 5: Apply the copy table to the remaining sections**
+
+Edit only the headline/body strings listed in the copy table, adding the
+`<span className="text-muted-foreground">` contrast span where shown. Do not
+touch layout, data, disclosures, or motion already present in those sections.
+
+- [ ] **Step 6: Run the focused landing suites**
+
+```bash
+npm test -- lib/landing-infrastructure-story.test.ts \
+  lib/landing-expansion.test.ts \
+  lib/landing-cinematic.test.ts \
+  lib/landing-rebrand.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Commit Task 8**
+
+```bash
+git add flashml-cloud/apps/web/components/landing/MarketStory.tsx \
+  flashml-cloud/apps/web/components/landing/SimpleJourney.tsx \
+  flashml-cloud/apps/web/components/landing/RecoveryDemo.tsx \
+  flashml-cloud/apps/web/components/landing/EvidenceBand.tsx \
+  flashml-cloud/apps/web/components/landing/SystemModules.tsx \
+  flashml-cloud/apps/web/components/landing/WorkloadFit.tsx \
+  flashml-cloud/apps/web/components/landing/PlatformSupport.tsx \
+  flashml-cloud/apps/web/components/landing/ClosingCta.tsx \
+  flashml-cloud/apps/web/lib/landing-infrastructure-story.test.ts \
+  flashml-cloud/apps/web/lib/landing-expansion.test.ts
+git commit -m "fix(web): restore landing motion, headline pattern, and tight copy"
+```
+
+---
+
+### Task 9: Full gate, visual verification, and progress record
+
+**Files:**
+
+- Modify: `PROGRESS.md`
+
+**Interfaces:**
+
+- Consumes: completed Tasks 6–8.
+- Produces: one progress entry with test/build evidence and visual
+  verification of the four Part II regressions.
+
+- [ ] **Step 1: Confirm the frozen SVG boundary**
+
+```bash
+ZOLLI_LANDING_BASE="$(git merge-base develop HEAD)"
+git diff --name-only "$ZOLLI_LANDING_BASE"..HEAD -- \
+  flashml-cloud/apps/web/components/landing/coordinator-map \
+  flashml-cloud/apps/web/lib/coordinator-map.ts
+```
+
+Expected: no output.
+
+- [ ] **Step 2: Run the complete gate**
+
+From `flashml-cloud/apps/web`:
+
+```bash
+npm test
+npx tsc --noEmit --incremental false
+npm run lint
+set -a
+source /Users/phongcao/Work/Zolli-Labs/flashml-cloud/.env.dev
+set +a
+npx next typegen
+npm run build
+```
+
+Expected: all exit 0.
+
+- [ ] **Step 3: Visual verification against the audit findings**
+
+Serve the branch and inspect at 1280, 1440, and 1920 px wide:
+
+- hero H1 right edge stays left of the map panel at every width;
+- no two adjacent sections share a background color while scrolling the full
+  page;
+- `MarketStory` and `SimpleJourney` content rises with a line clip on scroll
+  (and renders statically under reduced motion);
+- every headline renders in at most two lines at 1440 px.
+
+Record screenshots or state the limitation explicitly.
+
+- [ ] **Step 4: Add the progress entry and commit**
+
+Prepend one `PROGRESS.md` entry covering the Part II changes, gate evidence,
+and visual verification result.
+
+```bash
+git add PROGRESS.md
+git commit -m "docs: record the landing design-quality pass"
 ```
