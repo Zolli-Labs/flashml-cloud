@@ -9770,9 +9770,18 @@ def create_app() -> FastAPI:
         settings = Settings.from_env()
 
         def connect() -> psycopg.Connection:
-            conn = psycopg.connect(settings.database_url, row_factory=dict_row)
-            conn.autocommit = True
-            return conn
+            # Through db.connect, NEVER a bare psycopg.connect: that seam
+            # carries prepare_threshold=None, and this closure is the one
+            # every real deployment actually calls. A second connect site
+            # here shipped without the guard and detonated the day
+            # DATABASE_URL moved to the :6543 transaction pooler —
+            # get_prices runs the same price_series statement once per
+            # class, crosses psycopg's auto-prepare threshold (5) inside a
+            # single request, and PREPARE on a PgBouncer-shared connection
+            # collides with a name another session already claimed
+            # (DuplicatePreparedStatement, observed on dev 2026-08-13).
+            # tests/test_db_connect_seam.py pins this drift class shut.
+            return dbmod.connect(settings)
 
         return create_cloud_app(settings, connect=connect)
     return _create_legacy_app()
