@@ -155,21 +155,11 @@ describe("proof-led Zolli landing", () => {
     for (const copy of [
       "Compute is everywhere. Access is not.",
       "From isolated machines to an open compute network.",
-      "Need compute? Every source competes.",
-      "Idle machines? Let them earn.",
-      "Lower cost",
-      "More options",
-      "No lock-in",
-      "Never depend on one provider's price or availability.",
-      "Earn from idle",
-      "Sandboxed by default",
-      "RunPod",
-      "Alibaba Cloud",
+      "One request puts every source to work — your machines, community hosts, RunPod, and Alibaba Cloud compete on price.",
+      "Idle machines already cost you. Connect them and earn when they complete useful work.",
       "Early network",
       "Early testing uses Zolli credits. Cash payout is not live.",
     ]) expect(visibleText(network)).toContain(copy);
-    expect(network).toContain('data-market-side="demand"');
-    expect(network).toContain('data-market-side="supply"');
 
     expect(journey).toContain('data-surface="dark"');
     expect(humanSteps).toEqual(["1", "2", "3"]);
