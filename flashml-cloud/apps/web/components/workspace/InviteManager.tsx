@@ -17,7 +17,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatInviteState } from "@/lib/pool-invite-state";
+import { StatTile } from "@/components/ui/stat-tile";
+import { formatInviteExpiry } from "@/lib/pool-invite-state";
 import {
   ApiError,
   createPoolInvite,
@@ -204,9 +205,24 @@ export function InviteManager({ poolId }: { poolId: string }) {
           </Button>
         </div>
       ) : inviteState ? (
-        <p className="mt-3 text-xs text-muted-foreground">
-          {formatInviteState(inviteState)}
-        </p>
+        // `uses_remaining` used to be buried inside one prose sentence
+        // ("N uses left · expires in ..."), the only number on this whole
+        // section (density audit §3, gap 6). Its own Stat now, with the
+        // expiry — `formatInviteExpiry`, the same duration logic minus the
+        // uses-remaining prefix it used to be welded to — as the small line
+        // beside it.
+        <div className="mt-3 flex flex-wrap items-end gap-4">
+          <StatTile
+            variant="header"
+            label={
+              inviteState.uses_remaining === 1 ? "Use left" : "Uses left"
+            }
+            value={inviteState.uses_remaining}
+          />
+          <p className="text-xs text-muted-foreground">
+            {formatInviteExpiry(inviteState)}
+          </p>
+        </div>
       ) : (
         <p className="mt-3 text-xs text-muted-foreground">
           No active invite link.
