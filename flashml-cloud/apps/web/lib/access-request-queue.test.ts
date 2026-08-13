@@ -24,6 +24,7 @@ function row(overrides: Partial<AccessRequestRow> = {}): AccessRequestRow {
     use_case: "Fine-tune across the lab.",
     compute_sources: ["own_machines"],
     heard_from: "github",
+    linkedin_url: "https://linkedin.com/in/hanguyen",
     requested_at: "2026-08-01T00:00:00Z",
     pending_pool_name: null,
     invited_by_name: null,

@@ -101,6 +101,7 @@ describe("isComplete", () => {
     use_case: "Fine-tune across the lab.",
     compute_sources: ["own_machines"],
     heard_from: "github",
+    linkedin_url: "linkedin.com/in/hanguyen",
   };
 
   it("accepts a complete draft", () => {
@@ -115,7 +116,7 @@ describe("isComplete", () => {
     expect(isComplete({ ...full, heard_from: "" })).toBe(true);
   });
 
-  it.each(["first_name", "last_name", "company_name", "use_case"])(
+  it.each(["first_name", "last_name", "company_name", "use_case", "linkedin_url"])(
     "requires %s",
     (field) => {
       expect(isComplete({ ...full, [field]: "   " })).toBe(false);

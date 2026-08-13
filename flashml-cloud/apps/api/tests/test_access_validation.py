@@ -19,6 +19,7 @@ VALID = {
     "use_case": "Fine-tune a 7B model across our lab's four machines.",
     "compute_sources": ["own_machines", "colab"],
     "heard_from": "github",
+    "linkedin_url": "https://linkedin.com/in/hanguyen",
 }
 
 
@@ -44,7 +45,7 @@ def test_trims_whitespace_on_every_text_field():
 
 
 @pytest.mark.parametrize(
-    "field", ["first_name", "last_name", "company_name", "use_case"]
+    "field", ["first_name", "last_name", "company_name", "use_case", "linkedin_url"]
 )
 def test_required_text_fields_cannot_be_blank(field):
     for blank in ("", "   "):
@@ -53,13 +54,20 @@ def test_required_text_fields_cannot_be_blank(field):
 
 
 @pytest.mark.parametrize(
-    "field", ["first_name", "last_name", "company_name", "use_case"]
+    "field", ["first_name", "last_name", "company_name", "use_case", "linkedin_url"]
 )
 def test_required_text_fields_cannot_be_missing(field):
     payload = dict(VALID)
     del payload[field]
     with pytest.raises(ValueError, match=field):
         parse_submission(payload)
+
+
+def test_linkedin_url_gets_a_scheme_when_typed_without_one():
+    s = parse_submission({**VALID, "linkedin_url": "linkedin.com/in/hanguyen"})
+    assert s.linkedin_url == "https://linkedin.com/in/hanguyen"
+    s = parse_submission({**VALID, "linkedin_url": "http://linkedin.com/in/x"})
+    assert s.linkedin_url == "http://linkedin.com/in/x"
 
 
 def test_rejects_an_unknown_role():
@@ -103,6 +111,8 @@ def test_length_caps_are_enforced():
         parse_submission({**VALID, "company_name": "x" * 161})
     with pytest.raises(ValueError, match="use_case"):
         parse_submission({**VALID, "use_case": "x" * 2001})
+    with pytest.raises(ValueError, match="linkedin_url"):
+        parse_submission({**VALID, "linkedin_url": "x" * 201})
 
 
 def test_length_caps_accept_boundary_values():
@@ -112,6 +122,8 @@ def test_length_caps_accept_boundary_values():
     assert s.company_name == "x" * 160
     s = parse_submission({**VALID, "use_case": "x" * 2000})
     assert s.use_case == "x" * 2000
+    s = parse_submission({**VALID, "linkedin_url": "x" * 200})
+    assert s.linkedin_url == "https://" + "x" * 200
 
 
 def test_privileged_fields_in_the_body_are_ignored_not_honoured():

@@ -28,6 +28,7 @@ SUBMISSION = parse_submission(
         "first_name": "Minh", "last_name": "Tran", "company_name": "VinAI",
         "role": "ml_engineer", "team_size": "2_5",
         "use_case": "Join my team's pool.", "compute_sources": ["own_machines"],
+        "linkedin_url": "linkedin.com/in/minhtran",
     }
 )
 

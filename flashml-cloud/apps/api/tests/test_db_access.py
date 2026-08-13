@@ -27,6 +27,7 @@ SUBMISSION = parse_submission(
         "use_case": "Fine-tune across the lab's machines.",
         "compute_sources": ["own_machines", "colab"],
         "heard_from": "github",
+        "linkedin_url": "https://linkedin.com/in/hanguyen",
     }
 )
 
@@ -262,6 +263,7 @@ def test_resubmitting_while_pending_updates_in_place(db):
             "team_size": "6_20",
             "use_case": "Changed my mind.",
             "compute_sources": ["runpod"],
+            "linkedin_url": "linkedin.com/in/ha-founder",
         }
     )
     dbmod.submit_access_request(

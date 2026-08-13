@@ -1585,6 +1585,7 @@ export interface OnboardingSubmission {
   use_case: string;
   compute_sources: string[];
   heard_from?: string;
+  linkedin_url: string;
 }
 
 /** `POST /v1alpha1/access-request` — callable by a not-yet-admitted
@@ -1619,6 +1620,7 @@ export interface AccessRequestRow {
   use_case: string | null;
   compute_sources: string[];
   heard_from: string | null;
+  linkedin_url: string | null;
   requested_at: string;
   pending_pool_name: string | null;
   invited_by_name: string | null;

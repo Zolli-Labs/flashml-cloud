@@ -63,8 +63,8 @@ def test_access_requests_table_exists_with_expected_columns(db):
     assert cols["status"] == "text"
     assert cols["compute_sources"] == "ARRAY"
     for name in (
-        "use_case", "heard_from", "pending_pool_id", "invited_by",
-        "requested_at", "decided_at", "decided_by",
+        "use_case", "heard_from", "linkedin_url", "pending_pool_id",
+        "invited_by", "requested_at", "decided_at", "decided_by",
     ):
         assert name in cols, f"access_requests.{name} missing"
 

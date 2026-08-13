@@ -1077,6 +1077,7 @@ describe("cloud-api", () => {
         team_size: "2_5",
         use_case: "Fine-tune across the lab.",
         compute_sources: ["own_machines"],
+        linkedin_url: "linkedin.com/in/hanguyen",
       });
 
       expect(result.access).toBe("pending");
@@ -1101,6 +1102,7 @@ describe("cloud-api", () => {
           team_size: "2_5",
           use_case: "x",
           compute_sources: [],
+          linkedin_url: "linkedin.com/in/hanguyen",
         })
       ).rejects.toBeInstanceOf(ApiError);
     });

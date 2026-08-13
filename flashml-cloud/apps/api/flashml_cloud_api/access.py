@@ -20,6 +20,7 @@ HEARD_FROM = frozenset(
 NAME_MAX = 80
 COMPANY_MAX = 160
 USE_CASE_MAX = 2000
+LINKEDIN_MAX = 200
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class OnboardingSubmission:
     use_case: str
     compute_sources: list[str]
     heard_from: str | None
+    linkedin_url: str
 
 
 def _required_text(payload: dict, field: str, cap: int) -> str:
@@ -84,4 +86,16 @@ def parse_submission(payload: dict) -> OnboardingSubmission:
         use_case=_required_text(payload, "use_case", USE_CASE_MAX),
         compute_sources=seen,
         heard_from=heard,
+        linkedin_url=_linkedin_url(payload),
     )
+
+
+def _linkedin_url(payload: dict) -> str:
+    """Required for pilot screening — a human reads the profile with the
+    request. People type `linkedin.com/in/x` far more often than a full
+    URL, so a missing scheme is normalised rather than rejected; what is
+    stored is always clickable."""
+    value = _required_text(payload, "linkedin_url", LINKEDIN_MAX)
+    if not value.startswith(("http://", "https://")):
+        value = f"https://{value}"
+    return value

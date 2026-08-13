@@ -101,6 +101,7 @@ export function OnboardingForm({
       team_size: draft.team_size,
       use_case: draft.use_case.trim(),
       compute_sources: draft.compute_sources,
+      linkedin_url: draft.linkedin_url.trim(),
     };
     // Sent only when set — `heard_from` is genuinely optional, and the
     // field is typed `heard_from?: string` precisely so an empty answer is
@@ -198,6 +199,26 @@ export function OnboardingForm({
             disabled={submitting}
             className="h-11"
           />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="linkedin-url" className="text-xs font-medium">
+            LinkedIn profile
+          </Label>
+          <Input
+            id="linkedin-url"
+            name="linkedin-url"
+            autoComplete="url"
+            required
+            placeholder="linkedin.com/in/you"
+            value={draft.linkedin_url}
+            onChange={(e) => set("linkedin_url", e.target.value)}
+            disabled={submitting}
+            className="h-11"
+          />
+          <p className="text-xs text-muted-foreground">
+            Required — a human reviews it with your request.
+          </p>
         </div>
 
         <GroupHeading>Your work</GroupHeading>

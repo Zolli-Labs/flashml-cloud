@@ -30,6 +30,7 @@ VALID = {
     "first_name": "Ha", "last_name": "Nguyen", "company_name": "VinAI",
     "role": "researcher", "team_size": "2_5",
     "use_case": "Fine-tune across the lab.", "compute_sources": ["own_machines"],
+    "linkedin_url": "linkedin.com/in/hanguyen",
 }
 
 

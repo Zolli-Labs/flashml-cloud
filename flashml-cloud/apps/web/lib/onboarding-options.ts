@@ -67,6 +67,7 @@ export interface OnboardingDraft {
   use_case: string;
   compute_sources: string[];
   heard_from: string;
+  linkedin_url: string;
 }
 
 export const EMPTY_DRAFT: OnboardingDraft = {
@@ -78,9 +79,10 @@ export const EMPTY_DRAFT: OnboardingDraft = {
   use_case: "",
   compute_sources: [],
   heard_from: "",
+  linkedin_url: "",
 };
 
-/** Mirrors the API's own rules: four required text fields, two required
+/** Mirrors the API's own rules: five required text fields, two required
  * choices, and `compute_sources` / `heard_from` genuinely optional.
  * Client-side only — the API validates independently and is the authority. */
 export function isComplete(draft: OnboardingDraft): boolean {
@@ -90,6 +92,7 @@ export function isComplete(draft: OnboardingDraft): boolean {
     filled(draft.last_name) &&
     filled(draft.company_name) &&
     filled(draft.use_case) &&
+    filled(draft.linkedin_url) &&
     draft.role !== "" &&
     draft.team_size !== ""
   );

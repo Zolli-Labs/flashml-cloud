@@ -21,6 +21,7 @@ VALID = {
     "use_case": "Fine-tune a 7B model across the lab's machines.",
     "compute_sources": ["own_machines", "colab"],
     "heard_from": "github",
+    "linkedin_url": "linkedin.com/in/hanguyen",
 }
 
 

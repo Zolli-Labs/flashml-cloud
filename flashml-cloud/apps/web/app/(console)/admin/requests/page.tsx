@@ -620,6 +620,20 @@ function RequestCard({
             )}
           </span>
         </Field>
+        <Field label="LinkedIn">
+          {row.linkedin_url ? (
+            <a
+              href={row.linkedin_url}
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2 hover:no-underline"
+            >
+              {row.linkedin_url.replace(/^https?:\/\//, "")}
+            </a>
+          ) : (
+            "—"
+          )}
+        </Field>
       </dl>
 
       {row.compute_sources.length > 0 && (
