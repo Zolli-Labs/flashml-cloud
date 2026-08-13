@@ -1,4 +1,5 @@
-"""The agent wallet: `marketplace.can_cover` gets its first caller (AG-3).
+"""The agent wallet: `marketplace.can_cover` gets its first caller (AG-3),
+then one shared approver for every principal kind (PF-3).
 
 AS-17 named three layers that should stand between an agent and someone
 else's money and found only two built: the AS-9 confirmation gate ("are you
@@ -8,6 +9,19 @@ it?" — did not exist: `marketplace.can_cover` was defined and had **no
 production caller anywhere**, only test callers and two docstrings that
 described a bound nothing enforced. This module is that caller, and it is
 the only thing this module does.
+
+**PF-3 — one vocabulary for every principal.** AG-3 built the can_cover
+caller for exactly one principal kind: an agent, spending under a human's
+`AgentAllowance`. AS-10 asks for the same allowance/spend/refusal vocabulary
+whether the principal is an agent, a human spending directly, or a pool
+spending on a job's behalf. `SpendAllowance` and `make_spend_approver` are
+that generalization — the same two guards (allowance, solvency), the same
+OC-4 and OC-9 rules, keyed by `principal_kind` + `principal_id` instead of
+hardcoded to `agent_id`. `AgentAllowance` and `make_agent_approver` are
+unchanged in signature and behavior; internally, `make_agent_approver` is now
+a thin adapter that builds a `SpendAllowance` with `principal_kind="agent"`
+and calls `make_spend_approver`. There is exactly one approval code path;
+every principal kind runs it.
 
 **What this is not.** `agent_loop.AgentLoop` already refuses a spend when no
 `approve_spend` is configured, or when one is configured and returns
@@ -88,6 +102,28 @@ class AgentAllowance:
     spent_zc: int
 
 
+@dataclass(frozen=True)
+class SpendAllowance:
+    """The principal-neutral generalization of `AgentAllowance` (PF-3).
+
+    Same two fields, same discipline — `allowance_zc` is a ceiling, not a
+    balance or a price, and `spent_zc` is a running total the caller must
+    source from the ledger, never guessed or invented here — plus a
+    `principal_kind` / `principal_id` pair identifying *whose* ceiling this
+    is: `"agent"` for an agent spending under a human's pre-authorization
+    (AG-3's original case), `"human"` for a human spending directly, or
+    `"pool"` for a pool spending on a job's behalf. AS-10 asks for one
+    vocabulary across all three; this is that vocabulary. `make_spend_approver`
+    treats every field as a read and writes none of them, exactly as
+    `make_agent_approver` treats `AgentAllowance`.
+    """
+
+    principal_kind: str
+    principal_id: str
+    allowance_zc: int
+    spent_zc: int
+
+
 def spend_cost_zc(result: ToolResult) -> tuple[int | None, dict[str, int]]:
     """The proposed spend's cost in millicredits, and the grant shape it was
     parsed from — or `(None, {})` if it could not be parsed.
@@ -138,6 +174,110 @@ def spend_cost_zc(result: ToolResult) -> tuple[int | None, dict[str, int]]:
     return total_zc, parsed
 
 
+def make_spend_approver(
+    *,
+    allowance: SpendAllowance,
+    read_spendable: Callable[[], int],
+    cost_of: Callable[[Any], tuple[int | None, dict[str, int]]],
+) -> Callable[[Any], bool]:
+    """The general spend approver (PF-3): the same two guards AG-3 built for
+    an agent, generalized to run identically for any principal — agent,
+    human, or pool — under one vocabulary (AS-10): allowance, spend,
+    refusal.
+
+    There is no `db` parameter here at all, not merely an unused one: every
+    fact this approver needs arrives already read, through `allowance`,
+    `read_spendable()`, and `cost_of()`. A future edit cannot make this
+    function touch a database, because there is no name in its signature
+    that resolves to one (OC-9: every guard is a ledger read).
+
+    `cost_of` plays the role `spend_cost_zc` plays for `make_agent_approver`:
+    given the proposed spend (a `ToolResult`, or whatever shape a given
+    principal's spend proposals take), it returns `(cost_zc, grant)` where
+    `grant` carries the `zc_per_hour` / `seconds` / `tasks` triple
+    `marketplace.can_cover` checks a balance against, or `(None, {})` when
+    the proposed spend cannot be parsed — never `(0, {})`. `None` refuses
+    immediately, before either guard below runs, exactly as the module
+    docstring's honesty rule states.
+
+    Returns `True` only when BOTH hold, checked in this order (OC-4: refuse
+    the instant either fails, never queue, never partially approve):
+
+    1. **Parseable.** `cost_of(result)` must find a cost.
+    2. **Within allowance.** `allowance.spent_zc + cost <= allowance.allowance_zc`
+       — the human's (or pool's, or agent's) consent, bounded, with no path
+       through this function past it no matter how solvent the account is.
+    3. **Solvent.** `marketplace.can_cover(read_spendable(), ...)` — the same
+       ledger-backed solvency check AG-3 wired in, now reachable by every
+       principal kind through this one function.
+    """
+
+    def approve_spend(result: Any) -> bool:
+        cost_zc, grant = cost_of(result)
+        if cost_zc is None:
+            log.info(
+                "%s %s refused: unparseable spend for tool %r "
+                "(unknown cost is never treated as zero)",
+                allowance.principal_kind,
+                allowance.principal_id,
+                getattr(result, "name", None),
+            )
+            return False
+
+        if allowance.spent_zc + cost_zc > allowance.allowance_zc:
+            log.info(
+                "%s %s refused: over allowance (spent=%d + cost=%d > "
+                "allowance=%d) — a ledger read, not a hold",
+                allowance.principal_kind,
+                allowance.principal_id,
+                allowance.spent_zc,
+                cost_zc,
+                allowance.allowance_zc,
+            )
+            return False
+
+        spendable_zc = read_spendable()
+        solvent = marketplace.can_cover(
+            spendable_zc,
+            zc_per_hour=grant["zc_per_hour"],
+            seconds=grant["seconds"],
+            tasks=grant["tasks"],
+        )
+        if not solvent:
+            log.info(
+                "%s %s refused: insolvent for tool %r "
+                "(spendable=%d, would need cost=%d) — can_cover, a ledger read",
+                allowance.principal_kind,
+                allowance.principal_id,
+                getattr(result, "name", None),
+                spendable_zc,
+                cost_zc,
+            )
+        return solvent
+
+    return approve_spend
+
+
+def make_human_approver(
+    *,
+    allowance: SpendAllowance,
+    read_spendable: Callable[[], int],
+    cost_of: Callable[[Any], tuple[int | None, dict[str, int]]],
+) -> Callable[[Any], bool]:
+    """The human-facing name for `make_spend_approver` (PF-3).
+
+    Behaviorally identical to calling `make_spend_approver` directly — this
+    exists only so the site that wires a human's direct spend (not an
+    agent's, not a pool's) reads its intent without decoding a generic name.
+    `allowance.principal_kind` is expected to be `"human"`, but this function
+    does not check that: the caller building the `SpendAllowance` is the one
+    place that fact is known, and `make_spend_approver` treats it as an
+    opaque label used only for logging, not a value it branches on. No HTTP
+    wiring lives here; that is the caller's job.
+    """
+    return make_spend_approver(allowance=allowance, read_spendable=read_spendable, cost_of=cost_of)
+
+
 def make_agent_approver(
     db: Any,
     *,
@@ -159,6 +299,14 @@ def make_agent_approver(
     takes, and so a future guard that genuinely needs a fresh read has
     somewhere to put it without changing every call site.)
 
+    **PF-3: this is now a thin adapter.** All the logic — the two guards, the
+    honesty rule, OC-4, OC-9 — lives in `make_spend_approver`. This function's
+    only job is to translate an `AgentAllowance` into the `SpendAllowance`
+    shape (`principal_kind="agent"`, `principal_id=agent_id`) and hand
+    `spend_cost_zc` in as `cost_of`. Signature and behavior are unchanged
+    from before the refactor — AG-2's loop and every existing caller keep
+    working exactly as they did.
+
     Returns `True` only when BOTH hold, checked in this order (OC-4: refuse
     the instant either fails, never queue, never partially approve):
 
@@ -178,45 +326,16 @@ def make_agent_approver(
     `spends_money` is false — `AgentLoop` never calls this. This function
     only ever sees proposed spends.
     """
+    del db  # deliberately unused — see docstring above and `make_spend_approver`
 
-    def approve_spend(result: ToolResult) -> bool:
-        cost_zc, grant = spend_cost_zc(result)
-        if cost_zc is None:
-            log.info(
-                "agent %s refused: unparseable spend for tool %r "
-                "(unknown cost is never treated as zero)",
-                agent_id,
-                result.name,
-            )
-            return False
-
-        if allowance.spent_zc + cost_zc > allowance.allowance_zc:
-            log.info(
-                "agent %s refused: over allowance (spent=%d + cost=%d > "
-                "allowance=%d) — a ledger read, not a hold",
-                agent_id,
-                allowance.spent_zc,
-                cost_zc,
-                allowance.allowance_zc,
-            )
-            return False
-
-        spendable_zc = read_spendable()
-        solvent = marketplace.can_cover(
-            spendable_zc,
-            zc_per_hour=grant["zc_per_hour"],
-            seconds=grant["seconds"],
-            tasks=grant["tasks"],
-        )
-        if not solvent:
-            log.info(
-                "agent %s refused: insolvent for tool %r "
-                "(spendable=%d, would need cost=%d) — can_cover, a ledger read",
-                agent_id,
-                result.name,
-                spendable_zc,
-                cost_zc,
-            )
-        return solvent
-
-    return approve_spend
+    spend_allowance = SpendAllowance(
+        principal_kind="agent",
+        principal_id=agent_id,
+        allowance_zc=allowance.allowance_zc,
+        spent_zc=allowance.spent_zc,
+    )
+    return make_spend_approver(
+        allowance=spend_allowance,
+        read_spendable=read_spendable,
+        cost_of=spend_cost_zc,
+    )

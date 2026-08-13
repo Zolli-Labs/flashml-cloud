@@ -24,7 +24,10 @@ from flashml_cloud_api import marketplace
 from flashml_cloud_api.agent_loop import AgentLoop, FakeTool, ToolRegistry, ToolResult
 from flashml_cloud_api.agent_wallet import (
     AgentAllowance,
+    SpendAllowance,
     make_agent_approver,
+    make_human_approver,
+    make_spend_approver,
     spend_cost_zc,
 )
 from flashml_cloud_api.model_provider import FakeModelProvider
@@ -59,6 +62,17 @@ def _spend_result(
 
 def _allowance(*, allowance_zc: int, spent_zc: int = 0) -> AgentAllowance:
     return AgentAllowance(agent_id="agent-1", allowance_zc=allowance_zc, spent_zc=spent_zc)
+
+
+def _spend_allowance(
+    *, principal_kind: str, principal_id: str = "p-1", allowance_zc: int, spent_zc: int = 0
+) -> SpendAllowance:
+    return SpendAllowance(
+        principal_kind=principal_kind,
+        principal_id=principal_id,
+        allowance_zc=allowance_zc,
+        spent_zc=spent_zc,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -292,3 +306,148 @@ async def test_end_to_end_with_agentloop_within_budget_proceeds(tmp_path):
     assert state.status == "running"
     # The tool ran, exactly once, with the args the model proposed.
     assert spender.calls == [{"zc_per_hour": 1_000, "seconds": 3_600, "tasks": 1}]
+
+
+# ---------------------------------------------------------------------------
+# PF-3: make_spend_approver — the same can_cover path for any principal
+# ---------------------------------------------------------------------------
+#
+# These mirror the "two guards" tests above almost exactly, parameterized
+# over `principal_kind`, to prove the point of PF-3 directly: it is not that
+# a "human" approver and a "pool" approver each happen to behave like the
+# agent one — it is that all three run through the exact same function.
+
+
+@pytest.mark.parametrize("principal_kind", ["agent", "human", "pool"])
+def test_make_spend_approver_approves_a_spend_within_allowance_and_solvent(principal_kind):
+    approve = make_spend_approver(
+        allowance=_spend_allowance(
+            principal_kind=principal_kind, allowance_zc=5_000, spent_zc=1_000
+        ),
+        read_spendable=lambda: 50_000,
+        cost_of=spend_cost_zc,
+    )
+    # cost = hold_zc(1000, 3600) * 1 = 1000; 1000 (spent) + 1000 (cost) <= 5000
+    result = _spend_result(zc_per_hour=1_000, seconds=3_600, tasks=1)
+
+    assert approve(result) is True
+
+
+@pytest.mark.parametrize("principal_kind", ["agent", "human", "pool"])
+def test_make_spend_approver_refuses_over_allowance_even_if_solvent(principal_kind):
+    approve = make_spend_approver(
+        allowance=_spend_allowance(
+            principal_kind=principal_kind, allowance_zc=500
+        ),  # cost will be 1000
+        read_spendable=lambda: 1_000_000,  # trivially solvent
+        cost_of=spend_cost_zc,
+    )
+    result = _spend_result(zc_per_hour=1_000, seconds=3_600, tasks=1)
+
+    assert approve(result) is False
+
+
+@pytest.mark.parametrize("principal_kind", ["agent", "human", "pool"])
+def test_make_spend_approver_refuses_insolvent_even_if_within_allowance(principal_kind):
+    approve = make_spend_approver(
+        allowance=_spend_allowance(
+            principal_kind=principal_kind, allowance_zc=1_000_000
+        ),  # plenty of room
+        read_spendable=lambda: 1,  # can_cover will say no
+        cost_of=spend_cost_zc,
+    )
+    result = _spend_result(zc_per_hour=1_000, seconds=3_600, tasks=1)
+
+    assert approve(result) is False
+
+
+@pytest.mark.parametrize("principal_kind", ["agent", "human", "pool"])
+def test_make_spend_approver_refuses_unparseable_spend_not_treated_as_zero(principal_kind):
+    # A generous allowance and a generous balance: if the unparseable spend
+    # were ever treated as costing 0, both guards would trivially pass it.
+    approve = make_spend_approver(
+        allowance=_spend_allowance(principal_kind=principal_kind, allowance_zc=1_000_000),
+        read_spendable=lambda: 1_000_000,
+        cost_of=spend_cost_zc,
+    )
+    result = ToolResult(name="rent_gpu", ok=True, content="not json", spends=True)
+
+    assert approve(result) is False
+
+
+def test_make_human_approver_is_the_same_path_as_make_spend_approver():
+    """`make_human_approver` names the human wiring site; it is not a second
+    implementation. Same inputs, same output as calling `make_spend_approver`
+    directly."""
+    allowance = _spend_allowance(principal_kind="human", allowance_zc=5_000, spent_zc=1_000)
+    read_spendable = lambda: 50_000
+    result = _spend_result(zc_per_hour=1_000, seconds=3_600, tasks=1)
+
+    via_human = make_human_approver(
+        allowance=allowance, read_spendable=read_spendable, cost_of=spend_cost_zc
+    )
+    via_general = make_spend_approver(
+        allowance=allowance, read_spendable=read_spendable, cost_of=spend_cost_zc
+    )
+
+    assert via_human(result) == via_general(result) == True  # noqa: E712
+
+
+def test_make_spend_approver_has_no_db_to_touch():
+    """Unlike `make_agent_approver`, which accepts `db` and is proven never
+    to touch it (`test_the_approver_never_writes`, via `_PoisonDB`),
+    `make_spend_approver` has no `db` parameter at all — there is no slot for
+    a future edit to wire one in. Passing one is a `TypeError`, the same way
+    passing any other unexpected keyword would be; this is the poison-db
+    guarantee made structural instead of behavioral."""
+    with pytest.raises(TypeError):
+        make_spend_approver(
+            db=_PoisonDB(),  # type: ignore[call-arg]
+            allowance=_spend_allowance(principal_kind="human", allowance_zc=10_000),
+            read_spendable=lambda: 10_000,
+            cost_of=spend_cost_zc,
+        )
+
+
+# ---------------------------------------------------------------------------
+# PF-3: make_agent_approver now delegates to make_spend_approver
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "allowance_zc, spent_zc, spendable_zc, expected",
+    [
+        (10_000, 0, 10_000, True),  # within allowance, solvent
+        (500, 0, 1_000_000, False),  # over allowance even though trivially solvent
+        (1_000_000, 0, 1, False),  # insolvent even though well within allowance
+    ],
+)
+def test_make_agent_approver_delegates_to_make_spend_approver(
+    allowance_zc, spent_zc, spendable_zc, expected
+):
+    """The existing 16 tests above are the guard that `make_agent_approver`'s
+    own behavior is unchanged by the refactor. This test additionally proves
+    *why* it is unchanged: for the same inputs, `make_agent_approver` and
+    `make_spend_approver` (fed the equivalent `SpendAllowance`, with
+    `principal_kind="agent"`) agree exactly — because the former now builds
+    its approver by calling the latter, not by re-implementing the guards."""
+    result = _spend_result(zc_per_hour=1_000, seconds=3_600, tasks=1)
+
+    via_agent = make_agent_approver(
+        _PoisonDB(),
+        agent_id="agent-1",
+        allowance=_allowance(allowance_zc=allowance_zc, spent_zc=spent_zc),
+        read_spendable=lambda: spendable_zc,
+    )
+    via_general = make_spend_approver(
+        allowance=_spend_allowance(
+            principal_kind="agent",
+            principal_id="agent-1",
+            allowance_zc=allowance_zc,
+            spent_zc=spent_zc,
+        ),
+        read_spendable=lambda: spendable_zc,
+        cost_of=spend_cost_zc,
+    )
+
+    assert via_agent(result) == via_general(result) == expected
