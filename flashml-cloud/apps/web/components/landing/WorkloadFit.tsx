@@ -16,8 +16,11 @@ export function WorkloadFit() {
           </p>
           <div>
             <h2 className="max-w-[820px] text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              Work that benefits from <span className="text-muted-foreground">a recovery contract.</span>
+              Can your work run on <span className="text-muted-foreground">Zolli?</span>
             </h2>
+            <p className="mt-5 max-w-[58ch] text-base leading-relaxed text-muted-foreground">
+              Zolli works best when a job can be divided into separate pieces or can save its progress while running.
+            </p>
           </div>
         </div>
 

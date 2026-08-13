@@ -13,7 +13,7 @@ export function WorkloadRows() {
       aria-label="Supported workloads"
       className="mt-12 grid border-t border-[var(--z-border-strong)] lg:mt-16 lg:grid-cols-12"
     >
-      {WORKLOADS.map(({ number, title, body, layout }, index) => (
+      {WORKLOADS.map(({ number, title, body, machineContext, layout }, index) => (
         <motion.li
           key={number}
           data-workload-row={number}
@@ -30,6 +30,9 @@ export function WorkloadRows() {
             <div>
               <h3 className="text-2xl font-semibold tracking-[-0.035em]">{title}</h3>
               <p className="mt-3 max-w-[48ch] text-[15px] leading-relaxed text-muted-foreground">{body}</p>
+              <p data-workload-machines className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                Suitable machines: {machineContext}
+              </p>
             </div>
             <span
               data-workload-rule

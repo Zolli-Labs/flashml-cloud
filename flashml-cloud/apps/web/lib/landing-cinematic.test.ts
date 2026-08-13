@@ -92,7 +92,7 @@ describe("cinematic landing foundation", () => {
     expect(evidence.match(/data-evidence-value=/g)).toHaveLength(4);
     expect(evidence).toContain('data-layout="evidence-ledger"');
     expect(platform).toContain('data-layout="machine-lanes"');
-    expect(platform).toContain("macOS arm64");
+    expect(platform).toContain("macOS Apple silicon");
     expect(platform).toContain("Windows 11");
   });
 
@@ -124,8 +124,9 @@ describe("cinematic landing foundation", () => {
     const rowSource = source("components/landing/WorkloadRows.tsx");
     const fitSource = source("components/landing/WorkloadFit.tsx");
 
-    expect(rows.match(/data-workload-row=/g) ?? []).toHaveLength(4);
-    expect(rows.match(/data-workload-rule/g) ?? []).toHaveLength(4);
+    expect(rows.match(/data-workload-row=/g) ?? []).toHaveLength(5);
+    expect(rows.match(/data-workload-machines/g) ?? []).toHaveLength(5);
+    expect(rows.match(/data-workload-rule/g) ?? []).toHaveLength(5);
     expect(rowSource).toContain("whileInView");
     expect(rowSource).toContain("data-animated");
     expect(rowSource).not.toMatch(/(?:opacity|autoAlpha)\s*:\s*0/);

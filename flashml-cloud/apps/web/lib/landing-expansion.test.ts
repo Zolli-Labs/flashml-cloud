@@ -272,16 +272,17 @@ describe("proof-led Zolli landing", () => {
     expect(text).not.toMatch(/\b(?:trusted by|used by)\b|\bcustomers?\b/i);
     expect(text).not.toMatch(/\b(?:all|every) (?:cloud )?providers?\b/i);
     expect(text).not.toMatch(/\b(?:supports?|works on|available on) (?:all|every)\b/i);
-    expect(text).not.toMatch(/\b(?:RunPod|Together AI|Lambda Labs|Vast\.ai)\b/i);
+    expect(text).not.toMatch(/\b(?:Together AI|Lambda Labs|Vast\.ai)\b/i);
     expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?(?:%|×|x)(?!\w)/i);
     expect(text).not.toMatch(/\bguarantee(?:d|s)?\b/i);
   });
 
   it("qualifies platform compatibility without overstating Windows", () => {
     const text = visibleText(renderLanding());
-    expect(text).toContain("Production-proven hosts");
-    expect(text).toContain("macOS arm64 Proven");
+    expect(text).toContain("Proven today");
+    expect(text).toContain("macOS Apple silicon Proven");
     expect(text).toContain("Linux x86_64 Proven");
+    expect(text).toContain("RunPod NVIDIA GPUs Proven");
     expect(text).toContain("Windows 11 Preview");
     expect(text).toContain("Docker");
     expect(text).toContain("GitHub");
@@ -292,7 +293,7 @@ describe("proof-led Zolli landing", () => {
     const markup = renderPlatformSupport();
 
     expect(markup.match(/data-runtime-button="[^"]*"/g) ?? []).toHaveLength(9);
-    expect(markup.match(/data-host-card="[^"]*"/g) ?? []).toHaveLength(3);
+    expect(markup.match(/data-host-card="[^"]*"/g) ?? []).toHaveLength(4);
     expect(markup).not.toContain("Python workloads");
     expect(markup).not.toContain("Local/cloud machine supply");
     expect(markup).not.toContain("data-machine-result");
@@ -302,12 +303,13 @@ describe("proof-led Zolli landing", () => {
     ]) expect(visibleText(markup)).toContain(label);
   });
 
-  it("names four workloads already represented in the project", () => {
+  it("names five workloads with their supported machine context", () => {
     const text = visibleText(renderLanding());
     for (const workload of [
-      "Federated training",
-      "Hyperparameter search",
-      "Shared data processing",
+      "Model configuration search",
+      "AI model evaluation",
+      "Independent file processing",
+      "Simulations and research trials",
       "Checkpointable model training",
     ]) expect(text).toContain(workload);
   });
@@ -317,7 +319,7 @@ describe("proof-led Zolli landing", () => {
 
     expect(workloads).toContain('aria-label="Supported workloads"');
     expect(workloads).toContain('aria-hidden="true"');
-    expect(workloads.match(/<li\b/g) ?? []).toHaveLength(4);
+    expect(workloads.match(/<li\b/g) ?? []).toHaveLength(5);
   });
 
   it("groups the runtime into control, execution, and integrity layers", () => {

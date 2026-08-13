@@ -15,14 +15,14 @@ export function PlatformSupport() {
         <div className="grid gap-10 lg:grid-cols-[.72fr_1.28fr] lg:gap-12">
           <div>
             <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
-              Platform support
+              Workload and machine fit
             </p>
             <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              Start from the machines <span className="text-muted-foreground">you can already run.</span>
+              Bring the machines <span className="text-muted-foreground">you already use.</span>
             </h2>
           </div>
           <p className="max-w-[58ch] self-end text-base leading-relaxed text-muted-foreground">
-            Host support is stated by observed execution state, with the execution contract shown alongside it.
+            See what is proven today, what is in preview, and where the network is expanding.
           </p>
         </div>
 
@@ -44,17 +44,45 @@ export function PlatformSupport() {
           </div>
 
           <div className="mt-10 border-t border-[var(--z-border-strong)] pt-5 sm:mt-12 sm:pt-6">
-            <p className="font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-brand-foreground">
-              Control-plane host lanes
-            </p>
-            <p className="mt-2 max-w-[52ch] text-sm text-muted-foreground">
-              Production-proven hosts and a preview host share one execution contract.
-            </p>
-            <div className="mt-5 grid gap-4 sm:grid-cols-3">
-              {HOST_SUPPORT.map((host) => (
-                <HostCard key={host.platform} {...host} />
-              ))}
+            <div className="grid gap-8 lg:grid-cols-2">
+              <div>
+                <p className="font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-brand-foreground">
+                  Proven today
+                </p>
+                <div className="mt-5 grid gap-4">
+                  {HOST_SUPPORT.filter(({ state }) => state === "Proven").map((host) => (
+                    <HostCard key={host.platform} {...host} />
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-brand-foreground">
+                  Preview
+                </p>
+                <div className="mt-5 grid gap-4">
+                  {HOST_SUPPORT.filter(({ state }) => state === "Preview").map((host) => (
+                    <HostCard key={host.platform} {...host} />
+                  ))}
+                </div>
+              </div>
             </div>
+          </div>
+
+          <div className="mt-10 border-t border-[var(--z-border-strong)] pt-5 sm:mt-12 sm:pt-6">
+            <p className="font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-brand-foreground">
+              Network expansion
+            </p>
+            <ul className="mt-4 grid gap-2 text-sm leading-relaxed text-muted-foreground sm:grid-cols-2">
+              {[
+                "More cloud providers",
+                "More GPU and hardware configurations",
+                "Automatic capacity purchasing",
+                "Cash earnings for machine hosts",
+              ].map((item) => <li key={item}>{item}</li>)}
+            </ul>
+            <p className="mt-5 max-w-[68ch] text-sm leading-relaxed text-muted-foreground">
+              Zolli is best for work that can be divided or resumed. It is not currently designed for tightly synchronized training where every GPU must communicate continuously over a very fast network.
+            </p>
           </div>
 
           <div className="mt-10 border-t border-[var(--z-border-strong)] pt-5 sm:mt-12 sm:pt-6">

@@ -7,6 +7,7 @@ import { HeroMarketSwitch } from "@/components/landing/HeroMarketSwitch";
 import { CoordinatorMap } from "@/components/landing/coordinator-map/CoordinatorMap";
 import { PlatformSupport } from "@/components/landing/PlatformSupport";
 import { SystemJourney } from "@/components/landing/SystemJourney";
+import { WorkloadRows } from "@/components/landing/WorkloadRows";
 import { ARCHITECTURE_SIGNALS } from "@/components/landing/ArchitectureSignal";
 import {
   WORKFLOW_SCENES,
@@ -701,8 +702,9 @@ describe("the infrastructure story", () => {
 
   it("qualifies every host state", () => {
     expect(HOST_SUPPORT.map(({ platform, state }) => [platform, state])).toEqual([
-      ["macOS arm64", "Proven"],
+      ["macOS Apple silicon", "Proven"],
       ["Linux x86_64", "Proven"],
+      ["RunPod NVIDIA GPUs", "Proven"],
       ["Windows 11", "Preview"],
     ]);
   });
@@ -1348,10 +1350,13 @@ describe("the platform support section", () => {
     environment.restore();
   });
 
-  it("renders three host cards with visible Proven or Preview labels", () => {
+  it("groups qualified hosts into Proven today, Preview, and Network expansion", () => {
     const markup = renderToStaticMarkup(createElement(PlatformSupport));
 
-    expect((markup.match(/data-host-card="[^"]*"/g) ?? [])).toHaveLength(3);
+    expect((markup.match(/data-host-card="[^"]*"/g) ?? [])).toHaveLength(4);
+    for (const label of ["Proven today", "Preview", "Network expansion"]) {
+      expect(markup).toContain(label);
+    }
     for (const { platform, state } of HOST_SUPPORT) {
       const card = markup.match(
         new RegExp(`<article[^>]*data-host-card="${platform}"[^>]*>([\\s\\S]*?)</article>`),
@@ -1360,6 +1365,13 @@ describe("the platform support section", () => {
       expect(visible, platform).toContain(platform);
       expect(visible, platform).toContain(state);
     }
+    for (const item of [
+      "More cloud providers",
+      "More GPU and hardware configurations",
+      "Automatic capacity purchasing",
+      "Cash earnings for machine hosts",
+    ]) expect(markup).toContain(item);
+    expect(markup).toContain("not currently designed for tightly synchronized training");
   });
 
   it("keeps the machine result out of the DOM until the check is requested", () => {
@@ -1458,13 +1470,19 @@ describe("the seven-scene workflow", () => {
 });
 
 describe("the supporting landing story", () => {
-  it("keeps the four workload messages factual and in the approved order", () => {
+  it("pairs each approved workload with a machine context", () => {
+    const markup = renderToStaticMarkup(createElement(WorkloadRows));
+
     expect(WORKLOADS.map(({ title }) => title)).toEqual([
-      "Federated training",
-      "Hyperparameter search",
-      "Shared data processing",
+      "Model configuration search",
+      "AI model evaluation",
+      "Independent file processing",
+      "Simulations and research trials",
       "Checkpointable model training",
     ]);
+    expect(WORKLOADS).toHaveLength(5);
+    expect(WORKLOADS.every(({ machineContext }) => machineContext.length > 0)).toBe(true);
+    expect(markup.match(/data-workload-machines/g) ?? []).toHaveLength(WORKLOADS.length);
   });
 
   it("limits the architecture trace to lease, checkpoint, and recovery", () => {
