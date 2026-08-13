@@ -691,5 +691,44 @@ print("         checkpoint, and the model that came out is byte-for-byte the")
 print("         model an uninterrupted run produces.")
 PY
 
+# --- 11. the structured artifact --------------------------------------------
+#
+# ADDITIVE, and never fatal. Everything above this line behaves exactly as it
+# did; this only stops the run's numbers from evaporating. Until now the one
+# recovery figure it produced was the "LEASE_EXPIRED after Ns" line on stdout,
+# and `$RUN` is deleted on exit unless --keep — so a rehearsal left nothing an
+# evidence pack could cite.
+#
+# Placed HERE and not beside the expiry check on purpose: `reclaim_s` and
+# `resume_to_progress_s` — how long until another machine picked the task up,
+# and how long until it was demonstrably progressing — are the intervals the
+# whole demo exists to show, and at the instant the lease expires neither has
+# happened yet. The ledger is complete only once the surviving machine has
+# committed, which the verdict above just proved it did.
+#
+# The evidence lands in the REPO's `.evidence/`, not in `$RUN`: the ledger dump
+# is a working file and dies with the temp dir, the analysis is the artifact
+# and has to outlive it.
+step "structured recovery evidence"
+EVENTS_JSON="$RUN/job-events.json"
+RECOVERY_TOOL="$E2E/../flashml-cloud/scripts/competition/recovery_latency.py"
+EVIDENCE_DIR="$E2E/../flashml-cloud/.evidence"
+if get "/v1alpha1/jobs/$JOB/events" >"$EVENTS_JSON" 2>/dev/null; then
+    echo "  ledger: $EVENTS_JSON"
+    if [ -f "$RECOVERY_TOOL" ]; then
+        # `--kill-at` takes epoch seconds, which is exactly what KILLED_AT
+        # already is — no `date` conversion, and so no BSD-vs-GNU trap.
+        "$PY" "$RECOVERY_TOOL" \
+            --events-json "$EVENTS_JSON" \
+            --kill-at "$KILLED_AT" \
+            --out-dir "$EVIDENCE_DIR" \
+            || echo "  (recovery_latency.py failed — the verdict above still stands)" >&2
+    else
+        echo "  no recovery_latency.py at $RECOVERY_TOOL — ledger dumped, not analysed"
+    fi
+else
+    echo "  could not read the job's events — nothing to analyse" >&2
+fi
+
 echo
 echo "▶ dashboard: $BASE/   (job $JOB)"

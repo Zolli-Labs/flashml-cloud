@@ -286,3 +286,131 @@ carrying the chosen cap and its rationale, and a `provenance` map labelling
 every field **measured / derived / config / quoted** — a set-equality test
 means a new figure cannot ship unlabelled. Same double redaction as every
 other script here; gitignored, and not safe to publish unreviewed.
+
+## `recovery_latency.py` — wake/recovery latency + cost for the venues that cannot hibernate (D-9, generalized)
+
+`cost_worksheet.py` and `hibernation_modes_probe.py` answer the hibernation
+half of "what does idle capacity cost": an FC Agent Sandbox wakes from deep
+hibernation in **1109 ms (p50)** and idles at **0.00351553 USD/hr** against
+**0.05654376 USD/hr** active — a **93.78%** saving. That covers `fc-sandbox`
+and `fc-gpu`, the only two venues whose `hibernates` flag is True in
+`apps/api/flashml_cloud_api/router/venues.py`.
+
+**This script covers the other three.** An owned/volunteer FlashNode host, a
+RunPod pod and an ECS GPU instance cannot hibernate, and their analogue of
+hibernate→wake is **die → another machine resumes from the checkpoint**.
+FlashML's own form of hibernation for them is to *release the machine and keep
+the state*: the machine leaves the fleet and stops billing, the committed
+checkpoint waits in the artifact store, and whoever claims the task next picks
+it up from there. Together the two artifacts cover every machine type the
+fleet controls.
+
+### What it measures, and from what
+
+Everything comes out of the coordinator's own append-only ledger,
+`GET /v1alpha1/jobs/{id}/events`. Both ends of every interval are stamped by
+the same clock, so none of them can be skewed by a worker's wall clock.
+
+| Interval | Definition | Kind |
+|---|---|---|
+| `detection_s` | `LEASE_EXPIRED` − the dying node's last `LEASE_RENEWED`/`LEASE_CLAIMED` for that task — the ledger-derivable MTTD analogue | `derived` |
+| `reclaim_s` | `LEASE_EXPIRED` → the next `LEASE_CLAIMED` on the same task. **This is the wake**, and the number directly comparable to FC's 1109 ms | `derived` |
+| `resume_to_progress_s` | that claim → the first following `CHECKPOINT_MANIFEST_COMMITTED` or `TASK_COMMIT_ACCEPTED` — claiming is not progressing | `derived` |
+| `recomputed_s` | the event gap between the last proof of life and the last committed progress on the dying attempt: the work the next machine has to redo | `derived` |
+| `kill_to_expire_s` | expiry − an externally supplied kill instant | `measured` |
+| `kill_to_progress_s` | first progress after the resume − that same kill instant: the whole die→progressing-again arc | `measured` |
+
+The ledger **cannot** see the instant a machine actually stopped, only the
+instant the coordinator stopped hearing from it. That is why the first four
+are `derived` and the last two exist only with `--kill-at`. Absent one they
+are `None` with a named reason — never `0.0`.
+
+Multiple deaths on one task are numbered cycles; out-of-order input is sorted
+(by `seq` when the payload carries one — the HTTP wire shape does not — else
+by timestamp); tasks that never lost a machine are **excluded and counted**,
+so a p50 cannot be diluted by tasks that had nothing to recover from.
+
+### A `None` that is not a fault
+
+`CHECKPOINT_MANIFEST_COMMITTED` is emitted under the composite scope
+`"<job_id>::<task_id>"` (`service/checkpoints._scope`) and therefore never
+appears in a job's own event feed — the same trap documented in
+`e2e/competition/run_local_recovery.sh`. In a job feed the progress marker
+resolves against `TASK_COMMIT_ACCEPTED`. Concatenate both feeds into the input
+file to use manifest events too; the parser takes whatever it is given.
+
+### Cost layer
+
+Per venue, from a rate table you supply:
+
+* **cost of wait** = `detection_s + reclaim_s`. For a hibernating venue, at
+  the hibernated rate. For a non-hibernating one it is **exactly 0.00, and
+  that zero is the finding** — the machine left the fleet.
+* **cost of death** = `detection + reclaim + resume_to_progress + recomputed`
+  at the venue's **active** rate.
+* Volunteer/owned hardware prices at `0.00` with the explicit source
+  `volunteer hardware, no hourly rate`.
+* A venue with no supplied rate is **unpriced** — `None` with a named reason,
+  never zeroed. No rate is hard-coded: RunPod's is a per-rental fact in
+  `public.rented_capacity.usd_per_hour` (nullable, and its column comment says
+  "Null means the venue quoted no price"), ECS GPU's is whatever
+  `DescribePrice` answered for the configured instance type. The FC pair is
+  read from the newest `.evidence/alibaba-hibernation-modes-*.json` when one
+  is present, so the two artifacts join up instead of restating each other.
+
+`DEFAULT_VENUE_HIBERNATES` mirrors `venues.py` because this script must run
+under a bare interpreter in the e2e rehearsal, where `flashml_cloud_api` is
+not importable. The mirror has a drift guard: `test_recovery_latency.py`
+imports the real table and fails if they disagree.
+
+### Run
+
+```bash
+# file mode — no network at all
+../../apps/api/.venv/bin/python recovery_latency.py \
+    --events-json events.json --kill-at 1786968021 \
+    --rates rates.json --out-dir ../../.evidence
+
+# fetch mode — OWNER-RUN, one GET against a coordinator/API you operate
+../../apps/api/.venv/bin/python recovery_latency.py \
+    --api-base https://flashml-api-dev.onrender.com \
+    --job-id <job-id> --token "$TOKEN" --out-dir ../../.evidence
+```
+
+`--events-json -` reads stdin. **No paid provider API is ever called from this
+script** — fetch mode's single GET goes to a FlashML coordinator, nowhere else.
+
+A rate table is `{"venues": [{venue, usd_per_hour, hibernates,
+hibernated_usd_per_hour?, source?}]}`; a plain `{venue: {...}}` mapping works
+too. An explicit `null` rate stays unpriced; a non-numeric one is refused
+loudly rather than coerced.
+
+### Output
+
+`../../.evidence/recovery-latency-<stamp>.json` and a markdown table beside
+it. Both carry the measured/derived labels per figure, the per-venue rows, a
+"why a cell is blank" table, and a header stating what is derived from ledger
+timestamps, what would need an external clock, and that the FC hibernate/wake
+numbers live in the separate hibernation evidence — cited by filename.
+
+### Verified without a coordinator
+
+```bash
+../../apps/api/.venv/bin/python -m pytest test_recovery_latency.py -q
+```
+
+48 tests over synthetic event streams: single death, two deaths on one task,
+expiry with no reclaim, out-of-order input with and without `seq`, missing
+checkpoint events, tasks that never died, rate-table edge cases (missing
+venue, null rate refused not zeroed, non-numeric rate), the venue mirror, the
+markdown rendering, and the CLI in file mode. Nothing in the suite opens a
+socket.
+
+### Wired into the local rehearsal
+
+`e2e/competition/run_local_recovery.sh` now dumps the job's ledger to
+`$RUN/job-events.json` after its verdict and runs this script over it with
+`--kill-at "$KILLED_AT"`, so a kill rehearsal leaves a structured artifact in
+`.evidence/` instead of one line on stdout. The step is additive and never
+fatal: a missing script or an unreadable ledger prints a note and the
+rehearsal's own verdict still stands.
