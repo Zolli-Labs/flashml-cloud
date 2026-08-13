@@ -1,9 +1,24 @@
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { prerenderToNodeStream } from "react-dom/static.node";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import Home from "@/app/(marketing)/page";
 import { HowItWorks } from "@/components/landing/HowItWorks";
+
+// `Home` renders `PriceBoard`, which fetches `GET /v1alpha1/public/prices`
+// server-side (`lib/landing/market-board.ts`'s `fetchLandingPrices`) against
+// `http://localhost:8000` by default. Unstubbed, every `renderLanding()` call
+// below is a real network attempt — today a fast ECONNREFUSED against a
+// coordinator that isn't running, but a listener on that port (a stray dev
+// server) would hang the whole suite waiting on a response nobody sends.
+// Stubbed the same way `lib/landing/market-board.test.ts` stubs it: a
+// rejected promise, which `fetchLandingPrices` already turns into `null` —
+// the empty-board state every one of this file's assertions already treats
+// as a normal render.
+vi.stubGlobal(
+  "fetch",
+  vi.fn().mockRejectedValue(new Error("stubbed: tests never hit the network")),
+);
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(`${root}/${path}`, "utf8");

@@ -1,11 +1,23 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { prerenderToNodeStream } from "react-dom/static.node";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import Home from "@/app/(marketing)/page";
 import { RecoveryDemo } from "@/components/landing/RecoveryDemo";
 import { Navbar } from "@/components/nav/Navbar";
 import { MARKETING } from "@/lib/marketing";
+
+// `Home` renders `PriceBoard`, which fetches `GET /v1alpha1/public/prices`
+// server-side against `http://localhost:8000` by default — a real network
+// attempt on every `renderLanding()` call below unless stubbed. Stubbed the
+// same way `lib/landing/market-board.test.ts` stubs it: a rejected promise,
+// which `fetchLandingPrices` already turns into `null` (the empty-board
+// state this file's assertions already treat as normal), so no unstubbed
+// listener on that port can ever hang this suite.
+vi.stubGlobal(
+  "fetch",
+  vi.fn().mockRejectedValue(new Error("stubbed: tests never hit the network")),
+);
 
 // `Home` renders `PriceBoard`, an async server component, so the classic
 // synchronous `renderToStaticMarkup` throws the moment it reaches it.

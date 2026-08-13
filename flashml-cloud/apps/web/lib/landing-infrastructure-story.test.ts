@@ -131,6 +131,18 @@ vi.mock("@/components/landing/motion/LandingMotionProvider", async (importOrigin
   };
 });
 
+// This file renders `Hero` directly and never `Home`/`PriceBoard`, so no
+// test here currently calls `fetch`. Stubbed anyway, the same way
+// `lib/landing/market-board.test.ts` stubs it — a rejected promise, which
+// `fetchLandingPrices` would turn into `null` — so a future test that grows
+// to render `Home` in this file (as its sibling landing suites already do)
+// inherits a safe default instead of a real, potentially hanging, network
+// call by omission.
+vi.stubGlobal(
+  "fetch",
+  vi.fn().mockRejectedValue(new Error("stubbed: tests never hit the network")),
+);
+
 afterEach(() => {
   motionHarness.motion = null;
   vi.useRealTimers();

@@ -101,12 +101,36 @@ export function trendToneClass(direction: TrendDirection): string {
   return TREND_TONE[direction];
 }
 
-/** The provenance cell: "observed <ageLabel>", reusing
- * `lib/market-prices.ts`'s `ageLabel` so this board and the price-comparison
- * page describe the same age the same way. Never says "live" — the most a
- * fresh quote may claim is how long ago it was actually observed. */
-export function capturedLabel(row: Pick<PriceBoardRow, "age_seconds">): string {
-  return `observed ${ageLabel(row.age_seconds)}`;
+/** The provenance cell's relative half: "observed <ageLabel>", or
+ * "stale — observed <ageLabel>" when the API's own `stale` verdict says so —
+ * the identical convention `lib/market-prices.ts`'s `quoteRow` already uses
+ * for `capturedText`, so a stale quote reads the same way on both pages.
+ * Never says "live" — the most a fresh quote may claim is how long ago it
+ * was actually observed. */
+export function capturedLabel(row: Pick<PriceBoardRow, "age_seconds" | "stale">): string {
+  const observed = `observed ${ageLabel(row.age_seconds)}`;
+  return row.stale ? `stale — ${observed}` : observed;
+}
+
+/** The provenance cell's absolute half: "2026-08-13 12:00 UTC", parsed
+ * straight from `captured_at`.
+ *
+ * WHY THIS EXISTS ALONGSIDE `capturedLabel`. This page prerenders
+ * statically, and `flashml-web` on Render is a free plan with manual
+ * deploys — so the first visitor after a cold start can be looking at a
+ * relative label ("observed 3h ago") that was computed at BUILD time and is
+ * now days stale itself. A relative label can only ever be honest as of the
+ * moment it was rendered; an absolute UTC date parsed from the API's own
+ * `captured_at` cannot misstate itself no matter how long the prerender
+ * sits, so the two are always shown together — never the relative label
+ * alone. */
+export function capturedAbsoluteLabel(row: Pick<PriceBoardRow, "captured_at">): string {
+  const d = new Date(row.captured_at);
+  if (Number.isNaN(d.getTime())) return row.captured_at;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const time = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  return `${date} ${time} UTC`;
 }
 
 const TREND_DIRECTIONS: readonly TrendDirection[] = ["up", "down", "flat", "new"];

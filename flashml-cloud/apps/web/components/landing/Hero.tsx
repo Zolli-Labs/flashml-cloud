@@ -63,14 +63,13 @@ export function Hero() {
   const { phase } = useMapStory();
   const compact = useCompactMap();
 
-  // At `xl` the hero still fills exactly one viewport and centres itself in
-  // it, so its bottom border lands on the bottom of the frame instead of
-  // leaving a seam of bare track under it — that part of the layout, and the
-  // sticky scroll track still wrapping it in `app/(marketing)/page.tsx`, are
-  // unchanged by this hook. What changed is only that `useMapStory`'s timer
-  // no longer cares where in that track the reader has scrolled to: it runs
-  // the same way, on a loop, whether or not anything outside it is pinning
-  // this section at all.
+  // At `xl` the hero fills exactly one viewport and centres itself in it, so
+  // its bottom border lands on the bottom of the frame rather than leaving a
+  // seam of bare space under it. Nothing pins or measures this section any
+  // more — `app/(marketing)/page.tsx` renders it once, like every other
+  // section, and `useMapStory`'s timer just loops the map's beats forever on
+  // its own clock (see the comment above `useMapStory` for the retired
+  // scroll-driven mechanics and why they went).
   return (
     <section
       id="hero"

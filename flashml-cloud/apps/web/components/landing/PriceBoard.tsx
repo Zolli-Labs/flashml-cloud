@@ -1,5 +1,6 @@
 import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 import {
+  capturedAbsoluteLabel,
   capturedLabel,
   fetchLandingPrices,
   trendGlyph,
@@ -141,7 +142,14 @@ function PriceRow({ row }: { row: PriceBoardRow }) {
       </td>
       <td className="whitespace-nowrap px-3 py-4 text-sm text-muted-foreground">{row.tier}</td>
       <td className="whitespace-nowrap px-3 py-4 pr-0 text-sm text-muted-foreground">
-        {capturedLabel(row)}
+        {/* The relative label alone can misstate itself once this page's
+            static prerender goes stale between Render's manual deploys —
+            the absolute UTC date beside it cannot, whatever the visitor's
+            clock or the age of the build. */}
+        <span className="block">{capturedLabel(row)}</span>
+        <span className="block text-xs text-muted-foreground/70">
+          {capturedAbsoluteLabel(row)}
+        </span>
       </td>
     </tr>
   );

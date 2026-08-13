@@ -11,6 +11,7 @@ vi.mock("@/lib/supabase", () => ({
 }));
 
 import {
+  capturedAbsoluteLabel,
   capturedLabel,
   fetchLandingPrices,
   trendGlyph,
@@ -65,13 +66,44 @@ describe("trendToneClass", () => {
 });
 
 describe("capturedLabel", () => {
-  it("reuses lib/market-prices's ageLabel verbatim, prefixed 'observed'", () => {
-    expect(capturedLabel(row({ age_seconds: 7200 }))).toBe("observed 2h ago");
-    expect(capturedLabel(row({ age_seconds: 30 }))).toBe("observed 30s ago");
+  it("reuses lib/market-prices's ageLabel verbatim, prefixed 'observed', when not stale", () => {
+    expect(capturedLabel(row({ age_seconds: 7200, stale: false }))).toBe("observed 2h ago");
+    expect(capturedLabel(row({ age_seconds: 30, stale: false }))).toBe("observed 30s ago");
+  });
+
+  it("prefixes 'stale — ' when the API's own stale verdict is true — the same convention lib/market-prices.ts's quoteRow uses for capturedText", () => {
+    expect(capturedLabel(row({ age_seconds: 7200, stale: true }))).toBe("stale — observed 2h ago");
+    expect(capturedLabel(row({ age_seconds: 90_000, stale: true }))).toBe(
+      "stale — observed 1d ago",
+    );
   });
 
   it("never claims 'live', even for a very fresh row", () => {
     expect(capturedLabel(row({ age_seconds: 1 }))).not.toContain("live");
+  });
+});
+
+describe("capturedAbsoluteLabel", () => {
+  it("renders the UTC capture date and time, independent of the reader's clock or timezone", () => {
+    expect(capturedAbsoluteLabel(row({ captured_at: "2026-08-13T12:00:00Z" }))).toBe(
+      "2026-08-13 12:00 UTC",
+    );
+  });
+
+  it("pads single-digit month, day, hour and minute", () => {
+    expect(capturedAbsoluteLabel(row({ captured_at: "2026-01-02T03:04:00Z" }))).toBe(
+      "2026-01-02 03:04 UTC",
+    );
+  });
+
+  it("drops seconds — the same precision the worked example in the finding uses", () => {
+    expect(capturedAbsoluteLabel(row({ captured_at: "2026-08-13T12:00:45Z" }))).toBe(
+      "2026-08-13 12:00 UTC",
+    );
+  });
+
+  it("falls back to the raw string rather than throwing on an unparseable captured_at", () => {
+    expect(capturedAbsoluteLabel(row({ captured_at: "not-a-date" }))).toBe("not-a-date");
   });
 });
 
