@@ -2353,6 +2353,476 @@ def _preview_budget(payload: Mapping[str, Any], key: str) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# the shared planner: `preview-plans` and `cost-quote` (AG-5) ask different
+# questions about the SAME fleet — "what would each option cost and how long
+# would it take" versus "roughly what does this class of capacity cost right
+# now" — and `_route_plan` is the one place that fleet gets built: resolved
+# from a job or a spec, gated, estimated, classified and priced through
+# `router.plan_job`. Neither route re-implements any of that; both call this
+# and shape the result their own way. See `preview_plans` for why a 200 with
+# an empty shape and a reason beats a 500 on a comparison view — `_route_plan`
+# raises `_PlanDegraded` rather than answering that shape itself, because the
+# shape differs per caller.
+# ---------------------------------------------------------------------------
+
+
+class _PlanDegraded(Exception):
+    """Nothing is quotable, and here is why.
+
+    Carries the reason and the `job_id` (resolved before any check below
+    could fail) back out to whichever route is asking, so each can build its
+    own degraded response without a second copy of the job/spec resolution
+    that produced it.
+    """
+
+    def __init__(self, reason: str, *, job_id: str | None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.job_id = job_id
+
+
+@dataclasses.dataclass
+class _RoutedPlan:
+    """Everything `router.plan_job` needed and produced, for one request.
+
+    Built once by `_route_plan`. `preview_plans` and `cost_quote` each read
+    the fields they need and shape their own response — the arithmetic
+    itself (gates, venue fit, the estimate ladder, the three solvers) lives
+    entirely in `router/` and runs exactly once per request either way.
+    """
+
+    job_id: str | None
+    tasks: list[Any]
+    task: Any  # a real TaskSpec — see router.PlanRequest.task
+    rows: list[Mapping[str, Any]]
+    candidates: list[routermod.Candidate]
+    estimates_by_class: dict[str, routermod.Estimate]
+    estimates_by_machine: dict[str, routermod.Estimate]
+    eligible_ids: set[str]
+    #: Gate-passing candidates narrowed further by venue fit — the same
+    #: `survivors` `router.plan_job` prices internally, recomputed here from
+    #: the two public functions it calls (`eligible_fleet`, `venue_admitted`)
+    #: rather than duplicated, because `PlanSet` does not expose them and
+    #: `cost_quote` needs the set a price may honestly be attached to.
+    priced_candidates: tuple[routermod.Candidate, ...]
+    rates: Any
+    duration: routermod.Estimate | None
+    kind: routermod.WorkloadKind | None
+    kind_evidence: str | None
+    gpus_per_task: int | None
+    plan_set: routermod.PlanSet
+    notes: list[str]
+
+
+def _route_plan(
+    payload: Mapping[str, Any],
+    user_id: str,
+    db: psycopg.Connection,
+    *,
+    placement_eligible: Any,
+    expand_tasks: Any,
+    notes: list[str],
+) -> _RoutedPlan:
+    """Resolve a job or spec into a gated, priced plan.
+
+    This is `preview_plans`'s body before it grew a second caller: every gate,
+    every estimate and the one call to `router.plan_job` that answers "which
+    venues, which classes, what it costs" now happens exactly once here.
+    `notes` is the CALLER's own list, appended to in place — a note earned
+    before a later degradation (e.g. "planned from the first N of M tasks")
+    still reaches the caller's own degraded response exactly as it did when
+    all of this lived inline in one route.
+
+    Raises `_PlanDegraded` rather than returning a degraded shape, because
+    that shape is different for each caller (`preview-plans` answers with
+    `plans`/`candidates`/`canary`; `cost-quote` with `estimates`/`total`). An
+    `HTTPException` (bad `job_id`, unknown job, invalid spec) is left to
+    propagate straight through — both callers want the same 400/404/409 for
+    the same malformed request, so there is nothing for either to catch.
+    """
+    job_id = payload.get("job_id")
+    raw_spec = payload.get("spec")
+    if job_id is not None:
+        if not isinstance(job_id, str) or not job_id:
+            raise HTTPException(status_code=400, detail="job_id must be a string")
+        row = dbmod.fetch_job_for_owner(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        raw_spec = row.get("spec")
+        if not isinstance(raw_spec, dict):
+            raise HTTPException(
+                status_code=409,
+                detail="this job has no stored spec to plan against",
+            )
+    elif not isinstance(raw_spec, dict):
+        raise HTTPException(status_code=400, detail="pass either job_id or spec")
+
+    if placement_eligible is None or expand_tasks is None:
+        raise _PlanDegraded(
+            "routing is not configured on this deployment: the placement "
+            "gates and the task expansion both live in the runtime, and "
+            "this API imports only its protocol package. Nothing is "
+            "quoted rather than quoting a fleet a permissive stand-in "
+            "would have approved.",
+            job_id=job_id,
+        )
+
+    try:
+        spec = JobSpec.model_validate(raw_spec)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid job spec") from None
+
+    try:
+        tasks = list(expand_tasks(job_id or "preview", spec))
+    except Exception:
+        log.warning("could not expand a spec for preview by %s", user_id)
+        raise _PlanDegraded(
+            "this spec could not be expanded into tasks, so there is "
+            "nothing to plan",
+            job_id=job_id,
+        )
+    if not tasks:
+        raise _PlanDegraded("this spec expands to no tasks", job_id=job_id)
+    if len(tasks) > _PREVIEW_MAX_TASKS:
+        notes.append(
+            f"planned from the first {_PREVIEW_MAX_TASKS} of "
+            f"{len(tasks)} tasks"
+        )
+        tasks = tasks[:_PREVIEW_MAX_TASKS]
+
+    # The gates are per task, and the tasks of one job differ only in their
+    # payload's trial parameters — except for a verification pair's
+    # `exclude_nodes`, which narrows the fleet for one task and not the job.
+    # The first task is the representative and the fleet below is the job's,
+    # not that task's.
+    task = tasks[0]
+
+    rows = dbmod.router_candidates_for_owner(db, user_id)
+    if not rows:
+        raise _PlanDegraded(
+            "no active machine is available to this account: nothing is "
+            "enrolled, nothing is shared by a workspace, and nothing is "
+            "listed on the open market",
+            job_id=job_id,
+        )
+
+    machine_ids = [row["machine_id"] for row in rows]
+    rates = metricsmod.acceptance_rates(
+        dbmod.acceptance_rate_rows(db, machine_ids=machine_ids)
+    )
+
+    # Rung 1: other machines' recorded durations on this job, each labelled
+    # with the class of the machine that produced it. Passed whole to the
+    # estimator, which drops every observation from a class other than the
+    # one it is asked about — the filtering rule stays in one place rather
+    # than being re-implemented per class here.
+    observations = tuple(
+        routermod.Observation(
+            seconds=item["duration_s"],
+            capability_class=item["capability_class"],
+            federated=item["federated"],
+        )
+        for item in (
+            dbmod.peer_task_observations(db, job_id=job_id) if job_id else []
+        )
+    )
+    evidence = [
+        routermod.Evidence(rung=routermod.RUNG_SAME_JOB, observations=observations)
+    ]
+
+    estimates: dict[str, routermod.Estimate] = {}
+    for capability_class in {
+        routermod.hardware_class(row["capabilities"]) for row in rows
+    }:
+        if capability_class is None:
+            continue
+        estimate = routermod.estimate_task_seconds(
+            evidence, capability_class=capability_class
+        )
+        if estimate is not None:
+            estimates[capability_class] = estimate
+
+    candidates: list[routermod.Candidate] = []
+    estimates_by_machine: dict[str, routermod.Estimate] = {}
+    classes_present: set[str | None] = set()
+    for row in rows:
+        capability_class = routermod.hardware_class(row["capabilities"])
+        classes_present.add(capability_class)
+        estimate = estimates.get(capability_class) if capability_class else None
+        if estimate is not None:
+            estimates_by_machine[row["machine_id"]] = estimate
+        candidates.append(
+            routermod.Candidate(
+                machine_id=row["machine_id"],
+                node=_preview_node_view(row),
+                venue=row["venue"],
+                currency=routermod.CURRENCY_ZC,
+                # Millicredits on the wire, credits in a quote: the ledger
+                # settles in integers so it can never round, and a page
+                # showing "14200" where the design says "14.2 ZC" is the
+                # same number in a unit nobody reads.
+                price_per_hour=(
+                    row["ask_zc_per_hour"]
+                    / marketplacemod.MILLICREDITS_PER_CREDIT
+                ),
+                max_concurrent_tasks=row["max_concurrent_tasks"],
+                seconds_per_task=(
+                    routermod.planning_seconds(estimate)
+                    if estimate is not None
+                    else None
+                ),
+                reliability_tier=routermod.reliability_tier(
+                    routermod.select_acceptance(
+                        rates,
+                        machine_id=row["machine_id"],
+                        capability_class=capability_class,
+                    )
+                ),
+                capability_class=capability_class,
+            )
+        )
+
+    # The job-wide fallback duration is offered ONLY when every candidate
+    # sits in the one class that has evidence. Otherwise it is None, and
+    # each machine is quoted from its own class or not at all: a fallback
+    # applied across classes is exactly the pooling the estimator refuses
+    # everywhere else, arriving through the back door of a default.
+    duration: routermod.Estimate | None = None
+    if len(classes_present) == 1:
+        only = next(iter(classes_present))
+        duration = estimates.get(only) if only is not None else None
+
+    gated_candidates = routermod.eligible_fleet(
+        task, candidates, eligible=placement_eligible
+    )
+    eligible_ids = {candidate.machine_id for candidate in gated_candidates}
+    # What KIND of work is this, and therefore which venues can do it?
+    #
+    # Without this the planner narrows on nothing and prices every machine as
+    # if any of them could run any job — which is how a GPU fine-tune gets
+    # quoted on a 2 vCPU CPU sandbox. `kind=None` is a deliberate no-op inside
+    # the planner, so before this line venue fit was built, tested, and
+    # unreachable.
+    #
+    # `raw_spec` rather than the validated model: `signals_from_job_spec`
+    # reads a compiled JobSpec mapping, which is what this route holds. It
+    # never sees the flashml.yaml those were compiled from.
+    #
+    # `task_count` is passed explicitly because we have just run the
+    # runtime's own `expand_tasks` and know the real number. Re-deriving it
+    # inside the classifier would be a second copy of the coordinator's
+    # expansion rule, and the two would eventually disagree.
+    kind, kind_evidence = routermod.classify(raw_spec, task_count=len(tasks))
+    # `resources.gpuPerTask` is the hardware refusal: a venue with no GPU is
+    # not eligible for a job that needs one, whatever it costs. Read off the
+    # validated model rather than `raw_spec` so a missing or malformed value
+    # becomes the schema default (0 = no GPU required) instead of a KeyError
+    # on a read-only route.
+    gpus_per_task = getattr(spec.spec.resources, "gpuPerTask", 0) or None
+    # The same narrowing `plan_job` runs internally, recomputed here (from
+    # its own two public functions, not reimplemented) because `PlanSet`
+    # reports allocations and venue-level fits but never the per-machine
+    # survivor set a class-level price may honestly be attached to.
+    priced_candidates, _venue_refused_for_pricing = routermod.venue_admitted(
+        gated_candidates, kind=kind, gpus_per_task=gpus_per_task
+    )
+    plan_set = routermod.plan_job(
+        routermod.PlanRequest(
+            task=task,
+            tasks=len(tasks),
+            candidates=tuple(candidates),
+            duration=duration,
+            deadline_seconds=_preview_deadline(payload),
+            kind=kind,
+            kind_evidence=kind_evidence,
+            gpus_per_task=gpus_per_task,
+        ),
+        eligible=placement_eligible,
+    )
+
+    if task.payload.get("local_inputs"):
+        notes.append(
+            "this job wants host-local datasets, and this API does not "
+            "record which datasets a machine holds — that gate fails "
+            "closed here, so the fleet below is narrower than the "
+            "coordinator's will be"
+        )
+    if task.payload.get("extra_dependencies"):
+        notes.append(
+            "this job declares extra dependencies, and this API does not "
+            "record which machines can install them — that gate fails "
+            "closed here, so the fleet below is narrower than the "
+            "coordinator's will be"
+        )
+
+    return _RoutedPlan(
+        job_id=job_id,
+        tasks=tasks,
+        task=task,
+        rows=rows,
+        candidates=candidates,
+        estimates_by_class=estimates,
+        estimates_by_machine=estimates_by_machine,
+        eligible_ids=eligible_ids,
+        priced_candidates=priced_candidates,
+        rates=rates,
+        duration=duration,
+        kind=kind,
+        kind_evidence=kind_evidence,
+        gpus_per_task=gpus_per_task,
+        plan_set=plan_set,
+        notes=notes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# cost-quote (AG-5): a rough, class-level price for a workload
+# ---------------------------------------------------------------------------
+#
+# `preview-plans` prices the exact machines in the fleet at THEIR OWN asks.
+# This is a different, coarser question: what does a CLASS of capacity cost
+# at the market's live going rate, independent of any one listing — useful
+# before a submitter has committed to a fleet, and honest about being an
+# estimate rather than the fine-grained fill `preview-plans` already gives.
+
+#: The unit every priced row in `cost-quote` carries today. Not a constant
+#: chosen for convenience: `db.router_candidates_for_owner`'s own docstring
+#: is explicit that `rented` — the only venue that would ever settle in
+#: USD — "has no producer" in this deployment, so there is currently no
+#: path by which a `cost-quote` row could honestly carry any other unit.
+_COST_QUOTE_UNIT_ZC = "ZC/hour"
+
+
+def _cost_quote_seconds(payload: Mapping[str, Any]) -> float | None:
+    """A caller-supplied per-task duration estimate, in seconds, or None.
+
+    Optional and coarse by design: the estimator's own evidence is used when
+    this is absent, and only when NEITHER exists does a row's cost go to
+    `null` for want of a duration. Malformed input is refused rather than
+    clamped, exactly like `_preview_deadline` — silently flooring a negative
+    guess to zero would answer a different question than the one asked.
+    """
+    raw = payload.get("estimated_task_seconds")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise HTTPException(
+            status_code=400,
+            detail="estimated_task_seconds must be a number of seconds",
+        )
+    if not math.isfinite(raw) or raw <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="estimated_task_seconds must be a positive number of seconds",
+        )
+    return float(raw)
+
+
+def _cost_quote_usd_equivalent(price_millicredits: int) -> float:
+    """The fixed 1 ZC = 1 USD comparable value, through the real conversion.
+
+    Routed through `prices.normalized_usd_amount` rather than copied from
+    `price_per_hour` — this module states the ZC/USD distinction as a rule
+    everywhere else (`Cost`, `_preview_cost`), and a hand-rolled 1:1 copy
+    here would be the one place that rule was assumed instead of applied.
+    """
+    zc_amount = Decimal(price_millicredits) / Decimal(
+        marketplacemod.MILLICREDITS_PER_CREDIT
+    )
+    usd = pricesmod.normalized_usd_amount("ZC", zc_amount)
+    assert usd is not None  # ZC always normalizes; see normalized_usd_amount
+    return float(usd)
+
+
+def _cost_quote_row(
+    db: psycopg.Connection,
+    *,
+    venue: str,
+    capability_class: str,
+    eligible_machines: int,
+    estimate: routermod.Estimate | None,
+    override_seconds: float | None,
+    task_count: int,
+) -> dict[str, Any]:
+    """One `(venue, capability class)` line of the quote.
+
+    The price is the market's, never a specific listing's:
+    `marketplace.class_board`'s `median_ask_zc` — the same live order
+    statistic `open_asks`/`match_bid` clear a bid against, not a frozen
+    snapshot (`class_board`'s own docstring is explicit about why `last_zc`
+    would be the wrong choice here: it can describe a book that has since
+    gone quiet). Workspace capacity is never looked up on the board at all —
+    it is free to its own members by construction (M1), a known zero rather
+    than an unobserved one.
+
+    A capability class the market has never priced answers `price_per_hour:
+    None`, never `0`: `0` reads as free compute, and free is a fact only
+    workspace capacity gets to claim here.
+    """
+    price_millicredits: int | None
+    if venue == routermod.VENUE_WORKSPACE:
+        price_millicredits = 0
+        basis = "workspace capacity is free to its own members (M1)"
+    elif venue == routermod.VENUE_MARKET:
+        board = marketplacemod.class_board(db, capability_class)
+        price_millicredits = board.get("median_ask_zc")
+        if price_millicredits is None:
+            basis = (
+                f"no open ask for {capability_class} on the market right now"
+            )
+        else:
+            basis = (
+                f"live median of {board.get('depth', 0)} open ask(s) for "
+                f"{capability_class}"
+            )
+    else:
+        # `rented` or anything future: no priced source is wired up here —
+        # see `_COST_QUOTE_UNIT_ZC`. Refused rather than guessed at zero.
+        price_millicredits = None
+        basis = f"no priced source for venue {venue!r}"
+
+    if price_millicredits is None:
+        price_per_hour: float | None = None
+        unit: str | None = None
+        usd_equivalent_per_hour: float | None = None
+    else:
+        price_per_hour = price_millicredits / marketplacemod.MILLICREDITS_PER_CREDIT
+        unit = _COST_QUOTE_UNIT_ZC
+        usd_equivalent_per_hour = _cost_quote_usd_equivalent(price_millicredits)
+
+    if override_seconds is not None:
+        seconds_per_task: float | None = override_seconds
+        duration_basis: str | None = "caller-provided"
+    elif estimate is not None:
+        seconds_per_task = routermod.planning_seconds(estimate)
+        duration_basis = estimate.basis
+    else:
+        seconds_per_task = None
+        duration_basis = None
+        basis += "; task duration is not observed for this class"
+
+    estimated_cost: float | None = None
+    if price_per_hour is not None and seconds_per_task is not None:
+        estimated_cost = round(
+            price_per_hour * (seconds_per_task / 3600.0) * task_count, 4
+        )
+
+    return {
+        "venue": venue,
+        "capability_class": capability_class,
+        "price_per_hour": price_per_hour,
+        "unit": unit,
+        "usd_equivalent_per_hour": usd_equivalent_per_hour,
+        "eligible_machines": eligible_machines,
+        "estimated_task_seconds": seconds_per_task,
+        "duration_basis": duration_basis,
+        "estimated_tasks": task_count,
+        "estimated_cost": estimated_cost,
+        "basis": basis,
+    }
+
+
+# ---------------------------------------------------------------------------
 # the trade-off curve: what one more machine buys, and when it buys nothing
 # ---------------------------------------------------------------------------
 #
@@ -4372,32 +4842,12 @@ def create_cloud_app(
         tasks in the whole ledger.
         """
         payload = await _json_object(request)
-        deadline_seconds = _preview_deadline(payload)
         budget_zc = _preview_budget(payload, "budget_zc")
         budget_usd = _preview_budget(payload, "budget_usd")
 
-        job_id = payload.get("job_id")
-        raw_spec = payload.get("spec")
-        if job_id is not None:
-            if not isinstance(job_id, str) or not job_id:
-                raise HTTPException(status_code=400, detail="job_id must be a string")
-            row = dbmod.fetch_job_for_owner(db, job_id, user_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="unknown job")
-            raw_spec = row.get("spec")
-            if not isinstance(raw_spec, dict):
-                raise HTTPException(
-                    status_code=409,
-                    detail="this job has no stored spec to plan against",
-                )
-        elif not isinstance(raw_spec, dict):
-            raise HTTPException(
-                status_code=400, detail="pass either job_id or spec"
-            )
-
         notes: list[str] = []
 
-        def _degraded(reason: str) -> dict[str, Any]:
+        def _degraded(job_id: str | None, reason: str) -> dict[str, Any]:
             """Answer the question that can be answered, and say which one
             could not. A 200 with empty plans and a reason, rather than a 500
             or a silent empty page: "nothing is quotable here, and here is
@@ -4416,199 +4866,28 @@ def create_cloud_app(
                 "notes": notes + [reason],
             }
 
-        if placement_eligible is None or expand_tasks is None:
-            return _degraded(
-                "routing is not configured on this deployment: the placement "
-                "gates and the task expansion both live in the runtime, and "
-                "this API imports only its protocol package. Nothing is "
-                "quoted rather than quoting a fleet a permissive stand-in "
-                "would have approved."
-            )
-
         try:
-            spec = JobSpec.model_validate(raw_spec)
-        except Exception:
-            raise HTTPException(status_code=400, detail="invalid job spec") from None
-
-        try:
-            tasks = list(expand_tasks(job_id or "preview", spec))
-        except Exception:
-            log.warning("could not expand a spec for preview by %s", user_id)
-            return _degraded(
-                "this spec could not be expanded into tasks, so there is "
-                "nothing to plan"
+            build = _route_plan(
+                payload,
+                user_id,
+                db,
+                placement_eligible=placement_eligible,
+                expand_tasks=expand_tasks,
+                notes=notes,
             )
-        if not tasks:
-            return _degraded("this spec expands to no tasks")
-        if len(tasks) > _PREVIEW_MAX_TASKS:
-            notes.append(
-                f"planned from the first {_PREVIEW_MAX_TASKS} of "
-                f"{len(tasks)} tasks"
-            )
-            tasks = tasks[:_PREVIEW_MAX_TASKS]
+        except _PlanDegraded as degraded:
+            return _degraded(degraded.job_id, degraded.reason)
 
-        # The gates are per task, and the tasks of one job differ only in
-        # their payload's trial parameters — except for a verification pair's
-        # `exclude_nodes`, which narrows the fleet for one task and not the
-        # job. The first task is the representative and the fleet below is
-        # the job's, not that task's.
-        task = tasks[0]
-
-        rows = dbmod.router_candidates_for_owner(db, user_id)
-        if not rows:
-            return _degraded(
-                "no active machine is available to this account: nothing is "
-                "enrolled, nothing is shared by a workspace, and nothing is "
-                "listed on the open market"
-            )
-
-        machine_ids = [row["machine_id"] for row in rows]
-        rates = metricsmod.acceptance_rates(
-            dbmod.acceptance_rate_rows(db, machine_ids=machine_ids)
-        )
-
-        # Rung 1: other machines' recorded durations on this job, each
-        # labelled with the class of the machine that produced it. Passed
-        # whole to the estimator, which drops every observation from a class
-        # other than the one it is asked about — the filtering rule stays in
-        # one place rather than being re-implemented per class here.
-        observations = tuple(
-            routermod.Observation(
-                seconds=item["duration_s"],
-                capability_class=item["capability_class"],
-                federated=item["federated"],
-            )
-            for item in (
-                dbmod.peer_task_observations(db, job_id=job_id) if job_id else []
-            )
-        )
-        evidence = [
-            routermod.Evidence(rung=routermod.RUNG_SAME_JOB, observations=observations)
-        ]
-
-        estimates: dict[str, routermod.Estimate] = {}
-        for capability_class in {
-            routermod.hardware_class(row["capabilities"]) for row in rows
-        }:
-            if capability_class is None:
-                continue
-            estimate = routermod.estimate_task_seconds(
-                evidence, capability_class=capability_class
-            )
-            if estimate is not None:
-                estimates[capability_class] = estimate
-
-        candidates: list[routermod.Candidate] = []
-        estimates_by_machine: dict[str, routermod.Estimate] = {}
-        classes_present: set[str | None] = set()
-        for row in rows:
-            capability_class = routermod.hardware_class(row["capabilities"])
-            classes_present.add(capability_class)
-            estimate = estimates.get(capability_class) if capability_class else None
-            if estimate is not None:
-                estimates_by_machine[row["machine_id"]] = estimate
-            candidates.append(
-                routermod.Candidate(
-                    machine_id=row["machine_id"],
-                    node=_preview_node_view(row),
-                    venue=row["venue"],
-                    currency=routermod.CURRENCY_ZC,
-                    # Millicredits on the wire, credits in a quote: the ledger
-                    # settles in integers so it can never round, and a page
-                    # showing "14200" where the design says "14.2 ZC" is the
-                    # same number in a unit nobody reads.
-                    price_per_hour=(
-                        row["ask_zc_per_hour"]
-                        / marketplacemod.MILLICREDITS_PER_CREDIT
-                    ),
-                    max_concurrent_tasks=row["max_concurrent_tasks"],
-                    seconds_per_task=(
-                        routermod.planning_seconds(estimate)
-                        if estimate is not None
-                        else None
-                    ),
-                    reliability_tier=routermod.reliability_tier(
-                        routermod.select_acceptance(
-                            rates,
-                            machine_id=row["machine_id"],
-                            capability_class=capability_class,
-                        )
-                    ),
-                    capability_class=capability_class,
-                )
-            )
-
-        # The job-wide fallback duration is offered ONLY when every candidate
-        # sits in the one class that has evidence. Otherwise it is None, and
-        # each machine is quoted from its own class or not at all: a fallback
-        # applied across classes is exactly the pooling the estimator refuses
-        # everywhere else, arriving through the back door of a default.
-        duration: routermod.Estimate | None = None
-        if len(classes_present) == 1:
-            only = next(iter(classes_present))
-            duration = estimates.get(only) if only is not None else None
-
-        eligible_ids = {
-            candidate.machine_id
-            for candidate in routermod.eligible_fleet(
-                task, candidates, eligible=placement_eligible
-            )
-        }
-        # What KIND of work is this, and therefore which venues can do it?
-        #
-        # Without this the planner narrows on nothing and prices every machine
-        # as if any of them could run any job — which is how a GPU fine-tune
-        # gets quoted on a 2 vCPU CPU sandbox. `kind=None` is a deliberate
-        # no-op inside the planner, so before this line venue fit was built,
-        # tested, and unreachable.
-        #
-        # `raw_spec` rather than the validated model: `signals_from_job_spec`
-        # reads a compiled JobSpec mapping, which is what this route holds. It
-        # never sees the flashml.yaml those were compiled from.
-        #
-        # `task_count` is passed explicitly because we have just run the
-        # runtime's own `expand_tasks` and know the real number. Re-deriving it
-        # inside the classifier would be a second copy of the coordinator's
-        # expansion rule, and the two would eventually disagree.
-        kind, kind_evidence = routermod.classify(raw_spec, task_count=len(tasks))
-        plan_set = routermod.plan_job(
-            routermod.PlanRequest(
-                task=task,
-                tasks=len(tasks),
-                candidates=tuple(candidates),
-                duration=duration,
-                deadline_seconds=deadline_seconds,
-                kind=kind,
-                kind_evidence=kind_evidence,
-                # `resources.gpuPerTask` is the hardware refusal: a venue with
-                # no GPU is not eligible for a job that needs one, whatever it
-                # costs. Read off the validated model rather than `raw_spec`
-                # so a missing or malformed value becomes the schema default
-                # (0 = no GPU required) instead of a KeyError on a read-only
-                # preview route.
-                gpus_per_task=getattr(spec.spec.resources, "gpuPerTask", 0) or None,
-            ),
-            eligible=placement_eligible,
-        )
-
-        if task.payload.get("local_inputs"):
-            notes.append(
-                "this job wants host-local datasets, and this API does not "
-                "record which datasets a machine holds — that gate fails "
-                "closed here, so the fleet below is narrower than the "
-                "coordinator's will be"
-            )
-        if task.payload.get("extra_dependencies"):
-            notes.append(
-                "this job declares extra dependencies, and this API does not "
-                "record which machines can install them — that gate fails "
-                "closed here, so the fleet below is narrower than the "
-                "coordinator's will be"
-            )
+        plan_set = build.plan_set
+        candidates = build.candidates
+        rows = build.rows
+        rates = build.rates
+        eligible_ids = build.eligible_ids
+        estimates_by_machine = build.estimates_by_machine
 
         return {
-            "job_id": job_id,
-            "tasks": len(tasks),
+            "job_id": build.job_id,
+            "tasks": len(build.tasks),
             # WHAT KIND OF WORK, AND WHY — never the enum alone.
             #
             # "hpo" tells a reader nothing they can check. "hpo, because the
@@ -4699,6 +4978,141 @@ def create_cloud_app(
             "excluded_machines": plan_set.excluded_machines,
             "unplannable_machines": plan_set.unplannable_machines,
             "notes": notes + list(plan_set.notes),
+        }
+
+    @app.post("/v1alpha1/jobs/cost-quote", tags=["browser"])
+    async def cost_quote(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """A rough, class-level price for a workload, beside ``preview-plans``.
+        **Nothing is submitted, matched, held or charged — this is an
+        ESTIMATE, never a bill**, and the response says so (``kind:
+        "estimate"``).
+
+        ``preview-plans`` prices the exact machines in its fleet at THEIR OWN
+        asks. This route answers a different, coarser question: what does a
+        CLASS of capacity cost at the market's live going rate right now,
+        independent of any one listing. The fleet is the same one —
+        resolved, gated and classified by the identical call to
+        ``router.plan_job`` that ``preview-plans`` makes (see
+        ``_route_plan``) — so the two surfaces can never disagree about
+        which venues and classes are in play, only about which price to
+        attach to them.
+
+        **Body.** Identical to ``preview-plans``: ``{"job_id": "..."}`` or
+        ``{"spec": {...}}``. Optional ``estimated_task_seconds`` — a coarse
+        caller guess used in place of recorded evidence when the evidence is
+        thin or absent; when neither exists a row's cost is ``null`` rather
+        than assumed.
+
+        **Response.** ``estimates`` — one row per ``(venue, capability
+        class)`` that survived the placement gates and the workload's venue
+        fit, each carrying ``price_per_hour`` and an explicit ``unit`` (ZC
+        and USD are never mixed without an explicit, named conversion — see
+        ``_cost_quote_usd_equivalent``), ``estimated_tasks``,
+        ``estimated_cost`` and a ``basis`` a reader can check. **A class the
+        market has never priced answers ``null``, never ``0``** — a zero
+        reads as free compute, and only workspace capacity (M1) is actually
+        free. ``total`` keeps a ZC range and a USD range apart rather than
+        summing them, exactly as ``router.Cost`` never collapses settlement
+        currencies; every priced row settles in ZC today (``rented`` "has no
+        producer" — see ``db.router_candidates_for_owner``), so the USD
+        range is ``null`` by construction rather than by omission, and an
+        all-unpriced plan answers a ``null`` range too, never a ``0`` one.
+
+        Auth matches ``preview-plans`` exactly: ``admitted_user``, because
+        this is the product rather than the door to it.
+        """
+        payload = await _json_object(request)
+        override_seconds = _cost_quote_seconds(payload)
+        notes: list[str] = []
+
+        def _degraded(job_id: str | None, reason: str) -> dict[str, Any]:
+            return {
+                "kind": "estimate",
+                "job_id": job_id,
+                "tasks": None,
+                "duration": None,
+                "estimates": [],
+                "total": {
+                    "zc": {"min": None, "max": None},
+                    "usd": {"min": None, "max": None},
+                },
+                "notes": notes + [reason],
+            }
+
+        try:
+            build = _route_plan(
+                payload,
+                user_id,
+                db,
+                placement_eligible=placement_eligible,
+                expand_tasks=expand_tasks,
+                notes=notes,
+            )
+        except _PlanDegraded as degraded:
+            return _degraded(degraded.job_id, degraded.reason)
+
+        task_count = len(build.tasks)
+
+        # One row per (venue, class) actually present among the machines a
+        # price may honestly be attached to — gated and venue-fit narrowed,
+        # exactly as `plan_job` itself narrows before pricing anything.
+        groups: dict[tuple[str, str], int] = {}
+        unclassified = 0
+        for candidate in build.priced_candidates:
+            if candidate.capability_class is None:
+                unclassified += 1
+                continue
+            key = (candidate.venue, candidate.capability_class)
+            groups[key] = groups.get(key, 0) + 1
+        if unclassified:
+            notes.append(
+                f"{unclassified} eligible machine"
+                f"{'s' if unclassified != 1 else ''} report no billable "
+                f"capability class and are not represented in `estimates`"
+            )
+
+        estimates = [
+            _cost_quote_row(
+                db,
+                venue=venue,
+                capability_class=capability_class,
+                eligible_machines=count,
+                estimate=build.estimates_by_class.get(capability_class),
+                override_seconds=override_seconds,
+                task_count=task_count,
+            )
+            for (venue, capability_class), count in sorted(groups.items())
+        ]
+
+        # ZC and USD stay apart, always — see `router.Cost` for the same
+        # rule made structural rather than stated. Nothing today produces a
+        # USD row (see `_COST_QUOTE_UNIT_ZC`), so this is `null` by
+        # construction and not by an omitted case.
+        zc_costs = [
+            row["estimated_cost"]
+            for row in estimates
+            if row["estimated_cost"] is not None
+            and row["unit"] == _COST_QUOTE_UNIT_ZC
+        ]
+
+        return {
+            "kind": "estimate",
+            "job_id": build.job_id,
+            "tasks": task_count,
+            "duration": _preview_estimate(build.duration),
+            "estimates": estimates,
+            "total": {
+                "zc": {
+                    "min": min(zc_costs) if zc_costs else None,
+                    "max": max(zc_costs) if zc_costs else None,
+                },
+                "usd": {"min": None, "max": None},
+            },
+            "notes": notes + list(build.plan_set.notes),
         }
 
     @app.get("/v1alpha1/jobs/{job_id}/tradeoff", tags=["browser"])
