@@ -29,9 +29,9 @@ export async function PriceBoard() {
   return (
     <section
       id="market"
-      data-surface="light"
+      data-surface="sand"
       data-layout="price-board"
-      className="landing-surface-light scroll-mt-20 border-b border-border py-20 md:py-28"
+      className="landing-surface-sand scroll-mt-20 border-b border-border py-20 md:py-28"
     >
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
         <div className="grid gap-8 lg:grid-cols-[.72fr_1.28fr] lg:gap-12">
