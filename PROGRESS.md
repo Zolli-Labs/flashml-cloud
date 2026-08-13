@@ -174,6 +174,30 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-12 — Classify workloads by mode and show the real runtime lanes (flashml-cloud, web landing)
+What/why: User feedback on two sections. Workload fit: the staggered rows read
+misaligned and the marquee rail duplicated the list — replaced with a
+mode-classified task list directly under the header (Mode / Divide: four
+independent-piece workloads; Mode / Resume: checkpointable training), aligned
+rows with machine context, rail deleted. Technical depth: the abstract
+three-curve "runtime signal" said nothing and the Control/Execution/Integrity
+cards didn't describe the real stack — replaced with equal aligned lanes
+01 Host (flashnode, allowlisted Docker images, --network none, read-only
+rootfs, cpu/mem caps), 02 Runtime (independent tasks across machines, DDP /
+FSDP inside one machine, per M1_DECISIONS D6), 03 Recovery (checkpoint
+manifests, heartbeat expiry, one accepted commit); ArchitectureSignal and
+WorkloadVelocityRail components deleted.
+How verified: `npm test` — 823 tests passed; `npx tsc --noEmit --incremental
+  false`, `npm run lint`, canonical-environment `npx next typegen` and
+  `npm run build` exited 0; frozen-SVG diff against develop empty. Structure
+  and copy verified via SSR markup tests (data-mode groups, lane labels,
+  sandbox contract line, five workload rows with machine context).
+Gotchas: Mid-page pixel verification still blocked by the pre-existing
+  `/#anchor` deep-link crash (also on develop); visual confirmation deferred
+  to a real-browser scroll at :3025.
+Next: Real-browser review of the two redesigned sections; then decide whether
+  to fix the anchor deep-link crash.
+
 ### 2026-08-12 — Restore the landing's original visual system (flashml-cloud, web landing Part II)
 What/why: Design-quality pass over the vision-led landing after user feedback
 that Part I broke the original style: the H1 clipped under the map panel,
