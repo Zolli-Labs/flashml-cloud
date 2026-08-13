@@ -86,6 +86,7 @@ from flashml_cloud_api import datasets as dsmod
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
+from flashml_cloud_api import job_share as jobsharemod
 from flashml_cloud_api import metrics as metricsmod
 from flashml_cloud_api import marketplace as marketplacemod
 from flashml_cloud_api import repo as repomod
@@ -6388,6 +6389,81 @@ def create_cloud_app(
         r = await coordinator.forward("POST", f"/v1alpha1/jobs/{_seg(job_id)}/cancel")
         return _passthrough(r)
 
+    # -- minting and revoking a job's public link --------------------------
+    #
+    # OWNER-ONLY, not viewer-only, and the gap is deliberate: `fetch_job_for_viewer`
+    # admits every member of the job's pool, and publishing a teammate's run to
+    # the open internet is not a read. Both routes below scope on the OWNER,
+    # in SQL, inside `job_share`.
+    #
+    # `admitted_user` rather than `current_user`, matching the rule
+    # `admitted_user` states for itself: reads stay open to un-admitted
+    # accounts and everything that creates state requires admission. A share
+    # token is state, and it is the state with the widest blast radius in this
+    # API.
+
+    @app.post("/v1alpha1/jobs/{job_id}/share", tags=["browser"])
+    async def create_job_share(
+        job_id: str,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Mint (or return) this job's public link.
+
+        **IDEMPOTENT, AND THAT IS THE POINT.** Calling twice returns the same
+        token, because minting a second one would not add a link — it would
+        silently invalidate one somebody has already sent, at the moment they
+        are most likely to be watching it. `job_share.mint_share_token` writes
+        only where the column is NULL and returns whatever the row ends up
+        holding, in one statement, so two concurrent calls cannot both win.
+
+        A job is PRIVATE until this route is called. Nothing mints on submit
+        — the opposite of `sandbox_sessions.create_session`, which mints
+        immediately because a session exists to be evidence, while the
+        overwhelming majority of jobs are somebody's private training run.
+
+        404 for a job that does not exist and for one belonging to somebody
+        else, indistinguishably, as every job route here does it.
+        """
+        token = await run_in_threadpool(
+            jobsharemod.mint_share_token, db, job_id, user_id
+        )
+        if token is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        # The console path, not the API path: what a person pastes into a
+        # message is `/share/<token>`, which `apps/web/middleware.ts` already
+        # allows through unauthenticated by an anchored one-segment rule. The
+        # fallback mirrors the device-code route's — a deployment with no
+        # console URL configured still gets a usable relative path rather than
+        # a URL beginning "None".
+        base = settings.console_url.rstrip("/")
+        return {
+            "share_token": token,
+            "url": f"{base}/share/{token}" if base else f"/share/{token}",
+        }
+
+    @app.delete("/v1alpha1/jobs/{job_id}/share", status_code=204,
+                tags=["browser"])
+    async def delete_job_share(
+        job_id: str,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Kill this job's public link. The old URL stops working immediately.
+
+        The column goes back to NULL — there is no `revoked_at` for a future
+        reader to forget to consult, and `fetch_job_by_share_token` refuses an
+        empty token so a revoked row cannot be handed to a caller who sends
+        none. Revoking a job that was never shared succeeds: "the link does
+        not work" is the state asked for and it was already true.
+        """
+        ok = await run_in_threadpool(
+            jobsharemod.revoke_share_token, db, job_id, user_id
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return Response(status_code=204)
+
     @app.get("/v1alpha1/jobs/{job_id}/artifacts", tags=["browser"])
     async def list_job_artifacts(
         job_id: str,
@@ -7750,6 +7826,156 @@ def create_cloud_app(
         )
         return {
             "session": public_session_view(row),
+            "events": [public_event_view(e) for e in events],
+        }
+
+    # -- the one share resolver: NO AUTHENTICATION, TWO KINDS OF THING -----
+    #
+    # `/share/<token>` in the console maps here. It resolves a sandbox session
+    # OR a job, and the reply is DISCRIMINATED — `{"kind": "session", …}` or
+    # `{"kind": "job", …}` — so a consumer branches on a field the API states
+    # rather than by sniffing which keys arrived.
+    #
+    # THE MIDDLEWARE RULE IS NOT WIDENED, AND THAT IS THE WHOLE DESIGN.
+    # `apps/web/middleware.ts` matches `/^\/share\/[A-Za-z0-9_-]{1,128}$/`,
+    # anchored at both ends, one path segment. A job share REUSES that URL; it
+    # does not get `/share/job/<token>`, which would need a second segment and
+    # therefore a looser pattern. Its own comment says why: loosening the
+    # matcher is how a route meant to satisfy one requirement quietly
+    # unauthenticates the console. AS-7.
+    #
+    # THE THREE MISSES ANSWER IDENTICALLY, and a discriminated resolver is
+    # exactly where they want to diverge — which is why AS-16 wrote it down
+    # before it was built. "No such token", "exists but is the OTHER kind" and
+    # "exists but was revoked" are one 404 with one body. This is the doctrine
+    # `redeem_device_code` already runs (unknown, unapproved, expired and
+    # already-redeemed are one answer so polling cannot enumerate), and here it
+    # additionally stops a prober learning WHICH table it missed.
+    #
+    # The existing `/public/sandbox-sessions/{token}` route above is untouched
+    # and keeps working: this is additive. A JOB token handed to that route
+    # answers its ordinary 404, indistinguishable from an unknown one, because
+    # `fetch_session_by_share_token` simply matches no row.
+
+    #: How long the public page waits on the coordinator's ledger before
+    #: giving up and rendering without it. `CoordinatorClient`'s own timeout is
+    #: 60 s, which is right for an operator call and far too long to hold a
+    #: request nobody authenticated. The database half of this page is the part
+    #: that must always render.
+    ledger_budget_s = 5.0
+
+    async def _public_job_ledger(job_id: str) -> list[dict[str, Any]]:
+        """The coordinator's ledger for one job, reduced to kind and timing.
+
+        BEST EFFORT BY DESIGN. A coordinator that is down, slow or answering
+        nonsense must degrade this page, never break it: the evidence that
+        matters most (state, timings, lease transitions, outcomes) comes from
+        our own Postgres and renders regardless. So every failure path returns
+        `[]`.
+
+        FEDERATED RUNS GET NOTHING HERE, deliberately. A federated job is one
+        coordinator job PER ROUND, so there is no single ledger to read and a
+        fan-out would multiply one unauthenticated request into N outbound
+        calls with N chosen by the submitter. The attempt history below already
+        covers federated runs — `public_attempts_for_job` joins through
+        `job_rounds` — and the fault-tolerance page this exists for is a Mode A
+        story.
+        """
+        if fedavgmod.is_federated_job_id(job_id):
+            return []
+        try:
+            r = await asyncio.wait_for(
+                coordinator.forward(
+                    "GET", f"/v1alpha1/jobs/{_seg(job_id)}/events"
+                ),
+                timeout=ledger_budget_s,
+            )
+        except Exception:
+            # Including the HTTPException(502) `forward` raises for a
+            # transport failure: on this route that is not an error to report,
+            # it is a section of the page that cannot be drawn.
+            return []
+        if r.status_code >= 300:
+            return []
+        try:
+            events = r.json()
+        except ValueError:
+            return []
+        if not isinstance(events, list):
+            return []
+        return jobsharemod.public_ledger_view(events)
+
+    @app.get("/v1alpha1/public/share/{share_token}", tags=["public"])
+    async def public_share(
+        share_token: str,
+        request: Request,
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """One shared job or session, for anybody holding the link.
+
+        The envelope always carries `kind`, and the payload keys under it are
+        fixed per kind — `{"kind", "session", "events"}` or
+        `{"kind", "job", "attempts", "events"}`. Never conditional on there
+        being any: a consumer that has to sniff which of several shapes it
+        received is a consumer with a branch that will eventually be wrong,
+        which is the argument the sibling route above already makes for its own
+        envelope.
+
+        **What a job publishes and what it withholds is `job_share`'s
+        docstring, and it is the security property of this route.** The short
+        version is AS-16: *a session's output is ours; a job's output is
+        theirs* — we execute user-supplied code from a submitted repository, so
+        this page shows our typed lifecycle facts and none of the submitter's
+        bytes. The narrowing is in SQL (`JOB_SHARE_COLUMNS`, and the attempt
+        query's own select list), not here; the rendering below is a second
+        cut, never the only one.
+        """
+        client = request.client.host if request.client else "unknown"
+        if not public_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many requests")
+
+        # One answer for every miss, built once and raised from three places
+        # so the three cannot drift into three different bodies.
+        unknown = HTTPException(status_code=404, detail="unknown share")
+
+        job = await run_in_threadpool(
+            jobsharemod.fetch_job_by_share_token, db, share_token
+        )
+        if job is not None:
+            job_id = str(job["id"])
+            attempts = await run_in_threadpool(
+                jobsharemod.public_attempts_for_job, db, job_id
+            )
+            return {
+                "kind": "job",
+                "job": jobsharemod.public_job_view(job, attempts),
+                "attempts": [
+                    jobsharemod.public_attempt_view(a) for a in attempts
+                ],
+                "events": await _public_job_ledger(job_id),
+            }
+
+        # Sessions second, and gated exactly as the sibling route is: two
+        # routes reading one row must not disagree about whether it is
+        # readable, and a deployment with no FC sandbox configured answers 404
+        # on both. That is also a non-leak — it is the same 404 an unknown
+        # token gets.
+        if not settings.fc_sandbox_configured:
+            raise unknown
+        session = await run_in_threadpool(
+            ssmod.fetch_session_by_share_token, db, share_token
+        )
+        if session is None:
+            raise unknown
+        events = await run_in_threadpool(
+            ssmod.events_for_session, db, str(session["id"])
+        )
+        return {
+            "kind": "session",
+            # The SAME two renderers the sibling route uses, called rather than
+            # reimplemented: two public views of one row would drift, and the
+            # one that drifted would be the one nobody was looking at.
+            "session": public_session_view(session),
             "events": [public_event_view(e) for e in events],
         }
 
