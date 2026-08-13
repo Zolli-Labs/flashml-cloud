@@ -880,8 +880,16 @@ export interface TradeoffRenting {
   usable: boolean;
   /** The API's own sentence for the `suited` verdict. Verbatim, always. */
   reason: string;
-  /** The API's own sentence for the price. Verbatim, always. */
+  /** The API's own sentence for the price — the claim alone. Verbatim,
+   * always. */
   price_reason: string;
+  /** Standalone qualifications of `price_reason`, split out in `5f7fb50`
+   * so each survives as its own assertable string instead of a sentence
+   * buried in one ~90-word paragraph. Each entry is independently true and
+   * order-independent — a console may render any subset, in any order,
+   * without the remainder becoming false. Optional: older responses and a
+   * `suited: false` job carry no notes at all. */
+  price_notes?: string[] | null;
   venue_id: string | null;
   usd_per_hour: number | null;
   price: TradeoffPrice | null;

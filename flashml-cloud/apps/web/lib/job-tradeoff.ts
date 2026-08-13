@@ -198,8 +198,14 @@ export interface RentingPanel {
   acquirable: boolean;
   /** The API's own sentence for the `suited` verdict. Verbatim. */
   reason: string;
-  /** The API's own sentence for the price. Verbatim. */
+  /** The API's own sentence for the price — the claim alone. Verbatim. */
   priceReason: string;
+  /** Standalone qualifications of `priceReason`, each independently true —
+   * see `TradeoffRenting.price_notes` in `cloud-api.ts`. Never joined back
+   * into a paragraph: that would reconstruct exactly the misleading
+   * one-string version the API split away from in `5f7fb50`. Empty when the
+   * route sent none. */
+  priceNotes: string[];
   /** How many rented machines the curve swept, and why it stopped there. */
   slots: number;
   slotsReason: string;
@@ -331,6 +337,7 @@ function rentingPanel(renting: TradeoffRenting): RentingPanel {
     acquirable: renting.acquirable,
     reason: renting.reason,
     priceReason: renting.price_reason,
+    priceNotes: renting.price_notes ?? [],
     slots: renting.slots,
     slotsReason: renting.slots_reason,
     venueId: renting.venue_id,

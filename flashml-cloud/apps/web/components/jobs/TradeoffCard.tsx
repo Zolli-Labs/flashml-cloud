@@ -1,7 +1,9 @@
 "use client";
 
+import { Fragment, useState } from "react";
 import {
   ArrowsClockwise,
+  CaretRight,
   CheckCircle,
   Minus,
   Prohibit,
@@ -13,6 +15,10 @@ import {
   type TradeoffPanel,
   type TradeoffRow,
 } from "@/lib/job-tradeoff";
+import {
+  groupTradeoffRows,
+  type TradeoffCollapsedItem,
+} from "@/lib/tradeoff-row-groups";
 
 /**
  * What each additional rented machine buys this job's finish time, and when
@@ -138,64 +144,7 @@ export function TradeoffCard({
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-border">
-              {panel.rows.map((r, i) => (
-                <tr key={r.totalSlots}>
-                  <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
-                    {fleetLabel(r)}
-                  </td>
-                  <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
-                    {r.finishSeconds == null
-                      ? NOT_OBSERVED
-                      : duration(r.finishSeconds)}
-                  </td>
-                  {/* THE FIRST ROW HAS NOTHING TO HAVE SAVED AGAINST, and that
-                      is not a failed measurement. `savedSeconds` is the
-                      difference between this row's finish time and the row
-                      ABOVE it, and the top row has no row above it — so it
-                      gets an em dash, the absence of a comparison, and never
-                      NOT_OBSERVED, which this repo reserves for a figure
-                      nobody could establish. Stamping "not observed" beside a
-                      populated finish time in row one reads as a broken read.
-
-                      Keyed on the index rather than on `rentedSlots === 0`
-                      because those two agree only while the account owns
-                      capacity: reaching none at all, the route's first row is
-                      the first RENTED fleet size, and it has no predecessor
-                      either. */}
-                  <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
-                    {i === 0
-                      ? "—"
-                      : r.savedSeconds == null
-                        ? NOT_OBSERVED
-                        : r.savedSeconds <= 0
-                          ? "nothing"
-                          : duration(r.savedSeconds)}
-                  </td>
-                  <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
-                    {r.zcCost.toFixed(2)}
-                  </td>
-                  <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
-                    {r.usdCost == null ? NOT_OBSERVED : r.usdCost.toFixed(4)}
-                  </td>
-                  {/* Permitted here and only here: 1 ZC = $1 USD is settled
-                      policy, so the two units add up — and both halves stay
-                      in their own cells beside it. */}
-                  <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
-                    {r.totalUsdValue == null
-                      ? NOT_OBSERVED
-                      : r.totalUsdValue.toFixed(4)}
-                  </td>
-                  <td className="px-3 py-2.5 text-xs">
-                    <span
-                      className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${TONE_STYLES[r.tone]}`}
-                    >
-                      <ToneIcon tone={r.tone} /> {r.headline}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
+            <TradeoffTableBody rows={panel.rows} />
           </table>
         </div>
 
@@ -294,6 +243,26 @@ function Renting({ panel }: { panel: TradeoffPanel }) {
           {renting.priceReason}
         </p>
       )}
+      {/* Each qualification of the price claim above is independently true
+          and order-independent — `lib/job-tradeoff.ts` carries them as a
+          list rather than a paragraph precisely so none of them can be lost
+          to a truncation or a layout decision. Rendered as separate list
+          items, never rejoined into prose. */}
+      {renting.suited && renting.priceNotes.length > 0 && (
+        <ul
+          data-testid="price-notes"
+          className="mt-1.5 space-y-1 pl-4"
+        >
+          {renting.priceNotes.map((note, i) => (
+            <li
+              key={i}
+              className="max-w-prose list-disc text-[11px] leading-relaxed text-muted-foreground"
+            >
+              {note}
+            </li>
+          ))}
+        </ul>
+      )}
       {renting.price && (
         <p className="mt-1.5 max-w-prose font-mono text-[11px] text-muted-foreground">
           {renting.price.provider} · {renting.price.sku}
@@ -308,6 +277,160 @@ function Renting({ panel }: { panel: TradeoffPanel }) {
           deliberately NOT here beside the renting summary too. Two copies of
           the same sentence in one panel reads as a bug, not as emphasis. */}
     </div>
+  );
+}
+
+/** The curve, grouped by `lib/tradeoff-row-groups.ts` so a long sweep stays
+ * readable without losing a single row. All state here is which collapsed
+ * groups are expanded — a display concern, not a decision, so it lives as
+ * ordinary component state rather than in `lib/`. */
+function TradeoffTableBody({ rows }: { rows: TradeoffRow[] }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const items = groupTradeoffRows(rows);
+  const firstRow = rows[0] as TradeoffRow | undefined;
+
+  // Expand-only: a collapsed group's rows are revealed in place and stay
+  // revealed. There is no affordance to hide them again, so this never
+  // needs to remove an id once added.
+  const expand = (id: string) => {
+    setExpanded((prev) => new Set(prev).add(id));
+  };
+
+  return (
+    <tbody className="divide-y divide-border">
+      {items.map((item) => {
+        if (item.kind === "row") {
+          return (
+            <TradeoffTableRow
+              key={item.row.totalSlots}
+              row={item.row}
+              isFirstRow={item.row === firstRow}
+            />
+          );
+        }
+        if (expanded.has(item.id)) {
+          return (
+            <Fragment key={item.id}>
+              {item.rows.map((row) => (
+                <TradeoffTableRow
+                  key={row.totalSlots}
+                  row={row}
+                  isFirstRow={false}
+                />
+              ))}
+            </Fragment>
+          );
+        }
+        return (
+          <CollapsedRowsControl
+            key={item.id}
+            item={item}
+            onExpand={() => expand(item.id)}
+          />
+        );
+      })}
+    </tbody>
+  );
+}
+
+/** One fleet size. `isFirstRow` is true only for the curve's own opening
+ * row — see the comment on `savedSeconds` below — and is never true for a
+ * row revealed out of a collapsed group, because index 0 is always an
+ * anchor `groupTradeoffRows` never hides (see its module docblock). */
+function TradeoffTableRow({
+  row: r,
+  isFirstRow,
+}: {
+  row: TradeoffRow;
+  isFirstRow: boolean;
+}) {
+  return (
+    <tr>
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
+        {fleetLabel(r)}
+      </td>
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
+        {r.finishSeconds == null ? NOT_OBSERVED : duration(r.finishSeconds)}
+      </td>
+      {/* THE FIRST ROW HAS NOTHING TO HAVE SAVED AGAINST, and that is not a
+          failed measurement. `savedSeconds` is the difference between this
+          row's finish time and the row ABOVE it, and the top row has no row
+          above it — so it gets an em dash, the absence of a comparison, and
+          never NOT_OBSERVED, which this repo reserves for a figure nobody
+          could establish. Stamping "not observed" beside a populated finish
+          time in row one reads as a broken read. */}
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
+        {isFirstRow
+          ? "—"
+          : r.savedSeconds == null
+            ? NOT_OBSERVED
+            : r.savedSeconds <= 0
+              ? "nothing"
+              : duration(r.savedSeconds)}
+      </td>
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
+        {r.zcCost.toFixed(2)}
+      </td>
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
+        {r.usdCost == null ? NOT_OBSERVED : r.usdCost.toFixed(4)}
+      </td>
+      {/* Permitted here and only here: 1 ZC = $1 USD is settled policy, so
+          the two units add up — and both halves stay in their own cells
+          beside it. */}
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
+        {r.totalUsdValue == null ? NOT_OBSERVED : r.totalUsdValue.toFixed(4)}
+      </td>
+      <td className="px-3 py-2.5 text-xs">
+        <span
+          className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${TONE_STYLES[r.tone]}`}
+        >
+          <ToneIcon tone={r.tone} /> {r.headline}
+        </span>
+      </td>
+    </tr>
+  );
+}
+
+/** The control that stands in for a run of three or more rows
+ * `lib/tradeoff-row-groups.ts` collapsed. Says only what it hides — a count,
+ * the fleet-size span, and the one advice headline every hidden row shares
+ * (a collapsed group is always monochromatic; see that module) — and
+ * invents nothing: no total saved, no computed figure the API never
+ * returned. Clicking reveals `item.rows` exactly, in place; nothing more
+ * and nothing less than what this control was standing in for. */
+function CollapsedRowsControl({
+  item,
+  onExpand,
+}: {
+  item: TradeoffCollapsedItem;
+  onExpand: () => void;
+}) {
+  const first = item.rows[0];
+  const last = item.rows[item.rows.length - 1];
+  const count = item.rows.length;
+  return (
+    <tr
+      data-testid="collapsed-tradeoff-rows"
+      onClick={onExpand}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onExpand();
+        }
+      }}
+      tabIndex={0}
+      role="button"
+      aria-expanded={false}
+      className="cursor-pointer transition-colors hover:bg-surface-2"
+    >
+      <td colSpan={7} className="px-3 py-2 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5 font-mono">
+          <CaretRight className="h-3 w-3 shrink-0" />
+          {count} more fleet size{count === 1 ? "" : "s"} ({first.totalSlots}-
+          {last.totalSlots}) · {first.headline}
+        </span>
+      </td>
+    </tr>
   );
 }
 
