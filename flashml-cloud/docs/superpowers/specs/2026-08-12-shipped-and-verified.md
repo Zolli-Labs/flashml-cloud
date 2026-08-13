@@ -158,6 +158,41 @@ reclaimed by the **RTX 3090** ~30 s later and reported:
 58 epochs of work crossed a machine death and a card change without being
 recomputed.
 
+**Which half of that is ours, and which is the task's — corrected 2026-08-12.**
+The sentence above is safe to say about *this* run because we wrote the task.
+It is not safe to generalise, and the step number in particular is not a
+control-plane measurement.
+
+The checkpoint relay discovers steps by globbing `step-*.json` under
+`workdir/out/ckpt` (`preflight.py:125`, `:149`) — **filenames the task's own
+code writes.** So `step` has a name we chose and a value the submitter chose.
+The `\d+` in `_CKPT_CONVENTION` is a static advisory inside preflight, not an
+enforced guarantee: `2026-08-11-open-gaps.md` §5 item 4 records a non-numeric
+`step-*.json` re-failing every 0.3 s for a whole task, so non-integer step
+names occur at runtime.
+
+Split by who assigned the value:
+
+| Ours — assigned by this codebase | The task's — self-reported |
+|---|---|
+| the pod was destroyed | `step 16298` |
+| a different machine claimed the lease ~30 s later | `epoch 58/200` |
+| which machine, in which venue and region | `epochs_executed 142` |
+| lease transitions, attempt counts, timings | |
+| the job completed | |
+
+**The story survives intact on the left column alone**, and that is the version
+to put in front of anyone: *a job's host was destroyed mid-run, a different GPU
+in another country picked the work up about thirty seconds later, and the job
+finished.* Every fact in that sentence is one this codebase assigned.
+
+Quote the right-hand column as the task's own stdout, attributed — never as a
+figure the platform verified.
+
+**The general test**, adopted with the public share page (D16.1): *can you name
+the line in our code that assigned this value, with no user input reaching it?*
+Numbers are not safer than strings here; they are just harder to notice.
+
 ### Constraints this experiment discovered
 
 1. **`allowFallback` iff `pool`.** Unsandboxed machines are eligible only for
