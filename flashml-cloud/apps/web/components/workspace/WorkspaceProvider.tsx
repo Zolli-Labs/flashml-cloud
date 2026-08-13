@@ -32,6 +32,23 @@ export interface WorkspaceContextValue {
   state: WorkspaceLoadState;
   error: string | null;
   reload: () => void;
+  /** A reload somebody ASKED for is in flight — the retry button in
+   * `WorkspaceGate`, the refresh control on the jobs tab, the reload
+   * `RenameWorkspace` fires after a successful save.
+   *
+   * Separate from `state === "loading"` on purpose, and both directions
+   * matter. Polling must NOT set it: `load` runs every 5s while a job is
+   * active, and flipping the page to a skeleton on each tick would be a
+   * worse bug than the one this fixes. And `state` must not be driven back
+   * to `"loading"` on a retry either, because the retry button lives inside
+   * the `"error"` branch — moving the state would unmount the control
+   * mid-click and lose the only thing on screen that says what failed.
+   *
+   * So this is the third fact neither flag carried: a request the user
+   * started, still outstanding. Without it the retry button had no way to
+   * acknowledge a click, and four network round trips of silence is
+   * indistinguishable from a dead button. */
+  reloading: boolean;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -62,6 +79,7 @@ export function WorkspaceProvider({
   const [viewerId, setViewerId] = useState<string | null>(null);
   const [state, setState] = useState<WorkspaceLoadState>("loading");
   const [error, setError] = useState<string | null>(null);
+  const [reloading, setReloading] = useState(false);
 
   // Bumped by every `load()` call and compared when that call's response
   // settles, so a response that is no longer the latest one this instance
@@ -76,6 +94,11 @@ export function WorkspaceProvider({
   // below) — all real, none of them fixed by the key.
   const requestIdRef = useRef(0);
 
+  // Takes no arguments and writes no state synchronously — the mount effect
+  // below calls it, and a setState in an effect's synchronous pass
+  // double-renders EVERY consumer of this provider on every mount
+  // (`react-hooks/set-state-in-effect`). `reloading` is therefore initialised
+  // to `false` and only ever raised by `reload`, which runs from a click.
   const load = useCallback(() => {
     const requestId = ++requestIdRef.current;
     Promise.all([getPool(poolId), getMe(), listJobs(), listPoolMachines(poolId)])
@@ -111,8 +134,30 @@ export function WorkspaceProvider({
           err instanceof Error ? err.message : "Couldn't load this Workspace."
         );
         setState("error");
+      })
+      .finally(() => {
+        // Guarded by the same token as the two branches above, so a
+        // superseded response cannot clear a flag a NEWER request owns.
+        if (requestIdRef.current !== requestId) return;
+        // Cleared by whichever request is current when it settles, whether
+        // or not that is the one the user started. A poll tick can supersede
+        // a manual reload — same four endpoints, so its response IS the
+        // answer they asked for — and clearing only on the manual request
+        // would leave the flag stuck true for the rest of the page's life in
+        // exactly that case. `setReloading(false)` when it is already false
+        // is a no-op React bails out of, so the poll pays nothing for this.
+        setReloading(false);
       });
   }, [poolId, router]);
+
+  /** What every caller outside this file gets: the same read, plus the flag
+   * that says somebody asked for it. Raising `reloading` here rather than
+   * inside `load` is what keeps the mount path free of a synchronous state
+   * write — this only ever runs from a click. */
+  const reload = useCallback(() => {
+    setReloading(true);
+    load();
+  }, [load]);
 
   // NOTE: there is deliberately no `useEffect` here resetting state when
   // `poolId` changes. That reset can't happen "in time" — a `useEffect` runs
@@ -164,6 +209,9 @@ export function WorkspaceProvider({
   useEffect(() => {
     if (state !== "ready") return;
     if (!jobs.some(isActiveJob)) return;
+    // Polling calls `load` directly and never `reload`: a background tick is
+    // not something the user asked for, so it must not raise `reloading` and
+    // spin the refresh control every five seconds.
     const t = setInterval(load, POLL_MS);
     return () => clearInterval(t);
   }, [jobs, state, load]);
@@ -173,7 +221,7 @@ export function WorkspaceProvider({
 
   return (
     <WorkspaceContext.Provider
-      value={{ pool, members, machines, jobs, viewerId, isOwner, state, error, reload: load }}
+      value={{ pool, members, machines, jobs, viewerId, isOwner, state, error, reload, reloading }}
     >
       {children}
     </WorkspaceContext.Provider>

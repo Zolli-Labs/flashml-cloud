@@ -14,7 +14,9 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatInviteState } from "@/lib/pool-invite-state";
 import {
   ApiError,
@@ -38,20 +40,55 @@ export function InviteManager({ poolId }: { poolId: string }) {
   const [link, setLink] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Why the READ failed, in the API's words. Kept separate from `error`
+   * above, which is why a WRITE (regenerate) failed — they are different
+   * failures with different recoveries, and one string for both would put a
+   * write error where the read's status line goes. */
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const load = useCallback(() => {
+    // No `setState("loading")` here: `load` is what the mount effect calls,
+    // and a synchronous setState in an effect body double-renders on every
+    // mount (`react-hooks/set-state-in-effect`). `state` is already
+    // initialised to `"loading"`, which is the honest initial value for a
+    // component that always fetches on mount. Going BACK to loading is the
+    // retry's job, and that runs from a click — see `retry` below.
     getPoolInviteState(poolId)
       .then((s) => {
         setInviteState(s);
         setState("ready");
       })
-      .catch(() => {
+      .catch((err) => {
+        // DEFECT FIX. This was `.catch(() => setState("error"))` — the error
+        // was not even bound, so the API's account of what went wrong was
+        // discarded at the only point it existed, and the panel rendered one
+        // fixed sentence for a 403, a 502 and a dead network alike. Keeping
+        // the words is the same rule `lib/console/panel-state.ts` encodes as
+        // `state.detail`: the reason belongs to the API, and a paraphrase is
+        // more confident than the evidence behind it.
+        setLoadError(
+          err instanceof ApiError
+            ? err.detail
+            : err instanceof Error
+              ? err.message
+              : null
+        );
         setState("error");
       });
   }, [poolId]);
 
   useEffect(() => {
+    load();
+  }, [load]);
+
+  /** Re-run the read after a failure. From a click, so it may reset to
+   * `loading` — the skeleton comes back and the previous failure's sentence
+   * clears, instead of the old error sitting there unchanged while the new
+   * request is in flight. */
+  const retry = useCallback(() => {
+    setState("loading");
+    setLoadError(null);
     load();
   }, [load]);
 
@@ -147,11 +184,25 @@ export function InviteManager({ poolId }: { poolId: string }) {
       </p>
 
       {state === "loading" ? (
-        <div className="skeleton mt-3 h-4 w-40" />
+        <Skeleton className="mt-3 h-4 w-40" />
       ) : state === "error" ? (
-        <p className="mt-3 text-xs text-destructive">
-          Couldn&apos;t load the current invite state.
-        </p>
+        // DEFECT FIX (second half). The read could fail and leave no way to
+        // re-run it: there was no retry here, so a transient 502 hid the
+        // owner's invite controls until they reloaded the whole page. The
+        // fixed sentence stays as the heading — it is true and it is about
+        // us, per `UNREADABLE_TITLE`'s reasoning — and the API's own words
+        // now sit under it when there were any.
+        <div role="alert" className="mt-3">
+          <p className="text-xs text-destructive">
+            Couldn&apos;t load the current invite state.
+          </p>
+          {loadError && (
+            <p className="mt-1 text-xs text-muted-foreground">{loadError}</p>
+          )}
+          <Button variant="outline" size="sm" className="mt-2" onClick={retry}>
+            Try again
+          </Button>
+        </div>
       ) : inviteState ? (
         <p className="mt-3 text-xs text-muted-foreground">
           {formatInviteState(inviteState)}
@@ -202,26 +253,22 @@ export function InviteManager({ poolId }: { poolId: string }) {
       )}
 
       <div className="mt-3 flex items-center gap-3">
-        <button
-          type="button"
-          onClick={regenerate}
-          disabled={working}
-          className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-        >
+        <Button type="button" onClick={regenerate} disabled={working}>
           {working ? "Working…" : "Regenerate"}
-        </button>
+        </Button>
 
         {inviteState && (
           <AlertDialog>
             <AlertDialogTrigger
               render={
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
                   disabled={working}
-                  className="rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                 >
                   Revoke
-                </button>
+                </Button>
               }
             />
             <AlertDialogContent>
