@@ -2347,7 +2347,19 @@ _TRADEOFF_UNIT_SECONDS = 1.0
 #: A response-size bound and nothing else — it makes no claim about the world.
 #: A truncated sweep says so in a note rather than letting a curve that was
 #: cut short read as a curve that ran out of useful fleet sizes.
-_TRADEOFF_MAX_RENTED_STEPS = 16
+#:
+#: Raised 16 -> 64 on 2026-08-12. The truncation note is honest, but a caveat
+#: is only honest if it is RARE: at 16 it fired on essentially every real HPO
+#: sweep, so the caveat became the normal answer and the panel stopped
+#: answering the question it exists to answer. 64 rows is a trivial payload
+#: and puts the note back where it belongs — genuinely unusual fleet sizes.
+#:
+#: The binding cost is rendering, not bytes: a 64-row table scrolls the
+#: interesting rows — the `helps` -> `no_marginal_gain` boundary — off a demo
+#: screen, so the console collapses around that transition rather than
+#: truncating the data. Raising this further without checking that is how the
+#: answer becomes unreadable while staying correct.
+_TRADEOFF_MAX_RENTED_STEPS = 64
 
 #: ``(price publisher, unit)`` that means ONE WHOLE RENTED MACHINE FOR AN
 #: HOUR, and which venue it prices.
@@ -2432,6 +2444,26 @@ def _tradeoff_rented_gate(spec: JobSpec) -> tuple[bool, str]:
         "rewriting placement.pool here would change who is allowed to run "
         "your code without asking you."
     )
+
+
+def _venue_acquisition(venue_id: str | None) -> str | None:
+    """How this API obtains capacity at ``venue_id``, or ``None`` if unknown.
+
+    Read off ``router.VENUES`` rather than hardcoded, because the whole point
+    of quoting it in a price sentence is that it is the router's fact and not
+    a second copy that can drift from it. ``router.venue()`` is not exported
+    from the package, so the tuple is scanned; it has five entries.
+
+    Unknown answers ``None`` and the caller says nothing, which is the
+    under-claiming rule the rest of this file uses: a venue we cannot classify
+    must not be described.
+    """
+    if not venue_id:
+        return None
+    for candidate in routermod.VENUES:
+        if candidate.id == venue_id:
+            return candidate.acquisition
+    return None
 
 
 def _tradeoff_rented_price(
@@ -4707,12 +4739,57 @@ def create_cloud_app(
             # `captured_at`, `age_seconds` and its own `stale` verdict, and a
             # second spelling of the same instant is how two dates that
             # disagree end up on one page.
+            #
+            # THIS SENTENCE USED TO MAKE A COMPLETENESS CLAIM AND IT WAS
+            # FALSE. It ended "Another SKU costs more", which tells a reader
+            # the quoted rate is the floor. It is only the floor of the SKUs
+            # that publish a rate here — and the venue this deployment
+            # actually brings capacity up at, `ecs-gpu`, publishes none and
+            # cost 8x the quoted figure when it was checked. Worse, the
+            # `RoutingCard` on the same tab renders `VenueFit.reason`
+            # verbatim, and several `ecs-gpu` reasons in `router/venues.py`
+            # contain that higher rate as a literal — so one screen carried
+            # two prices and asserted the lower was the minimum.
+            #
+            # The rate is real and its provenance is stated instead. Nothing
+            # here claims anything about venues that published no rate,
+            # because this API has not observed one.
+            quoted_acq = _venue_acquisition(quote_venue)
+            auto_unpriced = sorted(
+                vid
+                for vid in rentable_venue_ids
+                if vid != quote_venue
+                and _venue_acquisition(vid) == routermod.ACQUISITION_AUTOMATIC
+            )
             acquirable_reason = (
-                f"priced at ${usd_per_hour:g}/hr from the cheapest published "
-                f"whole-machine hour among the venues that can run this work "
-                f"({quote.provider} {quote.sku}"
+                f"priced at ${usd_per_hour:g}/hr — a published "
+                f"{quote.provider} whole-machine hour ({quote.sku}"
                 + (f", {quote.tier}" if quote.tier else "")
-                + "). Another SKU costs more."
+                + f"), the cheapest {quote.provider} rate on record here; "
+                f"every other published {quote.provider} SKU costs more."
+            )
+            if quoted_acq == routermod.ACQUISITION_MANUAL:
+                acquirable_reason += (
+                    f" {quote.provider} capacity is acquired manually: a "
+                    f"person starts that machine and it enrols itself. This "
+                    f"API does not create it."
+                )
+            if auto_unpriced:
+                plural = len(auto_unpriced) > 1
+                acquirable_reason += (
+                    f" The venue{'s' if plural else ''} this deployment does "
+                    f"bring up automatically ({', '.join(auto_unpriced)}) "
+                    f"publish{'' if plural else 'es'} no rate here and "
+                    f"{'are' if plural else 'is'} priced live at acquisition, "
+                    f"so {'they are' if plural else 'it is'} absent from the "
+                    f"comparison above rather than more expensive than it."
+                )
+            acquirable_reason += (
+                " This is the cheapest LISTED machine-hour, not the cheapest "
+                "one that could run this job: the row is chosen on whether a "
+                "GPU is present at all, so a job needing more GPU memory — or "
+                "more than one GPU per task — may be quoted a machine that "
+                "could not finish it."
             )
 
         if suited and acquirable:
@@ -4810,7 +4887,13 @@ def create_cloud_app(
                     "acquirable": acquirable,
                     "usable": suited and acquirable,
                     "reason": suited_reason,
-                    "price_reason": acquirable_reason,
+                    # Withheld when a rented machine could not run this work
+                    # at all. How well we priced a machine this job can never
+                    # use is noise at best, and at worst it reads as a choice
+                    # we made — "we looked at renting and it was expensive"
+                    # rather than "renting is not available to this job".
+                    # `reason` above already carries the whole answer.
+                    "price_reason": acquirable_reason if suited else None,
                     "venue_id": quote_venue,
                     "usd_per_hour": usd_per_hour,
                     "price": (
