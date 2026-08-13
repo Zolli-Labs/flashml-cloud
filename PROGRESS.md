@@ -27,6 +27,15 @@ Next: the single most useful next action. Parking lot: ideas deliberately
 Rules:
 1. **Evidence or it didn't happen.** "All tests pass" must carry numbers
    (`flashruntime 109, flashnode 28, e2e 3`).
+   **Name every suite you ran — and a green suite is a claim about a SCOPE,
+   so name what it cannot see.** "2664 passed" means the API's own tests: it
+   says nothing about the public agent still agreeing with this API, nothing
+   about the console rendering, nothing about anything actually running.
+   On 2026-08-12 four sessions quoted that number at each other for a day
+   while `e2e/` — the *only* suite checking that the public agent and this
+   API agree — had been red for ~50 commits and nobody had run it. Every
+   baseline quoted was true, and about the wrong population. A number with an
+   unstated scope reads as coverage it does not have.
 2. **Update the stage checklist** below in the same edit when a stage's
    status changes ([ ] / [~] / [x] with a one-line justification).
 3. **Docs move with code** — if you changed a public surface, say which
