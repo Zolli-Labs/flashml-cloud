@@ -646,14 +646,38 @@ def test_the_public_view_serves_only_the_share_columns(make_client, db):
 
 def test_no_attempt_field_names_a_machine_a_task_or_a_lease(make_client, db):
     client = make_client()
-    _, token = _shared_job(client, db, _new_user(db))
+    job_id, token = _shared_job(client, db, _new_user(db))
 
     body = client.get(f"/v1alpha1/public/share/{token}").json()
 
+    # SCOPED TO THIS JOB, and the scoping is the point rather than tidiness.
+    #
+    # Unscoped, this read every attempt row in the database and asserted none
+    # of those values appeared in THIS job's page. `conftest.py` runs one
+    # session-scoped Postgres and never truncates between files, so rows left
+    # by unrelated modules were visible here — and a short or common
+    # `task_id` from one of them collides by substring with something the
+    # page legitimately renders. The test then failed for a job that had
+    # leaked nothing.
+    #
+    # It failed in the full suite and passed alone, which is the dangerous
+    # shape for an assertion like this one: it does not merely fail
+    # sometimes, it PASSES sometimes, and the run it passes on is the one
+    # somebody ships from. For a check whose job is keeping a volunteer's
+    # hostname off an unauthenticated page, an unreliable green is worse than
+    # a red — a red stops you.
+    #
+    # Scoping loses nothing. This page renders exactly one job, so only that
+    # job's identifiers are reachable to leak; another job's ids cannot
+    # escape through a route that never reads them.
     with db.cursor() as cur:
-        cur.execute("select lease_id, machine_id, task_id from public.attempts")
+        cur.execute(
+            "select lease_id, machine_id, task_id from public.attempts "
+            "where job_id = %s",
+            (job_id,),
+        )
         rows = cur.fetchall()
-    assert rows
+    assert rows, "the fixture stopped producing attempts for this job"
     raw = client.get(f"/v1alpha1/public/share/{token}").text
     for row in rows:
         for value in (row["lease_id"], str(row["machine_id"]), row["task_id"]):
