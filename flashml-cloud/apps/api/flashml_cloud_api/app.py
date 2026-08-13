@@ -51,7 +51,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -89,6 +89,7 @@ from flashml_cloud_api import repo as repomod
 from flashml_cloud_api import placement as placementmod
 from flashml_cloud_api import prices as pricesmod
 from flashml_cloud_api import router as routermod
+from flashml_cloud_api.router import tradeoff as tradeoffmod
 from flashml_cloud_api import sandbox_orchestrator as orchmod
 from flashml_cloud_api import sandbox_sessions as ssmod
 from flashml_cloud_api import storage as storagemod
@@ -2039,6 +2040,252 @@ def _preview_budget(payload: Mapping[str, Any], key: str) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# the trade-off curve: what one more machine buys, and when it buys nothing
+# ---------------------------------------------------------------------------
+#
+# `router/tradeoff.py` holds the arithmetic and every one of the five advice
+# codes. Everything below is WIRING: it finds the four real inputs that module
+# needs (a task count, a per-task duration, the slots this account already
+# has, and a price for a rented machine-hour) and renders its answer. No
+# advice is decided here, and nothing here rents, holds, matches or charges
+# anything — this is a read.
+
+#: The duration the curve is swept with when the estimator has none.
+#:
+#: A job with no observed duration still has a real answer to "does another
+#: machine help?", because every comparison inside ``tradeoff_curve`` is
+#: between two values of ``ceil(task_count / slots) x task_seconds`` that
+#: share the same positive ``task_seconds`` factor. Scaling both sides of
+#: ``finish >= previous_finish`` by the same positive number cannot flip it,
+#: so the advice codes a one-second probe produces are *identical* to the ones
+#: any real duration would produce. The seconds and the costs it computes are
+#: therefore discarded rather than rendered: they are the arbitrary part, and
+#: the client is told ``null`` — not observed — for both.
+_TRADEOFF_UNIT_SECONDS = 1.0
+
+#: Most rented fleet sizes one answer will sweep.
+#:
+#: A response-size bound and nothing else — it makes no claim about the world.
+#: A truncated sweep says so in a note rather than letting a curve that was
+#: cut short read as a curve that ran out of useful fleet sizes.
+_TRADEOFF_MAX_RENTED_STEPS = 16
+
+#: ``(price publisher, unit)`` that means ONE WHOLE RENTED MACHINE FOR AN
+#: HOUR, and which venue it prices.
+#:
+#: ``tradeoff_curve`` multiplies ``usd_per_hour`` by held wall-clock hours per
+#: rented machine, so only a whole-machine hourly rate may be fed to it. A
+#: RunPod ``gpu-hour`` is exactly that. Alibaba's FC quotes are deliberately
+#: absent: they are per-component (``vcpu-hour`` + ``gib-hour`` + disk), and
+#: adding them into one machine-hour means choosing a machine shape, which is
+#: an invented number wearing the clothes of arithmetic — the thing
+#: ``prices.py`` refuses everywhere else. ``fc-gpu`` is ``acquisition: none``
+#: as well, so no plan may rest on it in any case.
+#:
+#: ``ecs-gpu`` is the venue this API can actually create capacity at, and it
+#: publishes no row in ``price_quotes`` at all: its rate is read live from
+#: ``DescribePrice`` at acquisition time, inside a provider this read-only
+#: route must not call. So the USD column below rests on a published RunPod
+#: rate, and the response names the venue and the SKU it came from rather
+#: than letting a reader assume it priced the venue we would actually rent.
+_TRADEOFF_MACHINE_HOUR: dict[tuple[str, str], str] = {
+    ("runpod", "gpu-hour"): routermod.VENUE_RUNPOD,
+}
+
+
+def _tradeoff_rented_gate(spec: JobSpec) -> tuple[bool, str]:
+    """Whether a RENTED machine could legally run this job's tasks, and why.
+
+    Two facts, neither of them a guess.
+
+    **A machine this API rents registers ``sandbox_capable: false``.**
+    ``capacity/ecs.py`` never writes ``FLASHNODE_SANDBOX_CAPABLE`` in any
+    form, and the agent's own ``capabilities.discover`` reads an unset
+    variable as false — deliberately, because "a sandbox-capable stamp on an
+    unsandboxed rented box is what lets a stranger's public job land on it".
+
+    **The runtime's last placement gate admits such a host only when the
+    task's isolation tier is ``standard``, or the job carries the
+    ``allowFallback`` waiver** (``IsolationAwarePlacement.eligible``:
+    ``return node.get("sandbox_capable") is True``). ``compile.py`` grants
+    that waiver to pool-scoped jobs and to nothing else — *allowFallback iff
+    pool* — so a PUBLIC job, one whose ``placement.pool`` is ``any``, is
+    refused, and no fleet money can buy will make it finish sooner.
+
+    **``placement.pool`` is never rewritten to change that answer**, here or
+    anywhere below. Editing it would silently widen who is allowed to run
+    somebody's code, on their behalf and without their asking. A flat curve
+    is a disappointing screen; that would be a security decision taken by a
+    display surface.
+
+    Reported the way ``venues.VenueFit`` reports its two refusals: this is
+    the *suited* half — may a rented machine run this work at all — and it is
+    kept apart from *acquirable*, which asks whether capacity can be obtained
+    and priced. Merging them would let "we could not price a machine" read as
+    "this job cannot use one".
+    """
+    placement = getattr(spec.spec, "placement", None)
+    isolation = getattr(spec.spec, "isolation", None)
+    pool = getattr(placement, "pool", "any") or "any"
+    tier = getattr(isolation, "tier", "standard") or "standard"
+    waived = getattr(isolation, "allowFallback", False) is True
+
+    if tier in ("", "standard"):
+        return True, (
+            "this job's tasks declare no isolation tier, so the sandbox gate "
+            "admits any host and a rented machine is eligible on that gate "
+            "like every other."
+        )
+    if waived:
+        return True, (
+            f"this job is scoped to workspace {pool} and carries the "
+            f"allowFallback waiver, so a machine rented into that workspace "
+            f"may run it even though a rented host registers "
+            f"sandbox_capable: false."
+        )
+    return False, (
+        "renting cannot make this job faster at any price. It is a public "
+        "job — placement.pool is 'any' — so it carries no allowFallback "
+        "waiver, and its tasks are sandboxed, which the coordinator places "
+        "only on a host advertising sandbox_capable: true. A machine this "
+        "API rents registers sandbox_capable: false. Scoping the job to a "
+        "workspace is what changes this, and only its submitter can do that: "
+        "rewriting placement.pool here would change who is allowed to run "
+        "your code without asking you."
+    )
+
+
+def _tradeoff_rented_price(
+    quotes: Sequence[pricesmod.Quote], *, venue_ids: Collection[str]
+) -> tuple[pricesmod.Quote | None, str | None]:
+    """The cheapest published whole-machine hour among ``venue_ids``.
+
+    Returns ``(quote, venue_id)`` or ``(None, None)``. ``None`` is *not
+    observed*: no rate for a rentable machine is recorded, which leaves every
+    money figure on the curve ``null`` while the fleet sizes and the advice
+    codes stay exactly as true as they were.
+
+    Cheapest, and the response says which SKU it is. A price column has to
+    rest on one machine and this picks the least expensive published one, so
+    the reader is looking at the best case — named, dated, and carrying its
+    own staleness verdict through ``prices.render`` rather than presented as
+    a live number. A scraped price shown as live is a lie with a delay.
+    """
+    best: pricesmod.Quote | None = None
+    best_venue: str | None = None
+    for quote in quotes:
+        venue_id = _TRADEOFF_MACHINE_HOUR.get((quote.provider, quote.unit))
+        if venue_id is None or venue_id not in venue_ids:
+            continue
+        if quote.currency != routermod.CURRENCY_USD:
+            continue
+        if best is None or quote.amount < best.amount:
+            best, best_venue = quote, venue_id
+    return best, best_venue
+
+
+def _tradeoff_rented_slots(
+    *,
+    task_count: int,
+    owned_slots: int,
+    usd_per_hour: float | None,
+    per_acquisition_max_usd: float,
+    window_max_usd: float,
+) -> tuple[int, str]:
+    """How many rented machines the curve sweeps, and the reason for the stop.
+
+    Three bounds, each a real constraint rather than a display preference:
+
+    1. **What renting could ever buy.** One step past ``task_count`` slots.
+       Past that ``ceil(task_count / slots)`` is 1 and every further machine
+       is ``beyond_task_count`` at a higher price — the same verdict repeated,
+       which is worth showing once. At least one rented step is always swept:
+       "what does one more machine buy me?" is the question, and *nothing* is
+       a complete answer to it that has to be visible to be read.
+    2. **What this deployment could pay for.** ``rented_usd_window_max``
+       divided by the hourly rate is how many concurrent rentals the same
+       ceiling ``capacity.budget.assert_within_budget`` enforces would admit,
+       and ``rented_usd_per_acquisition_max`` refuses a single machine dearer
+       than itself. A row for a fleet nobody could buy is a fleet that does
+       not exist. With no price at all neither ceiling can be applied, and
+       neither is invented — the sweep is bounded by 1 and 3 alone.
+    3. **Response size.** ``_TRADEOFF_MAX_RENTED_STEPS``, disclosed in a note
+       whenever it is what stopped the sweep.
+    """
+    useful = max(int(task_count) + 1 - max(int(owned_slots), 0), 1)
+    limit, why = useful, (
+        "the sweep stops one machine past the task count, where "
+        "ceil(task_count / slots) reaches 1 and every further machine costs "
+        "more and finishes no sooner."
+    )
+
+    if usd_per_hour is not None and usd_per_hour > 0:
+        if usd_per_hour > per_acquisition_max_usd:
+            return 0, (
+                f"no machine is swept: the cheapest published rate is "
+                f"${usd_per_hour:g}/hr and this deployment refuses any single "
+                f"rental above ${per_acquisition_max_usd:g}/hr."
+            )
+        affordable = int(window_max_usd // usd_per_hour)
+        if affordable <= 0:
+            return 0, (
+                f"no machine is swept: this deployment's rolling ceiling of "
+                f"${window_max_usd:g}/hr does not cover one machine at "
+                f"${usd_per_hour:g}/hr."
+            )
+        if affordable < limit:
+            limit, why = affordable, (
+                f"the sweep stops at {affordable} machines, which is what "
+                f"this deployment's rolling ceiling of ${window_max_usd:g}/hr "
+                f"covers at ${usd_per_hour:g}/hr."
+            )
+
+    if limit > _TRADEOFF_MAX_RENTED_STEPS:
+        return _TRADEOFF_MAX_RENTED_STEPS, (
+            f"the sweep stops at {_TRADEOFF_MAX_RENTED_STEPS} machines, which "
+            f"is this answer's size limit and not a fleet size where renting "
+            f"stops helping."
+        )
+    return limit, why
+
+
+def _tradeoff_point(
+    point: tradeoffmod.TradeoffPoint,
+    *,
+    seconds_observed: bool,
+    price_observed: bool,
+) -> dict[str, Any]:
+    """One fleet size as the console renders it.
+
+    ``finish_seconds`` is ``null`` with no observed duration and ``usd_cost``
+    is ``null`` without both a duration and a price — a cost is hours held
+    times a rate, so either missing leaves it unobserved. Never 0: a rented
+    machine that costs nothing is a claim, and it is not one this route is in
+    a position to make.
+
+    ``zc_cost`` is 0.0 on every row and that IS a measurement rather than a
+    gap. ``tradeoff_curve`` sweeps fleet sizes above capacity this account
+    already reaches, which is free to its own members (M1); the only money
+    the curve models is the rented delta, and it is priced in USD. Both units
+    travel so the page can show both, and their sum is offered at the settled
+    1 ZC = $1 USD rate rather than being left for a reader to do in their
+    head.
+    """
+    finish = point.finish_seconds if seconds_observed else None
+    usd = point.usd_cost if (seconds_observed and price_observed) else None
+    return {
+        "total_slots": point.total_slots,
+        "owned_slots": point.owned_slots,
+        "rented_slots": point.rented_slots,
+        "finish_seconds": finish,
+        "zc_cost": 0.0,
+        "usd_cost": usd,
+        "total_usd_value": None if usd is None else round(usd, 4),
+        "advice_code": point.advice_code,
+    }
+
+
+# ---------------------------------------------------------------------------
 # the cloud app
 # ---------------------------------------------------------------------------
 
@@ -3943,6 +4190,367 @@ def create_cloud_app(
             "unplannable_machines": plan_set.unplannable_machines,
             "notes": notes + list(plan_set.notes),
         }
+
+    @app.get("/v1alpha1/jobs/{job_id}/tradeoff", tags=["browser"])
+    async def job_tradeoff(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """What each additional rented machine buys this job — and when it
+        buys nothing. **Nothing is rented, held, matched or charged.**
+
+        A GET, because it is a read of a job that already exists and takes no
+        body. Read-only by construction: the only writes reachable from here
+        are none, and no acquisition path is called or exposed. There is no
+        confirm-and-rent flow behind it.
+
+        **Post-submit only, and that is a decision rather than an omission.**
+        The task count is the denominator of every advice code below, and
+        pre-submit it is not honest yet — compiling without network dataset
+        resolution changes it, and "a preview claiming 40 trials for a job
+        that submits as 4 is the lie the honesty rules forbid". By the time a
+        job exists the count is real, so this surface carries none of that
+        debt.
+
+        **Response.** ``points`` — one fleet size per row, from the slots this
+        account already reaches up to that plus what could be rented, each
+        carrying finish time, cost in both units, and one of five advice
+        codes: ``baseline`` (your own hardware, nothing rented, nothing to
+        improve on), ``helps``, ``no_marginal_gain`` (costs more, finishes no
+        sooner — ``ceil(task_count / slots)`` did not step down),
+        ``beyond_task_count`` (more machines than tasks), ``no_parallelism``
+        (one task; no fleet is faster at any price). A curve that always
+        slopes downward is a sales tool rather than a planner, and it would
+        spend somebody's money on a machine that cannot help them.
+
+        **``renting`` reports two different refusals separately**, exactly as
+        ``preview-plans`` keeps ``suited`` and ``acquirable`` apart:
+        ``suited`` is "may a rented machine run this work at all" — false for
+        a public job, because a rented host registers ``sandbox_capable:
+        false`` and a sandboxed job with no pool waiver requires true — and
+        ``acquirable`` is "can capacity be obtained and priced here". Neither
+        is ever produced from the other, and ``placement.pool`` is never
+        rewritten to turn the first one true.
+
+        **Every figure the estimator could not observe travels as ``null``.**
+        A job with no duration evidence still has a real answer: the fleet
+        sizes and the advice codes are facts about task counts and slots, and
+        they do not need a second to be true. What they do not get is
+        invented seconds.
+
+        Viewer-scoped: the owner, or a member of the job's pool, same 404
+        doctrine as every sibling read — never 403, which would confirm the
+        id exists. The FLEET is the caller's own reachable capacity, so a
+        teammate reading a colleague's job sees what it would cost *them*.
+        """
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        raw_spec = row.get("spec")
+        if not isinstance(raw_spec, dict):
+            raise HTTPException(
+                status_code=409,
+                detail="this job has no stored spec to plan against",
+            )
+
+        notes: list[str] = []
+
+        def _degraded(reason: str) -> dict[str, Any]:
+            """Answer what can be answered and name what could not.
+
+            A 200 with no points and a reason, never a 500 and never an empty
+            table: "nothing is swept here, and here is why" is actionable,
+            and a curve that is missing because a read failed must not look
+            like a curve that had nothing to show.
+            """
+            return _jsonable(
+                {
+                    "job_id": job_id,
+                    "tasks": None,
+                    "kind": None,
+                    "duration": None,
+                    "task_seconds": None,
+                    "owned": None,
+                    "renting": None,
+                    "points": [],
+                    "notes": notes + [reason],
+                }
+            )
+
+        if placement_eligible is None or expand_tasks is None:
+            return _degraded(
+                "routing is not configured on this deployment: the placement "
+                "gates and the task expansion both live in the runtime, and "
+                "this API imports only its protocol package. Nothing is swept "
+                "rather than sweeping a fleet a permissive stand-in would "
+                "have approved."
+            )
+
+        try:
+            spec = JobSpec.model_validate(raw_spec)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid job spec") from None
+
+        try:
+            tasks = list(expand_tasks(job_id, spec))
+        except Exception:
+            log.warning("could not expand a spec for tradeoff by %s", user_id)
+            return _degraded(
+                "this spec could not be expanded into tasks, so there is no "
+                "task count to sweep a fleet against"
+            )
+        if not tasks:
+            return _degraded("this spec expands to no tasks")
+
+        # The whole count, never a truncated one. It is the denominator of
+        # every advice code — where `beyond_task_count` starts and where
+        # `no_marginal_gain` falls — so a cap applied here would move the
+        # honest half of the answer to the wrong fleet size.
+        task_count = len(tasks)
+        # The gates are per task and the tasks of one job differ only in
+        # their trial parameters, so the first is the representative — the
+        # same choice `preview-plans` makes and for the same reason.
+        task = tasks[0]
+
+        rows = dbmod.router_candidates_for_owner(db, user_id)
+        candidate_rows: list[tuple[routermod.Candidate, Mapping[str, Any]]] = []
+        for item in rows:
+            candidate_rows.append(
+                (
+                    routermod.Candidate(
+                        machine_id=item["machine_id"],
+                        node=_preview_node_view(item),
+                        venue=item["venue"],
+                        currency=routermod.CURRENCY_ZC,
+                        max_concurrent_tasks=item["max_concurrent_tasks"],
+                    ),
+                    item,
+                )
+            )
+        eligible_ids = {
+            candidate.machine_id
+            for candidate in routermod.eligible_fleet(
+                task,
+                [candidate for candidate, _ in candidate_rows],
+                eligible=placement_eligible,
+            )
+        }
+        eligible_rows = [
+            item for candidate, item in candidate_rows
+            if candidate.machine_id in eligible_ids
+        ]
+        # A SLOT, not a machine: `plan._slots` counts the concurrency a host
+        # advertises, and a machine that runs four trials at once is four
+        # places a task can go. The curve's x-axis is the same quantity.
+        owned_slots = sum(
+            max(int(item["max_concurrent_tasks"]), 0) for item in eligible_rows
+        )
+        owned_ask_millicredits = sum(
+            int(item["ask_zc_per_hour"] or 0) for item in eligible_rows
+        )
+
+        # Rung 1 only, exactly as `preview-plans`: other machines' recorded
+        # durations on THIS job. Rungs 2 and 3 have no producer in this
+        # schema — nothing records what shape a task was — so a job with no
+        # peer durations yet is `not observed`, which at 29 credited tasks in
+        # the whole ledger is the honest and the common answer.
+        observations = tuple(
+            routermod.Observation(
+                seconds=item["duration_s"],
+                capability_class=item["capability_class"],
+                federated=item["federated"],
+            )
+            for item in dbmod.peer_task_observations(db, job_id=job_id)
+        )
+        evidence = [
+            routermod.Evidence(rung=routermod.RUNG_SAME_JOB, observations=observations)
+        ]
+        # The curve models ONE task duration over ONE slot count, so it needs
+        # a single number — and a single number may only be offered when
+        # every eligible machine sits in one capability class. Otherwise it
+        # is None and the seconds column is *not observed*: a duration
+        # averaged across classes is precisely the pooling the estimator
+        # refuses everywhere, arriving through the back door of a default.
+        eligible_classes = {
+            routermod.hardware_class(item["capabilities"]) for item in eligible_rows
+        }
+        duration: routermod.Estimate | None = None
+        if len(eligible_classes) == 1:
+            only = next(iter(eligible_classes))
+            if only is not None:
+                duration = routermod.estimate_task_seconds(
+                    evidence, capability_class=only
+                )
+        elif len(eligible_classes) > 1:
+            notes.append(
+                "the eligible machines sit in more than one capability class, "
+                "so no single per-task duration is quoted — pooling durations "
+                "across classes is what the estimator refuses, and the fleet "
+                "sizes and advice below are true without one"
+            )
+        task_seconds = (
+            routermod.planning_seconds(duration) if duration is not None else None
+        )
+
+        kind, kind_evidence = routermod.classify(raw_spec, task_count=task_count)
+        gpus_per_task = getattr(spec.spec.resources, "gpuPerTask", 0) or None
+        # Rentable means: somewhere that is not capacity this account already
+        # reaches, that can do this kind of work, and that we could obtain at
+        # all. `usable` is the only verdict a plan may rest on.
+        rentable_venue_ids = {
+            fit.venue.id
+            for fit in routermod.venues_for(kind, gpus_per_task=gpus_per_task)
+            if fit.usable and fit.venue.id != routermod.VENUE_OWNED
+        }
+        now = datetime.now(timezone.utc)
+        quote, quote_venue = _tradeoff_rented_price(
+            pricesmod.latest_quotes(db), venue_ids=rentable_venue_ids
+        )
+        # float() at the last moment and for arithmetic only. The exact
+        # decimal the vendor published travels to the client untouched
+        # through `prices.render`, which is what a reader checks the row
+        # against.
+        usd_per_hour = None if quote is None else float(quote.amount)
+
+        suited, suited_reason = _tradeoff_rented_gate(spec)
+        acquirable = quote is not None
+        if not acquirable:
+            acquirable_reason = (
+                "no rate for a whole rented machine-hour is recorded for any "
+                "venue that can run this work, so no fleet is priced. The "
+                "fleet sizes and the advice below are unaffected — they are "
+                "facts about tasks and slots — but every money figure is not "
+                "observed rather than zero."
+            )
+        else:
+            # No timestamp in this sentence on purpose: `price` below carries
+            # `captured_at`, `age_seconds` and its own `stale` verdict, and a
+            # second spelling of the same instant is how two dates that
+            # disagree end up on one page.
+            acquirable_reason = (
+                f"priced at ${usd_per_hour:g}/hr from the cheapest published "
+                f"whole-machine hour among the venues that can run this work "
+                f"({quote.provider} {quote.sku}"
+                + (f", {quote.tier}" if quote.tier else "")
+                + "). Another SKU costs more."
+            )
+
+        if suited and acquirable:
+            rented_slots, slots_reason = _tradeoff_rented_slots(
+                task_count=task_count,
+                owned_slots=owned_slots,
+                usd_per_hour=usd_per_hour,
+                per_acquisition_max_usd=float(
+                    settings.rented_usd_per_acquisition_max
+                ),
+                window_max_usd=float(settings.rented_usd_window_max),
+            )
+        elif suited:
+            # Unpriced but allowed: the fleet sizes and the advice codes are
+            # still real, so they are swept, and only the money is null.
+            rented_slots, slots_reason = _tradeoff_rented_slots(
+                task_count=task_count,
+                owned_slots=owned_slots,
+                usd_per_hour=None,
+                per_acquisition_max_usd=float(
+                    settings.rented_usd_per_acquisition_max
+                ),
+                window_max_usd=float(settings.rented_usd_window_max),
+            )
+        else:
+            rented_slots, slots_reason = 0, (
+                "no rented machine is swept, because no rented machine may "
+                "run this job — a fleet size nobody could use is not a choice "
+                "worth pricing."
+            )
+
+        points = tradeoffmod.tradeoff_curve(
+            task_count=task_count,
+            # See `_TRADEOFF_UNIT_SECONDS`: the advice codes are unchanged by
+            # which positive duration is swept, and the seconds this probe
+            # produces are discarded rather than rendered.
+            task_seconds=(
+                task_seconds if task_seconds is not None else _TRADEOFF_UNIT_SECONDS
+            ),
+            owned_slots=owned_slots,
+            rentable_slots=rented_slots,
+            usd_per_hour=usd_per_hour if usd_per_hour is not None else 0.0,
+        )
+
+        if task_seconds is None:
+            notes.append(
+                "no per-task duration has been observed for this job yet, so "
+                "every finish time and every cost below is not observed. "
+                "Which fleet sizes help and which do not is unaffected: that "
+                "is arithmetic over the task count and the slots, and it does "
+                "not need a second to be true"
+            )
+        if owned_ask_millicredits > 0:
+            notes.append(
+                "some machines in the eligible fleet carry a ZC ask; this "
+                "curve prices capacity you already reach at zero (M1) and "
+                "only the rented machines carry a figure, so those asks are "
+                "not in the ZC column"
+            )
+        if task.payload.get("local_inputs"):
+            notes.append(
+                "this job wants host-local datasets, and this API does not "
+                "record which datasets a machine holds — that gate fails "
+                "closed here, so the owned fleet below is narrower than the "
+                "coordinator's will be"
+            )
+        if task.payload.get("extra_dependencies"):
+            notes.append(
+                "this job declares extra dependencies, and this API does not "
+                "record which machines can install them — that gate fails "
+                "closed here, so the owned fleet below is narrower than the "
+                "coordinator's will be"
+            )
+
+        return _jsonable(
+            {
+                "job_id": job_id,
+                "tasks": task_count,
+                "kind": kind.value if kind else None,
+                "kind_evidence": kind_evidence,
+                "duration": _preview_estimate(duration),
+                "task_seconds": task_seconds,
+                "owned": {
+                    "machines": len(eligible_rows),
+                    "slots": owned_slots,
+                    "reachable_machines": len(rows),
+                    "ask_zc_per_hour": (
+                        owned_ask_millicredits
+                        / marketplacemod.MILLICREDITS_PER_CREDIT
+                    ),
+                },
+                # Two refusals, never merged. See `_tradeoff_rented_gate`.
+                "renting": {
+                    "suited": suited,
+                    "acquirable": acquirable,
+                    "usable": suited and acquirable,
+                    "reason": suited_reason,
+                    "price_reason": acquirable_reason,
+                    "venue_id": quote_venue,
+                    "usd_per_hour": usd_per_hour,
+                    "price": (
+                        None if quote is None else pricesmod.render(quote, now)
+                    ),
+                    "slots": rented_slots,
+                    "slots_reason": slots_reason,
+                },
+                "points": [
+                    _tradeoff_point(
+                        point,
+                        seconds_observed=task_seconds is not None,
+                        price_observed=usd_per_hour is not None,
+                    )
+                    for point in points
+                ],
+                "notes": notes,
+            }
+        )
 
     # -- GitHub App: connecting an installation ------------------------------
     #

@@ -13,6 +13,7 @@ import { MemberCredits } from "@/components/jobs/MemberCredits";
 import { JobResultCard } from "@/components/jobs/JobResultCard";
 import { CheckpointsCard } from "@/components/jobs/CheckpointsCard";
 import { RoutingCard } from "@/components/jobs/RoutingCard";
+import { TradeoffCard } from "@/components/jobs/TradeoffCard";
 import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
 import {
   deriveAttempts,
@@ -30,6 +31,11 @@ import {
   type RoutingRead,
 } from "@/lib/job-routing";
 import {
+  summariseTradeoff,
+  type TradeoffPanel,
+  type TradeoffRead,
+} from "@/lib/job-tradeoff";
+import {
   selectTasksForCheckpointRead,
   summariseCheckpoints,
   type CheckpointPanel,
@@ -42,6 +48,7 @@ import {
   cancelJob,
   getJob,
   getJobResult,
+  getJobTradeoff,
   listJobArtifacts,
   listJobContributions,
   listJobEvents,
@@ -110,6 +117,13 @@ export default function JobDetailPage({
   // could not ask the router" are different sentences, and the panel must
   // never substitute the second for the first.
   const [routingRead, setRoutingRead] = useState<RoutingRead>({
+    status: "loading",
+  });
+  // And its own again, for the third time on this page and for the third
+  // instance of the same reason: "one more machine buys you nothing" and "we
+  // could not ask" are different sentences, and a curve that is missing
+  // because a read failed must never render as a curve with nothing in it.
+  const [tradeoffRead, setTradeoffRead] = useState<TradeoffRead>({
     status: "loading",
   });
   // One refusal ends the reads for the life of this page. The checkpoint
@@ -237,6 +251,38 @@ export default function JobDetailPage({
     loadRouting();
   }, [loadRouting]);
 
+  /** Ask what each additional machine would buy this job.
+   *
+   * Once per job, not per tick, for exactly `loadRouting`'s reason: the
+   * answer is a property of the spec and the fleet rather than of the run,
+   * and it plans every fleet size on every call. A read-only GET — nothing
+   * is rented, held, matched or charged by it, and there is no
+   * confirm-and-rent flow behind this panel. */
+  const loadTradeoff = useCallback(() => {
+    getJobTradeoff(jobId)
+      .then((t) => setTradeoffRead({ status: "read", tradeoff: t }))
+      .catch((err) => {
+        if (err instanceof NotAuthenticated) {
+          router.push(`/sign-in?next=/jobs/${jobId}`);
+          return;
+        }
+        setTradeoffRead({
+          status: "unreadable",
+          detail:
+            err instanceof ApiError
+              ? err.detail
+              : err instanceof Error
+                ? err.message
+                : String(err),
+        });
+      });
+  }, [jobId, router]);
+
+  const retryTradeoff = useCallback(() => {
+    setTradeoffRead({ status: "loading" });
+    loadTradeoff();
+  }, [loadTradeoff]);
+
   const load = useCallback(() => {
     getJob(jobId)
       .then((j) => {
@@ -303,6 +349,11 @@ export default function JobDetailPage({
     loadRouting();
   }, [loadRouting]);
 
+  // Same cadence and the same reason — see `loadTradeoff`.
+  useEffect(() => {
+    loadTradeoff();
+  }, [loadTradeoff]);
+
   useEffect(() => {
     if (job && TERMINAL.has(job.state)) return;
     const t = setInterval(() => {
@@ -328,6 +379,10 @@ export default function JobDetailPage({
   const routingPanel = useMemo(
     () => summariseRouting(routingRead),
     [routingRead]
+  );
+  const tradeoffPanel = useMemo(
+    () => summariseTradeoff(tradeoffRead),
+    [tradeoffRead]
   );
   const artifactsPanel = useMemo(
     () =>
@@ -484,6 +539,8 @@ export default function JobDetailPage({
             now={now}
             routing={routingPanel}
             onRetryRouting={retryRouting}
+            tradeoff={tradeoffPanel}
+            onRetryTradeoff={retryTradeoff}
           />
         )}
         {activeView === "ledger" && <LedgerView events={events} />}
@@ -652,6 +709,8 @@ function PlacementView({
   now,
   routing,
   onRetryRouting,
+  tradeoff,
+  onRetryTradeoff,
 }: {
   job: JobRecord;
   tasks: JobTask[];
@@ -659,18 +718,30 @@ function PlacementView({
   now: number;
   routing: RoutingPanel;
   onRetryRouting: () => void;
+  tradeoff: TradeoffPanel;
+  onRetryTradeoff: () => void;
 }) {
   // The routing card sits ABOVE the "nothing has run yet" guard on purpose.
   // Where the work went and where it COULD go are different questions, and
   // the second one has an answer from the moment the job exists — a PENDING
   // job with no attempts yet is exactly when "which venues can run this, and
   // why not the others" is the only thing there is to say.
-  const routingCard = <RoutingCard panel={routing} onRetry={onRetryRouting} />;
+  //
+  // The trade-off curve sits directly under it for the same reason and one
+  // more: it answers the question the routing card raises. Routing says where
+  // this work MAY go; the curve says what going there would actually buy —
+  // including, often, nothing.
+  const placementCards = (
+    <>
+      <RoutingCard panel={routing} onRetry={onRetryRouting} />
+      <TradeoffCard panel={tradeoff} onRetry={onRetryTradeoff} />
+    </>
+  );
 
   if (tasks.length === 0 && attempts.length === 0) {
     return (
       <div className="space-y-6">
-        {routingCard}
+        {placementCards}
         <section className="rounded-lg border border-border bg-surface p-6">
           <h2 className="text-sm font-semibold">No placement recorded</h2>
           <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
@@ -683,7 +754,7 @@ function PlacementView({
 
   return (
     <div className="space-y-6">
-      {routingCard}
+      {placementCards}
 
       {attempts.length > 0 && (
         <>

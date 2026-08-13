@@ -823,6 +823,108 @@ export interface PlanPreview {
 }
 
 // ---------------------------------------------------------------------------
+// GET /v1alpha1/jobs/{id}/tradeoff — what one more machine buys
+// ---------------------------------------------------------------------------
+//
+// Read the route's docstring before changing any of these. Three of its
+// invariants are shapes rather than conventions:
+//
+//   1. `renting.suited` and `renting.acquirable` are DIFFERENT REFUSALS and
+//      neither is derived from the other. `suited: false` means a rented
+//      machine may not run this job at all (a public job: a rented host
+//      registers `sandbox_capable: false` and a sandboxed job with no pool
+//      waiver requires true). `acquirable: false` means no rate for a rented
+//      machine-hour is recorded. Collapsing them would tell somebody to go
+//      and get a workspace when the real problem was a missing price.
+//   2. `null` is *not observed*, never 0. A job with no duration evidence
+//      still gets real fleet sizes and real advice codes; `finish_seconds`,
+//      `usd_cost` and `total_usd_value` come back null rather than zeroed.
+//   3. `owned` and `renting` are NULL — not zeroed — on the degraded answer
+//      (routing not configured, a spec that expands to nothing). Nothing was
+//      measured, so nothing is reported.
+
+/** One published price with its provenance and its own staleness verdict.
+ * `amount` is a decimal STRING so the vendor's digits survive the trip. */
+export interface TradeoffPrice {
+  provider: string;
+  sku: string;
+  region: string;
+  tier: string | null;
+  currency: string;
+  amount: string;
+  unit: string;
+  captured_at: string;
+  age_seconds: number;
+  stale: boolean;
+  max_age_seconds: number;
+  source: string;
+  observed_by: string | null;
+}
+
+/** Capacity this account already reaches, after the placement gates. */
+export interface TradeoffOwned {
+  machines: number;
+  /** Concurrency slots, not machines: a host that runs four tasks at once is
+   * four places a task can go, and slots are the curve's x-axis. */
+  slots: number;
+  reachable_machines: number;
+  ask_zc_per_hour: number;
+}
+
+/** Whether renting could help this job, and at what price. */
+export interface TradeoffRenting {
+  /** May a rented machine run this job's tasks at all? */
+  suited: boolean;
+  /** Is a whole rented machine-hour priced anywhere that fits this work? */
+  acquirable: boolean;
+  usable: boolean;
+  /** The API's own sentence for the `suited` verdict. Verbatim, always. */
+  reason: string;
+  /** The API's own sentence for the price. Verbatim, always. */
+  price_reason: string;
+  venue_id: string | null;
+  usd_per_hour: number | null;
+  price: TradeoffPrice | null;
+  /** How many rented machines the curve swept. */
+  slots: number;
+  slots_reason: string;
+}
+
+/** One fleet size on the curve.
+ *
+ * `advice_code` is one of `baseline`, `helps`, `no_marginal_gain`,
+ * `beyond_task_count`, `no_parallelism`. It is typed as `string` on purpose:
+ * an API that grows a sixth code must reach the console as an unrecognised
+ * verdict it declines to characterise, never as a silently mislabelled one. */
+export interface TradeoffPoint {
+  total_slots: number;
+  owned_slots: number;
+  rented_slots: number;
+  finish_seconds: number | null;
+  zc_cost: number;
+  usd_cost: number | null;
+  total_usd_value: number | null;
+  advice_code: string;
+}
+
+/** `GET /v1alpha1/jobs/{id}/tradeoff`. Read-only: nothing is rented, held,
+ * matched or charged by this call, and no acquisition path is behind it. */
+export interface JobTradeoff {
+  job_id: string;
+  tasks: number | null;
+  kind?: string | null;
+  kind_evidence?: string | null;
+  duration: PreviewEstimate | null;
+  /** The single per-task duration the curve rests on, or `null` — not
+   * observed. */
+  task_seconds: number | null;
+  owned: TradeoffOwned | null;
+  renting: TradeoffRenting | null;
+  points: TradeoffPoint[];
+  notes: string[];
+}
+
+// ---------------------------------------------------------------------------
 // request plumbing
 // ---------------------------------------------------------------------------
 
@@ -1387,6 +1489,26 @@ export function previewJobPlans(jobId: string): Promise<PlanPreview> {
     method: "POST",
     body: JSON.stringify({ job_id: jobId }),
   });
+}
+
+/** `GET /v1alpha1/jobs/{id}/tradeoff` — what each additional rented machine
+ * buys this job's finish time, and when it buys nothing.
+ *
+ * A read, and a plain GET because it is one: nothing is rented, held,
+ * matched or charged, and there is no confirm-and-rent flow behind it. Like
+ * `previewJobPlans` it plans the whole reachable fleet on every call, so it
+ * is deliberately NOT part of the job page's 2.5s poll — the answer is a
+ * property of the spec, which cannot change after submission.
+ *
+ * Viewer-scoped: the owner or a member of the job's workspace. Somebody
+ * else's job id is a 404 and not a 403, because a 403 would confirm to a
+ * guesser that the id is real. A job with no stored spec to plan against is
+ * a 409, which reaches the caller as an `ApiError` carrying the API's own
+ * sentence. */
+export function getJobTradeoff(jobId: string): Promise<JobTradeoff> {
+  return request<JobTradeoff>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/tradeoff`
+  );
 }
 
 /** `GET /v1alpha1/jobs/{id}/contributions` — visibility matches the
