@@ -30,8 +30,9 @@ same kind of doubt:
   rented host has no ``last_seen_at`` until it has booted, pulled a
   multi-gigabyte image and enrolled. This allowance is deliberately the
   longest of the three: cutting it short destroys machines that were about to
-  work, and pays for them anyway. ``acquire.py`` records the same hazard as
-  its reason for not minting rentals ``lifecycle = 'ephemeral'``.
+  work, and pays for them anyway. ``sandbox_identity.LEASED_LIFECYCLE``
+  records the same hazard as the reason rentals are minted ``leased`` rather
+  than ``ephemeral``.
 * **Nothing to ask** (``abandoned_after_s``), measured from acquisition. No
   machine row is bound at all — which, now that ``acquire.py`` records
   ``machine_id`` on its failure paths too (see ``_record_evidence`` there),
@@ -130,21 +131,31 @@ still leave a legible row behind and must still give the pool back; one row's
 failure must not end the sweep for the rows after it; and a failure to
 *record* must never be mistaken for a failure to *destroy*.
 
-The credential half is not tidiness. A rented machine is minted with
-``lifecycle = 'persistent'``, so ``expire_stale_ephemeral_machines`` — the
-sweep that cleans up rental *sessions* — never touches it. Left alone after
-release it is two live problems: a valid machine token for a machine that no
-longer exists, on hardware we handed back to a third party; and a binding
-that makes ``provision_sandbox_machine``'s closing ``assert_pool_isolated``
-refuse the NEXT rental into that pool. ``acquire.py`` already revokes on its
-failure path for exactly that reason; without the same on the success path,
-renting once would poison the pool for good.
+**The credential half is not tidiness, and since D6 (2026-08-12) it is the
+only thing there is.** A rented machine's identity is a LEASE, not a deed: true
+while we hold the hardware and false the moment we give it back. It is minted
+``lifecycle = 'leased'`` (migration 0023), which says exactly that and is
+deliberately outside ``expire_stale_ephemeral_machines`` — that sweep measures
+from ``coalesce(last_seen_at, created_at)`` and would revoke a rented host that
+is still pulling its image. **Nothing expires a lease on a timer.** Ending it
+is this module's job, on every path a rental ends.
+
+Left alive after release it is a valid machine token, bound to a user's
+workspace, for hardware a third party has since rented. That used to be
+self-correcting by accident: the leftover binding made
+``provision_sandbox_machine``'s closing ``assert_pool_isolated`` refuse the
+NEXT rental into that pool, so renting once poisoned the pool loudly. D6
+replaced that path with ``provision_rented_machine``, which asserts nothing —
+renting into a pool that already holds the submitter's laptop is the entire
+point of the feature. So the next rental now succeeds and the stale credential
+is *silent*. The revoke below is the mechanism, not a backstop behind one.
 
 Because that half can fail on its own, it is swept on its own too:
 :func:`finished_rentals_with_live_credentials` finds rentals that are over
 and whose credential is not, and the sweep revokes them. Without it, a revoke
 that failed on the one call that mattered would never be retried — the row is
-RELEASED and out of :func:`unreleased_rows` for good.
+RELEASED and out of :func:`unreleased_rows` for good, and no other sweep in
+this system looks at a leased machine at all.
 
 WHY A MISSING HANDLE IS THE DANGEROUS CASE, NOT THE EASY ONE
 ------------------------------------------------------------
@@ -455,16 +466,27 @@ def finished_rentals_with_live_credentials(
 ) -> list[dict]:
     """Rentals that are over and whose credential is not.
 
-    The retry vehicle for the half of teardown that costs no money and is
-    therefore easiest to lose: ``_revoke_credential`` is best effort, and a
-    row that reached ``RELEASED`` is out of :func:`unreleased_rows` for good,
-    so without this query one failed revoke would leave a live token and a
-    bound pool for ever — and the next rental into that pool refused by an
-    isolation assertion about a machine nobody meant to keep.
+    **This query is what makes a rental's identity a lease rather than a
+    deed.** ``_revoke_credential`` is best effort, a row that reached
+    ``RELEASED`` is out of :func:`unreleased_rows` for good, and a ``leased``
+    machine is outside ``expire_stale_ephemeral_machines`` by design (a rented
+    host has no heartbeat until it has finished booting). So this is the only
+    thing in the system that comes back for a credential whose rental is over:
+    without it, one failed revoke leaves a working machine token bound to a
+    user's workspace, for hardware somebody else has since rented, for ever.
+
+    Until D6 a leftover binding was also caught by accident, because it made
+    the next rental into that pool fail an isolation assertion. That path is
+    gone — renting into a pool that already holds a machine is now the point —
+    so the accident is gone with it and nothing else is watching.
 
     A binding with no live token still counts: ``revoke_sandbox_machine``
     unbinds on every call including ones where the row is already revoked,
     which is exactly the half-done state a crashed revoke leaves behind.
+
+    Both terminal states are selected. ``FAILED`` is not a lesser case: an
+    acquisition that minted a credential and then failed is precisely the row
+    whose machine never existed at a venue, and its lease has to end too.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -704,8 +726,9 @@ async def release_capacity(
     if row["state"] == "RELEASED":
         # Idempotent on BOTH halves. Returning early without this was a way
         # for a revoke that failed once to be retried by nothing: the row is
-        # out of `unreleased_rows` for good, and rentals are minted
-        # `persistent` so no other sweep comes for the machine either.
+        # out of `unreleased_rows` for good, and rentals are minted `leased`,
+        # which no heartbeat sweep in this schema selects, so no other sweep
+        # comes for the machine either.
         await _revoke_credential(db, row)
         return True
 
@@ -782,10 +805,11 @@ async def release_capacity(
             await _revoke_credential(db, row)
             return False
 
-    # 3. Kill the identity, whatever happened above. A machine that outlived
-    #    its destroy must not keep a working token, and the pool has to be
-    #    given back either way or the next rental into it is refused by an
-    #    isolation assertion about a machine nobody meant to keep.
+    # 3. Kill the identity, whatever happened above. The lease ends when the
+    #    rental does, not when the venue gets around to confirming it: a
+    #    machine that outlived its destroy must not keep a working token, and
+    #    the pool has to be given back either way. Nothing else will notice if
+    #    it is not -- see this module's docstring on what D6 removed.
     await _revoke_credential(db, row)
 
     if not destroyed:

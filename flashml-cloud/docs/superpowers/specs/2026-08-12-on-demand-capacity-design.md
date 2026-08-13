@@ -12,6 +12,7 @@ survives:
 | Where | Now false |
 |---|---|
 | §6 out-of-scope | "Relaxing `assert_pool_isolated`. Not required" — **it is required, and the owner has now overruled this line.** See D6 below. |
+| D6 | "rentals are minted `lifecycle = 'persistent'`" — **D6 is now BUILT (2026-08-12).** `sandbox_identity.provision_rented_machine` is the sibling path, `assert_pool_isolated` and `provision_sandbox_machine` are unchanged, and rentals are minted `lifecycle = 'leased'` (migration 0023) — outside every heartbeat sweep, ended by `capacity/reconcile.py` and its credential retry. Note what the change also removed: a leaked rental credential used to announce itself by making the next rental into that pool fail the isolation assertion. It is silent now, and `finished_rentals_with_live_credentials` is the only thing that comes back for it. |
 | §2.2 | "Ephemeral machine identity … already revoke and unbind rentals" — **declined during implementation, correctly.** That sweep measures from `coalesce(last_seen_at, created_at)` with a 15-minute default, and a rented host has no `last_seen_at` until it has booted and pulled a multi-gigabyte image; it would revoke machines that are still starting. |
 | §2.1 | `CapacityRequest` "carries … a deadline" — **no such field was built.** That dropped field is close to the cost backstop the wiring is now blocked on. |
 | §2.3 | "job settles → `provider.release()` [best effort]" — **no settle path exists.** `release_capacity` has zero callers. |

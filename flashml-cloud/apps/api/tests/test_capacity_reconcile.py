@@ -88,10 +88,11 @@ class _Venue(FakeProvider):
     def rent(self) -> str:
         """A handle for a machine that is already billing at this venue.
 
-        Used by the tests that build a row directly instead of acquiring one:
-        the pool-isolation assertion in ``provision_sandbox_machine`` allows a
-        pool exactly one machine, so a sweep over several rows cannot be built
-        out of several real acquisitions.
+        Used by the tests that build a row directly instead of acquiring one.
+        Several real acquisitions into one pool are legal since D6 (see
+        ``test_capacity_acquire.py::test_two_rentals_can_share_one_pool``);
+        what this still buys is a row in any state, at any age, with any
+        machine — or none — without a venue conversation to arrange it.
         """
         handle = f"{self.venue_id}-{uuid.uuid4().hex[:12]}"
         self._live.add(handle)
@@ -184,6 +185,15 @@ def _machine_status(db, machine_id):  # noqa: F811
         )
         row = cur.fetchone()
     return row["status"] if row else None
+
+
+def _lifecycle(db, machine_id):  # noqa: F811
+    with db.cursor() as cur:
+        cur.execute(
+            "select lifecycle from public.machines where id = %s", (machine_id,)
+        )
+        row = cur.fetchone()
+    return row["lifecycle"] if row else None
 
 
 def _machine(
@@ -432,13 +442,15 @@ async def test_a_released_rental_gives_its_credential_and_its_pool_back(
 ):
     """Teardown is two things, and the second one is not tidiness.
 
-    A rented machine is minted ``lifecycle = 'persistent'``, so
-    ``expire_stale_ephemeral_machines`` never comes for it. Left bound, its
-    token still authenticates for a machine we have handed back to a third
-    party — and ``provision_sandbox_machine``'s closing isolation assertion
-    refuses the next rental into that pool. Renting once would poison the pool
-    for good, which is why the final assertion here is a second rental rather
-    than a database state.
+    A rented machine is minted ``lifecycle = 'leased'`` — deliberately outside
+    ``expire_stale_ephemeral_machines``, which would revoke a host still
+    pulling its image — so nothing comes for the credential on a timer. Left
+    bound, its token still authenticates for a machine we have handed back to a
+    third party. **Ending the lease is this call's job and nobody else's**: the
+    isolation assertion that used to refuse the next rental into a poisoned
+    pool is gone from this path since D6, so the second rental below proves the
+    pool is reusable rather than proving the credential died. The credential
+    dying is the assertion above it.
     """
     venue = _Venue()
     rid = await acquire_for_job(
@@ -1055,10 +1067,14 @@ async def test_a_revoke_that_failed_is_retried_by_a_later_sweep(
     """The hole a best-effort revoke leaves, and the sweep that closes it.
 
     A RELEASED row is out of ``unreleased_rows`` for good, and rentals are
-    minted ``persistent`` so ``expire_stale_ephemeral_machines`` never comes
-    for the machine either. Without a second sweep, one failed revoke leaves a
-    live token and a bound pool for ever — and the next rental into that pool
-    refused by an isolation assertion about a machine nobody meant to keep.
+    minted ``leased``, which no heartbeat sweep in this schema selects, so
+    nothing else comes for the machine either. Without this second sweep, one
+    failed revoke leaves a live token bound to a live workspace for ever.
+
+    Until D6 that had a loud consequence — the next rental into the pool was
+    refused by an isolation assertion — and the noise was doing some of the
+    work. It no longer is; see
+    ``test_a_stale_lease_is_silent_now_and_the_sweep_is_what_ends_it``.
     """
     venue = _Venue()
     rid = await acquire_for_job(
@@ -1103,6 +1119,71 @@ async def test_releasing_an_already_released_row_still_revokes(
     assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
     # ...and the venue was never asked about a rental that is already over.
     assert venue.release_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_lease_is_silent_now_and_the_sweep_is_what_ends_it(
+    db, an_owner, a_pool, monkeypatch  # noqa: F811
+):
+    """**What D6 removed, and what has to carry the weight instead.**
+
+    Before D6 a credential this module failed to revoke announced itself: the
+    leftover ``machine_pools`` row made the next rental into that pool fail
+    ``assert_pool_isolated``. Renting into an occupied pool is now the whole
+    point of the feature, so that refusal is gone — the next rental succeeds,
+    and the stale lease sits there, valid, bound to a live workspace, for
+    hardware a third party has since rented.
+
+    Nothing else is watching it: ``leased`` is outside
+    ``expire_stale_ephemeral_machines`` on purpose, and a RELEASED row is
+    outside ``unreleased_rows`` for good. So this test asserts both halves —
+    that the silence is real, and that
+    ``finished_rentals_with_live_credentials`` still ends the lease anyway.
+    """
+    venue = _Venue()
+    rid = await acquire_for_job(
+        db, venue, _Settings(), request=_request(an_owner, a_pool)
+    )
+    machine_id = str(_row(db, rid)["machine_id"])
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("the connection went away mid-revoke")
+
+    monkeypatch.setattr(sandbox_identity, "revoke_sandbox_machine", _explode)
+    assert await release_capacity(db, venue, rented_id=rid) is True
+    monkeypatch.undo()
+
+    # 1. The silence. The machine is gone from the venue and its token still
+    #    works, and nothing about the NEXT rental notices.
+    assert _machine_status(db, machine_id) != "revoked"
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [machine_id]
+    nxt = await acquire_for_job(
+        db, venue, _Settings(),
+        request=_request(an_owner, a_pool, job="job-after-a-stale-lease"),
+    )
+    assert _row(db, nxt)["state"] == "ACTIVE"
+
+    # 2. ...and no timer will end it either: the machine is `leased`, which
+    #    `expire_stale_ephemeral_machines` deliberately does not select. That
+    #    sweep is global and this file must not call it (see the header on
+    #    leaving the database clean); the guarantee is asserted directly in
+    #    `test_sandbox_identity.py::test_no_heartbeat_timer_ever_expires_a_lease`.
+    assert _lifecycle(db, machine_id) == "leased"
+
+    # 3. The one thing that does come back for it. Note the live rental from
+    #    step 1 is NOT in this list — its lease is current.
+    stale = {str(r["machine_id"]) for r in
+             finished_rentals_with_live_credentials(db)}
+    assert machine_id in stale
+    assert str(_row(db, nxt)["machine_id"]) not in stale
+
+    await reconcile_rented(db, {"fake": venue})
+    assert _machine_status(db, machine_id) == "revoked"
+    assert dbmod.pool_ids_bound_to_machine(db, machine_id) == []
+    # The live rental kept its lease and its binding.
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [
+        str(_row(db, nxt)["machine_id"])
+    ]
 
 
 def test_a_bound_pool_alone_is_enough_to_come_back_for(

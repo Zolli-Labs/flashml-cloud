@@ -140,13 +140,75 @@ def an_owner(db):
 @pytest.fixture
 def a_pool(db, an_owner):
     """A pool through the real constructor, which seats its owner as a
-    member. Membership is not decoration: `provision_sandbox_machine` calls
+    member. Membership is not decoration: `provision_rented_machine` calls
     `lock_pool_for_owner`, which joins through `pool_members` and refuses an
     owner who is not also a member — a raw `insert into public.pools` yields a
     pool its own creator cannot mint into."""
     return str(
         dbmod.create_pool(db, name="rented-capacity-acquire", owner_id=an_owner)["id"]
     )
+
+
+@pytest.fixture
+def someone_elses_pool(db):
+    """A real pool belonging to somebody else.
+
+    The pre-venue failure this file needs since D6. It used to use a pool that
+    already held a machine — the isolation assertion refused that before
+    `provider.acquire` was ever called — and relaxing the assertion is exactly
+    what D6 did, so that shape is now a SUCCESS and is tested as one below.
+    What is still refused before the venue is asked anything is authorisation:
+    `lock_pool_for_owner` is owner-scoped, and a pool the submitter does not
+    own is `PoolNotFound`, 404-shaped.
+
+    Its own user, cleaned up here. The `pool_id` foreign key cascades, so
+    dropping the pool takes any `rented_capacity` row pointing at it too —
+    which is what keeps this file's promise to leave `window_spend_usd` at
+    zero for the next one.
+    """
+    user_id = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into auth.users (id, email) values (%s, %s)",
+            (user_id, f"{user_id[:8]}@example.com"),
+        )
+        cur.execute("insert into public.profiles (id) values (%s)", (user_id,))
+    pool_id = str(
+        dbmod.create_pool(db, name="not-yours", owner_id=user_id)["id"]
+    )
+    try:
+        yield pool_id
+    finally:
+        with db.cursor() as cur:
+            cur.execute(
+                "delete from public.rented_capacity where pool_id = %s",
+                (pool_id,),
+            )
+            cur.execute("delete from public.pools where id = %s", (pool_id,))
+            cur.execute("delete from auth.users where id = %s", (user_id,))
+
+
+def _laptop(db, owner_id, pool_id, *, name="the owner's own laptop"):
+    """A machine the submitter already had in that pool. The thing renting is
+    supposed to join, and the thing that used to make it impossible."""
+    machine_id = str(
+        dbmod.insert_machine(
+            db, owner_id=str(owner_id), node_id=f"laptop-{uuid.uuid4()}",
+            name=name, platform="linux",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool_id))
+    return machine_id
+
+
+def _lifecycle(db, machine_id):
+    with db.cursor() as cur:
+        cur.execute(
+            "select lifecycle from public.machines where id = %s",
+            (str(machine_id),),
+        )
+        row = cur.fetchone()
+    return row["lifecycle"] if row else None
 
 
 def _request(owner_id, pool_id, job="job-1"):
@@ -247,6 +309,99 @@ async def test_a_successful_acquisition_lands_active_with_a_handle(
     assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [
         str(row["machine_id"])
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_rental_joins_a_pool_that_already_holds_the_owners_laptop(
+    db, an_owner, a_pool
+):
+    """**The thing this feature exists to do, and could not do until D6.**
+
+    The submitter's workspace already holds their laptop; renting is adding a
+    GPU *to that workspace*. `provision_sandbox_machine` ends with
+    `assert_pool_isolated`, so reusing it refused exactly this — renting worked
+    only into an empty pool. `provision_rented_machine` is the sibling that
+    does not assert it, and this is the assertion that says so.
+
+    Both machines end up bound, which is the point: two eligible claimants for
+    the pool's work is what "add more GPUs to my job" means.
+    """
+    laptop = _laptop(db, an_owner, a_pool)
+
+    rid = await acquire_for_job(
+        db, _Venue(), _Settings(), request=_request(an_owner, a_pool),
+    )
+    row = _row(db, rid)
+    assert row["state"] == "ACTIVE"
+    assert sorted(dbmod.machine_ids_bound_to_pool(db, str(a_pool))) == sorted(
+        [laptop, str(row["machine_id"])]
+    )
+    # ...and the rental really is stamped with the pool, so it can claim the
+    # pool's work. A binding the placement stamp ignores would be decoration.
+    assert dbmod.pool_ids_for_machine(db, str(row["machine_id"])) == [str(a_pool)]
+
+
+@pytest.mark.asyncio
+async def test_two_rentals_can_share_one_pool(db, an_owner, a_pool):
+    """What `gpu_count > 1` needs, and the second thing the isolation
+    assertion forbade: a fleet is several machines in one pool.
+
+    The trade-off curve the planner already draws ("eight machines, roughly
+    five trials each") is a fleet, not a single pod, and it was unreachable
+    while a pool could hold exactly one rented machine.
+    """
+    first = await acquire_for_job(
+        db, _Venue(), _Settings(), request=_request(an_owner, a_pool, job="j"),
+    )
+    second = await acquire_for_job(
+        db, _Venue(), _Settings(), request=_request(an_owner, a_pool, job="j"),
+    )
+    assert _row(db, first)["state"] == "ACTIVE"
+    assert _row(db, second)["state"] == "ACTIVE"
+
+    machines = {str(_row(db, first)["machine_id"]),
+                str(_row(db, second)["machine_id"])}
+    assert len(machines) == 2
+    assert set(dbmod.machine_ids_bound_to_pool(db, str(a_pool))) == machines
+    # Two rentals, two distinct node ids — the machines table's global unique
+    # constraint is what would have caught a shared one.
+    assert len({_row(db, first)["id"], _row(db, second)["id"]}) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_rented_identity_is_minted_as_a_lease_not_a_deed(
+    db, an_owner, a_pool
+):
+    """A laptop's binding says whose machine this is, permanently. A rental's
+    is true while we hold the hardware and false the moment we give it back,
+    and the row has to say which it is — nothing else in `public.machines`
+    distinguishes a rented pod from the owner's own laptop.
+
+    `leased`, deliberately not `ephemeral`: that would hand this machine to
+    `expire_stale_ephemeral_machines`, whose window runs from
+    `coalesce(last_seen_at, created_at)` and would revoke a rented host that is
+    still pulling a multi-gigabyte image. See `test_sandbox_identity.py` for
+    that guarantee stated directly.
+    """
+    laptop = _laptop(db, an_owner, a_pool)
+    rid = await acquire_for_job(
+        db, _Venue(), _Settings(), request=_request(an_owner, a_pool),
+    )
+    machine_id = str(_row(db, rid)["machine_id"])
+
+    assert _lifecycle(db, machine_id) == si.LEASED_LIFECYCLE == "leased"
+    assert _lifecycle(db, laptop) == "persistent"
+
+    # And the row says where it came from, rather than filing a RunPod pod
+    # under the Alibaba sandbox platform the old path hard-coded.
+    with db.cursor() as cur:
+        cur.execute(
+            "select platform, node_id from public.machines where id = %s",
+            (machine_id,),
+        )
+        row = cur.fetchone()
+    assert row["platform"] == "fake"
+    assert row["node_id"] == f"rented-{rid[:12]}"
 
 
 @pytest.mark.asyncio
@@ -358,7 +513,7 @@ async def test_a_failed_acquire_leaves_a_row_the_sweep_still_selects(
 
 @pytest.mark.asyncio
 async def test_a_failure_before_the_venue_is_closed_not_left_for_the_sweep(
-    db, an_owner, a_pool
+    db, an_owner, someone_elses_pool
 ):
     """The other side of the rule, and what keeps the sweep's list worth
     reading.
@@ -369,55 +524,56 @@ async def test_a_failure_before_the_venue_is_closed_not_left_for_the_sweep(
     too, the list an operator reconciles against the venue would fill up with
     attempts that provably never reached it.
 
-    A pool that already holds a machine is the failure used here because it is
-    also the KNOWN LIMIT of this feature: it is meant to put a rented machine
-    into the submitter's ordinary pool, alongside the machines they already
-    have, and it cannot yet — `provision_sandbox_machine` ends with
-    `assert_pool_isolated`, which requires the pool to hold exactly the one
-    machine being minted. Relaxing that is out of scope in the design (§6);
-    this test fails the moment somebody changes it, which is the conversation
-    that should happen.
+    The failure used here is authorisation: `provision_rented_machine` starts
+    at `lock_pool_for_owner`, which is owner-scoped and 404-shaped, so renting
+    into somebody else's pool is refused before a venue is asked for anything.
+    This used to be a pool that already held a machine, and D6 turned that case
+    into the feature (see
+    `test_a_rental_joins_a_pool_that_already_holds_the_owners_laptop`).
     """
-    sitting_tenant = str(
-        dbmod.insert_machine(
-            db, owner_id=an_owner, node_id=f"laptop-{uuid.uuid4()}",
-            name="the owner's own laptop", platform="linux",
-        )
-    )
-    dbmod.bind_machine_pool(db, machine_id=sitting_tenant, pool_id=str(a_pool))
-
     provider = _Venue()
-    with pytest.raises(si.PoolNotIsolated):
+    with pytest.raises(si.PoolNotFound):
         await acquire_for_job(
-            db, provider, _Settings(), request=_request(an_owner, a_pool),
+            db, provider, _Settings(),
+            request=_request(an_owner, someone_elses_pool),
         )
     assert provider.live_handles() == []
     rows = _rows_for(db, an_owner)
     assert len(rows) == 1
     assert rows[0]["state"] == "FAILED"
-    assert rows[0]["failure_code"] == "PoolNotIsolated"
+    assert rows[0]["failure_code"] == "PoolNotFound"
     assert rows[0]["provider_handle"] is None
     assert not _is_swept(db, rows[0]["id"])
     # The pool is exactly as it was: the failed mint rolled back with its
     # transaction rather than leaving a half-bound machine behind.
-    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [sitting_tenant]
+    assert dbmod.machine_ids_bound_to_pool(db, str(someone_elses_pool)) == []
 
 
 @pytest.mark.asyncio
 async def test_a_failed_acquisition_gives_the_pool_back(db, an_owner, a_pool):
-    """A failure after minting must take the credential with it.
+    """A failure after minting must take the credential with it — and take
+    ONLY its own.
 
-    Not tidiness. `provision_sandbox_machine` asserts the pool holds exactly
-    the machine it just made, so a dead machine left bound to the pool makes
-    the NEXT acquisition fail for a reason that has nothing to do with it —
-    one bad venue call and the pool can never be rented into again.
+    This used to be self-correcting: `provision_sandbox_machine` asserted the
+    pool held exactly the machine it had just made, so a leftover binding made
+    the next acquisition fail loudly. D6 removed that assertion from this path
+    on purpose, and with it the accident. A credential left behind here is now
+    silent: a working machine token, bound to a live workspace, for a machine
+    that exists nowhere but in a failed row. Ending the lease on this path is
+    the mechanism, not a backstop behind one.
+
+    The laptop is in the pool to say the second half out loud: the failure
+    unbinds the rental and leaves the submitter's own machines exactly where
+    they were.
     """
+    laptop = _laptop(db, an_owner, a_pool)
+
     with pytest.raises(RuntimeError):
         await acquire_for_job(
             db, _Venue(fail_after_create=True), _Settings(),
             request=_request(an_owner, a_pool, job="job-doomed"),
         )
-    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [laptop]
 
     # ...and the retry, into the same pool, works.
     rid = await acquire_for_job(
@@ -571,28 +727,21 @@ async def test_an_unconfirmed_acquisition_is_listed_now_not_in_half_an_hour(
 
 @pytest.mark.asyncio
 async def test_a_row_closed_before_the_venue_is_not_swept_by_any_window(
-    db, an_owner, a_pool
+    db, an_owner, someone_elses_pool
 ):
     """The guard on the fix: making failure rows visible sooner must not make
     the provably-empty ones visible at all.
 
-    A pool that already holds a machine fails before `provider.acquire` is
-    ever called, so nothing can exist at the venue; the row is closed FAILED
-    and `unreleased_rows` selects neither FAILED nor RELEASED. If this ever
-    turns True, the list an operator reconciles against the venue has started
+    A pool the submitter does not own fails before `provider.acquire` is ever
+    called, so nothing can exist at the venue; the row is closed FAILED and
+    `unreleased_rows` selects neither FAILED nor RELEASED. If this ever turns
+    True, the list an operator reconciles against the venue has started
     filling with attempts that provably never reached it.
     """
-    sitting_tenant = str(
-        dbmod.insert_machine(
-            db, owner_id=an_owner, node_id=f"laptop-{uuid.uuid4()}",
-            name="the owner's own laptop", platform="linux",
-        )
-    )
-    dbmod.bind_machine_pool(db, machine_id=sitting_tenant, pool_id=str(a_pool))
-
-    with pytest.raises(si.PoolNotIsolated):
+    with pytest.raises(si.PoolNotFound):
         await acquire_for_job(
-            db, _Venue(), _Settings(), request=_request(an_owner, a_pool),
+            db, _Venue(), _Settings(),
+            request=_request(an_owner, someone_elses_pool),
         )
     row = _rows_for(db, an_owner)[0]
     assert row["state"] == "FAILED"

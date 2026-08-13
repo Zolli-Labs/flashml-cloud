@@ -1,4 +1,4 @@
-"""One-session machine credentials for a managed sandbox worker.
+"""Machine credentials this control plane mints on its own authority.
 
 An FC Agent Sandbox hosts a real FlashNode. To register and claim work it
 needs a machine token — the same credential a volunteer's laptop carries. The
@@ -6,6 +6,32 @@ difference is entirely in the lifetime: a laptop enrols once and keeps its
 token for months, while a sandbox exists for one session, and its credential
 must die with it on every path out, including the paths where the sandbox is
 already gone.
+
+TWO MINTING PATHS, ONE PIECE OF MACHINERY, AND THEY ARE NOT INTERCHANGEABLE
+---------------------------------------------------------------------------
+:func:`provision_sandbox_machine` mints the identity of an **evaluation
+sandbox**: a machine that holds a session credential and runs code the
+submitter wrote. It ends by asserting the pool contains exactly that one
+machine, because a second machine in the pool would be an eligible claimant
+for that session's tasks.
+
+:func:`provision_rented_machine` mints the identity of a **GPU the operator
+rented into a user's own pool**, and deliberately makes no such assertion.
+Neither half of the sandbox's reasoning applies: being an eligible claimant
+alongside the user's other machines is the entire point of renting, and there
+is no session credential on the host to protect. It is a separate function
+with its own name rather than a flag on the first, so that no caller can skip
+the isolation assertion by passing the wrong argument. Everything else — the
+authorise-and-lock ordering, the ownership *and* membership requirement, and
+the mint-once-return-the-token-once discipline — is the same in both, and the
+duplication of those steps is the price of keeping the two decisions apart.
+See ``docs/superpowers/specs/2026-08-12-on-demand-capacity-design.md``, D6.
+
+The lifetimes differ too, and the column says so: a sandbox worker is
+``lifecycle = 'persistent'`` and killed by its session's cleanup, while a
+rental is ``lifecycle = 'leased'`` — a lease, not a deed, ended by the
+``rented_capacity`` row that paid for it. See
+:data:`LEASED_LIFECYCLE`.
 
 WHY THIS IS A SEPARATE MODULE AND NOT MORE OF ``enrolment.py``
 --------------------------------------------------------------
@@ -94,6 +120,7 @@ __all__ = [
     "PoolNotIsolated",
     "SandboxIdentityError",
     "assert_pool_isolated",
+    "provision_rented_machine",
     "provision_sandbox_machine",
     "revoke_sandbox_machine",
 ]
@@ -102,6 +129,28 @@ __all__ = [
 #: files under ``provider``, imported rather than repeated so the two cannot
 #: drift into describing one sandbox two ways.
 SANDBOX_PLATFORM = DEFAULT_PROVIDER
+
+#: What goes in ``machines.lifecycle`` for a rented machine (migration 0023).
+#:
+#: **Not ``'ephemeral'``, and the difference is the whole point.**
+#: ``db.expire_stale_ephemeral_machines`` selects ``'ephemeral'`` and measures
+#: from ``coalesce(last_seen_at, created_at)`` on a 15-minute default; a rented
+#: host has no ``last_seen_at`` until it has booted, pulled a multi-gigabyte
+#: image and enrolled, so that sweep would revoke the credentials of machines
+#: that are still starting — having already paid for the boot. ``'leased'`` is
+#: outside every heartbeat timer in this schema on purpose.
+#:
+#: What it buys instead is that the row STATES its own lifetime. Nothing else
+#: in ``public.machines`` distinguishes a rented pod from its owner's laptop,
+#: so before this a returned rental left a permanent-looking entry in that
+#: owner's fleet — a live-looking link to hardware a third party now has.
+#: ``db.list_machines_for_owner`` hides a revoked lease for exactly that
+#: reason, the same way it hides a revoked rental session.
+#:
+#: The lease is ENDED BY THE RENTAL, not by age: ``capacity/reconcile.py``
+#: revokes the credential on every path a rental ends, and
+#: ``finished_rentals_with_live_credentials`` retries that revoke for ever.
+LEASED_LIFECYCLE = "leased"
 
 #: How much of the raw token is kept for display. Matches what
 #: ``redeem_device_code`` stores, so the console renders both kinds of
@@ -275,10 +324,124 @@ def provision_sandbox_machine(
     )
 
 
+def provision_rented_machine(
+    db: psycopg.Connection,
+    *,
+    owner_id: str,
+    pool_id: str,
+    node_id: str,
+    label: str | None,
+    platform: str | None = None,
+) -> EphemeralMachineCredential:
+    """Mint the identity of a GPU we rented into the submitter's own pool.
+
+    The sibling of :func:`provision_sandbox_machine`, sharing its
+    authorise-and-lock ordering and its mint-once discipline, and differing in
+    exactly two things — both deliberate, both decided in D6 of
+    ``2026-08-12-on-demand-capacity-design.md``.
+
+    **1. It does not assert pool isolation, and must not.** That assertion
+    protects an evaluation sandbox: a machine holding a session credential and
+    running code the submitter wrote, where a second machine bound to the same
+    pool would be an eligible claimant for that session's tasks. A rented GPU
+    has neither property. Being an eligible claimant *alongside the user's own
+    machines* is the entire reason it was rented — the pool it goes into is the
+    submitter's workspace and already holds their laptop — and no session
+    credential is present for a co-tenant to reach. Applying the assertion here
+    forbade the feature outright: renting worked only into an empty pool, one
+    machine at a time, which also made ``gpu_count > 1`` unreachable.
+
+    This is a separate function rather than a parameter on the first for one
+    reason: a flag can be passed wrongly, and the failure mode of passing it
+    wrongly on the sandbox path is an evaluation session whose tasks another
+    machine can claim. Two names cannot be confused by a keyword argument.
+    :func:`assert_pool_isolated` is untouched and still means what it says;
+    nothing here weakens it, and the sandbox path still calls it.
+
+    **2. The identity is a lease, not a deed** (:data:`LEASED_LIFECYCLE`). A
+    laptop's binding says whose machine this is, permanently. A rental's is
+    true while we hold the hardware and false the moment we give it back, and
+    the row says so rather than claiming ``'persistent'`` about a pod somebody
+    else will rent next week. It is *not* ``'ephemeral'``: that hands the
+    machine to a heartbeat timer which would revoke it mid-boot. What ends the
+    lease is the rental's own lifecycle — ``capacity/reconcile.py`` revokes the
+    credential on every path a ``rented_capacity`` row ends, independently of
+    the destroy, and retries for ever through
+    ``finished_rentals_with_live_credentials``.
+
+    **What is kept, because this path still needs all of it:**
+
+    1. **Authorise and serialise.** ``lock_pool_for_owner`` refuses anyone who
+       does not own the pool (404-shaped, see :class:`PoolNotFound`) and holds
+       a row lock on it for the rest of the transaction. The lock is still
+       load-bearing without the isolation assertion: two concurrent
+       acquisitions into one pool must not interleave their reads and writes of
+       that pool's bindings, and a controller retrying a slow provision is the
+       ordinary way to get two. Requiring *membership* as well as ownership is
+       not belt-and-braces either — ``pool_ids_for_machine`` intersects
+       bindings with ``pool_members``, so a machine minted into a pool its
+       owner does not belong to would be stamped with nothing and could never
+       claim the job it was rented for.
+    2. **Insert the machine, then bind it.** A ``node_id`` already taken is
+       :class:`NodeAlreadyEnrolled`, the same refusal and the same reason as in
+       the device-code flow.
+    3. **The token last.** A token that exists is a token that can be used, so
+       it is created once everything above has held, and returned exactly once.
+
+    All of it in one transaction, so every failure leaves the pool exactly as
+    it was: no orphan machine row burning a ``node_id``, no half-bound pool,
+    and — the case that matters here — no trace on top of the machines the
+    submitter already had in that pool.
+
+    ``platform`` records WHERE this machine came from and should be the venue
+    id (``"runpod"``, ``"alibaba-ecs"``). It defaults to ``None`` rather than
+    to :data:`SANDBOX_PLATFORM`: a RunPod pod filed under ``alibaba-fc-sandbox``
+    is worse than a blank, and this column is display only.
+    """
+    owner_id = str(owner_id)
+    pool_id = str(pool_id)
+    node_id = (node_id or "").strip()
+    if not node_id:
+        raise ValueError("node_id is required to provision a rented machine")
+
+    with db.transaction():
+        if dbmod.lock_pool_for_owner(db, pool_id, owner_id) is None:
+            raise PoolNotFound(pool_id)
+
+        try:
+            machine_id = dbmod.insert_machine(
+                db,
+                owner_id=owner_id,
+                node_id=node_id,
+                name=label,
+                platform=platform,
+                lifecycle=LEASED_LIFECYCLE,
+            )
+        except psycopg.errors.UniqueViolation as exc:
+            raise NodeAlreadyEnrolled(node_id) from exc
+
+        dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=pool_id)
+
+        token = new_machine_token()
+        dbmod.set_machine_token(
+            db, machine_id, hash_machine_token(token), token[:TOKEN_PREFIX_LENGTH]
+        )
+
+    return EphemeralMachineCredential(
+        machine_id=str(machine_id), node_id=node_id, raw_token=token
+    )
+
+
 def revoke_sandbox_machine(
     db: psycopg.Connection, *, machine_id: str, owner_id: str
 ) -> bool:
-    """End a session's credential. Idempotent, total, and survivable.
+    """End a minted credential. Idempotent, total, and survivable.
+
+    Both kinds end here: an evaluation session's worker, and a rented GPU's
+    lease. ``capacity/reconcile.py`` calls this on every path a rental is over
+    — the destroy succeeded, the destroy failed, or the row was already
+    released — because the lease has to be false the moment we give the
+    hardware back, whatever the venue said about it.
 
     **Total.** Two things must stop being true, and they are independent: the
     token must stop authenticating (``status = 'revoked'``, which

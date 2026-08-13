@@ -174,6 +174,35 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-12 — D6: rentals get their own minting path, and their identity is a lease (flashml-cloud/apps/api)
+What/why: Renting into the submitter's own workspace was refused, because
+`capacity/acquire.py` reused `provision_sandbox_machine` and inherited its
+closing `assert_pool_isolated` — so renting only worked into an empty pool, one
+machine at a time, which forbade the feature's purpose and blocked
+`gpu_count > 1`. Added the sibling `sandbox_identity.provision_rented_machine`:
+same authorise-and-lock ordering, same ownership+membership requirement, same
+mint-once discipline, no isolation assertion. `provision_sandbox_machine` and
+`assert_pool_isolated` are byte-unchanged — a separate name, not a flag, so no
+caller can skip the assertion by argument. Second half: a rental's binding is a
+lease, so it is minted `machines.lifecycle = 'leased'` (migration 0023),
+deliberately NOT `'ephemeral'` — that sweep measures from
+`coalesce(last_seen_at, created_at)` and would revoke a host still pulling its
+image. `db.list_machines_for_owner` now hides a revoked lease as it already
+hid a revoked rental session.
+How verified: apps/api `pytest` — 2389 passed, 2 skipped, 3 deselected,
+1 xfailed (baseline 2366/2/3/1; +20 new tests here, +3 from a concurrent
+access-request slice). Capacity + `test_sandbox_identity` + `test_db_pools`
+run in four file orders, all green.
+Gotchas: the isolation assertion was also, by accident, the thing that made a
+leaked rental credential LOUD — a leftover binding used to make the next rental
+into that pool fail. It no longer does. `reconcile.finished_rentals_with_live_
+credentials` is now the whole mechanism, not a backstop behind one, and
+`leased` machines are outside every heartbeat sweep by design. Four docstrings
+in `acquire.py`/`reconcile.py` asserted the old behaviour and were corrected.
+Next: wire `acquire_for_job` to a caller (it still has none) with the total-
+dollar ceiling the spec flags as the largest open risk. Parking lot: surfacing
+`lifecycle` in `MACHINE_PUBLIC_COLUMNS` so the console can label a rented GPU.
+
 ### 2026-08-12 — Define the vision-led Zolli landing story (flashml-cloud, web design)
 What/why: Reframed the landing from fault-tolerance mechanics to the open
 compute-allocation network Zolli is building: people seeking competitively

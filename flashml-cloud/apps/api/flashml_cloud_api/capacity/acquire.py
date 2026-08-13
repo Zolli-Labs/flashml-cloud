@@ -6,11 +6,13 @@ The order is the design, not an implementation detail:
    venue is asked anything. A refusal must cost nothing and leave nothing.
 2. **Open the row.** From here every step has somewhere durable to be
    recorded and a restart has something to find.
-3. **Mint the credential into the SUBMITTER'S pool.** Not an isolation
-   pool -- this machine is meant to share a pool with the user's other
-   machines. Nothing here calls :func:`sandbox_identity.assert_pool_isolated`:
-   it is an evaluation-session invariant, and applying it deliberately would
-   forbid the thing this function exists to do. See the known limit below.
+3. **Mint the credential into the SUBMITTER'S pool**, through
+   :func:`sandbox_identity.provision_rented_machine`. Not an isolation pool --
+   this machine is meant to share a pool with the user's other machines, and
+   that minting path asserts no isolation, because
+   :func:`sandbox_identity.assert_pool_isolated` is an evaluation-session
+   invariant and applying it here forbade the thing this function exists to do.
+   See "the lease, and what it replaced" below.
 4. **Re-gate the answered rate**, then acquire -- and record the handle in
    the same update that moves REQUESTED -> ACTIVE.
 
@@ -63,9 +65,12 @@ closed, where the only question left is why it failed.
 
 The credential is revoked on every failure path, independently of the release
 (``cleanup_session``'s rule, that neither failure may hide the other). It is
-not tidiness: ``provision_sandbox_machine`` ends by asserting the pool holds
-exactly the machine it just minted, so a dead machine left bound to the pool
-makes the *next* acquisition fail for a reason that has nothing to do with it.
+not tidiness, and since D6 it is not self-correcting either: a rental's
+identity is a LEASE, true only while we hold the hardware, so a failed
+acquisition that leaves a live token bound to the submitter's pool has left a
+working credential for a machine we do not have. It used to be caught by
+accident -- the next acquisition into that pool failed an isolation assertion
+-- and that accident is gone. See below.
 
 WHY A FAILED ``acquire`` IS NOT TREATED AS CLEAN
 ------------------------------------------------
@@ -86,18 +91,29 @@ reading. This is the same trade ``reconcile.py`` makes for a handleless row:
 a permanently stuck row is a cheap, visible defect; a silently closed one is an
 invoice.
 
-A KNOWN LIMIT, AND WHERE IT ACTUALLY LIVES
-------------------------------------------
-Reusing ``provision_sandbox_machine`` inherits its final
+THE LEASE, AND WHAT IT REPLACED (D6, 2026-08-12)
+------------------------------------------------
+This module used to reuse ``provision_sandbox_machine`` and inherit its final
 ``assert_pool_isolated``. That assertion is one level below this module and
-this module does not call it, but the effect reaches here anyway: renting into
-a pool that already holds a machine is refused today, which is precisely the
-case this feature is for. The refusal is clean -- it happens before the venue
-is asked anything, so no money is spent, and the row records it -- and it is
-pinned by ``test_a_pool_that_already_holds_a_machine_is_refused_today``.
-Relaxing the assertion is out of scope in the design (§6); it needs its own
-decision, because the assertion is what keeps an evaluation session's tasks
-from being claimed by a second machine.
+this module never called it, but the effect reached here anyway: renting into a
+pool that already held a machine was refused, which is exactly the case this
+feature is for -- the submitter's workspace already holds their laptop -- and
+it made ``gpu_count > 1`` unreachable as well. D6 settled it with a sibling
+minting path, ``provision_rented_machine``, which asserts nothing about the
+pool. ``provision_sandbox_machine`` and its invariant are untouched: they
+protect an evaluation sandbox holding a session credential, where a second
+machine in the pool could claim the session's tasks. A rented GPU has neither
+property.
+
+**What that assertion was also doing, by accident, is now nobody's accident.**
+A dead machine left bound to the pool used to make the *next* acquisition fail
+loudly. Now it does not: the next rental succeeds and the stale credential sits
+there, valid, bound to a user's workspace, for hardware a third party has since
+rented. So the revoke on every failure path here, and
+``reconcile.finished_rentals_with_live_credentials``' unbounded retry of it,
+are the entire mechanism -- not a backstop behind one. That is what "a rental's
+binding is a lease" means operationally, and ``machines.lifecycle = 'leased'``
+(migration 0023) is the row saying so.
 """
 from __future__ import annotations
 
@@ -327,9 +343,13 @@ async def _abandon(
         settled = True
 
     # 3. Kill the identity, independently of the release: neither failure may
-    #    hide the other, and the pool has to be given back either way or the
-    #    next acquisition into it fails on an isolation assertion about a
-    #    machine that no longer exists anywhere but here.
+    #    hide the other, and the lease has to end either way. It used to be
+    #    self-correcting -- a leftover binding made the next acquisition into
+    #    this pool fail an isolation assertion -- and since D6 it is not. A
+    #    credential left alive here is a working token, bound to a user's
+    #    workspace, for a machine that exists nowhere but in this row.
+    #    `reconcile.finished_rentals_with_live_credentials` is what comes back
+    #    for the ones this loses; nothing else will.
     if credential is not None:
         try:
             await asyncio.to_thread(
@@ -390,26 +410,30 @@ async def acquire_for_job(
     handle: str | None = None
     venue_asked = False
     try:
-        # 3. Identity, in the submitter's own pool.
+        # 3. Identity, in the submitter's own pool, alongside whatever they
+        #    already have there. `provision_rented_machine`, not
+        #    `provision_sandbox_machine`: the second asserts pool isolation and
+        #    would refuse this outright (D6).
         #
-        # `lifecycle` is left at its default, 'persistent'. Minting
-        # 'ephemeral' would hand this machine to
+        # It mints `lifecycle = 'leased'` -- a lease, not a deed, and
+        # deliberately not 'ephemeral'. 'ephemeral' would hand this machine to
         # `expire_stale_ephemeral_machines`, whose TTL runs from
         # `coalesce(last_seen_at, created_at)` -- and a rented host has no
         # `last_seen_at` until it has booted, pulled a multi-gigabyte image
         # and registered, which regularly takes longer than the 15-minute
         # default. That sweep would revoke the credential of a machine that is
-        # still starting up. The credential is already revoked explicitly on
-        # both paths out (below, and `reconcile._revoke_credential`), so the
-        # TTL would add a new way to break a healthy rental in exchange for a
-        # backstop on a liability that is already handled twice.
+        # still starting up. What ends the lease instead is this row: the
+        # credential is revoked explicitly on every path out (below, and
+        # `reconcile._revoke_credential`, retried for ever by
+        # `reconcile.finished_rentals_with_live_credentials`).
         credential = await asyncio.to_thread(
-            sandbox_identity.provision_sandbox_machine,
+            sandbox_identity.provision_rented_machine,
             db,
             owner_id=request.owner_id,
             pool_id=request.pool_id,
             node_id=f"rented-{rid[:12]}",
             label=f"rented {request.venue_id} for job {request.job_id}",
+            platform=request.venue_id,
         )
 
         # 4. Acquire. Everything from here on may have created a machine.

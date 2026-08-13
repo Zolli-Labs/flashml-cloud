@@ -284,12 +284,14 @@ def submit_access_request(
             cur.execute(
                 """
                 insert into public.access_requests
-                    (user_id, status, use_case, compute_sources, heard_from)
-                values (%s, 'pending', %s, %s, %s)
+                    (user_id, status, use_case, compute_sources, heard_from,
+                     linkedin_url)
+                values (%s, 'pending', %s, %s, %s, %s)
                 on conflict (user_id) do update
                    set use_case        = excluded.use_case,
                        compute_sources = excluded.compute_sources,
                        heard_from      = excluded.heard_from,
+                       linkedin_url    = excluded.linkedin_url,
                        requested_at    = now()
                  where public.access_requests.status = 'pending'
                 """,
@@ -298,6 +300,7 @@ def submit_access_request(
                     submission.use_case,
                     submission.compute_sources,
                     submission.heard_from,
+                    submission.linkedin_url,
                 ),
             )
 
@@ -418,8 +421,8 @@ def list_access_requests(
         cur.execute(
             """
             select ar.user_id, ar.status, ar.use_case, ar.compute_sources,
-                   ar.heard_from, ar.requested_at, ar.pending_pool_id,
-                   ar.invited_by,
+                   ar.heard_from, ar.linkedin_url, ar.requested_at,
+                   ar.pending_pool_id, ar.invited_by,
                    u.email,
                    p.first_name, p.last_name, p.company_name, p.role,
                    p.team_size, p.email_domain, p.is_personal_email,
@@ -850,13 +853,24 @@ def list_machines_for_owner(
 ) -> list[dict[str, Any]]:
     """Every machine belonging to owner_id, and nothing else. The owner
     filter is in the SQL, not applied afterwards in Python — omitting it
-    would be a missing argument, not a missing ``if``."""
+    would be a missing argument, not a missing ``if``.
+
+    **A revoked machine whose identity was never permanent is not in this
+    person's fleet and is hidden.** Two lifecycles qualify and the reason is
+    the same for both: a rental session (``ephemeral``) and a GPU this control
+    plane rented on their behalf (``leased``, migration 0023) are borrowed
+    hardware, and once the credential is dead the row describes a machine
+    somebody else now has. A revoked ``persistent`` machine is the opposite
+    case and stays: a laptop its owner revoked on purpose is still theirs, and
+    hiding it would hide the evidence that they did.
+    """
     columns = ", ".join(MACHINE_PUBLIC_COLUMNS)
     with db.cursor() as cur:
         cur.execute(
             f"select {columns} from public.machines "
             "where owner_id = %s "
-            "and not (lifecycle = 'ephemeral' and status = 'revoked') "
+            "and not (lifecycle in ('ephemeral', 'leased') "
+            "         and status = 'revoked') "
             "order by created_at",
             (owner_id,),
         )
@@ -871,6 +885,16 @@ def expire_stale_ephemeral_machines(
     Persistent machines are deliberately outside this query: a laptop being
     off for a month does not transfer its identity to somebody else. Rental
     sessions opt into the shorter lifetime during device-code enrolment.
+
+    **``leased`` machines are outside it too, and that is the whole reason
+    they are not filed as ``ephemeral``.** A GPU this control plane rented has
+    no ``last_seen_at`` until it has booted, pulled a multi-gigabyte image and
+    enrolled — routinely longer than the 15 minutes ``stale_seconds`` defaults
+    to — so this window would revoke the credential of a machine that is still
+    starting up, on hardware we have already paid for. A lease is ended by the
+    ``public.rented_capacity`` row that opened it (``capacity/reconcile.py``),
+    never by age. Adding ``'leased'`` to the predicate below would break every
+    slow-booting rental; see migration 0023.
     """
     with db.cursor() as cur:
         cur.execute(

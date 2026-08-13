@@ -1,4 +1,16 @@
-"""One-session machine credentials for the FC sandbox worker.
+"""Machine credentials this control plane mints on its own authority.
+
+Two paths, and most of this file is about the first:
+
+- :func:`provision_sandbox_machine` — an FC sandbox worker, which holds a
+  session credential and runs code the submitter wrote. It ends by asserting
+  pool isolation, and that assertion is a security boundary.
+- :func:`provision_rented_machine` — a GPU the operator rented into the user's
+  own workspace. It asserts nothing about the pool, because being an eligible
+  claimant alongside the user's own machines is the whole point of renting
+  (D6). Its own section is at the bottom of this file, together with the tests
+  that prove the first function's invariant survived the neighbourhood
+  changing.
 
 The properties pinned here are the ones whose failure hands someone a working
 credential they should not have, or leaves one alive after the session that
@@ -76,6 +88,19 @@ def _provision(db, owner_id: str, pool_id: str, node_id: str | None = None):
         pool_id=pool_id,
         node_id=node_id or f"fc-sandbox-{uuid.uuid4()}",
         label="fc session worker",
+    )
+
+
+def _rent(db, owner_id: str, pool_id: str, node_id: str | None = None,
+          platform: str | None = "runpod"):
+    """The sibling path: a GPU rented into the submitter's own pool."""
+    return si.provision_rented_machine(
+        db,
+        owner_id=owner_id,
+        pool_id=pool_id,
+        node_id=node_id or f"rented-{uuid.uuid4()}",
+        label="rented runpod for job j-1",
+        platform=platform,
     )
 
 
@@ -671,3 +696,426 @@ def test_the_machine_id_is_recorded_on_the_session_through_transition(db):
     # Fill-in-only: a later move that mentions no machine leaves it alone.
     assert ss.transition(db, session["id"], "ACTIVE", "PREPARED")
     assert str(ss.fetch_session(db, session["id"])["machine_id"]) == cred.machine_id
+
+
+# ---------------------------------------------------------------------------
+# Renting: the sibling path, and what it deliberately does not assert
+#
+# `provision_rented_machine` mints the identity of a GPU the operator rented
+# into the user's OWN workspace. Everything `provision_sandbox_machine` does to
+# authorise, serialise and mint is kept; the isolation assertion is not, and
+# its absence is the feature (D6). The section after this one proves the
+# assertion still holds where it belongs.
+# ---------------------------------------------------------------------------
+
+
+def test_a_rental_is_minted_into_a_pool_that_already_holds_a_machine(db):
+    """**The refusal this decision existed to remove.**
+
+    A submitter's workspace holds their laptop. Renting means adding a GPU to
+    *that* workspace, so the pool is occupied by construction — and
+    `provision_sandbox_machine`'s closing `assert_pool_isolated` refused it,
+    which meant renting only ever worked into an empty pool.
+    """
+    owner = _user(db)
+    pool = _pool(db, owner)
+    laptop = str(
+        dbmod.insert_machine(
+            db, owner_id=owner, node_id="laptop-beside-a-rental",
+            name="laptop", platform="linux",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=laptop, pool_id=pool)
+
+    cred = _rent(db, owner, pool, node_id="rented-alongside")
+
+    assert sorted(dbmod.machine_ids_bound_to_pool(db, pool)) == sorted(
+        [laptop, cred.machine_id]
+    )
+    # Bound AND stamped: `pool_ids_for_machine` is what the register proxy
+    # copies onto the node, and a binding it ignores would be decoration.
+    assert dbmod.pool_ids_for_machine(db, cred.machine_id) == [pool]
+    assert _machine_row(db, cred.machine_id)["status"] == "active"
+
+
+def test_two_rentals_can_serve_one_pool(db):
+    """What `gpu_count > 1` needs. A fleet is several machines in one pool,
+    and the isolation assertion allowed exactly one."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+
+    first = _rent(db, owner, pool, node_id="rented-1-of-2")
+    second = _rent(db, owner, pool, node_id="rented-2-of-2")
+
+    assert first.machine_id != second.machine_id
+    assert first.raw_token != second.raw_token
+    assert sorted(dbmod.machine_ids_bound_to_pool(db, pool)) == sorted(
+        [first.machine_id, second.machine_id]
+    )
+    # Both stamped with the pool, so both are eligible claimants for its work.
+    assert dbmod.pool_ids_for_machine(db, first.machine_id) == [pool]
+    assert dbmod.pool_ids_for_machine(db, second.machine_id) == [pool]
+
+
+def test_both_the_laptop_and_the_rental_may_claim_the_pools_work(db):
+    """The positive statement, against the real placement gate rather than a
+    restatement of it.
+
+    `test_the_sessions_task_cannot_be_claimed_by_any_other_machine` notes that
+    a second machine bound to a pool IS an eligible claimant, and treats that
+    as the hazard an isolation pool exists to remove. For a rental it is the
+    goal: "add more GPUs and the job finishes sooner" is exactly two nodes
+    stamped with one pool, both eligible for the same task.
+    """
+    from flashruntime.scheduler import IsolationAwarePlacement
+
+    owner = _user(db)
+    pool = _pool(db, owner)
+    laptop = str(
+        dbmod.insert_machine(
+            db, owner_id=owner, node_id="laptop-claimant", name=None,
+            platform="linux",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=laptop, pool_id=pool)
+    cred = _rent(db, owner, pool)
+
+    policy = IsolationAwarePlacement()
+    for machine_id, node_id in ((laptop, "laptop-claimant"), (cred.machine_id, cred.node_id)):
+        node = _node_view(node_id, dbmod.pool_ids_for_machine(db, machine_id))
+        assert policy.eligible(_pool_task(pool), node) is True
+
+    # And the boundary that does still hold: neither is eligible for another
+    # team's pool job.
+    other = str(uuid.uuid4())
+    assert policy.eligible(
+        _pool_task(other),
+        _node_view(cred.node_id, dbmod.pool_ids_for_machine(db, cred.machine_id)),
+    ) is False
+
+
+# --- the lease ------------------------------------------------------------
+
+
+def test_a_rental_is_minted_as_a_lease_and_a_laptop_as_a_deed(db):
+    """A laptop's binding says whose machine this is, permanently. A rental's
+    is true while we hold the hardware and false the moment we give it back,
+    and `machines.lifecycle` is the only column that can say which."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+
+    laptop = str(
+        dbmod.insert_machine(
+            db, owner_id=owner, node_id="laptop-deed", name=None,
+            platform="linux",
+        )
+    )
+    rental = _rent(db, owner, pool)
+
+    assert _machine_row(db, rental.machine_id)["lifecycle"] == "leased"
+    assert si.LEASED_LIFECYCLE == "leased"
+    assert _machine_row(db, laptop)["lifecycle"] == "persistent"
+    # An evaluation sandbox is neither: its credential dies with its session's
+    # own cleanup, not with a rental row.
+    assert _machine_row(db, _provision(db, owner, _pool(db, owner)).machine_id)[
+        "lifecycle"
+    ] == "persistent"
+    # And the venue is recorded rather than the Alibaba sandbox platform the
+    # shared path used to hard-code.
+    assert _machine_row(db, rental.machine_id)["platform"] == "runpod"
+
+
+def test_no_heartbeat_timer_ever_expires_a_lease(db):
+    """**Why `leased` is not `ephemeral`, stated as a guarantee.**
+
+    `expire_stale_ephemeral_machines` measures from
+    `coalesce(last_seen_at, created_at)`, and a rented host has NO
+    `last_seen_at` until it has booted, pulled a multi-gigabyte image and
+    enrolled — routinely longer than the fifteen-minute default. Filing
+    rentals as `ephemeral` would revoke the credentials of machines that are
+    still starting up, on hardware already paid for.
+
+    Both machines below have never been seen and are two hours old — past any
+    plausible window, and exactly the shape of a host mid-boot. Only the
+    ephemeral one is revoked.
+
+    The window is an hour rather than zero, and the assertions are membership
+    rather than equality, because this sweep is GLOBAL and the test database
+    outlives every file in the session: a zeroed window would revoke another
+    file's rental session, and an equality would report on its rows.
+    """
+    owner = _user(db)
+    pool = _pool(db, owner)
+    leased = _rent(db, owner, pool)
+    session = str(
+        dbmod.insert_machine(
+            db, owner_id=owner, node_id=f"rental-session-{uuid.uuid4()}",
+            name=None, platform="runpod", lifecycle="ephemeral",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=session, pool_id=_pool(db, owner))
+    assert _machine_row(db, leased.machine_id)["last_seen_at"] is None
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set created_at = now() - interval '2 hours'"
+            " where id = any(%s)",
+            ([leased.machine_id, session],),
+        )
+
+    expired = dbmod.expire_stale_ephemeral_machines(db, stale_seconds=3600.0)
+
+    assert session in expired, "the sweep must actually be sweeping"
+    assert leased.machine_id not in expired
+    assert _machine_row(db, leased.machine_id)["status"] == "active"
+    assert dbmod.pool_ids_bound_to_machine(db, leased.machine_id) == [pool]
+    assert authenticate_machine(db, leased.raw_token) is not None
+
+
+def test_a_returned_lease_leaves_the_owners_fleet_and_a_revoked_laptop_stays(db):
+    """The lease is over, so the machine is not theirs to list any more.
+
+    The owner's words: an identity we hand out "just stays in our account after
+    we're done with the job". A revoked laptop is the opposite case and stays
+    visible — its owner revoked it on purpose, and hiding it would hide the
+    evidence that they did.
+    """
+    owner = _user(db)
+    pool = _pool(db, owner)
+    rental = _rent(db, owner, pool)
+    laptop = str(
+        dbmod.insert_machine(
+            db, owner_id=owner, node_id="laptop-revoked-on-purpose",
+            name=None, platform="linux",
+        )
+    )
+
+    visible = {str(m["id"]) for m in dbmod.list_machines_for_owner(db, owner)}
+    assert {rental.machine_id, laptop} <= visible
+
+    si.revoke_sandbox_machine(db, machine_id=rental.machine_id, owner_id=owner)
+    dbmod.revoke_machine_row(db, laptop, owner)
+
+    visible = {str(m["id"]) for m in dbmod.list_machines_for_owner(db, owner)}
+    assert rental.machine_id not in visible
+    assert laptop in visible
+
+
+def test_revoking_one_lease_leaves_the_pools_other_machines_alone(db):
+    """Now that a pool may hold several machines, "revoke" has to mean this
+    one. A rental ending must not unbind the submitter's laptop or the
+    sibling GPU still working on the same job."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    laptop = str(
+        dbmod.insert_machine(
+            db, owner_id=owner, node_id="laptop-untouched", name=None,
+            platform="linux",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=laptop, pool_id=pool)
+    first = _rent(db, owner, pool, node_id="rented-ending")
+    second = _rent(db, owner, pool, node_id="rented-still-working")
+
+    assert si.revoke_sandbox_machine(
+        db, machine_id=first.machine_id, owner_id=owner
+    )
+
+    assert _machine_row(db, first.machine_id)["status"] == "revoked"
+    assert authenticate_machine(db, first.raw_token) is None
+    assert sorted(dbmod.machine_ids_bound_to_pool(db, pool)) == sorted(
+        [laptop, second.machine_id]
+    )
+    assert authenticate_machine(db, second.raw_token) is not None
+
+
+# --- everything the sibling KEPT ------------------------------------------
+
+
+def test_a_rented_token_authenticates_once_and_is_stored_only_as_a_digest(db):
+    owner = _user(db)
+    cred = _rent(db, owner, _pool(db, owner))
+
+    machine = authenticate_machine(db, cred.raw_token)
+    assert machine is not None
+    assert str(machine.id) == cred.machine_id
+
+    row = _machine_row(db, cred.machine_id)
+    assert row["token_hash"] == hash_machine_token(cred.raw_token)
+    assert row["token_prefix"] == cred.raw_token[: si.TOKEN_PREFIX_LENGTH]
+    assert cred.raw_token not in repr(row)
+    assert cred.raw_token not in repr(cred)
+
+
+def test_a_stranger_cannot_rent_into_someone_elses_pool(db):
+    """Same authorisation, same 404 shape. Dropping the isolation assertion
+    dropped nothing about who may mint."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    stranger = _user(db)
+
+    with pytest.raises(si.PoolNotFound):
+        _rent(db, stranger, pool, node_id="rented-stranger")
+
+    assert dbmod.machine_ids_bound_to_pool(db, pool) == []
+
+
+def test_a_plain_member_cannot_rent_into_a_pool_they_do_not_own(db):
+    """Ownership AND membership, both still required. Membership is not
+    belt-and-braces: `pool_ids_for_machine` intersects bindings with
+    `pool_members`, so a machine minted into a pool its owner does not belong
+    to is stamped with nothing and could never claim the job it was rented
+    for."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    member = _user(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.pool_members (pool_id, user_id) values (%s, %s)",
+            (pool, member),
+        )
+    assert dbmod.is_pool_member(db, pool, member) is True
+
+    with pytest.raises(si.PoolNotFound):
+        _rent(db, member, pool, node_id="rented-member")
+
+    assert dbmod.machine_ids_bound_to_pool(db, pool) == []
+
+
+def test_an_unknown_pool_is_refused_the_same_way_as_someone_elses_for_rentals(db):
+    owner = _user(db)
+    theirs = _pool(db, _user(db))
+
+    with pytest.raises(si.PoolNotFound) as unknown:
+        _rent(db, owner, str(uuid.uuid4()), node_id="rented-a")
+    with pytest.raises(si.PoolNotFound) as forbidden:
+        _rent(db, owner, theirs, node_id="rented-b")
+
+    assert type(unknown.value) is type(forbidden.value)
+
+
+def test_a_node_id_already_enrolled_is_refused_for_a_rental_too(db):
+    """The column is globally unique so one machine cannot adopt another's
+    identity, and a rental is not an exception. The whole mint is one
+    transaction, so the refusal burns nothing."""
+    owner = _user(db)
+    pool = _pool(db, owner)
+    _rent(db, owner, pool, node_id="rented-taken")
+
+    with pytest.raises(NodeAlreadyEnrolled):
+        _rent(db, owner, pool, node_id="rented-taken")
+
+    # Exactly the first machine: the second attempt left no half-bound row.
+    assert len(dbmod.machine_ids_bound_to_pool(db, pool)) == 1
+
+
+def test_renting_serialises_on_the_pool_row(db, postgres_dsn):
+    """The row lock is kept even though the isolation assertion is gone, and
+    it is not vestigial: two acquisitions into one pool must not interleave
+    their reads and writes of that pool's bindings, and a controller retrying
+    a slow provision is the ordinary way to get two.
+
+    Asserted by holding the lock and watching a mint fail to get in, rather
+    than by racing two threads — a race that happens to finish in order passes
+    whether the lock exists or not.
+    """
+    owner = _user(db)
+    pool = _pool(db, owner)
+
+    blocked = psycopg.connect(postgres_dsn, row_factory=dict_row, connect_timeout=5)
+    blocked.autocommit = True
+    blocked.execute("set lock_timeout = '250ms'")
+    try:
+        with db.transaction():
+            assert dbmod.lock_pool_for_owner(db, pool, owner) is not None
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                _rent(blocked, owner, pool, node_id="rented-blocked")
+
+        with db.cursor() as cur:
+            cur.execute(
+                "select id from public.machines where node_id = %s",
+                ("rented-blocked",),
+            )
+            assert cur.fetchone() is None
+
+        cred = _rent(blocked, owner, pool, node_id="rented-after")
+        assert dbmod.machine_ids_bound_to_pool(db, pool) == [cred.machine_id]
+    finally:
+        blocked.close()
+
+
+# ---------------------------------------------------------------------------
+# The invariant, in its new neighbourhood
+#
+# Relaxing isolation for rentals must not relax it for the thing it protects.
+# These are the tests that fail if the sibling ever grows into a shared code
+# path with a flag on it.
+# ---------------------------------------------------------------------------
+
+
+def test_an_evaluation_session_is_still_refused_a_pool_holding_a_rental(db):
+    """The assertion is unchanged and this is the case that proves it in the
+    world D6 created: a pool that now legitimately holds a rented machine is
+    still not somewhere an evaluation sandbox may mint.
+
+    The refusal is total — no machine row, no binding, no credential — because
+    the assertion runs inside the same transaction as the insert.
+    """
+    owner = _user(db)
+    pool = _pool(db, owner)
+    rental = _rent(db, owner, pool, node_id="rented-sitting-tenant")
+
+    with pytest.raises(si.PoolNotIsolated):
+        _provision(db, owner, pool, node_id="fc-sandbox-refused")
+
+    assert dbmod.machine_ids_bound_to_pool(db, pool) == [rental.machine_id]
+    with db.cursor() as cur:
+        cur.execute(
+            "select id from public.machines where node_id = %s",
+            ("fc-sandbox-refused",),
+        )
+        assert cur.fetchone() is None
+
+
+def test_a_rental_arriving_beside_a_sandbox_breaks_the_sessions_invariant(db):
+    """The other direction, and the reason `assert_pool_isolated` documents
+    itself as safe to call again at any point in the session.
+
+    Nothing stops `provision_rented_machine` being handed an isolation pool —
+    it asserts nothing about the pool, by design. What catches it is the
+    session's own re-check (`sandbox_orchestrator` calls it right after
+    minting, and the boundary is claimed for the session's lifetime, not for
+    the instant of minting). It must still fail closed.
+    """
+    owner = _user(db)
+    pool = _pool(db, owner)
+    sandbox = _provision(db, owner, pool)
+    si.assert_pool_isolated(db, pool_id=pool, machine_id=sandbox.machine_id)
+
+    _rent(db, owner, pool, node_id="rented-into-an-isolation-pool")
+
+    with pytest.raises(si.PoolNotIsolated):
+        si.assert_pool_isolated(db, pool_id=pool, machine_id=sandbox.machine_id)
+
+
+def test_the_isolation_assertion_cannot_be_switched_off_by_an_argument(db):
+    """D6's shape, pinned: a SEPARATE function, not a flag.
+
+    A boolean can be passed wrongly, and the cost of passing it wrongly on the
+    sandbox path is an evaluation session whose tasks a second machine can
+    claim. Two names cannot be confused by a keyword argument. If this ever
+    fails because somebody added `assert_isolated=True` to the sandbox path,
+    the question to answer first is what happens the day a caller passes False.
+    """
+    import inspect
+
+    sandbox = list(inspect.signature(si.provision_sandbox_machine).parameters)
+    assert sandbox == ["db", "owner_id", "pool_id", "node_id", "label"]
+
+    rented = list(inspect.signature(si.provision_rented_machine).parameters)
+    assert "assert_pool_isolated" not in rented
+    assert si.provision_rented_machine is not si.provision_sandbox_machine
+    # Both are exported, so neither is the private half of the other.
+    assert {"provision_sandbox_machine", "provision_rented_machine"} <= set(
+        si.__all__
+    )
+    assert si.__all__ == sorted(si.__all__)
