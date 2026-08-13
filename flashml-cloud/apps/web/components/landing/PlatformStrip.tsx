@@ -61,8 +61,14 @@ export function PlatformStrip() {
               </div>
             </div>
 
+            {/* No status adjectives here — "Preview" on the Windows badge
+                above is the only status wording this strip prints. This
+                sentence is a plain capability statement: what you can bring,
+                and (for Windows only) the mechanism, cited straight from
+                `HOST_SUPPORT`'s own `body` field in lib/landing/platform.ts —
+                not restated in Proven/Preview language. */}
             <p className="mt-8 max-w-[68ch] text-sm leading-relaxed text-muted-foreground">
-              macOS, Linux, and RunPod NVIDIA GPUs are verified; Windows 11 is in preview through Docker
+              macOS, Linux, and RunPod NVIDIA GPUs connect directly. Windows 11 connects through Docker
               Desktop and WSL2.
             </p>
           </div>
