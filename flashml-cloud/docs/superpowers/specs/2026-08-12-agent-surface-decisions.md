@@ -528,6 +528,59 @@ claimed the lease ~30 s later, and the job completed — timings, lease
 transitions, attempt counts and the claiming machine are all assigned by this
 codebase. **The step number is the submitter's and is not published.**
 
+### AS-16.2 — Provenance is one of TWO questions, and a rule enforced by
+### memory is not enforced.
+
+**Both corrections below were raised by `zolli-labs-d7` against a publish list
+this session wrote.**
+
+**The provenance test is necessary and not sufficient.** Ask both:
+
+1. **Who assigned this value?** — the AS-16.1 test.
+2. **Does this re-identify someone?**
+
+`region` passes the first and fails the second. It genuinely is ours, from
+`router/venues.py`, so provenance waves it straight through — and *"machine B,
+Czechia"* is anonymous only if several machines could plausibly be in Czechia.
+For rented capacity that holds. For a **volunteer's home rig** a small
+population makes a country a near-unique identifier, and the pseudonym
+assigned to protect them then labels them instead. A judge does not need the
+geography and a volunteer never consented to it.
+
+**Rule, defaulting to omission.** `public.machines.lifecycle` is the
+discriminator (`0020` adds `persistent`/`ephemeral`, `0023` widens to
+`leased`):
+
+| lifecycle | region |
+|---|---|
+| `leased` | **publish** — `provision_rented_machine` is its only writer and `acquire_for_job` its only caller, so the value is ours end to end (verified by `zolli-labs-d7`) |
+| `persistent` | **omit** — a volunteer's own machine; publish venue `owned` alone |
+| `ephemeral` | **omit unless established from the code.** Minted by both `sandbox_orchestrator` and the device-code path, so "what creates these" needs reading, not guessing |
+
+This costs the demo nothing: *"machine A stopped, machine B resumed thirty
+seconds later"* needs no geography, and the cross-country detail survives
+exactly where it is safe — both machines rented.
+
+**The meta-lesson, which is the durable part.** This session authored AS-16.1,
+quoted it verbatim to a subagent, and in the same message put a host-supplied
+hostname in the publish list. A machine's display name **is** its hostname
+(`enrolment.py:164`, from `app.py:3261`'s enrolment body).
+
+> **A rule enforced by memory is not enforced.**
+
+The evidence is that this one was authored, quoted, and broken by its author
+inside one conversation. So the rule needs a check that *runs*: a test
+asserting a distinctive fixture hostname is absent from the **serialized
+JSON**, not from a named field — the version that survives someone helpfully
+renaming a column.
+
+A rule that has only ever caught other people's mistakes has not been tested.
+
+`PROGRESS.md` Rule 7 carries both questions and this conclusion
+(`2bf9ee6`); this record carries the publish-side list. Two documents, one
+rule each, cross-referenced rather than duplicated — the same reasoning that
+keeps AS-9 and OC-D10 apart.
+
 **Consequence beyond the page:** if a demo claim rests on a submitter-authored
 value, that is worth knowing before Friday rather than after a judge asks
 where the number came from.
