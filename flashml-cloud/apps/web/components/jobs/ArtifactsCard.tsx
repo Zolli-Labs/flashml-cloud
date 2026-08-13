@@ -7,6 +7,11 @@ import { toast } from "sonner";
 
 import { ClearArtifactsButton } from "@/components/jobs/ClearArtifactsButton";
 import { DownloadAllButton } from "@/components/jobs/DownloadAllButton";
+import { Disclosure } from "@/components/jobs/Disclosure";
+import {
+  summariseArtifactGroup,
+  type ArtifactGroupSummary,
+} from "@/components/jobs/artifact-summary";
 import {
   describeDownloadFailure,
   downloadArtifact,
@@ -31,6 +36,11 @@ import { formatBytes } from "@/lib/utils";
  * Nothing here is rendered from anything but a value the API returned. There
  * is no placeholder size, no sample row, and no path on which a failed read
  * renders as an empty job.
+ *
+ * ONE LINE PER TASK, files on demand — see `ArtifactGroupSection` below for
+ * why, and `components/jobs/artifact-summary.ts` for what that line is
+ * allowed to claim. Folding is not filtering: every row this card used to
+ * render inline is still rendered, one click away and unchanged.
  */
 export function ArtifactsCard({
   jobId,
@@ -119,7 +129,7 @@ export function ArtifactsCard({
               {panel.mirroredAt && ` Recorded ${time(panel.mirroredAt)}.`}
             </p>
           )}
-          <div className="mt-3 space-y-3">
+          <div className="mt-3 space-y-2">
             {panel.groups.map((g) => (
               <ArtifactGroupSection
                 key={g.groupId}
@@ -153,12 +163,49 @@ const TASK_STATE_TONE: Record<string, string> = {
   PENDING: "text-muted-foreground border-muted",
 };
 
-/** One task's (or reducer bucket's) artifacts, grouped. A FAILED task with
- * at least one recognised log gets a visible callout — `hasFailureLog` is
- * exactly that check, computed once in `lib/task-artifacts.ts` rather than
- * re-derived here, and `groupArtifactsByTask` already sorts these groups to
- * the front so the callout is the first thing on the card, not something
- * to scroll past a healthy task's output to find. */
+/** What a group's row says before it is opened: how many files, how many
+ * checkpoints, how many bytes.
+ *
+ * The size is a FLOOR whenever the listing did not report every size — said
+ * with the same "at least" the card's own header uses, because a total built
+ * over a missing figure is a smaller number than the truth and must never be
+ * printed as if it were exact. Checkpoints get their own count rather than
+ * being folded into the file count: they are the machinery that made the run
+ * survivable, not the deliverable, and the whole reason
+ * `lib/task-artifacts.ts` separates them is that an undifferentiated list
+ * said otherwise. */
+function contentsLine(summary: ArtifactGroupSummary): string {
+  const parts = [
+    `${summary.fileCount} file${summary.fileCount === 1 ? "" : "s"}`,
+  ];
+  if (summary.checkpointCount > 0) {
+    parts.push(
+      `${summary.checkpointCount} checkpoint${summary.checkpointCount === 1 ? "" : "s"}`
+    );
+  }
+  parts.push(
+    summary.totalIsPartial
+      ? `at least ${formatBytes(summary.totalBytes)}`
+      : formatBytes(summary.totalBytes)
+  );
+  return parts.join(" · ");
+}
+
+/** One task's (or reducer bucket's) artifacts, behind one line.
+ *
+ * WHY IT IS FOLDED. Checkpointing is on for every job, so a nine-task run
+ * that checkpoints six times lists fifty-four files, and this card rendered
+ * all of them inline — every checkpoint of every task, between the reader
+ * and whatever they came for. The line states exactly what the fold holds
+ * (`task-000 · COMPLETED · 3 files · 6 checkpoints · 288 KiB`) and opening
+ * it renders the same rows as before, unchanged.
+ *
+ * A FAILED task with at least one recognised log OPENS BY DEFAULT, and that
+ * is the whole point of `hasFailureLog` — computed once in
+ * `lib/task-artifacts.ts`, which also sorts these groups to the front. The
+ * one file somebody lands on this page to find is a failed task's `stderr`,
+ * and putting it behind a click a reader has to guess at would undo the
+ * change that made it findable in the first place. */
 function ArtifactGroupSection({
   jobId,
   storage,
@@ -168,6 +215,7 @@ function ArtifactGroupSection({
   storage: string | null;
   group: ArtifactGroup;
 }) {
+  const summary = summariseArtifactGroup(group);
   return (
     <div
       className={`rounded-md border p-3 ${
@@ -176,63 +224,74 @@ function ArtifactGroupSection({
           : "border-border"
       }`}
     >
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-xs font-medium">
-          {group.taskState === null ? groupLabel(group.groupId) : group.groupId}
-        </span>
-        {group.taskState !== null && (
-          <span
-            className={`rounded-full border px-1.5 py-0.5 font-mono text-[10px] ${
-              TASK_STATE_TONE[group.taskState] ??
-              "text-muted-foreground border-muted"
-            }`}
-          >
-            {group.taskState}
+      <Disclosure
+        defaultOpen={group.hasFailureLog}
+        label={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-mono text-xs font-medium text-foreground">
+              {group.taskState === null
+                ? groupLabel(group.groupId)
+                : group.groupId}
+            </span>
+            {group.taskState !== null && (
+              <span
+                className={`rounded-full border px-1.5 py-0.5 font-mono text-[10px] ${
+                  TASK_STATE_TONE[group.taskState] ??
+                  "text-muted-foreground border-muted"
+                }`}
+              >
+                {group.taskState}
+              </span>
+            )}
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {contentsLine(summary)}
+            </span>
           </span>
-        )}
-      </div>
-      {group.hasFailureLog && (
-        <p className="mt-1.5 flex items-start gap-1.5 text-xs text-destructive">
-          <Terminal className="mt-0.5 h-3.5 w-3.5 shrink-0" weight="fill" />
-          <span>This task failed. Its stdout and stderr are below.</span>
-        </p>
-      )}
-      <div className="mt-2 space-y-1.5">
-        {group.results.map((entry) => (
-          <ArtifactRow
-            key={entry.key}
-            jobId={jobId}
-            storage={storage}
-            entry={entry}
-          />
-        ))}
-      </div>
-      {/* Kept, and kept apart. Checkpointing is on for every job, so a task
-          that died mid-run leaves its `ckpt/step-*.json` files at these same
-          keys — they are downloadable and sometimes exactly what someone
-          wants, but they are the machinery that made the run survivable, not
-          the run's output, and an undifferentiated list said otherwise. */}
-      {group.checkpoints.length > 0 && (
-        <div className="mt-3 border-t border-border pt-2">
-          <div className="label-caps">
-            Checkpoints ({group.checkpoints.length})
-          </div>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            Written while the task ran, so a machine death resumes here
-            instead of starting over. Not job output.
+        }
+      >
+        {group.hasFailureLog && (
+          <p className="flex items-start gap-1.5 text-xs text-destructive">
+            <Terminal className="mt-0.5 h-3.5 w-3.5 shrink-0" weight="fill" />
+            <span>This task failed. Its stdout and stderr are below.</span>
           </p>
-          <div className="mt-2 space-y-1.5">
-            {group.checkpoints.map((entry) => (
-              <ArtifactRow
-                key={entry.key}
-                jobId={jobId}
-                storage={storage}
-                entry={entry}
-              />
-            ))}
-          </div>
+        )}
+        <div className="mt-2 space-y-1.5">
+          {group.results.map((entry) => (
+            <ArtifactRow
+              key={entry.key}
+              jobId={jobId}
+              storage={storage}
+              entry={entry}
+            />
+          ))}
         </div>
-      )}
+        {/* Kept, and kept apart. Checkpointing is on for every job, so a task
+            that died mid-run leaves its `ckpt/step-*.json` files at these same
+            keys — they are downloadable and sometimes exactly what someone
+            wants, but they are the machinery that made the run survivable, not
+            the run's output, and an undifferentiated list said otherwise. */}
+        {group.checkpoints.length > 0 && (
+          <div className="mt-3 border-t border-border pt-2">
+            <div className="label-caps">
+              Checkpoints ({group.checkpoints.length})
+            </div>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Written while the task ran, so a machine death resumes here
+              instead of starting over. Not job output.
+            </p>
+            <div className="mt-2 space-y-1.5">
+              {group.checkpoints.map((entry) => (
+                <ArtifactRow
+                  key={entry.key}
+                  jobId={jobId}
+                  storage={storage}
+                  entry={entry}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </Disclosure>
     </div>
   );
 }

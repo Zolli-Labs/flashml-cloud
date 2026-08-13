@@ -14,6 +14,8 @@ import { JobResultCard } from "@/components/jobs/JobResultCard";
 import { CheckpointsCard } from "@/components/jobs/CheckpointsCard";
 import { RoutingCard } from "@/components/jobs/RoutingCard";
 import { TradeoffCard } from "@/components/jobs/TradeoffCard";
+import { LedgerView } from "@/components/jobs/LedgerView";
+import { Disclosure } from "@/components/jobs/Disclosure";
 import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
 import {
   deriveAttempts,
@@ -683,21 +685,33 @@ function ProgressView({
 
 /** The honest empty state. The only model metric the system records is
  * `mean_loss` per federated round. Rather than draw an empty chart frame,
- * say what is missing and what would fill it. */
+ * say what is missing and what would fill it.
+ *
+ * ONE SENTENCE, then the rest on request. Two paragraphs explaining an
+ * absence — where the metric comes from, and which repository would have to
+ * change for there to be more of them — is more page than the absence
+ * deserves, sitting where a chart would be. Neither paragraph is gone: both
+ * are under `why`, word for word. */
 function NoMetrics() {
   return (
     <section className="rounded-lg border border-border bg-surface p-6">
       <h2 className="text-sm font-semibold">No training metrics for this job</h2>
       <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-        Zolli displays the mean loss that FlashML records for each federated
-        round. Independent jobs report no model metrics today, so there is
-        nothing to chart here rather than an empty axis.
+        Independent jobs report no model metrics today, so there is nothing to
+        chart here rather than an empty axis.
       </p>
-      <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted-foreground">
-        Per-step curves need the workload to emit them through the event
-        ledger, which is a change to the runtime&apos;s protocol package
-        rather than to this console.
-      </p>
+      <Disclosure className="mt-2" label="why">
+        <p className="max-w-prose text-sm leading-relaxed text-muted-foreground">
+          Zolli displays the mean loss that FlashML records for each federated
+          round. Independent jobs report no model metrics today, so there is
+          nothing to chart here rather than an empty axis.
+        </p>
+        <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted-foreground">
+          Per-step curves need the workload to emit them through the event
+          ledger, which is a change to the runtime&apos;s protocol package
+          rather than to this console.
+        </p>
+      </Disclosure>
     </section>
   );
 }
@@ -834,85 +848,6 @@ function PlacementView({
         </section>
       )}
     </div>
-  );
-}
-
-function ledgerTone(type: string): string {
-  if (
-    type.includes("FAILED") ||
-    type.includes("REJECTED") ||
-    type.includes("EXPIRED") ||
-    type.includes("LOST") ||
-    type.includes("FROZEN")
-  ) {
-    return "text-warning-foreground";
-  }
-  if (
-    type.includes("ACCEPTED") ||
-    type.includes("SUCCEEDED") ||
-    type.includes("COMMITTED")
-  ) {
-    return "text-[var(--node-green)]";
-  }
-  return "text-muted-foreground";
-}
-
-function LedgerView({ events }: { events: JobEvent[] }) {
-  if (events.length === 0) {
-    return (
-      <section className="rounded-lg border border-border bg-surface p-6">
-        <h2 className="text-sm font-semibold">No events recorded</h2>
-        <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-          The coordinator has written nothing for this job yet.
-        </p>
-      </section>
-    );
-  }
-
-  // Newest first: when something has just gone wrong, it is at the top.
-  const rows = [...events].reverse();
-
-  return (
-    <section className="overflow-hidden rounded-lg border border-border bg-surface">
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <h2 className="text-sm font-semibold">Event ledger</h2>
-        <span className="font-mono text-xs text-muted-foreground">
-          {events.length} events
-        </span>
-      </div>
-      <ul className="divide-y divide-border">
-        {rows.map((e, i) => (
-          <li key={`${e.timestamp}-${i}`} className="px-4 py-2.5">
-            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <span className="font-mono text-xs tabular-nums text-muted-foreground">
-                {new Date(e.timestamp).toLocaleTimeString()}
-              </span>
-              {e.round !== undefined && (
-                <span className="font-mono text-[10px] text-muted-foreground">
-                  r{e.round}
-                </span>
-              )}
-              <span className={`font-mono text-xs ${ledgerTone(e.type)}`}>
-                {e.type}
-              </span>
-              {typeof e.data?.node_id === "string" && (
-                <span className="font-mono text-[11px] text-muted-foreground">
-                  {e.data.node_id}
-                </span>
-              )}
-            </div>
-            {/* The coordinator's own words, verbatim. Recovery decisions in
-                particular must never be paraphrased: the policy's reason IS
-                the explanation, and rewriting it would be inventing one. */}
-            {e.message && (
-              <p className="mt-1 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                {e.message}
-              </p>
-            )}
-          </li>
-        ))}
-      </ul>
-    </section>
   );
 }
 

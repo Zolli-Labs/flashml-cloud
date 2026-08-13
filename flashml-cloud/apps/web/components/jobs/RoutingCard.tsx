@@ -4,11 +4,20 @@ import { ArrowsClockwise, CheckCircle, CloudSlash, Prohibit } from "@phosphor-ic
 import {
   NOT_OBSERVED,
   NO_DEADLINE_NOTE,
+  VERDICT_COPY,
   basisLabel,
   type CurrencyFigure,
+  type PlanRow,
   type RoutingPanel,
+  type VenueRow,
   type VenueVerdict,
 } from "@/lib/job-routing";
+import { Disclosure } from "@/components/jobs/Disclosure";
+import {
+  NO_DURATION_YET,
+  firstSentence,
+  planTableIsUnpriced,
+} from "@/components/jobs/placement-summary";
 
 /**
  * How one job routes: what kind of work the router took it to be, which
@@ -27,6 +36,14 @@ import {
  * ZC and USD are rendered as two separate figures in two separate cells,
  * with no row, cell or label that could hold a total. The scheduler may use
  * fixed parity internally, but this card shows only settlement provenance.
+ *
+ * WHAT IS SHOWN FIRST AND WHAT IS SHOWN ON DEMAND. Every venue used to
+ * render its verdict definition, the router's own reason and its currency
+ * line at once — five venues, a screen of prose, before the first table. It
+ * now renders one line per venue and puts the rest behind `why`, verbatim.
+ * Compressed, not cut: `components/jobs/placement-summary.ts` decides which
+ * sentence leads, this file renders both halves, and no passage the panel
+ * used to show has stopped existing.
  */
 export function RoutingCard({
   panel,
@@ -108,112 +125,35 @@ export function RoutingCard({
           </p>
           <ul className="mt-3 divide-y divide-border">
             {panel.venues.map((v) => (
-              <li key={v.id} className="py-3 first:pt-0 last:pb-0">
-                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                  <span className="text-sm font-medium">{v.display}</span>
-                  <span
-                    className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${VERDICT_STYLES[v.verdict]}`}
-                  >
-                    <VerdictIcon verdict={v.verdict} /> {v.headline}
-                  </span>
-                </div>
-                <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
-                  {v.meaning}
-                </p>
-                {v.alsoUnreachable && (
-                  <p className="mt-1 max-w-prose text-xs leading-relaxed text-warning-foreground">
-                    We also have no way to obtain capacity here.
-                  </p>
-                )}
-                {v.reason && (
-                  <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
-                    {v.reason}
-                  </p>
-                )}
-                <p className="mt-1.5 font-mono text-[11px] text-muted-foreground">
-                  {v.id} · priced in {v.currency}
-                </p>
-              </li>
+              <VenueLine key={v.id} venue={v} />
             ))}
           </ul>
+          <VerdictLegend venues={panel.venues} />
         </div>
       )}
 
       {panel.plans.length > 0 ? (
         <div className="mt-4 border-t border-border pt-4">
           <p className="label-caps">Ways to run it</p>
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[520px] text-left">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Plan", "ZC", "USD", "Finishes in", "Machines", "Evidence"].map(
-                    (h) => (
-                      <th key={h} className="label-caps px-3 py-2 font-medium">
-                        {h}
-                      </th>
-                    )
-                  )}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {panel.plans.map((p) => (
-                  <tr key={p.name}>
-                    <td className="px-3 py-2.5 font-mono text-xs">
-                      {p.name}
-                      {p.recommended && (
-                        <span className="ml-1.5 rounded-md border border-brand/40 px-1 py-0.5 text-[10px] text-brand-foreground">
-                          recommended
-                        </span>
-                      )}
-                      {p.tasksUnplaced > 0 && (
-                        <span className="mt-1 block text-[11px] text-warning-foreground">
-                          {p.tasksPlaced} of {p.tasksPlaced + p.tasksUnplaced}{" "}
-                          tasks placed
-                        </span>
-                      )}
-                    </td>
-                    {/* Two cells, two currencies, and deliberately no third
-                        cell they could be added into. */}
-                    {p.costs.map((c: CurrencyFigure) => (
-                      <td
-                        key={c.currency}
-                        className="px-3 py-2.5 font-mono text-xs tabular-nums"
-                      >
-                        {c.amount.toFixed(2)}
-                      </td>
-                    ))}
-                    <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
-                      {p.makespanSeconds == null
-                        ? NOT_OBSERVED
-                        : duration(p.makespanSeconds)}
-                    </td>
-                    <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
-                      {p.machines}
-                    </td>
-                    <td className="px-3 py-2.5 font-mono text-xs text-muted-foreground">
-                      {basisLabel(p.basis, p.n)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted-foreground">
-            {NO_DEADLINE_NOTE}
-          </p>
-          {panel.plans.some((p) => p.notes.length > 0) && (
-            <ul className="mt-2 space-y-1">
-              {panel.plans.flatMap((p) =>
-                p.notes.map((note, i) => (
-                  <li
-                    key={`${p.name}-${i}`}
-                    className="max-w-prose text-xs leading-relaxed text-muted-foreground"
-                  >
-                    <span className="font-mono">{p.name}</span>: {note}
-                  </li>
-                ))
-              )}
-            </ul>
+          {/* A table of `0.00 · 0.00 · not observed` on every row is a table
+              that has told the reader one thing — nothing has been measured —
+              six cells at a time. It says it once instead, and keeps the
+              table one click away because the machine counts and the
+              placement figures in it are real regardless. */}
+          {planTableIsUnpriced(panel.plans) ? (
+            <>
+              <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-muted-foreground">
+                {NO_DURATION_YET}
+              </p>
+              <Disclosure
+                className="mt-2"
+                label="the plan table anyway — the machine counts are real"
+              >
+                <PlansTable plans={panel.plans} />
+              </Disclosure>
+            </>
+          ) : (
+            <PlansTable plans={panel.plans} />
           )}
         </div>
       ) : (
@@ -274,6 +214,172 @@ export function RoutingCard({
 
       <Notes notes={panel.notes} />
     </section>
+  );
+}
+
+/** One venue, in one row: what it is, what it decided, and the first
+ * sentence of the router's own reason for deciding it.
+ *
+ * The verdict's DEFINITION is not on the row — it is the same three
+ * paragraphs beside every venue every time, and a reader learns them once.
+ * They live on the chip's `title` and in "What the verdicts mean" below the
+ * list. The router's reason is specific to this venue and this job, so its
+ * opening sentence leads and the rest of it is one click away, verbatim.
+ *
+ * `alsoUnreachable` is inside the disclosure with the reason rather than on
+ * the row for the reason `lib/job-routing.ts` gives for ranking the
+ * headlines: a venue that physically cannot run the work is refusing on the
+ * more fundamental ground, and the second refusal qualifies it rather than
+ * competing with it. */
+function VenueLine({ venue }: { venue: VenueRow }) {
+  return (
+    <li className="py-2.5 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+        <span className="text-sm font-medium">{venue.display}</span>
+        <span
+          title={venue.meaning}
+          className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${VERDICT_STYLES[venue.verdict]}`}
+        >
+          <VerdictIcon verdict={venue.verdict} /> {venue.headline}
+        </span>
+      </div>
+      {venue.reason && (
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
+          {firstSentence(venue.reason)}
+        </p>
+      )}
+      <Disclosure className="mt-1" label="why">
+        {venue.reason && (
+          <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">
+            {venue.reason}
+          </p>
+        )}
+        {venue.alsoUnreachable && (
+          <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-warning-foreground">
+            We also have no way to obtain capacity here.
+          </p>
+        )}
+        <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
+          {venue.meaning}
+        </p>
+        <p className="mt-1.5 font-mono text-[11px] text-muted-foreground">
+          {venue.id} · priced in {venue.currency}
+        </p>
+      </Disclosure>
+    </li>
+  );
+}
+
+/** The verdict definitions, once, for the verdicts actually on the list — in
+ * the order they first appear, so a reader meets each explanation once
+ * rather than per venue, and never meets one for a verdict that is not
+ * there. The same rule `distinctVerdicts` follows in `TradeoffCard`. */
+function VerdictLegend({ venues }: { venues: VenueRow[] }) {
+  const seen: VenueVerdict[] = [];
+  for (const venue of venues) {
+    if (!seen.includes(venue.verdict)) seen.push(venue.verdict);
+  }
+  if (seen.length === 0) return null;
+  return (
+    <Disclosure className="mt-3" label="What the verdicts mean">
+      <ul className="space-y-1.5">
+        {seen.map((verdict) => (
+          <li
+            key={verdict}
+            className="max-w-prose text-xs leading-relaxed text-muted-foreground"
+          >
+            <span className="font-medium text-foreground">
+              {VERDICT_COPY[verdict].headline}
+            </span>{" "}
+            — {VERDICT_COPY[verdict].meaning}
+          </li>
+        ))}
+      </ul>
+    </Disclosure>
+  );
+}
+
+/** Every way the router would run this job, its cost in each currency kept
+ * apart, and the evidence behind each quote. Extracted so the collapsed and
+ * uncollapsed branches above render the same table rather than two tables
+ * that have to be kept in step by hand. */
+function PlansTable({ plans }: { plans: PlanRow[] }) {
+  return (
+    <>
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full min-w-[520px] text-left">
+          <thead>
+            <tr className="border-b border-border">
+              {["Plan", "ZC", "USD", "Finishes in", "Machines", "Evidence"].map(
+                (h) => (
+                  <th key={h} className="label-caps px-3 py-2 font-medium">
+                    {h}
+                  </th>
+                )
+              )}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {plans.map((p) => (
+              <tr key={p.name}>
+                <td className="px-3 py-2.5 font-mono text-xs">
+                  {p.name}
+                  {p.recommended && (
+                    <span className="ml-1.5 rounded-md border border-brand/40 px-1 py-0.5 text-[10px] text-brand-foreground">
+                      recommended
+                    </span>
+                  )}
+                  {p.tasksUnplaced > 0 && (
+                    <span className="mt-1 block text-[11px] text-warning-foreground">
+                      {p.tasksPlaced} of {p.tasksPlaced + p.tasksUnplaced} tasks
+                      placed
+                    </span>
+                  )}
+                </td>
+                {/* Two cells, two currencies, and deliberately no third
+                    cell they could be added into. */}
+                {p.costs.map((c: CurrencyFigure) => (
+                  <td
+                    key={c.currency}
+                    className="px-3 py-2.5 font-mono text-xs tabular-nums"
+                  >
+                    {c.amount.toFixed(2)}
+                  </td>
+                ))}
+                <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
+                  {p.makespanSeconds == null
+                    ? NOT_OBSERVED
+                    : duration(p.makespanSeconds)}
+                </td>
+                <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
+                  {p.machines}
+                </td>
+                <td className="px-3 py-2.5 font-mono text-xs text-muted-foreground">
+                  {basisLabel(p.basis, p.n)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted-foreground">
+        {NO_DEADLINE_NOTE}
+      </p>
+      {plans.some((p) => p.notes.length > 0) && (
+        <ul className="mt-2 space-y-1">
+          {plans.flatMap((p) =>
+            p.notes.map((note, i) => (
+              <li
+                key={`${p.name}-${i}`}
+                className="max-w-prose text-xs leading-relaxed text-muted-foreground"
+              >
+                <span className="font-mono">{p.name}</span>: {note}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </>
   );
 }
 
