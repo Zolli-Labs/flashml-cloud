@@ -172,6 +172,9 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
         self.artifacts: dict[str, bytes] = {}
         #: ``{job_id: {task_id: state}}``.
         self.tasks: dict[str, dict[str, str]] = {}
+        #: Job ids a free-tier restart has wiped from the registry — see
+        #: ``forget``.
+        self._forgotten: set[str] = set()
 
     # -- seeding -------------------------------------------------------------
 
@@ -183,6 +186,16 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
 
     def finish(self, job_id: str, state: str = "SUCCEEDED") -> None:
         self._jobs[job_id] = dict(self._jobs[job_id], state=state)
+
+    def forget(self, job_id: str) -> None:
+        """A free-tier coordinator restart wiped this job from its in-memory
+        registry. Every route that names ``job_id`` as a path segment now
+        answers as if it had never heard of it — the same "unknown job" shape
+        the healthy fake already returns at line 227 — so a test can assert
+        that a MIRRORED job survives this without the fake needing a second,
+        divergent 404 shape to agree with.
+        """
+        self._forgotten.add(job_id)
 
     # -- observation ---------------------------------------------------------
 
@@ -200,6 +213,18 @@ class FakeCoordinatorTransport(httpx.AsyncBaseTransport):
         await request.aread()
         self.requests.append(request)
         method, path = request.method, request.url.path
+
+        # A forgotten job is unknown to every route that names it as a path
+        # segment, checked before any specific route so no route needs its
+        # own amnesia branch. `job_id` always appears as a whole segment —
+        # in `/v1alpha1/jobs/{job_id}/...` and in an artifact key forwarded
+        # as `/v1alpha1/artifacts/jobs/{job_id}/...` alike — so splitting on
+        # "/" and matching a whole segment cannot false-positive on a key
+        # that merely contains the id as a substring.
+        if self._forgotten and any(
+            seg in self._forgotten for seg in path.split("/")
+        ):
+            return httpx.Response(404, json={"detail": "unregistered"})
 
         if method == "POST" and path == "/v1alpha1/jobs":
             body = json.loads(request.content or b"{}")
@@ -870,6 +895,74 @@ def test_the_listing_reports_oss_only_once_the_job_is_really_mirrored(
     # and put the console in the implementation-defined corner of `Date`.
     assert datetime.fromisoformat(body["mirrored_at"]).tzinfo is not None
     assert [a["key"] for a in body["artifacts"]] == EXPECTED_KEYS
+
+
+def test_a_mirrored_job_still_lists_after_the_coordinator_forgets_it(
+    client, db, transport, oss
+):
+    """THE OBSERVED DEFECT (`2026-08-12-shipped-and-verified.md` §8): a
+    finished, mirrored job whose coordinator has since forgotten it — disk
+    recycled, database rebuilt, a free-tier restart — used to answer
+    ``files=0`` while the bucket held every object. The manifest is a
+    certified record of the accepted subset, written once, so a coordinator
+    that no longer remembers the job is not evidence that the job produced
+    nothing.
+
+    THE ASSERTION BELOW IS NARROWER THAN ``EXPECTED_KEYS``, DELIBERATELY.
+    ``_finished_job`` also seeds a FAILED task (``shard-001``), and hard rule
+    4 (repo-wide, restated in ``artifact_mirror.py``'s "accepted work only")
+    means its ``stderr.txt`` was NEVER copied to OSS — it exists nowhere but
+    the coordinator's own disk. Once the coordinator has genuinely forgotten
+    the job there is no durable record of that key anywhere this API can
+    read: not the manifest (certifies the accepted subset only, by design),
+    not ``jobs`` (``_record_artifact_footprint`` keeps a byte total, never
+    keys — see ``app.py`` around ``_record_artifact_footprint``). Asserting
+    the full ``EXPECTED_KEYS`` here would require this route to either
+    fabricate a key/size nothing observed (the house honesty rule forbids
+    that: "never render/emit a number the source did not produce") or to
+    change the mirror's own accepted-only contract, which is out of this
+    task's scope. What the manifest DOES certify — the accepted subset,
+    exactly what ``oss.mirrored_keys`` shows landed in the bucket — must
+    survive amnesia in full: that is the real defect (``files=0`` while the
+    bucket held every object it was supposed to), and it is what this
+    assertion pins.
+    """
+    token = _browser_jwt(_new_user(db))
+    job_id = _finished_job(client, db, transport, token, "amnesia")
+    _open(client, token, job_id)                    # triggers mirror; manifest written
+    assert oss.manifest(job_id) is not None          # precondition: really mirrored
+
+    transport.forget(job_id)                          # free-tier restart wipes the registry
+
+    body = _list_artifacts(client, token, job_id).json()
+    assert body["storage"] == "oss"
+    # Ground truth from the bucket itself, not a hard-coded guess at which
+    # task failed: everything the mirror actually certified must still be
+    # listed. NOT files=0 — the defect this whole test exists to close.
+    mirror_prefix = f"jobs/{job_id}/"
+    expected_mirrored = {
+        k[len(mirror_prefix):] for k in oss.mirrored_keys(job_id)
+    }
+    assert expected_mirrored, "precondition: the mirror actually copied something"
+    assert {a["key"] for a in body["artifacts"]} == expected_mirrored
+    assert len(body["artifacts"]) > 0
+
+
+def test_a_mirrored_artifact_url_survives_coordinator_amnesia(
+    client, db, transport, oss
+):
+    """The sibling of the listing regression above, for the route that mints
+    the presigned URL a download click actually follows: a mirrored key's URL
+    must come from the manifest alone, never from asking a coordinator that
+    may no longer remember the job at all."""
+    token = _browser_jwt(_new_user(db))
+    job_id = _finished_job(client, db, transport, token, "amnesia-url")
+    _open(client, token, job_id)
+    transport.forget(job_id)
+    key = EXPECTED_KEYS[0]
+    body = _artifact_url(client, token, job_id, key).json()
+    assert body["storage"] == "oss"
+    assert body["url"]                                     # a real presigned URL
 
 
 def test_an_unconfigured_deployment_lists_and_downloads_exactly_as_before(
