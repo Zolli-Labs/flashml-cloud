@@ -93,12 +93,27 @@ uncommitted, in the shared public-repo checkout (`cli.py`, `identity/*`,
 tests). Whoever owns it: there is a tester waiting.
 
 ### 2.4 The FC-sandbox trusted worker stalls silently and holds its lease
-Claim → code unpacked → `datasets ready` → nothing, forever, renewing every
-~23s. To the coordinator this is indistinguishable from healthy work.
-**Holding is worse than failing** — the RunPod pod's fast failures requeued in
-seconds; the FC stall poisoned three consecutive jobs until revoked. Root
-cause not yet isolated (parked with FC work generally). The scheduler-side
-mitigation is 4.1.
+**ROOT-CAUSED** by the same-day six-agent audit
+(`2026-08-13-bug-audit-leases-fc-fragmented-devices.md` §0.1), and the
+flashnode half is **fixed on `fix/trusted-tier-execution` (`c133c5f`), 588
+tests passed, pushed**. Two layers:
+
+- **Worker layer (fixed):** the sandbox was not hung — it was inside a
+  dependency build it never logged, against an index it never chose. pip
+  inherited FC's `/etc/pip.conf` (the lagging Aliyun mirror) because
+  `_build` passed no index and no `--no-input`, and pulled toward the 1800 s
+  ceiling in total silence; the per-job cooldown key meant each poisoned job
+  paid a fresh build. Now: `PIP_INDEX_URL` pinned to real PyPI (env, so
+  requirements-file `--index-url` overrides still win), `--no-input`, and
+  log bracketing with dependency count and elapsed time. **And when a build
+  did finish, the trusted tier capped every task at 600 s** —
+  `TrustedArgvRunner()` built bare, `FLASHNODE_TASK_TIMEOUT_S` silently
+  ignored (audit C1). Now honored, same default (3600) as the docker tier.
+- **Protocol layer (open, coordinator):** heartbeat renewal is independent
+  of progress, renewal is unbounded, and no force-expire/revoke primitive
+  exists (audit C11) — so a stalled worker is unbreakable without revoking
+  the machine. Fix shapes are designed **as one set** in the audit's §5;
+  do not patch piecemeal.
 
 ## 3. Open — docs (they manufactured real failures tonight)
 
