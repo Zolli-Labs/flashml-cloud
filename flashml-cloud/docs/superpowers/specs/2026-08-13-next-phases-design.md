@@ -13,8 +13,8 @@ below descends from one of those, it cites the parent id. Re-opening a parent
 decision happens in the parent document, never here.
 
 **New ids minted here:** `AG-*` (agent layer), `MK-*` (market surface),
-`OB-*` (observability surfaces), `PF-*` (platform functions), `FT-*`
-(future tier — triggers, not dates).
+`OB-*` (observability surfaces), `UI-*` (console information design), `PF-*`
+(platform functions), `FT-*` (future tier — triggers, not dates).
 
 **Priority vocabulary** matches the competition spec: P0 (fails without it),
 P1 (core value), P2 (multiplier). **Status** values: `not started` ·
@@ -92,6 +92,7 @@ execution.
 | **OB-2** | Two more advisory slices, no new infrastructure: artifact presence, checkpoint monotonicity. (Duplicate-commit detection third.) Advisory only | same doc, G-D | P2 | Verdict rows written for a live job by each slice | not started |
 | **AG-5** | MCP surface for agents-in-a-loop: `wait_for` (long-poll on job/artifact/event — kills the poll-spin in `job_events`), `submit_batch`, a cost-quote tool beside `preview_plans`, `trace(correlation_id)` returning the whole D-4 chain in one call, share-link minting (the `shr_` mechanism as a tool), dataset publish/list | this spec | P1 | Each tool exercised by a scripted agent session transcript | not started |
 | **AG-6** | Agent principal: per-agent scoped revocable tokens (machine-token machinery is the template) so an agent stops borrowing the human's JWT. Scopes: read, submit-into-pool, spend-up-to. Identity + AG-3 wallet + ledger = the trust boundary for any fleet | this spec | P1 | A token with read-only scope refused on submit; revocation observed | not started |
+| **UI-1** | Console information-design refactor — **owner direction, 2026-08-13:** the console is too wordy and unorganized; numbers and figures are missing where the data already exists. Two steps: **UI-1a** an audit through the render harness (no agent can sign in; `preview/*.render.tsx` is the only eye) measuring per page word count, distinct numeric figures shown, and tables/figures vs prose — ranked, with the numbers each page *should* lead with; **UI-1b** the refactor itself: stat tiles and figures lead, prose demoted to captions, `2026-08-12-console-ui-plan.md` §5 conventions binding, `middleware.ts` untouched. Applies as the density standard to every page MK-1 and OB-1 add | `2026-08-12-console-ui-plan.md` + this row | P1 | Before/after harness screenshots per page + the audit table showing words down, figures up, per page | not started |
 
 ---
 
