@@ -1,18 +1,26 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ArrowClockwise } from "@phosphor-icons/react";
 
 import { PricesPanel } from "@/components/market/PricesPanel";
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
+import { Button } from "@/components/ui/button";
 import { NotAuthenticated, getPrices, type PricesView } from "@/lib/cloud-api";
 
-/** The compute board. Every number on the page comes from
- * `GET /v1alpha1/prices`: the capability classes as tickers (last live ask,
- * 24h movement, depth, observations) and the external venues' own quotes
- * beside them. Source amounts remain distinct; fixed-parity equivalents
- * appear only where the API supplies them, and nothing is summed. Not signed
- * in goes to /sign-in; any other failed read is
- * unreadable, never an empty board. */
+/** The compute board. Live numbers come from `GET /v1alpha1/prices` and
+ * nowhere else; the reference rows beside them come from the generated seed
+ * and carry a badge that says so on every row they appear in.
+ *
+ * A FAILED REFRESH IS NOT AN UNREADABLE PAGE. `hadData` is a ref rather
+ * than a look at `view`, because the decision is made inside a promise
+ * callback that closed over whatever `view` was when the request left — and
+ * "did we ever have an answer" is exactly the question a stale closure gets
+ * wrong. First read fails: the unreadable panel, there is nothing behind
+ * it. Any later read fails: the board stays and says it is stale. Not
+ * signed in goes to /sign-in either way. */
 export default function PricesPage() {
   const router = useRouter();
   const [state, setState] = useState<"loading" | "present" | "unreadable">(
@@ -20,12 +28,21 @@ export default function PricesPage() {
   );
   const [view, setView] = useState<PricesView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const hadData = useRef(false);
 
+  // No synchronous setState in here — the effect below calls it on mount,
+  // and a setState in an effect body is a cascading render (and a lint
+  // error). The spinner flag belongs to the button that starts a refresh,
+  // not to the read itself.
   const load = useCallback(() => {
-    getPrices()
+    return getPrices()
       .then((v) => {
+        hadData.current = true;
         setView(v);
         setError(null);
+        setStale(false);
         setState("present");
       })
       .catch((err) => {
@@ -34,7 +51,11 @@ export default function PricesPage() {
           return;
         }
         setError(err instanceof Error ? err.message : "Couldn't load.");
-        setState("unreadable");
+        if (hadData.current) {
+          setStale(true);
+        } else {
+          setState("unreadable");
+        }
       });
   }, [router]);
 
@@ -43,24 +64,40 @@ export default function PricesPage() {
   }, [load]);
 
   const retry = useCallback(() => {
-    setState("loading");
-    setError(null);
-    load();
+    if (!hadData.current) {
+      setState("loading");
+      setError(null);
+    }
+    setRefreshing(true);
+    load().finally(() => setRefreshing(false));
   }, [load]);
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <h1 className="title">Prices</h1>
-      <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-        Compute, read like a market: each capability class is a ticker with
-        its last live ask in Zolli Credits, its 24-hour movement, and the
-        observations behind it — external venues retain their own currencies,
-        with ZC equivalents where the API reports them.
-      </p>
+    <PageShell width="wide">
+      <PageHeader
+        title="Prices"
+        description="1 ZC = $1 on this surface."
+        actions={
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={retry}
+            aria-label="Refresh the board"
+          >
+            <ArrowClockwise className={refreshing ? "animate-spin" : ""} />
+          </Button>
+        }
+      />
 
       <div className="mt-6">
-        <PricesPanel state={state} view={view} onRetry={retry} error={error} />
+        <PricesPanel
+          state={state}
+          view={view}
+          onRetry={retry}
+          error={error}
+          stale={stale}
+        />
       </div>
-    </div>
+    </PageShell>
   );
 }

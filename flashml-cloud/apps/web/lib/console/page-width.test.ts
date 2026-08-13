@@ -101,6 +101,17 @@ describe("consoleRouteKey", () => {
     expect(consoleRouteKey("/pools/8f2c-41ab")).toBe("/pools/[poolId]");
   });
 
+  it("replaces a capability class, escaped or not", () => {
+    expect(consoleRouteKey("/market/prices/gpu-80gb-hopper")).toBe(
+      "/market/prices/[klass]"
+    );
+    expect(consoleRouteKey("/market/prices/H100-80G")).toBe(
+      "/market/prices/[klass]"
+    );
+    // The board itself is a different route and keeps its own entry.
+    expect(consoleRouteKey("/market/prices")).toBe("/market/prices");
+  });
+
   it("drops the query string and the hash", () => {
     expect(consoleRouteKey("/pools/join?token=abc")).toBe("/pools/join");
     expect(consoleRouteKey("/activate?pool=8f2c#top")).toBe("/activate");
@@ -144,6 +155,12 @@ describe("widthForConsolePath", () => {
 
   it("answers for a live pathname with its query attached", () => {
     expect(widthForConsolePath("/market/listings?state=open")).toBe("wide");
+  });
+
+  it("gives a class page the same column as the board it came from", () => {
+    expect(widthForConsolePath("/market/prices/gpu-24gb")).toBe(
+      widthForConsolePath("/market/prices")
+    );
   });
 });
 

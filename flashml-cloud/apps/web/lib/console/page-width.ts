@@ -91,6 +91,10 @@ export const CONSOLE_PAGE_WIDTH: Record<string, ConsoleWidth> = {
   // The market tabs share one column so the tab bar (drawn at `wide` by
   // app/(console)/market/layout.tsx) lines up with every page under it.
   "/market/prices": "wide",
+  // One class in full: a price chart beside a value axis, then the table of
+  // every machine offering the class. Same column as the board it is
+  // reached from, so the header does not jump width on the click.
+  "/market/prices/[klass]": "wide",
   "/market/listings": "wide",
   "/market/credits": "wide",
 
@@ -149,9 +153,9 @@ export const CONSOLE_ROUTES_WITHOUT_SHELL: Record<string, string> = {
 
 /** Reduce a live pathname to the route pattern the table is keyed by.
  *
- * Query and hash go first, then a trailing slash, then the two dynamic
- * segments this console has. Pure string work — it does not check that the
- * id names anything real, which is the API's job. */
+ * Query and hash go first, then a trailing slash, then the dynamic segments
+ * this console has. Pure string work — it does not check that the id names
+ * anything real, which is the API's job. */
 export function consoleRouteKey(pathname: string): string {
   const path = pathname.split(/[?#]/, 1)[0];
   const trimmed =
@@ -160,7 +164,8 @@ export function consoleRouteKey(pathname: string): string {
   return trimmed
     .replace(/^\/w\/[^/]+/, "/w/[poolId]")
     .replace(/^\/pools\/(?!join$)[^/]+/, "/pools/[poolId]")
-    .replace(/^\/jobs\/[^/]+/, "/jobs/[jobId]");
+    .replace(/^\/jobs\/[^/]+/, "/jobs/[jobId]")
+    .replace(/^\/market\/prices\/[^/]+/, "/market/prices/[klass]");
 }
 
 /** Which width a console route gets. Falls back to `DEFAULT_CONSOLE_WIDTH`
