@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from fractions import Fraction
 from math import ceil, prod
 
 import yaml
@@ -107,11 +108,17 @@ MAX_SWEEP_COMBINATIONS = 100
 # indefinitely.
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
+#: Decimal ZC per machine-hour to integer millicredits conversion factor.
+#: Evidence: migrations/0018_marketplace.sql:366 (ask_zc_per_hour column comment:
+#: "Millicredits per machine-hour"); apps/web/components/market/ListingsPanel.tsx:792
+#: (parseZcToMzc multiplies by 1000).
+ZC_PER_HOUR_UNIT = 1000
+
 REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "epochs", "sync_every",
                  "local_inputs", "partition", "validators", "reduce",
-                 "allow_partial", "dependencies", "datasets", "python"}
+                 "allow_partial", "dependencies", "datasets", "python", "price"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: The shape a ``python:`` declaration may take: CPython ``major.minor``.
@@ -278,6 +285,12 @@ class FlashmlConfig:
     #: where an interpreter mismatch turns a pinned wheel into a source
     #: build (see PYTHON_PARAM for the live evidence).
     python: str | None = None
+    #: Market opt-in pricing. ``None`` (default) means today's behavior:
+    #: workspace only, free. A price block declares max_per_hour (decimal ZC,
+    #: converted to millicredits), optional objective (cheapest/balanced/fastest,
+    #: default balanced), and optional budget (millicredits, must cover at least
+    #: one hour at the cap).
+    price: dict | None = None
 
     @property
     def is_federated(self) -> bool:
@@ -376,6 +389,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     dependencies = _validate_dependencies(raw.get("dependencies", []))
     datasets = _validate_datasets(raw.get("datasets"))
     python = _validate_python(raw.get("python"))
+    price = _validate_price(raw.get("price")) if raw.get("price") is not None else None
     mode, epochs, sync_every = _validate_mode(raw, version)
 
     return FlashmlConfig(
@@ -398,6 +412,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         dependencies=dependencies,
         datasets=datasets,
         python=python,
+        price=price,
     )
 
 
@@ -859,3 +874,56 @@ def _validate_timeout_seconds(value: object) -> int | None:
             f"{MAX_TIMEOUT_SECONDS} ({MAX_TIMEOUT_SECONDS // 3600}h)"
         )
     return value
+
+
+_OBJECTIVES = ("cheapest", "balanced", "fastest")
+
+
+def _validate_price(value: object) -> dict:
+    """The market opt-in. Absent means today's behavior: workspace only, free.
+
+    ``max_per_hour`` is decimal ZC per machine-hour and converts exactly into
+    the ledger's integer unit; a value the unit cannot represent exactly
+    (more decimal places than the unit carries) is refused rather than
+    rounded — a price the user typed must be the price the bid carries.
+    """
+    raw = _validate_mapping(value, "price")
+    allowed = {"max_per_hour", "objective", "budget"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ConfigError(
+            f"price: unknown key(s) {sorted(unknown)!r}; "
+            f"allowed: {sorted(allowed)!r}"
+        )
+
+    def to_unit(field: str, val: object, *, minimum_units: int) -> int:
+        try:
+            units = Fraction(str(val)) * ZC_PER_HOUR_UNIT
+        except (ValueError, ZeroDivisionError):
+            raise ConfigError(f"price.{field}: not a number: {val!r}")
+        if units.denominator != 1:
+            raise ConfigError(
+                f"price.{field}: {val!r} has more precision than "
+                f"1/{ZC_PER_HOUR_UNIT} ZC"
+            )
+        if units < minimum_units:
+            raise ConfigError(f"price.{field}: must be at least "
+                                   f"{minimum_units}/{ZC_PER_HOUR_UNIT} ZC")
+        return int(units)
+
+    if "max_per_hour" not in raw:
+        raise ConfigError("price: max_per_hour is required")
+    max_zc = to_unit("max_per_hour", raw["max_per_hour"], minimum_units=1)
+
+    objective = raw.get("objective", "balanced")
+    if objective not in _OBJECTIVES:
+        raise ConfigError(
+            f"price.objective: {objective!r} is not one of {_OBJECTIVES}"
+        )
+
+    budget = None
+    if raw.get("budget") is not None:
+        budget = to_unit("budget", raw["budget"], minimum_units=max_zc)
+
+    return {"max_zc_per_hour": max_zc, "objective": objective,
+            "budget_zc": budget}
