@@ -56,3 +56,30 @@ def test_budget_must_cover_at_least_one_hour_at_the_cap():
 def test_unknown_price_keys_are_refused_by_name():
     with pytest.raises(ConfigError, match="rented"):
         _parse("price:\n  max_per_hour: 2.0\n  rented: allow\n")
+
+
+def test_precision_loss_is_refused():
+    """Values with more precision than 1/1000 ZC are refused, not rounded.
+
+    The ledger stores millicredits (integers). A price the user typed must
+    be the price the bid carries — no silent rounding.
+    """
+    # 1.2345 = 1234.5 millicredits (half millicredit, not representable)
+    with pytest.raises(ConfigError, match="has more precision"):
+        _parse("price:\n  max_per_hour: 1.2345\n")
+    # Also refuse 0.0001 (too precise)
+    with pytest.raises(ConfigError, match="has more precision"):
+        _parse("price:\n  max_per_hour: 0.0001\n")
+
+
+def test_exact_millicredit_boundaries_are_accepted():
+    """Values representable as exact millicredits are accepted.
+
+    1.234 = 1234 millicredits (exact)
+    1.001 = 1001 millicredits (exact)
+    """
+    config = _parse("price:\n  max_per_hour: 1.234\n")
+    assert config.price["max_zc_per_hour"] == 1234
+
+    config = _parse("price:\n  max_per_hour: 1.001\n")
+    assert config.price["max_zc_per_hour"] == 1001
