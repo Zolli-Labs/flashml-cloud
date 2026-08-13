@@ -477,7 +477,7 @@ def test_the_attempts_tell_the_recovery_story_with_pseudonyms(make_client, db):
                           "outcome", "duration_s"}
 
 
-def test_the_ledger_publishes_kind_and_timing_and_nothing_else(
+def test_the_ledger_publishes_kind_and_position_and_nothing_else(
     make_client, db, transport
 ):
     client = make_client()
@@ -505,7 +505,13 @@ def test_the_ledger_publishes_kind_and_timing_and_nothing_else(
     ]
     assert [e["seq"] for e in events] == [1, 2, 3]
     for e in events:
-        assert set(e) == {"seq", "kind", "at"}
+        # No timestamp. `seq` already carries ordering and is a position we
+        # compute; an attempt's claimed_at/resolved_at already carry a clock
+        # from our own table. The wire timestamp duplicated both while being
+        # of uncertain origin (`Event.source` names "flashnode"), so it could
+        # only agree — adding nothing — or disagree, and a skewed host clock
+        # rendering an event dated next year discredits the page it sits on.
+        assert set(e) == {"seq", "kind"}
 
 
 def test_an_unrecognised_event_kind_is_dropped_entirely(make_client, db,

@@ -582,23 +582,33 @@ def public_ledger_view(events: Iterable[Any]) -> list[dict[str, Any]]:
     dropped entirely — which is also what makes a coordinator answering
     something unexpected harmless here.
 
-    **``at`` IS A WIRE VALUE, NOT ONE THIS PROCESS ASSIGNS**, and the publish
-    list said otherwise until it was checked. It is tempting to cite
-    ``Event.timestamp``'s ``default_factory=utcnow`` as its provenance, but a
-    ``default_factory`` fires only when the field is ABSENT from the payload
-    — and this function reads ``event["timestamp"]`` off the coordinator's
-    answer, so that default never runs on this path at all. ``Event.source``
-    names ``"flashnode"`` among its origins, so a host-influenced clock cannot
-    be ruled out from this repository.
+    **THE EVENT TIMESTAMP IS DELIBERATELY NOT PUBLISHED**, and the reason is
+    specific to this page rather than a general rule about clocks.
 
-    It is published anyway, and the reason is the AS-16.2 split rather than an
-    exception to it: the two questions are *who assigned this* and *does it
-    re-identify*. A clock fails the first (uncertainly) and passes the second
-    cleanly — it carries no submitter content and identifies nobody. What was
-    actually wrong was the CLAIM, not the field, and the claim is corrected
-    here. Every timestamp on the page that is genuinely ours — an attempt's
-    ``claimed_at`` and ``resolved_at`` — comes from our own table, so a reader
-    who needs a trustworthy clock has one.
+    It is a wire value, not one this process assigns. Citing
+    ``Event.timestamp``'s ``default_factory=utcnow`` as its provenance is
+    wrong twice over: a ``default_factory`` fires only when the field is
+    ABSENT, and this function read it straight off the coordinator's answer,
+    so that default never ran on this path at all. ``Event.source`` names
+    ``"flashnode"`` among its origins, so a host-influenced clock cannot be
+    ruled out from this repository.
+
+    That alone would not disqualify it — a clock carries no submitter content
+    and identifies nobody, so it fails *"who assigned this"* while passing
+    *"does it re-identify"* (AS-16.2). What disqualifies it is that **this
+    page is evidence**, and here the field is redundant with two values of
+    certain provenance: ``seq`` is a dense position computed below, so
+    ordering is already carried by something we assign; and an attempt's
+    ``claimed_at`` / ``resolved_at`` come from our own table, so the page
+    already has a trustworthy clock.
+
+    A value of uncertain provenance that duplicates a value of certain
+    provenance can only ever agree — adding no information — or disagree,
+    discrediting the page. A host with a skewed clock would render an event
+    dated next year, or out of order against the attempt timeline sitting
+    beside it. Not a leak; just visibly wrong, on the surface whose entire
+    job is to be believed. Same shape as a real step number from the wrong
+    author on a slide.
     """
     out: list[dict[str, Any]] = []
     for event in events:
@@ -607,10 +617,5 @@ def public_ledger_view(events: Iterable[Any]) -> list[dict[str, Any]]:
         kind = event.get("type")
         if not isinstance(kind, str) or kind not in PUBLIC_EVENT_TYPES:
             continue
-        at = event.get("timestamp")
-        out.append({
-            "seq": len(out) + 1,
-            "kind": kind,
-            "at": _isoformat(at) if isinstance(at, (str, datetime)) else None,
-        })
+        out.append({"seq": len(out) + 1, "kind": kind})
     return out
