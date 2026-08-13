@@ -116,7 +116,15 @@ export default function ClassPricePage({
                     {row.equivalentText}
                   </span>
                 )}
-                <span className={DELTA_TONE[row.change.direction]}>
+                {/* A derived movement never wears live green/red — the same
+                    rule the board's 24h cell follows. */}
+                <span
+                  className={
+                    row.change.reference
+                      ? "text-muted-foreground"
+                      : DELTA_TONE[row.change.direction]
+                  }
+                >
                   {row.change.text}
                 </span>
               </div>

@@ -150,7 +150,19 @@ def approve_device_code(db: psycopg.Connection, user_code: str, user_id: str) ->
         # impersonation is exactly what the unique constraint is for, and
         # revoking must not open a door into it. Moving a machine between
         # accounts means resetting its identity on the machine itself.
-        if existing["status"] != "revoked" or str(existing["owner_id"]) != str(user_id):
+        #
+        # `deleted` re-enrols on exactly the same terms (migration 0028), and
+        # leaving it out of this branch would have reintroduced the bug the
+        # branch was written to fix, one status along: `delete_machine_row`
+        # keeps the row and its node_id, so without this a machine its owner
+        # deleted could never enrol again — "this machine is already enrolled"
+        # for ever, with no way back short of deleting the agent's identity
+        # file. Deleting your own laptop and later plugging it back in is an
+        # ordinary thing to do.
+        if (
+            existing["status"] not in ("revoked", "deleted")
+            or str(existing["owner_id"]) != str(user_id)
+        ):
             raise NodeAlreadyEnrolled(row["node_id"])
 
         # Reuse the row rather than inserting a second one: contributions and
@@ -207,13 +219,18 @@ def authenticate_machine(db: psycopg.Connection, token: str | None) -> Machine |
     """Look up the machine a token belongs to. Returns None immediately
     for an unknown token or a revoked machine — a revoked machine's token
     must stop working the instant it is revoked, not at its next natural
-    expiry (machine tokens do not expire on their own)."""
+    expiry (machine tokens do not expire on their own).
+
+    ``deleted`` is refused beside ``revoked`` as defence in depth.
+    ``delete_machine_row`` clears ``token_hash``, so no token can reach a
+    tombstone through the lookup above at all; this line is what keeps that
+    true if some later path ever tombstones a row without scrubbing it."""
     if not token:
         return None
     row = dbmod.fetch_machine_by_token_hash(db, hash_machine_token(token))
     if row is None:
         return None
-    if row["status"] == "revoked":
+    if row["status"] in ("revoked", "deleted"):
         return None
     return Machine(
         id=row["id"],
@@ -233,3 +250,56 @@ def revoke_machine(db: psycopg.Connection, machine_id: str, user_id: str) -> boo
     owned by someone else, so a caller cannot use this to enumerate other
     users' machine ids."""
     return dbmod.revoke_machine_row(db, machine_id, user_id)
+
+
+def delete_machine(db: psycopg.Connection, machine_id: str, user_id: str) -> bool:
+    """Retire an already-revoked machine for good. Total and idempotent.
+
+    Two things must stop being true, and they are independent — the same
+    shape, and the same argument, as ``sandbox_identity.revoke_sandbox_machine``:
+
+    * the machine must stop being a member of anything (every
+      ``machine_pools`` row dropped, so a workspace is not left listing a
+      machine its owner has retired — ``list_pool_machines`` deliberately
+      shows revoked machines to teammates, and a deleted one is not a revoked
+      one);
+    * the row must become a tombstone with no device detail on it
+      (``db.delete_machine_row``).
+
+    Both in ONE transaction. A crash between them would leave a machine that
+    is gone from its owner's fleet and still bound to a pool, which is the
+    half-deleted state this route exists to make unrepresentable.
+
+    **Revoked first, always.** ``delete_machine_row``'s ``where`` clause is
+    the gate, not this function: deleting is tidying, revoking is the security
+    action, and folding the second into the first would let one click on a
+    console list kill a working machine's credential.
+
+    Returns False — never an exception, never a distinguishable answer — for
+    an unknown machine, someone else's, one that is still live, and one
+    already deleted. The caller that needs to tell "still live" from "unknown"
+    (the route, for its 409) reads the row first with
+    ``db.fetch_machine_for_owner``; nothing here will tell it.
+    """
+    machine_id = str(machine_id)
+    user_id = str(user_id)
+
+    with db.transaction():
+        # The tombstone runs FIRST, and the unbinds only if it took. This is
+        # the one place the order differs from ``revoke_sandbox_machine``,
+        # which unbinds on every call including ones that revoke nothing —
+        # there the desired end state is always "unbound", here it is not. A
+        # call that refuses (still live, not yours, already deleted) must
+        # change nothing at all, and unbinding first would quietly drop a
+        # working machine's workspace bindings on its way to answering False.
+        # The ``where`` clause carries ``owner_id``, so no row this caller
+        # cannot see is ever touched.
+        if not dbmod.delete_machine_row(db, machine_id, user_id):
+            return False
+
+        for bound_pool in dbmod.pool_ids_bound_to_machine(db, machine_id):
+            dbmod.unbind_machine_pool(
+                db, machine_id=machine_id, pool_id=bound_pool
+            )
+
+        return True

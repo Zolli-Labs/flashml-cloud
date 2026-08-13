@@ -126,7 +126,17 @@ function ContributionsSummaryView({
               key={m.machineId}
               className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-xs"
             >
-              <span className="min-w-0 truncate font-mono">
+              {/* Mono for a hostname, which is an id; plain and muted for
+                  the two substitutes, which are sentences about a machine
+                  ("Deleted machine", "No hostname reported") and would read
+                  as a host actually called that in the same face. */}
+              <span
+                className={
+                  m.hostnameKnown
+                    ? "min-w-0 truncate font-mono"
+                    : "min-w-0 truncate text-muted-foreground"
+                }
+              >
                 {m.hostnameLabel}
               </span>
               <span className="flex shrink-0 items-center gap-3 text-muted-foreground">

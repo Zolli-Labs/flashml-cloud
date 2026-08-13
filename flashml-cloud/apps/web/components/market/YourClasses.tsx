@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-import type { HostClassGroup } from "@/lib/market/board";
+import { historyStamp, type HostClassGroup } from "@/lib/market/board";
 import { PriceHistory } from "./PriceHistory";
 import { SourceChip } from "./SourceChip";
 
@@ -20,7 +20,10 @@ import { SourceChip } from "./SourceChip";
  * the line itself rather than only on the chart's caption. A generated
  * vendor-band series moves like a real one, and "cheaper than yesterday
  * ▼ 4.1%" read off it is a sentence about our market that our market never
- * said. The badge travels with the sentence.
+ * said. The badge travels with the sentence — and for a class priced off a
+ * donor card it names the donor, so a host whose rig sits in `cpu-large`
+ * gets a verdict, a chart and the card they came from instead of the words
+ * "no history yet".
  *
  * NAMED FOR WHAT IT LISTS. The section heading says machines because that
  * is what a host recognises, but a card is a CLASS — and
@@ -88,6 +91,10 @@ export function YourClasses({
  * costs, which way it moved, and the series behind that. */
 function ClassCard({ group }: { group: HostClassGroup }) {
   const { row, verdict } = group;
+  // The stamp for the SERIES, which is not always the stamp for the price:
+  // one live observation prices the class live and still leaves the chart
+  // borrowing a line. `historyStamp` is null when the series is ours.
+  const seriesStamp = historyStamp(group.history);
   return (
     <div className="panel px-4 py-3.5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -128,10 +135,8 @@ function ClassCard({ group }: { group: HostClassGroup }) {
           >
             {verdict.text}
           </span>
-          {verdict.reference && (
-            <span className="inline-flex shrink-0 items-center rounded-full border border-dashed border-border px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-muted-foreground">
-              REFERENCE
-            </span>
+          {verdict.reference && seriesStamp && (
+            <SourceChip source={seriesStamp} />
           )}
         </span>
       </div>

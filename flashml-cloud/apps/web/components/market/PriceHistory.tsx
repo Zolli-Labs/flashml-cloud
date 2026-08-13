@@ -2,6 +2,7 @@
 
 import { zcAmountText, type PriceHistoryData } from "@/lib/market/board";
 import { REFERENCE_META } from "@/lib/market/reference";
+import { SourceChip } from "./SourceChip";
 import { Sparkline } from "./Sparkline";
 
 /** One class's price over time, drawn from whichever series exists.
@@ -11,12 +12,15 @@ import { Sparkline } from "./Sparkline";
  * axis engine, a tooltip layer and a theme of its own, none of which this
  * page wants and all of which would have to be argued back out.
  *
- * THE TWO SERIES DO NOT LOOK ALIKE, and that is the point. Our own
+ * OURS AND NOT-OURS DO NOT LOOK ALIKE, and that is the point. Our own
  * observations are a solid brand-coloured line with the last point marked.
- * The seed is a muted dashed line under a caption that names it. Nothing
- * renders a series without saying which kind it is, and with neither series
- * present the component says "no history yet" over `Sparkline`'s dashed
- * baseline rather than drawing a flat line at some invented level.
+ * Anything borrowed is a muted dashed line under a caption that names what
+ * was borrowed — the seed's own band for a vendor SKU, and for a derived
+ * class the donor card, by name, because that line is literally another
+ * product's history drawn under this class's heading. Nothing renders a
+ * series without saying which kind it is, and with no series at all the
+ * component says "no history yet" over `Sparkline`'s dashed baseline rather
+ * than drawing a flat line at some invented level.
  *
  * The plot is `preserveAspectRatio="none"` in a 0–100 box, so it stretches
  * to whatever width the column gives it; every stroke carries
@@ -97,7 +101,9 @@ export function PriceHistory({
               aria-label={
                 live
                   ? "observed best ask over time"
-                  : "reference price over time, generated from vendor bands"
+                  : data.source === "derived"
+                    ? "reference card's price over time, standing in for this class"
+                    : "reference price over time, generated from vendor bands"
               }
             >
               {[0, 50, 100].map((y) => (
@@ -153,11 +159,20 @@ export function PriceHistory({
 
       {!live && (
         <figcaption className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-          <span className="inline-flex items-center rounded-full border border-dashed border-border px-1.5 py-0.5 font-mono text-[10px] tracking-wide">
-            REFERENCE
-          </span>
+          <SourceChip
+            source={
+              data.source === "derived"
+                ? { kind: "derived", note: data.note }
+                : { kind: "reference" }
+            }
+          />
+          {/* The donor sentence is the caption for a derived chart, not a
+              tooltip on it: this line IS somebody else's card's history, and
+              a reader who cannot see whose is reading an unlabelled chart. */}
           <span>
-            generated {REFERENCE_META.generatedAt} inside observed vendor bands
+            {data.source === "derived"
+              ? data.note
+              : `generated ${REFERENCE_META.generatedAt} inside observed vendor bands`}
           </span>
         </figcaption>
       )}

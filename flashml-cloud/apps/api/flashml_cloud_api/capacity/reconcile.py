@@ -723,7 +723,10 @@ def leased_machine_has_work_in_flight(
                where m.id = %(machine_id)s
                  and m.owner_id = %(owner_id)s
                  and m.lifecycle = %(leased)s
-                 and m.status <> 'revoked'
+                 -- `deleted` (migration 0028) is a credential deader than
+                 -- revoked -- the tombstone has no token_hash left at all --
+                 -- so it reads as "cannot be working" exactly as revoked does.
+                 and m.status not in ('revoked', 'deleted')
             )
             select exists (
                      select 1 from lease rc where {WORK_IN_FLIGHT_SQL}
@@ -899,8 +902,16 @@ def unreleased_rows(
                          -- releasing back OUT of the sweep until it aged into
                          -- a window below -- the one thing a failed destroy
                          -- must not do.
+                         --
+                         -- `deleted` (migration 0028) is the same fact and
+                         -- must fire the same branch: it is only ever reached
+                         -- FROM revoked, so leaving it out would mean an owner
+                         -- who revoked and then deleted a rental within one
+                         -- sweep interval handed the row back its allowance
+                         -- and we kept paying for hardware whose token is
+                         -- already dead.
                          when r.machine_row_id is not null
-                              and r.machine_status = 'revoked'
+                              and r.machine_status in ('revoked', 'deleted')
                            then 'REVOKED_CREDENTIAL'
                          -- THE COST BACKSTOP, first half: the one job this
                          -- rental was opened for has stopped. Nothing above
@@ -1125,7 +1136,12 @@ def finished_rentals_with_live_credentials(
               from public.rented_capacity rc
               join public.machines m on m.id = rc.machine_id
              where rc.state in ('RELEASED', 'FAILED')
-               and (m.status <> 'revoked'
+               -- `deleted` counts as revoked here (migration 0028), and it
+               -- has to: a tombstone cannot be revoked again -- every revoke
+               -- funnels through `revoke_machine_row`, which refuses one --
+               -- so selecting it would return the same row on every pass for
+               -- ever, retrying a revoke that can never report success.
+               and (m.status not in ('revoked', 'deleted')
                     or exists (select 1 from public.machine_pools mp
                                 where mp.machine_id = m.id))
              order by coalesce(rc.released_at, rc.created_at)
@@ -1212,7 +1228,10 @@ def orphaned_leases(
                 from public.machines m
                where m.lifecycle = %(leased)s
                  and m.created_at < now() - make_interval(secs => %(boot)s)
-                 and (m.status <> 'revoked'
+                 -- `deleted` counts as revoked, same as next door: a
+                 -- tombstone's token is gone and no revoke can ever report
+                 -- success on it again (migration 0028).
+                 and (m.status not in ('revoked', 'deleted')
                       or exists (select 1 from public.machine_pools mp
                                   where mp.machine_id = m.id))
                  and not exists (

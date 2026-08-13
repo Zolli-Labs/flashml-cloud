@@ -4394,6 +4394,88 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown machine")
         return {"machine_id": machine_id, "status": "revoked"}
 
+    @app.delete("/v1alpha1/machines/{machine_id}", tags=["browser"])
+    async def delete_machine_route(
+        machine_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Retire a machine you have already revoked. Terminal.
+
+        **Revoked only, and the refusal is a 409 that says so.** Revoking is
+        the security action — it kills the credential, it is reversible by
+        re-enrolling, and for a rented machine it has a mid-task guard of its
+        own one route up. Deleting is tidying. Folding the two together would
+        put "kill this machine's credential" behind a button labelled Delete
+        in a list of mostly-idle laptops, and the rented case would lose that
+        guard entirely. So the order is fixed: revoke, then delete.
+
+        **The row is not removed.** Six tables reference
+        ``public.machines(id)`` with ``on delete cascade``, two of which are
+        the accepted-work credit ledger and the attempt evidence trail, so a
+        real ``DELETE`` here would make somebody's contribution total fall
+        because they tidied their fleet — hard rules 3 and 4, and the exact
+        outcome ``db.contributions_for_owner`` warned about. What goes is the
+        DEVICE DETAIL, which is what the owner is actually asking to be rid
+        of: ``db.delete_machine_row`` scrubs name, platform, capabilities,
+        token prefix and last-seen in the same UPDATE that tombstones the row,
+        ``list_machines_for_owner`` stops returning it, and
+        ``enrolment.delete_machine`` drops its workspace bindings so no
+        teammate's fleet view keeps it either.
+
+        **Any open ask goes with it.** A withdrawn machine that leaves a
+        standing offer on the book is a listing nothing can ever fill; the
+        listings are withdrawn through ``marketplace.withdraw_listing``, the
+        same path the console's own withdraw button uses, so each one records
+        its price observation instead of vanishing from the series without a
+        cause. All of it — withdrawals, unbinds, tombstone — commits or rolls
+        back as one.
+
+        404 for someone else's machine, an unknown id, a non-uuid, and a
+        second delete alike: the same fold every machines route keeps, so this
+        cannot be used to learn which ids are real, and a repeat is not
+        reported as a fresh success.
+        """
+        try:
+            machine = dbmod.fetch_machine_for_owner(db, machine_id, user_id)
+        except psycopg.errors.InvalidTextRepresentation:
+            # Not even a uuid. Same answer as one that simply is not yours.
+            machine = None
+        if machine is None or machine["status"] == "deleted":
+            raise HTTPException(status_code=404, detail="unknown machine")
+        if machine["status"] != "revoked":
+            raise HTTPException(
+                status_code=409,
+                detail="this machine is still enrolled — revoke it first, "
+                       "which kills its credential, and then it can be "
+                       "deleted",
+            )
+
+        with db.transaction():
+            # Read through the owner's own listings rather than a query keyed
+            # on the machine: it is the same owner-scoped read the market page
+            # makes, so a listing this caller cannot see cannot be withdrawn
+            # here either. `open` and `paused` are the two states that still
+            # occupy the book; `withdrawn` is already terminal.
+            for listing in marketplacemod.listings_for_owner(db, user_id):
+                if str(listing["machine_id"]) != str(machine["id"]):
+                    continue
+                if listing["state"] not in ("open", "paused"):
+                    continue
+                marketplacemod.withdraw_listing(
+                    db,
+                    listing_id=str(listing["id"]),
+                    owner_id=user_id,
+                    from_state=str(listing["state"]),
+                )
+            if not enrolment.delete_machine(db, machine_id, user_id):
+                # Lost a race with a concurrent delete (or with a
+                # re-enrolment that moved the row out of `revoked`). Nothing
+                # above this line survives the rollback.
+                raise HTTPException(status_code=404, detail="unknown machine")
+
+        return {"machine_id": machine_id, "status": "deleted"}
+
     @app.get("/v1alpha1/cli-credentials", tags=["browser"])
     async def list_cli_credentials(
         user_id: str = Depends(current_user),

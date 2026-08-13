@@ -19,6 +19,11 @@ import {
   groupTradeoffRows,
   type TradeoffCollapsedItem,
 } from "@/lib/tradeoff-row-groups";
+import { Disclosure } from "@/components/jobs/Disclosure";
+import {
+  NO_DURATION_YET,
+  tradeoffTableIsUnobserved,
+} from "@/components/jobs/placement-summary";
 
 /**
  * What each additional rented machine buys this job's finish time, and when
@@ -125,40 +130,48 @@ export function TradeoffCard({
 
       <div className="mt-4 border-t border-border pt-4">
         <p className="label-caps">What each machine buys</p>
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full min-w-[560px] text-left">
-            <thead>
-              <tr className="border-b border-border">
-                {[
-                  "Fleet",
-                  "Finishes in",
-                  "Saved",
-                  "ZC",
-                  "USD",
-                  "Total (ZC+USD)",
-                  "Verdict",
-                ].map((h) => (
-                  <th key={h} className="label-caps px-3 py-2 font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <TradeoffTableBody rows={panel.rows} />
-          </table>
-        </div>
-
-        <ul className="mt-3 space-y-1.5">
-          {distinctVerdicts(panel.rows).map((r) => (
-            <li
-              key={r.adviceCode}
-              className="max-w-prose text-xs leading-relaxed text-muted-foreground"
+        {/* Every buying figure on the curve missing is one fact, and a
+            seven-column table repeats it once per cell. It is said once
+            instead — and the table stays one click away, because the fleet
+            sizes and the verdicts in it are arithmetic over the task count
+            and are true with or without a measured duration. */}
+        {tradeoffTableIsUnobserved(panel.rows) ? (
+          <>
+            <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-muted-foreground">
+              {NO_DURATION_YET}
+            </p>
+            <Disclosure
+              className="mt-2"
+              label="the table anyway — the fleet sizes and verdicts are real"
             >
-              <span className="font-medium text-foreground">{r.headline}</span>{" "}
-              — {r.meaning}
-            </li>
-          ))}
-        </ul>
+              <CurveTable rows={panel.rows} />
+            </Disclosure>
+          </>
+        ) : (
+          <CurveTable rows={panel.rows} />
+        )}
+
+        {/* The definitions, once, behind a caret. They are the same
+            paragraphs for every job that reaches this verdict, a reader
+            learns them once, and each row's own chip carries its meaning as
+            a `title` for the reader who wants it in place. */}
+        {panel.rows.length > 0 && (
+          <Disclosure className="mt-3" label="What the verdicts mean">
+            <ul className="space-y-1.5">
+              {distinctVerdicts(panel.rows).map((r) => (
+                <li
+                  key={r.adviceCode}
+                  className="max-w-prose text-xs leading-relaxed text-muted-foreground"
+                >
+                  <span className="font-medium text-foreground">
+                    {r.headline}
+                  </span>{" "}
+                  — {r.meaning}
+                </li>
+              ))}
+            </ul>
+          </Disclosure>
+        )}
 
         {/* The sentence a buyer takes away, and the one place this card is
             able to say something the route did not.
@@ -280,6 +293,36 @@ function Renting({ panel }: { panel: TradeoffPanel }) {
   );
 }
 
+/** The seven columns, extracted so the collapsed and uncollapsed branches
+ * above render the same table rather than two tables somebody has to keep in
+ * step by hand. */
+function CurveTable({ rows }: { rows: TradeoffRow[] }) {
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full min-w-[560px] text-left">
+        <thead>
+          <tr className="border-b border-border">
+            {[
+              "Fleet",
+              "Finishes in",
+              "Saved",
+              "ZC",
+              "USD",
+              "Total (ZC+USD)",
+              "Verdict",
+            ].map((h) => (
+              <th key={h} className="label-caps px-3 py-2 font-medium">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <TradeoffTableBody rows={rows} />
+      </table>
+    </div>
+  );
+}
+
 /** The curve, grouped by `lib/tradeoff-row-groups.ts` so a long sweep stays
  * readable without losing a single row. All state here is which collapsed
  * groups are expanded — a display concern, not a decision, so it lives as
@@ -381,7 +424,12 @@ function TradeoffTableRow({
         {r.totalUsdValue == null ? NOT_OBSERVED : r.totalUsdValue.toFixed(4)}
       </td>
       <td className="px-3 py-2.5 text-xs">
+        {/* The verdict's meaning travels with the chip. The legend below the
+            table is behind a disclosure now, and a reader who wants the
+            definition of the row in front of them should not have to go
+            find it. */}
         <span
+          title={r.meaning}
           className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${TONE_STYLES[r.tone]}`}
         >
           <ToneIcon tone={r.tone} /> {r.headline}
@@ -423,7 +471,11 @@ function CollapsedRowsControl({
       aria-expanded={false}
       className="cursor-pointer transition-colors hover:bg-surface-2"
     >
-      <td colSpan={7} className="px-3 py-2 text-xs text-muted-foreground">
+      <td
+        colSpan={7}
+        title={first.meaning}
+        className="px-3 py-2 text-xs text-muted-foreground"
+      >
         <span className="inline-flex items-center gap-1.5 font-mono">
           <CaretRight className="h-3 w-3 shrink-0" />
           {count} more fleet size{count === 1 ? "" : "s"} ({first.totalSlots}-

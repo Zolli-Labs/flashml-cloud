@@ -245,6 +245,16 @@ export interface RevokeMachineResult {
   status: string;
 }
 
+/** `DELETE /v1alpha1/machines/{id}`'s 200. Same two fields as
+ * `RevokeMachineResult` and deliberately its own type: these are two
+ * different lifecycle steps in a fixed order, and a shared name would invite
+ * a caller to treat the answers as interchangeable when only one of them is
+ * terminal. */
+export interface DeleteMachineResult {
+  machine_id: string;
+  status: string;
+}
+
 export type JobState =
   | "PENDING"
   | "SUBMITTED"
@@ -1087,6 +1097,36 @@ export function revokeMachine(machineId: string): Promise<RevokeMachineResult> {
   );
 }
 
+/** `DELETE /v1alpha1/machines/{id}` — retire a machine that has already been
+ * revoked, so it stops taking up a row in "My machines".
+ *
+ * **Revoked only.** The API answers 409 for a machine that is still
+ * enrolled, because revoking is the security action (it kills the
+ * credential) and deleting is tidying; folding them together would put "kill
+ * this credential" behind a button labelled Delete. The console must
+ * therefore only offer this on a revoked row, which makes the 409 a
+ * disagreement between our list and the server's rather than a state a
+ * reader can reach on purpose.
+ *
+ * **Nothing is erased.** The row is tombstoned and every column describing
+ * the device is scrubbed; the accepted-work credit it earned stays counted,
+ * because `contributions` cascades on the machine id and a total that FALLS
+ * when somebody tidies their fleet is indistinguishable from a bug. What the
+ * caller gets back is the fact that it happened, not a smaller fleet than
+ * the next `listMachines()` will report — a deleted machine simply stops
+ * appearing there, so refetch rather than editing the list in place.
+ *
+ * **404 means "already gone", not "something went wrong".** The route folds
+ * an unknown id, someone else's machine and a second delete into one answer
+ * so the ids cannot be enumerated. A caller that just read the row it is
+ * deleting should treat `NotFound` as a stale list and refetch. */
+export function deleteMachine(machineId: string): Promise<DeleteMachineResult> {
+  return request<DeleteMachineResult>(
+    `/v1alpha1/machines/${encodeURIComponent(machineId)}`,
+    { method: "DELETE" }
+  );
+}
+
 export function listCliCredentials(): Promise<CliCredential[]> {
   return request<CliCredential[]>("/v1alpha1/cli-credentials");
 }
@@ -1699,6 +1739,56 @@ export function submitFromRepo(
   if (ref) body.ref = ref;
   if (pool) body.pool = pool;
   return request<SubmitFromRepoResult>("/v1alpha1/jobs/from-repo", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** `POST /v1alpha1/preflight`'s answer — a verdict about a workload, not a
+ * status about a request.
+ *
+ * `ok` is `not any(level == "error")`, the same predicate `from-repo`
+ * refuses on. It is NOT a promise that submit succeeds: datasets are
+ * resolved, the fleet is measured and the spec compiled at submit time, and
+ * none of those can be answered without doing something.
+ *
+ * `config` is the parsed, normalized config back — `null` when the YAML did
+ * not parse, which is a different statement from an empty object and is why
+ * this is nullable rather than defaulted. Typed as an opaque record: it
+ * mirrors a Python dataclass this repo does not own, and spelling its fields
+ * out here would make an upstream addition a build break for a value the
+ * console only ever reads a couple of keys off. */
+export interface PreflightVerdict {
+  ok: boolean;
+  findings: PreflightFinding[];
+  config: Record<string, unknown> | null;
+}
+
+/** `POST /v1alpha1/preflight` — validate a `flashml.yaml` without pushing
+ * anything.
+ *
+ * **IT CREATES NOTHING.** No job row, no artifact, no coordinator call, no
+ * storage write, and it fetches nothing the caller names. That property is
+ * the whole reason a route this cheap to call is safe to issue from a
+ * textarea's button.
+ *
+ * A BAD CONFIG IS A 200, not a 4xx, and callers must not treat it as a
+ * failure: the caller asked for a verdict and got one. Only a malformed
+ * *request* errors — an absent or non-string config is 400, an unadmitted
+ * caller 403, a pool they cannot see 404 — which is why this function
+ * resolves for `ok: false` and rejects only for the request being wrong.
+ *
+ * `pool` rides in the body only when set, exactly like `submitFromRepo`'s.
+ * Nothing in preflight reads it; it is sent so that the API can refuse a
+ * workspace the caller cannot use, rather than blessing a config against a
+ * workspace they were never going to run it in. */
+export function preflightConfig(
+  config: string,
+  pool?: string
+): Promise<PreflightVerdict> {
+  const body: { config: string; pool?: string } = { config };
+  if (pool) body.pool = pool;
+  return request<PreflightVerdict>("/v1alpha1/preflight", {
     method: "POST",
     body: JSON.stringify(body),
   });
