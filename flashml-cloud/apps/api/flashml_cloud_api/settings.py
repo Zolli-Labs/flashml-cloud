@@ -335,6 +335,31 @@ class Settings:
     #: nothing and is therefore refused (it falls back to this default).
     rented_usd_window_hours: float = 24.0
 
+    # --- Rented capacity teardown ---------------------------------------
+    #
+    #: Whether the rented-capacity reconciler may DESTROY machines, or only
+    #: report the ones it would have destroyed. **False by default, which is
+    #: the disarmed setting**, and it is the one deliberate asymmetry in this
+    #: file: every other rented-capacity default is chosen to bound spend,
+    #: and this one is chosen to protect a running job.
+    #:
+    #: The reason is that the two mistakes are not the same size. An armed
+    #: sweep that is wrong destroys a machine three hours into a training run
+    #: and cannot undo it; the evidence that it was wrong arrives afterwards,
+    #: from a user whose job vanished. A disarmed sweep that is wrong keeps
+    #: paying — visibly, in a log line naming every row and the reason it was
+    #: selected, at a rate the ceilings above already bound.
+    #:
+    #: So: read the reports, satisfy yourself that the rows named in them are
+    #: really finished, then set `RENTED_CAPACITY_DESTROY=true`. Leaving it
+    #: false for ever is not a safe steady state — it means the only thing
+    #: that stops a rental is a human in the venue's console.
+    #:
+    #: It does NOT gate the sweep itself. A disarmed deployment still lists
+    #: what is billing on every pass, which is the whole point of running it
+    #: before arming it.
+    rented_capacity_destroy: bool = False
+
     @property
     def fc_sandbox_configured(self) -> bool:
         """All four present. All-or-nothing, like the GitHub App.
@@ -482,6 +507,15 @@ class Settings:
         )
         rented_usd_window_hours = _float_env("RENTED_USD_WINDOW_HOURS", 24.0)
 
+        # Opt IN, not opt out — the opposite polarity to `FLASHML_REQUIRE_AUTH`
+        # above and parsed the same way. Anything that is not an affirmative
+        # word leaves the sweep reporting rather than destroying, including a
+        # typo, an empty string, and the variable being absent. A flag whose
+        # misspelling arms a destructive loop is a flag pointed the wrong way.
+        rented_capacity_destroy = os.environ.get(
+            "RENTED_CAPACITY_DESTROY", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+
         settings = cls(
             supabase_url=supabase_url,
             supabase_jwt_secret=supabase_jwt_secret,
@@ -513,6 +547,7 @@ class Settings:
             rented_usd_per_acquisition_max=rented_usd_per_acquisition_max,
             rented_usd_window_max=rented_usd_window_max,
             rented_usd_window_hours=rented_usd_window_hours,
+            rented_capacity_destroy=rented_capacity_destroy,
         )
 
         if require_auth:

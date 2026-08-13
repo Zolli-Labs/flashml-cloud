@@ -1456,6 +1456,19 @@ def test_heartbeat_records_last_seen_so_the_console_can_show_online(client, mach
     A host who has just enrolled and started their agent sees a dead-looking
     dashboard, which reads as "my machine isn't working" at exactly the moment
     they are deciding whether this thing is worth running.
+
+    **AND SINCE THE RENTED-CAPACITY RECONCILER, THIS TEST GUARDS MONEY TOO.**
+    That is not what it was written for and it is now the more expensive half.
+    `capacity/reconcile.py` decides whether to DESTROY a rented GPU by reading
+    this column: quiet for `quiet_after_s` (15 minutes) is swept, and never
+    seen at all by `boot_grace_s` (60 minutes) is swept. The route below is the
+    only production writer, inside a `try/except` that logs and continues.
+
+    So if this test ever fails, the console showing "Offline" is the cheap
+    symptom. The expensive one is that every rented machine looks dead to the
+    reconciler and is destroyed mid-job, silently, on every rental — and the
+    correct response is to fix the write, never to relax the assertion or
+    delete the test because "it is only a display column". It is not.
     """
     # Establish the precondition rather than assume it: the machine fixture is
     # shared, so an earlier test in this module may already have heartbeated.

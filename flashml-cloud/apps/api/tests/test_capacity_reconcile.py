@@ -49,6 +49,7 @@ from flashml_cloud_api.capacity.reconcile import (
     finished_rentals_with_live_credentials,
     reconcile_rented,
     release_capacity,
+    teardown_plan,
     unreleased_rows,
 )
 from test_jobs_from_repo import db  # noqa: F401 - fixture
@@ -251,6 +252,7 @@ def _insert_row(
     machine_id=None,
     age_s=OLD,
     usd_per_hour=0.5,
+    job_id="job-sweep",
 ):
     """One rented_capacity row, aged, without going through the venue."""
     with db.cursor() as cur:
@@ -259,16 +261,82 @@ def _insert_row(
             insert into public.rented_capacity
                 (venue_id, state, owner_id, pool_id, job_id, provider_handle,
                  machine_id, usd_per_hour, created_at, acquired_at)
-            values (%s, %s, %s, %s, 'job-sweep', %s, %s, %s,
+            values (%s, %s, %s, %s, %s, %s, %s, %s,
                     now() - make_interval(secs => %s),
                     case when %s = 'REQUESTED' then null
                          else now() - make_interval(secs => %s) end)
             returning id
             """,
-            (venue_id, state, str(owner_id), str(pool_id), handle, machine_id,
-             usd_per_hour, float(age_s), state, float(age_s)),
+            (venue_id, state, str(owner_id), str(pool_id), job_id, handle,
+             machine_id, usd_per_hour, float(age_s), state, float(age_s)),
         )
         return str(cur.fetchone()["id"])
+
+
+def _job(
+    db,  # noqa: F811
+    owner_id,
+    *,
+    job_id=None,
+    status="SUCCEEDED",
+    finished_s=OLD,
+):
+    """A ``public.jobs`` row: what the sweep reads to learn a job is over.
+
+    ``finished_s`` is seconds ago, or ``None`` for a job with no finish time
+    recorded — which is what an unfinished one looks like.
+    """
+    job_id = job_id or f"job-{uuid.uuid4().hex[:12]}"
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.jobs (id, owner_id, status, finished_at)
+            values (%s, %s, %s,
+                    case when %s::float8 is null then null
+                         else now() - make_interval(secs => %s) end)
+            """,
+            (job_id, str(owner_id), status,
+             None if finished_s is None else float(finished_s),
+             None if finished_s is None else float(finished_s)),
+        )
+    return job_id
+
+
+def _attempt(
+    db,  # noqa: F811
+    machine_id,
+    *,
+    job_id="job-sweep",
+    claimed_s,
+    resolved=True,
+    deadline_s=None,
+):
+    """One row in the attempt ledger — the record of a lease this machine took.
+
+    ``resolved`` is what the completion hop writes. ``deadline_s`` is seconds
+    ago (negative for a deadline still in the future), or ``None`` for an
+    attempt whose deadline was never recorded — the pre-0015 shape, which the
+    sweep must treat as work in flight for ever.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.attempts
+                (lease_id, machine_id, job_id, task_id, claimed_at,
+                 resolved_at, outcome, lease_deadline)
+            values (%s, %s, %s, 't1',
+                    now() - make_interval(secs => %s),
+                    case when %s then now() - make_interval(secs => %s)
+                         else null end,
+                    case when %s then 'accepted' else null end,
+                    case when %s::float8 is null then null
+                         else now() - make_interval(secs => %s) end)
+            """,
+            (f"lease-{uuid.uuid4().hex[:12]}", machine_id, job_id,
+             float(claimed_s), resolved, float(claimed_s), resolved,
+             None if deadline_s is None else float(deadline_s),
+             None if deadline_s is None else float(deadline_s)),
+        )
 
 
 def _aged(db, rid, seconds=OLD):  # noqa: F811
@@ -431,6 +499,17 @@ async def test_a_heartbeating_machine_is_never_swept_however_old_the_rental(
     perfectly.
 
     Same row, twice. Only the heartbeat changes.
+
+    THE ATTEMPT ROW IS NEW AND IT IS NOT SCAFFOLDING. It is what "three hours
+    into a training run" actually looks like in this database: the machine
+    claimed a lease and has not finished it. The cost backstop
+    (``IDLE``) reads exactly that, because a heartbeat cannot distinguish a
+    machine mid-run from one that finished an hour ago and kept saying hello —
+    ``flashnode`` does the second, which is the whole reason liveness alone was
+    never a bound on money. Delete the attempt and this row IS swept, correctly:
+    a machine past its boot allowance that has never claimed anything and holds
+    nothing in flight is being paid for and doing nothing. See
+    ``test_a_machine_that_is_never_given_work_does_not_bill_for_ever``.
     """
     venue = _Venue()
     rid = await acquire_for_job(
@@ -438,6 +517,7 @@ async def test_a_heartbeating_machine_is_never_swept_however_old_the_rental(
     )
     machine_id = str(_row(db, rid)["machine_id"])
     _aged(db, rid)  # three hours in
+    _attempt(db, machine_id, claimed_s=OLD, resolved=False, deadline_s=-60.0)
 
     _seen(db, machine_id, 5.0)  # ...and talking to us five seconds ago
     assert await reconcile_rented(db, {"fake": venue}) == []
@@ -539,16 +619,27 @@ def test_the_windows_are_not_a_poll_interval(db, an_owner, a_pool):  # noqa: F81
     settlement", measured from acquisition, sitting beside a docstring line
     about sweeping every few minutes. Someone wiring a loop sets that to 300.
     Here, 300 seconds is passed as every window at once — the worst a confused
-    caller could do — and a machine that heartbeated ten seconds ago is still
-    not selected, because no window governs a live machine.
+    caller could do — and a machine that heartbeated ten seconds ago, holding
+    a lease it has not finished, is still not selected.
+
+    What the assertion means changed when the cost backstop landed, and it is
+    worth saying which half moved. It used to be "no window governs a live
+    machine"; that is no longer true, because a live machine that has finished
+    its work is precisely what ``IDLE`` and ``JOB_FINISHED`` are for. What
+    survives is the part that was ever load-bearing: **no window, however
+    badly misconfigured, destroys a machine that is doing something.** Work in
+    flight is not a duration and cannot be shortened by typing a small number
+    into a variable.
     """
     machine_id = _machine(db, an_owner, status="active", last_seen_s=10.0)
     rid = _insert_row(
         db, owner_id=an_owner, pool_id=a_pool, handle="h-live",
         machine_id=machine_id, age_s=OLD,
     )
+    _attempt(db, machine_id, claimed_s=OLD, resolved=False, deadline_s=-60.0)
     assert rid not in _swept(
         db, quiet_after_s=300.0, boot_grace_s=300.0, abandoned_after_s=300.0,
+        idle_after_s=300.0,
     )
 
 
@@ -1028,6 +1119,279 @@ def test_a_bound_pool_alone_is_enough_to_come_back_for(
     assert rid in {
         str(r["id"]) for r in finished_rentals_with_live_credentials(db)
     }
+
+
+# ---------------------------------------------------------------------------
+# the COST backstop: stopping a rental that WORKED
+#
+# Everything above this line stops a rental that broke. A rental that boots,
+# runs its job and finishes is invisible to all of it — flashnode keeps
+# heartbeating after the work is done, so the machine looks alive for ever and
+# bills for ever. These are the branches that stop it, and the tests that keep
+# them from stopping a machine that is still working.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_rental_whose_job_is_over_is_swept_though_it_is_heartbeating(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The test the cost backstop exists for.**
+
+    Same shape as ``test_a_heartbeating_machine_is_never_swept_however_old_the
+    _rental`` and the opposite answer, because one fact changed: the job is
+    over. Liveness says this machine is fine — it is, it is heartbeating — and
+    liveness is exactly the wrong question once there is no work left.
+    """
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    job_id = _job(db, an_owner, status="RUNNING", finished_s=None)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=machine_id, age_s=YOUNG, job_id=job_id,
+    )
+    assert await reconcile_rented(db, {"fake": venue}) == []
+
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.jobs set status = 'SUCCEEDED', "
+            "finished_at = now() - make_interval(secs => %s) where id = %s",
+            (OLD, job_id),
+        )
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+    assert venue.live_handles() == []
+
+
+def test_a_job_that_has_only_just_finished_keeps_the_idle_grace(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """``jobs.status`` is written by an OBSERVATION — a console poll landing on
+    ``db.sync_observed_job_states`` — not by the coordinator calling us. A
+    rental destroyed the instant that column changes is a rental whose fate
+    turns on one write being right, so the same grace applies as to idleness.
+    """
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    job_id = _job(db, an_owner, status="SUCCEEDED", finished_s=60.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-fresh-finish",
+        machine_id=machine_id, age_s=YOUNG, job_id=job_id,
+    )
+    assert rid not in _swept(db)
+    assert rid in _swept(db, idle_after_s=30.0)
+
+
+@pytest.mark.asyncio
+async def test_a_machine_that_stopped_claiming_work_is_swept_though_it_beats(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The input that needs NOBODY to have opened a console.
+
+    ``jobs.status`` only goes terminal when someone loads a page. This branch
+    reads the machine's own traffic through this API instead: it claimed, it
+    finished, and it has asked for nothing since.
+    """
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=machine_id, age_s=OLD,
+    )
+    # Claimed twenty minutes ago and resolved: nothing in flight, nothing new.
+    _attempt(db, machine_id, claimed_s=1200.0, resolved=True, deadline_s=1140.0)
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+    assert venue.live_handles() == []
+
+
+def test_a_machine_running_one_long_task_is_never_idle(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The test that stands between this branch and a training job.**
+
+    A three-hour task is ONE claim followed by three hours of silence, so "has
+    claimed nothing for fifteen minutes" describes a machine hard at work just
+    as well as it describes an empty one. The unresolved attempt is what tells
+    them apart, and its deadline — refreshed by every heartbeat the
+    coordinator grants — is what says the attempt is still real.
+    """
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-working",
+        machine_id=machine_id, age_s=OLD,
+    )
+    # Claimed three hours ago, still unresolved, deadline a minute from now.
+    _attempt(db, machine_id, claimed_s=OLD, resolved=False, deadline_s=-60.0)
+    assert rid not in _swept(db)
+
+    # Even at a minute's idleness, and even with the job's own row finished:
+    # work in flight outranks both.
+    assert rid not in _swept(db, idle_after_s=60.0)
+
+
+def test_an_attempt_with_no_deadline_counts_as_work_in_flight_for_ever(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """``lease_deadline`` is null for an attempt claimed before migration 0015
+    or one whose claim response could not be parsed. ``reconcile_expired_
+    attempts`` refuses to resolve such a row for the same reason this refuses
+    to sweep it: "we never learned when this lease ends" is not "it ended"."""
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-unknown-deadline",
+        machine_id=machine_id, age_s=OLD,
+    )
+    _attempt(db, machine_id, claimed_s=OLD, resolved=False, deadline_s=None)
+    assert rid not in _swept(db)
+
+
+def test_a_deadline_long_past_is_not_evidence_of_work(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The other side of the same test. An unresolved attempt whose deadline
+    passed hours ago is a machine that vanished mid-task, not one that is busy
+    — the coordinator refuses its heartbeats and rejects its commits. The
+    grace allowed is ``db.EXPIRY_GRACE_SECONDS``, the same figure the attempt
+    ledger uses to call that attempt expired, so the two cannot disagree."""
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-dead-lease",
+        machine_id=machine_id, age_s=OLD,
+    )
+    _attempt(db, machine_id, claimed_s=OLD, resolved=False, deadline_s=OLD / 2)
+    assert rid in _swept(db)
+
+
+def test_a_machine_still_booting_is_never_idle(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """A rented host that has claimed nothing because it CANNOT yet — it is
+    still pulling a multi-gigabyte image — must not be destroyed at
+    ``idle_after_s``. That is the boot hazard ``boot_grace_s`` exists for, and
+    the idle branch would have walked straight into it: no attempts, nothing
+    in flight, nothing claimed lately, all true of a machine twenty minutes
+    into a healthy boot."""
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-booting",
+        machine_id=machine_id, age_s=1200.0,  # 20 minutes in
+    )
+    assert rid not in _swept(db)
+
+
+def test_a_machine_that_is_never_given_work_does_not_bill_for_ever(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The other half of that pair, and a hole that was open until the idle
+    branch grew its second disjunct: a machine that boots, enrols and
+    heartbeats but is never handed a single lease matches NOTHING else here.
+    Not quiet (it is talking), not never-seen (it has been), not abandoned (it
+    has a machine row), and its job may never go terminal. Past the boot
+    allowance, having done nothing at all, it is waste."""
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-never-worked",
+        machine_id=machine_id, age_s=OLD,  # past boot_grace_s
+    )
+    assert rid in _swept(db)
+
+
+def test_the_reason_a_row_was_selected_travels_with_it(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """``sweep_reason`` is what a log-only deployment reports, so it has to be
+    the same expression that does the selecting rather than a second guess
+    about it. Ordered branches, so each row carries the strongest true reason:
+    a machine that never booted says so rather than reporting as idle."""
+    quiet_m = _machine(db, an_owner, status="active", last_seen_s=QUIET)
+    unseen_m = _machine(db, an_owner, last_seen_s=None)
+    revoked_m = _machine(db, an_owner, status="revoked", last_seen_s=5.0)
+    idle_m = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    done_m = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    job_id = _job(db, an_owner, status="FAILED", finished_s=OLD)
+
+    rows = {
+        "QUIET": _insert_row(db, owner_id=an_owner, pool_id=a_pool,
+                             machine_id=quiet_m, handle="h1"),
+        "NEVER_SEEN": _insert_row(db, owner_id=an_owner, pool_id=a_pool,
+                                  machine_id=unseen_m, handle="h2"),
+        "REVOKED_CREDENTIAL": _insert_row(db, owner_id=an_owner,
+                                          pool_id=a_pool,
+                                          machine_id=revoked_m, handle="h3"),
+        "ABANDONED": _insert_row(db, owner_id=an_owner, pool_id=a_pool,
+                                 handle="h4"),
+        "IDLE": _insert_row(db, owner_id=an_owner, pool_id=a_pool,
+                            machine_id=idle_m, handle="h5"),
+        "JOB_FINISHED": _insert_row(db, owner_id=an_owner, pool_id=a_pool,
+                                    machine_id=done_m, handle="h6",
+                                    job_id=job_id),
+    }
+    _attempt(db, idle_m, claimed_s=1200.0, resolved=True, deadline_s=1140.0)
+
+    by_id = {str(r["id"]): r["sweep_reason"] for r in unreleased_rows(db)}
+    assert {expected: by_id.get(rid) for expected, rid in rows.items()} == {
+        reason: reason for reason in rows
+    }
+
+
+# ---------------------------------------------------------------------------
+# log-only: the setting a first deployment ships with
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_reports_and_destroys_nothing(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """The failure this whole module fears is silent and irreversible, so the
+    deployed sweep starts disarmed. A dry run must touch NOTHING — not the
+    venue, not the row, not the credential. A log-only pass that quietly
+    revoked identities would not be log-only, and the operator reading the
+    report would be reading it after the fact."""
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=QUIET,
+                          pool_id=a_pool)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=machine_id, age_s=OLD,
+    )
+    assert await reconcile_rented(db, {"fake": venue}, dry_run=True) == []
+    assert venue.release_calls == []
+    assert len(venue.live_handles()) == 1
+    row = _row(db, rid)
+    assert row["state"] == "ACTIVE"
+    assert row["failure_code"] is None
+    assert _machine_status(db, machine_id) == "active"
+
+    # ...and armed, the same pass does the work.
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+    assert venue.live_handles() == []
+
+
+def test_the_plan_says_which_rows_no_configured_venue_can_reach(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """What an operator reads before arming the sweep, and the one distinction
+    the log has to make: a row nothing selected is fine, while a row selected
+    at a venue with no adapter is money NOTHING in this process can stop. The
+    production registry is empty, so today every row is the second kind."""
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=QUIET)
+    mine = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-known",
+        machine_id=machine_id, age_s=OLD,
+    )
+    orphan_m = _machine(db, an_owner, status="active", last_seen_s=QUIET)
+    orphan = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, venue_id="a-venue-nobody-wired",
+        handle="h-unknown", machine_id=orphan_m, age_s=OLD,
+    )
+
+    plan = {e["rented_id"]: e for e in teardown_plan(db, {"fake": _Venue()})}
+    assert plan[mine]["provider_configured"] is True
+    assert plan[orphan]["provider_configured"] is False
+    assert plan[orphan]["reason"] == "QUIET"
+    assert plan[orphan]["provider_handle"] == "h-unknown"
+
+    # Reads only. Naming a row in a report must never move it.
+    assert _row(db, orphan)["state"] == "ACTIVE"
 
 
 def test_the_window_is_left_clean_for_the_next_file(db):  # noqa: F811

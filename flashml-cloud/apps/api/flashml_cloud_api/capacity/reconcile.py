@@ -63,6 +63,63 @@ directly with a ``rented_id`` destroys immediately and asks nothing about
 heartbeats, because a caller who has just watched a job finish knows
 something the machine's liveness cannot tell us.
 
+WHY LIVENESS ALONE IS A FAILURE BACKSTOP AND NOT A COST ONE
+------------------------------------------------------------
+Everything above stops a rental that BROKE. Nothing above stops a rental that
+WORKED. ``flashnode`` keeps heartbeating after the job it was rented for has
+finished — that is correct behaviour for a host agent and this module cannot
+change it — so a rental that boots successfully refreshes ``last_seen_at`` for
+ever, matches the quiet branch never, and **bills for ever.** The budget
+ceilings do not close it either: ``budget.window_spend_usd`` sums
+``usd_per_hour`` over rows *created* in a rolling window, which bounds the rate
+of new commitments and stops nothing that is already running.
+
+So two more inputs, both meaning *this machine has nothing left to do*, and
+both governed by one window, ``idle_after_s``:
+
+* **The job is over** (``JOB_FINISHED``). ``rented_capacity.job_id`` names the
+  one job the rental was opened for, and a terminal ``public.jobs.status`` is
+  the coordinator's own verdict that it has stopped. Measured from
+  ``finished_at`` rather than acted on instantly, because that column is
+  written by an observation — see ``db.sync_observed_job_states`` — and a
+  rental whose fate turns on a single write being right deserves the same
+  grace as one that merely looks idle.
+* **Nothing has been claimed** (``IDLE``). ``public.attempts`` records every
+  lease this API proxied to the machine. A rental whose machine holds no
+  attempt that could still be live and has claimed nothing for
+  ``idle_after_s`` is finished with its work whatever its heartbeat says. This
+  is the input that needs nobody to have opened a console: it is written by
+  the machine's own traffic through this API.
+
+  It needs one more test to be safe in both directions, and the *pair* is the
+  point. A machine must have **claimed something before** — otherwise a rented
+  host still pulling a multi-gigabyte image, which has claimed nothing because
+  it cannot yet, is destroyed mid-boot at fifteen minutes and paid for
+  anyway. **Or** the rental must be past ``boot_grace_s`` — otherwise a
+  machine that boots, enrols, heartbeats and is never handed any work at all
+  matches no branch in this query and bills for ever, which is the same hole
+  in a different corner. One without the other is a bug either way.
+
+**The dangerous half of IDLE is the long task**, and it is why "no claim for N
+minutes" alone would be a machine-killer: a task that runs for three hours
+claims once and then says nothing. The guard is the unresolved-attempt test —
+an attempt with no ``resolved_at`` whose ``lease_deadline`` has not long passed
+counts as work in flight, and a rental with work in flight is never idle. The
+deadline is the coordinator's own instant, refreshed from every renewal it
+grants (``db.refresh_attempt_deadline``), and the grace allowed past it is
+``db.EXPIRY_GRACE_SECONDS`` — the same figure ``reconcile_expired_attempts``
+uses to call an attempt dead, for the same reason and with the same argument
+behind it. A null deadline counts as work in flight for ever: it means we
+never learned when the lease ends, and "we do not know" must not read as "it
+is finished".
+
+**What IDLE still cannot survive**, stated plainly because it is the residual
+risk of this whole module: ``db.record_attempt`` is best effort on the claim
+path. A machine whose claims stop being recorded while it goes on working
+looks idle from here. That failure needs the database to be unreachable from
+the claim path while it is reachable from this sweep, and it is the reason the
+sweep ships log-only by default (see :func:`reconcile_rented`).
+
 TEARDOWN IS TWO THINGS, AND ``cleanup_session`` IS THE MODEL
 ------------------------------------------------------------
 *Both halves, independently.* It kills the sandbox **and** revokes the
@@ -128,17 +185,22 @@ import asyncio
 import logging
 
 import psycopg
+from flashruntime.protocol.v1alpha1 import JobState
 
+from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import sandbox_identity
 from flashml_cloud_api.capacity.provider import ResourceProvider
 
 __all__ = [
     "DEFAULT_ABANDONED_AFTER_S",
     "DEFAULT_BOOT_GRACE_S",
+    "DEFAULT_IDLE_AFTER_S",
     "DEFAULT_QUIET_AFTER_S",
+    "TERMINAL_JOB_STATES",
     "finished_rentals_with_live_credentials",
     "reconcile_rented",
     "release_capacity",
+    "teardown_plan",
     "unreleased_rows",
 ]
 
@@ -200,6 +262,24 @@ DEFAULT_BOOT_GRACE_S = 60 * 60.0
 #: acquisition.
 DEFAULT_ABANDONED_AFTER_S = 30 * 60.0
 
+#: How long a rental with **nothing left to do** is given: the job it was
+#: opened for is over, or its machine has stopped claiming work. This is the
+#: COST backstop and the only window here that ever stops a healthy rental;
+#: the other three stop broken ones. Fifteen minutes, matching
+#: ``DEFAULT_QUIET_AFTER_S`` and ``db.EXPIRY_GRACE_SECONDS`` so an operator
+#: carries one number rather than three, and bounding the waste after a
+#: finished job to a quarter-hour of one machine's rate.
+DEFAULT_IDLE_AFTER_S = 15 * 60.0
+
+#: Job states that mean the work has stopped, from the protocol package rather
+#: than a tuple of strings kept here — the same reasoning
+#: ``app.is_terminal_state`` gives: the set is a wire fact and a private copy
+#: of it drifts the first time the runtime adds one. A state this API does not
+#: recognise is not terminal, which is the safe direction: the cost of missing
+#: one is a rental swept by a later window instead of this one, while the cost
+#: of guessing is a machine destroyed under a running job.
+TERMINAL_JOB_STATES = tuple(s.value for s in JobState if s.terminal)
+
 #: Written on a row the sweep could not act on because it names no machine.
 NO_HANDLE = "RECONCILE_NO_HANDLE"
 #: Written on a row whose machine the venue would not confirm destroying.
@@ -216,16 +296,26 @@ def unreleased_rows(
     quiet_after_s: float = DEFAULT_QUIET_AFTER_S,
     boot_grace_s: float = DEFAULT_BOOT_GRACE_S,
     abandoned_after_s: float = DEFAULT_ABANDONED_AFTER_S,
+    idle_after_s: float = DEFAULT_IDLE_AFTER_S,
 ) -> list[dict]:
     """Rentals still costing money that nothing is using.
 
     The ``case`` is the whole design and is written as a case rather than a
-    chain of ``or``s so that the three allowances cannot silently overlap:
-    each row is judged by exactly one of them, and which one is a fact about
-    the machine, not about the row's age. **A machine that has heartbeated
-    within ``quiet_after_s`` matches nothing here at all** — that is the
-    clause standing between this sweep and a running training job. See the
-    module docstring for what each window means and why they differ.
+    chain of ``or``s so that the allowances cannot silently overlap: each row
+    is judged by exactly one of them, and which one is a fact about the
+    machine and its work, not about the row's age. **A machine that has
+    heartbeated within ``quiet_after_s`` matches no LIVENESS branch here at
+    all** — that is the clause standing between this sweep and a running
+    training job, and the two branches that can select such a machine anyway
+    (``JOB_FINISHED`` and ``IDLE``) do it on evidence that the work is over,
+    never on how long the rental has existed. See the module docstring for
+    what each window means and why they differ.
+
+    It returns the reason as ``sweep_reason`` rather than a bare boolean, and
+    that is not decoration: it is the whole content of a log-only deployment's
+    report (:func:`teardown_plan`), and computing it in the same expression
+    that does the selecting is what stops the report and the decision from
+    drifting apart. ``null`` means "not sweepable" and is filtered out.
 
     ``REQUESTED`` is included on purpose: a row that never learned its handle
     may still have created something at the venue. It is also why
@@ -238,46 +328,123 @@ def unreleased_rows(
     with db.cursor() as cur:
         cur.execute(
             """
-            select rc.id, rc.venue_id, rc.state, rc.provider_handle,
-                   rc.machine_id, m.status as machine_status, m.last_seen_at
-              from public.rented_capacity rc
-              left join public.machines m on m.id = rc.machine_id
-             where rc.state in ('REQUESTED', 'ACTIVE')
-               and case
-                     -- A revoked credential can never claim our work again,
-                     -- so the rental is waste from this instant and gets no
-                     -- allowance at all. Without this branch, revoking would
-                     -- push a row we are mid-way through releasing back OUT
-                     -- of the sweep until it aged into the window below --
-                     -- the one thing a failed destroy must not do.
-                     when m.id is not null and m.status = 'revoked'
-                       then true
-                     -- No machine bound at all: acquisition never got as far
-                     -- as binding one, or an ACTIVE row whose machine row
-                     -- was since deleted. Not a REQUESTED row with a revoked
-                     -- credential -- acquire.py now records machine_id on
-                     -- its failure paths too, so that row is caught by the
-                     -- revoked branch above instead.
-                     when m.id is null
-                       then coalesce(rc.acquired_at, rc.created_at)
-                            < now() - make_interval(secs => %(abandoned)s)
-                     -- It spoke, and then it stopped.
-                     when m.last_seen_at is not null
-                       then m.last_seen_at
-                            < now() - make_interval(secs => %(quiet)s)
-                     -- It has never spoken: still booting, or never will.
-                     else coalesce(rc.acquired_at, rc.created_at)
-                          < now() - make_interval(secs => %(boot)s)
-                   end
-             order by coalesce(rc.acquired_at, rc.created_at)
+            select * from (
+              select rc.id, rc.venue_id, rc.state, rc.provider_handle,
+                     rc.machine_id, rc.job_id,
+                     m.status as machine_status, m.last_seen_at,
+                     coalesce(rc.acquired_at, rc.created_at) as billing_since,
+                     case
+                       -- A revoked credential can never claim our work again,
+                       -- so the rental is waste from this instant and gets no
+                       -- allowance at all. Without this branch, revoking would
+                       -- push a row we are mid-way through releasing back OUT
+                       -- of the sweep until it aged into a window below --
+                       -- the one thing a failed destroy must not do.
+                       when m.id is not null and m.status = 'revoked'
+                         then 'REVOKED_CREDENTIAL'
+                       -- THE COST BACKSTOP, first half: the one job this
+                       -- rental was opened for has stopped. Nothing above
+                       -- this line stops a rental that worked, because a
+                       -- flashnode goes on heartbeating after its job ends.
+                       when exists (
+                              select 1 from public.jobs j
+                               where j.id = rc.job_id
+                                 and j.status = any(%(terminal)s)
+                                 and coalesce(j.finished_at, j.created_at)
+                                     < now() - make_interval(secs => %(idle)s)
+                            )
+                         then 'JOB_FINISHED'
+                       -- No machine bound at all: acquisition never got as far
+                       -- as binding one, or an ACTIVE row whose machine row
+                       -- was since deleted. Not a REQUESTED row with a revoked
+                       -- credential -- acquire.py now records machine_id on
+                       -- its failure paths too, so that row is caught by the
+                       -- revoked branch above instead.
+                       when m.id is null
+                            and coalesce(rc.acquired_at, rc.created_at)
+                                < now() - make_interval(secs => %(abandoned)s)
+                         then 'ABANDONED'
+                       -- It spoke, and then it stopped.
+                       when m.id is not null and m.last_seen_at is not null
+                            and m.last_seen_at
+                                < now() - make_interval(secs => %(quiet)s)
+                         then 'QUIET'
+                       -- It has never spoken: still booting, or never will.
+                       when m.id is not null and m.last_seen_at is null
+                            and coalesce(rc.acquired_at, rc.created_at)
+                                < now() - make_interval(secs => %(boot)s)
+                         then 'NEVER_SEEN'
+                       -- THE COST BACKSTOP, second half, and the only branch
+                       -- that needs nobody to have opened a console: the
+                       -- machine holds nothing that could still be running and
+                       -- has claimed nothing for `idle_after_s`. LAST on
+                       -- purpose -- everything above is a stronger statement
+                       -- about the same row, and a machine that never booted
+                       -- should report NEVER_SEEN rather than "idle".
+                       --
+                       -- The three tests are each load-bearing:
+                       --
+                       -- * has worked, OR is past the boot allowance. Without
+                       --   the first half a rented host pulling a
+                       --   multi-gigabyte image is destroyed mid-boot at
+                       --   `idle_after_s`; without the second, a machine that
+                       --   enrols, heartbeats and is never given any work
+                       --   bills for ever, matching no branch at all.
+                       -- * nothing in flight. This is what keeps a three-hour
+                       --   task -- one claim, then silence -- from reading as
+                       --   an idle machine.
+                       -- * nothing claimed lately. The actual idleness.
+                       when rc.machine_id is not null
+                            and (
+                                  exists (
+                                    select 1 from public.attempts a
+                                     where a.machine_id = rc.machine_id
+                                  )
+                                  or coalesce(rc.acquired_at, rc.created_at)
+                                     < now() - make_interval(secs => %(boot)s)
+                                )
+                            and not exists (
+                                  select 1 from public.attempts a
+                                   where a.machine_id = rc.machine_id
+                                     and a.resolved_at is null
+                                     and (a.lease_deadline is null
+                                          or a.lease_deadline > now()
+                                             - make_interval(
+                                                 secs => %(lease_grace)s))
+                                )
+                            and not exists (
+                                  select 1 from public.attempts a
+                                   where a.machine_id = rc.machine_id
+                                     and a.claimed_at > now()
+                                         - make_interval(secs => %(idle)s)
+                                )
+                         then 'IDLE'
+                     end as sweep_reason
+                from public.rented_capacity rc
+                left join public.machines m on m.id = rc.machine_id
+               where rc.state in ('REQUESTED', 'ACTIVE')
+            ) candidate
+             where sweep_reason is not null
+             order by billing_since
             """,
             # `secs` is the one make_interval() argument typed `double
             # precision`, which is why every window here is expressed in
             # seconds exactly as in `budget.window_spend_usd`.
+            #
+            # `lease_grace` is deliberately NOT a parameter of this function.
+            # It is not a policy this module gets to choose: it is how long
+            # after a lease deadline the coordinator's own rule says the
+            # attempt is dead, and `db.reconcile_expired_attempts` already
+            # argues the number. Two copies of that judgement would let a
+            # sweep call an attempt live that the ledger has already resolved
+            # as expired, or the reverse.
             {
                 "abandoned": float(abandoned_after_s),
                 "quiet": float(quiet_after_s),
                 "boot": float(boot_grace_s),
+                "idle": float(idle_after_s),
+                "lease_grace": float(dbmod.EXPIRY_GRACE_SECONDS),
+                "terminal": list(TERMINAL_JOB_STATES),
             },
         )
         return [dict(r) for r in cur.fetchall()]
@@ -313,6 +480,57 @@ def finished_rentals_with_live_credentials(
             """
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def _plan_entries(
+    rows: list[dict], providers: dict[str, ResourceProvider]
+) -> list[dict]:
+    """One legible line per row an armed sweep would act on.
+
+    ``provider_configured`` is in here because the two ways a rental survives
+    a sweep look identical from outside and are not the same problem at all: a
+    row nothing selected is fine, while a row selected at a venue with no
+    adapter is money nothing in this process can stop. See
+    :func:`reconcile_rented`.
+    """
+    return [
+        {
+            "rented_id": str(row["id"]),
+            "venue_id": str(row["venue_id"]),
+            "state": row["state"],
+            "reason": row["sweep_reason"],
+            "job_id": row.get("job_id"),
+            "provider_handle": row.get("provider_handle"),
+            "billing_since": str(row.get("billing_since")),
+            "provider_configured": str(row["venue_id"]) in providers,
+        }
+        for row in rows
+    ]
+
+
+def teardown_plan(
+    db: psycopg.Connection,
+    providers: dict[str, ResourceProvider],
+    *,
+    quiet_after_s: float = DEFAULT_QUIET_AFTER_S,
+    boot_grace_s: float = DEFAULT_BOOT_GRACE_S,
+    abandoned_after_s: float = DEFAULT_ABANDONED_AFTER_S,
+    idle_after_s: float = DEFAULT_IDLE_AFTER_S,
+) -> list[dict]:
+    """What an armed sweep would destroy right now. Reads only, writes never.
+
+    This is what a log-only deployment ships instead of a teardown, and it is
+    the evidence an operator reads before arming one: the same rows, selected
+    by the same expression, with the reason each was selected. It exists as a
+    function of its own rather than as a flag inside the sweep so that the
+    report cannot quietly diverge from the decision -- both go through
+    :func:`unreleased_rows` and neither has a predicate of its own.
+    """
+    rows = unreleased_rows(
+        db, quiet_after_s=quiet_after_s, boot_grace_s=boot_grace_s,
+        abandoned_after_s=abandoned_after_s, idle_after_s=idle_after_s,
+    )
+    return _plan_entries(rows, providers)
 
 
 def _note(
@@ -593,6 +811,8 @@ async def reconcile_rented(
     quiet_after_s: float = DEFAULT_QUIET_AFTER_S,
     boot_grace_s: float = DEFAULT_BOOT_GRACE_S,
     abandoned_after_s: float = DEFAULT_ABANDONED_AFTER_S,
+    idle_after_s: float = DEFAULT_IDLE_AFTER_S,
+    dry_run: bool = False,
 ) -> list[str]:
     """Sweep. Returns the ids whose machines it settled.
 
@@ -610,6 +830,23 @@ async def reconcile_rented(
     everywhere else. The same reason the loops in ``app.py`` swallow and log a
     failed pass rather than letting the task die and silently removing the
     backstop.
+
+    ``dry_run`` REPORTS AND CHANGES NOTHING, and it is what the deployed loop
+    passes by default (``settings.rented_capacity_destroy`` is false until an
+    operator says otherwise). Nothing is destroyed, no row is annotated and no
+    credential is revoked -- a log-only pass that quietly revoked identities
+    would not be log-only, and the operator reading the report would be
+    reading it after the fact. The failure this defends against is the one
+    this module cannot undo: a wrongly destroyed machine takes a running job
+    with it, and the evidence that it was wrong arrives afterwards. Note the
+    asymmetry it accepts in exchange -- a dry run stops no money at all, so
+    running one is a decision to keep paying while the report is read.
+
+    The parameter defaults to ``False`` rather than ``True`` because this
+    function's contract is "stop the money"; the DEPLOYMENT decides whether it
+    is armed, and there is exactly one production caller (``app.py``) which
+    defaults to disarmed. A test calling this bare is asking for the sweep it
+    is testing.
     """
     settled: list[str] = []
 
@@ -617,7 +854,7 @@ async def reconcile_rented(
         rows = await asyncio.to_thread(
             unreleased_rows, db,
             quiet_after_s=quiet_after_s, boot_grace_s=boot_grace_s,
-            abandoned_after_s=abandoned_after_s,
+            abandoned_after_s=abandoned_after_s, idle_after_s=idle_after_s,
         )
     except Exception:  # noqa: BLE001 - a failed read must not end the pass
         log.error(
@@ -625,6 +862,17 @@ async def reconcile_rented(
             exc_info=True,
         )
         rows = []
+
+    if dry_run:
+        plan = _plan_entries(rows, providers)
+        if plan:
+            log.warning(
+                "capacity reconcile: LOG ONLY -- would destroy %d rental(s): "
+                "%s. Nothing was destroyed, annotated or revoked. Arm the "
+                "sweep (RENTED_CAPACITY_DESTROY=true) to stop this money.",
+                len(plan), plan,
+            )
+        return []
 
     for row in rows:
         rented_id = str(row["id"])

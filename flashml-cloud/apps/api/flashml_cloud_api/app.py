@@ -115,6 +115,10 @@ from flashml_cloud_api.auth import (
     new_invite_token,
     verify_supabase_jwt,
 )
+from flashml_cloud_api.capacity import reconcile as capacitymod
+from flashml_cloud_api.capacity import registry as capacityregistrymod
+from flashml_cloud_api.capacity import settle as capacitysettlemod
+from flashml_cloud_api.capacity.provider import ResourceProvider
 from flashml_cloud_api.compile import (
     DATASET_SLICES_PARAM,
     CompileError,
@@ -1338,6 +1342,18 @@ DEFAULT_RECONCILE_INTERVAL_S = 300.0
 DEFAULT_EPHEMERAL_MACHINE_TTL_S = 15 * 60.0
 DEFAULT_EPHEMERAL_RECONCILE_S = 60.0
 
+#: How often the RENTED-CAPACITY sweep runs — a different reconciler from the
+#: sandbox one above, over a different table, racing the same thing. Five
+#: minutes for the same reason: a rented GPU bills by the second and this is
+#: the only backstop that stops one. Overridable with
+#: FLASHML_RENTED_RECONCILE_S; <= 0 runs a single immediate sweep and no loop.
+#:
+#: **Not a teardown window.** `capacity.reconcile` takes four of those and
+#: none of them is this number; passing a poll interval as one would destroy
+#: live machines, which is why that module's windows all have safe defaults
+#: and this file passes none of them.
+DEFAULT_RENTED_RECONCILE_S = 300.0
+
 
 class EvaluationSpecError(ValueError):
     """The stored ``evaluation_spec`` cannot be compiled into a JobSpec.
@@ -2039,6 +2055,7 @@ def create_cloud_app(
     evaluation_driver: Any | None = None,
     placement_eligible: routermod.EligibilityPredicate | None = None,
     expand_tasks: Callable[[str, JobSpec], list[Any]] | None = None,
+    capacity_providers: dict[str, ResourceProvider] | None = None,
 ) -> FastAPI:
     """The public door. Agents and browsers both arrive here; nothing else
     is exposed to the internet.
@@ -2072,6 +2089,15 @@ def create_cloud_app(
     fallback predicate — a permissive default would be a second, absent copy
     of seven fail-closed placement gates, and a preview built on it would
     show a submitter machines the real scheduler will refuse.
+
+    ``capacity_providers`` maps ``rented_capacity.venue_id`` to the adapter
+    that can destroy machines at that venue, and defaults to
+    ``capacity.registry.providers_for(settings)`` — which is **empty**, because
+    no real adapter exists yet. That is not a stub to be filled in here: an
+    empty registry makes the rented-capacity sweep report and never destroy,
+    which is the honest behaviour for a deployment that cannot reach any
+    venue. Injected only so a test can drive the loop against a fake; see
+    ``capacity/registry.py`` for why a fake must never be the default.
 
     On ``settings.require_auth``: it governs *startup validation of the
     environment*, not whether requests are authenticated. There is no open
@@ -2177,6 +2203,23 @@ def create_cloud_app(
             DEFAULT_EPHEMERAL_RECONCILE_S,
         )
     )
+    rented_reconcile_s = float(
+        os.environ.get("FLASHML_RENTED_RECONCILE_S", DEFAULT_RENTED_RECONCILE_S)
+    )
+    # Empty in production, and see `capacity/registry.py` for why that is the
+    # right answer rather than a gap: with no adapter the sweep reports what it
+    # would destroy and destroys nothing, which is what an unconfigured
+    # deployment should do about a venue it cannot reach.
+    capacity_providers = (
+        capacityregistrymod.providers_for(settings)
+        if capacity_providers is None else capacity_providers
+    )
+    # `settings.rented_capacity_destroy` is FALSE by default, so the sweep and
+    # the settle hook both ship log-only. One flag, read in both places, so a
+    # deployment cannot be armed on one path and disarmed on the other — the
+    # settle path destroys on the same evidence the sweep does, minutes
+    # earlier, and arming half of that is not a safer half.
+    rented_destroy = bool(settings.rented_capacity_destroy)
 
     async def _reconcile_once() -> list[str]:
         """One sweep, on its own connection, never fatal.
@@ -2264,12 +2307,83 @@ def create_cloud_app(
                 return
             await asyncio.sleep(ephemeral_reconcile_s)
 
+    async def _rented_capacity_loop() -> None:
+        """Sweep rented GPUs on a timer, for ever.
+
+        **The only thing in this deployment that stops a rented machine
+        billing.** `capacity.settle_finished_jobs` runs on the job routes and
+        is faster, but it needs somebody to have a page open; this needs
+        nobody. A redeploy is exactly the event that abandons a rental
+        mid-flight, and the surviving evidence is a `rented_capacity` row.
+
+        THE FIRST SWEEP IS DELAYED BY ONE INTERVAL, following
+        `_ephemeral_machine_loop` above rather than `_reconcile_loop`, and the
+        reason is not cost — these rows ARE costing money during that first
+        interval, unlike the rental sessions that loop was written for. It is
+        that the agent routes are the public door and
+        `test_anonymous_traffic_costs_no_database_connection` pins that merely
+        starting this app opens no Postgres connection at all: a sweep on the
+        startup edge would open one before any credential had been checked.
+        Five minutes is well inside every teardown window
+        (`quiet_after_s` is fifteen, `boot_grace_s` sixty), so the trade costs
+        one interval of a redeploy's abandoned rental and keeps a property of
+        the front door that has nothing to do with rented GPUs.
+
+        Not gated on any venue being configured. With an empty registry the
+        pass is one indexed query that reports what it cannot reach, and that
+        report is the only alarm an operator would ever get for a row nothing
+        in this process can destroy.
+
+        Every failure is swallowed and logged, as `_ephemeral_machine_loop`
+        does: a sweep that raised would kill the task and silently remove the
+        backstop for the life of the process — and here that is the difference
+        between a bounded bill and an unbounded one.
+        """
+        if rented_reconcile_s > 0:
+            await asyncio.sleep(rented_reconcile_s)
+        while True:
+            conn = None
+            try:
+                conn = await run_in_threadpool(app.state.connect)
+                settled = await capacitymod.reconcile_rented(
+                    conn, capacity_providers,
+                    # Windows deliberately not passed: `capacity/reconcile.py`
+                    # owns them and its defaults are the safe ones. The only
+                    # number this file contributes is how often to look.
+                    dry_run=not rented_destroy,
+                )
+                if settled:
+                    log.info(json.dumps({
+                        "text": "rented capacity reconciler settled rentals",
+                        "rentals": settled,
+                    }))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one failed sweep must not end it
+                log.warning("rented capacity sweep failed", exc_info=True)
+            finally:
+                if conn is not None:
+                    await run_in_threadpool(conn.close)
+            if rented_reconcile_s <= 0:
+                return
+            await asyncio.sleep(rented_reconcile_s)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         tasks: list[asyncio.Task] = []
         tasks.append(asyncio.create_task(
             _ephemeral_machine_loop(), name="ephemeral-machine-reconcile"
         ))
+        # Unconditional, like the ephemeral loop and unlike the sandbox one:
+        # there is no "rented capacity is not configured" state that makes an
+        # unreleased row safe to stop looking at. A deployment with no venue
+        # adapter reports; a deployment with rows and no adapter needs to be
+        # told, every pass, that it is paying for something it cannot destroy.
+        rented_task = asyncio.create_task(
+            _rented_capacity_loop(), name="rented-capacity-reconcile"
+        )
+        tasks.append(rented_task)
+        _app.state.rented_capacity_reconciler = rented_task
         # Gated on the deployment being configured for sandboxes at all, which
         # is what keeps "unconfigured changes nothing" true of startup as well
         # as of the routes: with no FC configuration there is no sandbox that
@@ -2333,6 +2447,10 @@ def create_cloud_app(
     app.state.settings = settings
     app.state.connect = connect
     app.state.coordinator = coordinator
+    # Readable so a deployment can be checked for what it can actually destroy
+    # — and so a test can prove the un-injected default is the empty registry
+    # rather than a fake that would answer "destroyed" about real machines.
+    app.state.capacity_providers = capacity_providers
 
     # -- dependencies -------------------------------------------------------
 
@@ -4327,10 +4445,24 @@ def create_cloud_app(
         # `GET /me/metrics` counts succeeded/partial/failed out of this
         # column, and outcomes only recorded for jobs that were being
         # watched would make that page a survey of browsing habits.
+        finished = [j for j in visible if is_terminal_state(j.get("state"))]
         dbmod.sync_observed_job_states(
-            db,
-            [(j["job_id"], str(j["state"])) for j in visible
-             if is_terminal_state(j.get("state"))],
+            db, [(j["job_id"], str(j["state"])) for j in finished],
+        )
+        # THE SETTLE HOOK, list half. A rented machine keeps billing after the
+        # job it was rented for ends — flashnode goes on heartbeating, so no
+        # liveness check can notice — and this is one of the two places this
+        # API ever learns a job stopped. One batched query for the whole page,
+        # for the same reason the state sync above is batched: this route is
+        # polled every two seconds.
+        #
+        # It is an OPTIMISATION, not the guarantee. Nobody has to open this
+        # page; `capacity.reconcile`'s JOB_FINISHED and IDLE branches are what
+        # stop the money when nobody does.
+        await capacitysettlemod.settle_finished_jobs(
+            db, capacity_providers,
+            job_ids=[j["job_id"] for j in finished],
+            dry_run=not rented_destroy,
         )
         return visible + federated
 
@@ -4441,6 +4573,23 @@ def create_cloud_app(
                 await _record_artifact_footprint(coordinator, db, job_id)
             if row.get("artifacts_mirrored_at") is None:
                 await _mirror_job_artifacts(coordinator, db, job_id, settings)
+            # A FOURTH thing, and the only one that costs money to skip: give
+            # back any machine rented for this job. It needs no marker column
+            # of its own — a released rental leaves the state the query selects,
+            # so a page left polling a finished job re-runs one indexed lookup
+            # that finds nothing.
+            #
+            # Awaited inline rather than backgrounded, deliberately. The
+            # request-scoped connection is closed the moment this response is
+            # sent, so a background task would need its own; and the cost is
+            # paid once, only by a job that actually rented capacity, at the
+            # first observation of its end. `settle_finished_jobs` never
+            # raises, so this cannot turn a finished job's page into a 500 —
+            # the same rule the two hooks above follow.
+            await capacitysettlemod.settle_finished_jobs(
+                db, capacity_providers, job_ids=[job_id],
+                dry_run=not rented_destroy,
+            )
         return job
 
     @app.get("/v1alpha1/jobs/{job_id}/rounds", tags=["browser"])
@@ -6322,11 +6471,20 @@ def create_cloud_app(
         # written, so `machines.last_seen_at` stayed null and every machine
         # rendered "Offline / Last seen never" no matter how healthy it was.
         #
+        # AND IT IS NO LONGER ONLY A DISPLAY COLUMN. `capacity/reconcile.py`
+        # decides whether to DESTROY a rented GPU by reading it: quiet for
+        # `quiet_after_s` is swept, never seen by `boot_grace_s` is swept. This
+        # one statement is what tells the reconciler that a machine three hours
+        # into a training run is alive. Stop writing it — or write it from
+        # somewhere that is not really the machine speaking — and the failure
+        # is money, silent, and irreversible in one direction. Pinned by
+        # `test_agent_proxy.py::test_heartbeat_records_last_seen_so_the_console
+        # _can_show_online`, whose docstring now carries the same warning.
+        #
         # The pool membership refresh rides the same connection open, but
         # its own try/except, separate from `touch_machine_last_seen`'s: a
-        # display-column failure is best-effort and must never fail the
-        # pools stamp CLOSED — only a genuine membership-lookup failure
-        # does that, below.
+        # best-effort liveness write must never fail the pools stamp CLOSED —
+        # only a genuine membership-lookup failure does that, below.
         try:
             with contextlib.closing(app.state.connect()) as conn:
                 try:

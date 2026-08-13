@@ -1071,14 +1071,24 @@ Expected: PASS
 
 - [ ] **Step 5: Wire the loop into the app — DEFERRED, AND GATED**
 
-> **STOP. This step is not ready and the text below is superseded in one
-> respect: `settle_after_s` no longer exists.** The sweep now takes three
-> named windows (`quiet_after_s`, `boot_grace_s`, `abandoned_after_s`), each
+> **LANDED 2026-08-12. The three gates below are closed; read them for the
+> reasoning, not as work outstanding.** The sweep now takes FOUR named windows
+> (`quiet_after_s`, `boot_grace_s`, `abandoned_after_s`, `idle_after_s`), each
 > with a safe default, so `reconcile_rented(conn, providers)` is correct with
-> no arguments. Read `capacity/reconcile.py` — not this plan — for its API.
+> no arguments — `settle_after_s` no longer exists. Read
+> `capacity/reconcile.py`, `capacity/registry.py` and `capacity/settle.py` —
+> not this plan — for the API.
 >
-> **Three gates must close before this step runs. Each is a silent,
-> money-losing failure if skipped:**
+> What closed each: (1) `idle_after_s` and its two branches, `JOB_FINISHED`
+> and `IDLE`, plus a settle hook on the two job routes; (2) no
+> `CapacityRequest` is constructed anywhere in production yet, and
+> `capacity/registry.py` carries the enrolment rule for the adapter that will;
+> (3) the money coupling is stated at the write site, in
+> `db.touch_machine_last_seen`, and in that test's docstring. **The sweep
+> ships LOG-ONLY** — `RENTED_CAPACITY_DESTROY` is opt-in — and the provider
+> registry is legitimately empty until Task 7.
+>
+> **The three gates, each a silent money-losing failure if skipped:**
 >
 > 1. **There is no cost backstop for a healthy idle rental.** Age was the only
 >    thing that ever stopped a booted machine, and removing it was correct —
@@ -1105,7 +1115,8 @@ Expected: PASS
 >    money coupling at the write site and in that test's docstring.
 >
 > Consider shipping the first deployment **log-only** — the failure mode is
-> silent and irreversible.
+> silent and irreversible. (It does: `settings.rented_capacity_destroy` is
+> false by default and governs the sweep and the settle hook together.)
 
 Read `app.py` around lines 2159–2260 — the existing `_reconcile_loop` and `_ephemeral_machine_loop`. Add a third loop following that exact shape (same logging style, same `<= 0 disables` convention, same startup-sweep-then-loop structure). Do not restructure the existing loops. The loop must catch, as `_ephemeral_machine_loop` does.
 

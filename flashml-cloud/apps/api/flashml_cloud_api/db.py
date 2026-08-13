@@ -591,8 +591,25 @@ def touch_machine_last_seen(db: psycopg.Connection, machine_id: str) -> None:
     it as alive. A host who has just enrolled and started their agent should
     not be shown a dead-looking dashboard.
 
-    Deliberately best-effort at the call site: a machine's work must not fail
-    because a display column could not be updated.
+    **THIS COLUMN IS NOW LOAD-BEARING FOR MONEY, NOT ONLY FOR DISPLAY.**
+    `capacity/reconcile.py` selects rentals to destroy on it: a rented GPU
+    whose machine has not been seen for `quiet_after_s` is swept, and one that
+    was never seen at all is destroyed at `boot_grace_s`. So this write is what
+    stands between a live rental and its destruction, and the two ways to break
+    it are not symmetrical:
+
+    * **Stop writing it** and every rented machine looks dead — destroyed 15
+      minutes into a healthy job, silently, on every rental.
+    * **Write it for a machine that is not really speaking** and a rental
+      billing for nothing looks alive for ever.
+
+    Deliberately best-effort at the call site even so: a machine's work must
+    not fail because this could not be written, and the failure mode of the
+    first kind is bounded by `capacity.reconcile`'s other inputs (a job in a
+    terminal state, or a machine claiming no leases) which do not read this
+    column at all. That is why the cost backstop was not built on liveness.
+    Anything that changes when or whether this is written belongs in the same
+    conversation as `capacity/reconcile.py`.
     """
     with db.cursor() as cur:
         cur.execute(
