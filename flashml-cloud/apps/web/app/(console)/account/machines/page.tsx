@@ -23,15 +23,24 @@ import { PageShell } from "@/components/shell/PageShell";
 import { StatePanel } from "@/components/shell/StatePanel";
 import { isEmptyList, resolvePanel } from "@/lib/console/panel-state";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
-import { isOnline, relativeTime } from "@/lib/machine-status";
+import { RevokedMachines } from "@/components/machines/RevokedMachines";
+import { relativeTime } from "@/lib/machine-status";
+import { isMachineOnline } from "@/lib/machine-scope";
 import {
   MACHINE_BADGE_LABELS as BADGE_LABELS,
   MACHINE_BADGE_STYLES as BADGE_STYLES,
   machineBadge,
 } from "@/lib/machine-badge";
 import {
+  machineLabel,
+  splitFleet,
+  type DeleteOutcome,
+} from "@/lib/machine-lifecycle";
+import {
   NotAuthenticated,
+  NotFound,
   cloudApiBase,
+  deleteMachine,
   listMachines,
   revokeMachine,
   type Machine,
@@ -91,6 +100,37 @@ export default function MachinesPage() {
     );
   }
 
+  /**
+   * Delete, refetch, and classify — never throw.
+   *
+   * The list is REFETCHED rather than edited in place, unlike revoke above:
+   * revoke changes one field on a row that stays, and delete removes the row
+   * from what the API will return next. Patching state to match would be
+   * this page asserting the server's answer instead of reading it.
+   *
+   * A 404 refetches too. The route folds "unknown", "not yours" and "already
+   * deleted" into one answer, and on a row this page just read the third is
+   * what it means: the list was stale, so the honest response is to re-read
+   * it and say so once. Treating it as an error would put a failure on
+   * screen for an outcome that is exactly what the reader asked for.
+   */
+  async function handleDelete(id: string): Promise<DeleteOutcome> {
+    try {
+      await deleteMachine(id);
+    } catch (err) {
+      if (err instanceof NotFound) {
+        load();
+        return { kind: "already-gone" };
+      }
+      return {
+        kind: "failed",
+        detail: err instanceof Error ? err.message : "the API did not say why",
+      };
+    }
+    load();
+    return { kind: "deleted" };
+  }
+
   // Same ordering the hand-rolled switch below used — error, then loading,
   // then the rows — with the one difference that no arrangement of these can
   // now reach the empty state from a failed read.
@@ -148,51 +188,68 @@ export default function MachinesPage() {
           // state switch, so a failed poll left "2 Online now" standing over a
           // panel that had just said it could not read anything — stale
           // numbers presented as current.
-          const activeRows = rows.filter((m) => m.status !== "revoked");
-          const online = activeRows.filter((m) =>
-            isOnline(m.last_seen_at)
-          ).length;
+          //
+          // The split, and the two numbers over it, are one decision made in
+          // `lib/machine-lifecycle.ts` — the header cannot count one set of
+          // machines while the table draws another.
+          const { enrolled, revoked, online } = splitFleet(rows);
           return (
             <>
-              {activeRows.length > 0 && (
-                <div className="mb-6 flex items-baseline gap-6">
-                  <div>
-                    <div className="metric-lg">{online}</div>
-                    <div className="label-caps mt-1">Online now</div>
+              {/* Rendered even at zero. A fleet that is entirely revoked is
+                  the state this whole screen exists for, and "0 Enrolled" is
+                  a measured answer to the question the label asks. The
+                  revoked count is deliberately NOT up here: it is not
+                  capacity, and it already labels the section that holds it. */}
+              <div className="mb-6 flex items-baseline gap-6">
+                <div>
+                  <div className="metric-lg">{online}</div>
+                  <div className="label-caps mt-1">Online now</div>
+                </div>
+                <div>
+                  <div className="metric-lg text-muted-foreground">
+                    {enrolled.length}
                   </div>
-                  <div>
-                    <div className="metric-lg text-muted-foreground">
-                      {activeRows.length}
-                    </div>
-                    <div className="label-caps mt-1">Enrolled</div>
-                  </div>
+                  <div className="label-caps mt-1">Enrolled</div>
+                </div>
+              </div>
+
+              {enrolled.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Nothing enrolled right now.{" "}
+                  <Link href="/machines/add" className="underline">
+                    Add a machine
+                  </Link>
+                  , or bring one back below.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[620px] text-left">
+                    <thead>
+                      <tr className="border-b border-border">
+                        {["Machine", "Platform", "Last seen", ""].map((h, i) => (
+                          <th
+                            key={h || i}
+                            className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
+                          >
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {enrolled.map((m) => (
+                        <MachineRow
+                          key={m.id}
+                          machine={m}
+                          onRevoke={handleRevoke}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[620px] text-left">
-                  <thead>
-                    <tr className="border-b border-border">
-                      {["Machine", "Platform", "Last seen", ""].map((h, i) => (
-                        <th
-                          key={h || i}
-                          className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {rows.map((m) => (
-                      <MachineRow
-                        key={m.id}
-                        machine={m}
-                        onRevoke={handleRevoke}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+
+              <RevokedMachines machines={revoked} onDelete={handleDelete} />
             </>
           );
         }}
@@ -210,9 +267,14 @@ function MachineRow({
 }) {
   const [revoking, setRevoking] = useState(false);
 
-  const revoked = machine.status === "revoked";
-  const online = !revoked && isOnline(machine.last_seen_at);
-  const label = machine.name || machine.node_id;
+  // Enrolled rows only. `splitFleet` sends the revoked ones to
+  // `RevokedMachines`, so nothing below branches on status any more — the
+  // greyed-out full-detail row this used to draw for a revoked machine is
+  // the clutter that section exists to replace. `isMachineOnline` rather
+  // than a bare `isOnline` so this dot and the header count above it are the
+  // same predicate.
+  const online = isMachineOnline(machine);
+  const label = machineLabel(machine);
 
   // Revoking is irreversible from this screen, so it gets a real modal
   // rather than the previous inline swap where "Revoke" quietly became
@@ -237,24 +299,20 @@ function MachineRow({
   const badge = machineBadge(machine);
 
   return (
-    <tr className={revoked ? "opacity-45" : undefined}>
+    <tr>
       <td className="px-3 py-3">
         <div className="flex items-center gap-2.5">
           <span
             className="status-dot"
             data-state={online ? "live" : undefined}
             style={{
-              background: revoked
-                ? "var(--muted-foreground)"
-                : online
-                  ? "var(--node-green)"
-                  : "var(--muted-foreground)",
+              background: online
+                ? "var(--node-green)"
+                : "var(--muted-foreground)",
             }}
           />
           <span className="min-w-0">
-            <span className="block truncate font-mono text-sm">
-              {machine.name || machine.node_id}
-            </span>
+            <span className="block truncate font-mono text-sm">{label}</span>
             <span className="meta block truncate">{machine.node_id}</span>
             <Badge
               variant="outline"
@@ -282,49 +340,44 @@ function MachineRow({
         </div>
       </td>
       <td className="meta px-3 py-3 whitespace-nowrap">
-        {revoked
-          ? `revoked ${relativeTime(machine.revoked_at)}`
-          : relativeTime(machine.last_seen_at)}
+        {relativeTime(machine.last_seen_at)}
       </td>
       <td className="px-3 py-3 text-right">
-        {revoked ? (
-          <span className="meta">revoked</span>
-        ) : (
-          <AlertDialog>
-            <AlertDialogTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                >
-                  Revoke
-                </Button>
-              }
-            />
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Revoke {label}?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Its token stops working immediately and it can no longer
-                  claim work. Any task it currently holds keeps running until
-                  the lease expires, then requeues elsewhere. Re-enrolling
-                  needs a new device code.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Keep it</AlertDialogCancel>
-                <AlertDialogAction
-                  disabled={revoking}
-                  onClick={confirm}
-                  className="bg-destructive/15 text-destructive hover:bg-destructive/25"
-                >
-                  {revoking ? "Revoking…" : "Revoke"}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        )}
+        <AlertDialog>
+          <AlertDialogTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              >
+                Revoke
+              </Button>
+            }
+          />
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Revoke {label}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Its token stops working immediately and it can no longer claim
+                work. Any task it currently holds keeps running until the
+                lease expires, then requeues elsewhere. Re-enrolling needs a
+                new device code. It moves to Revoked below, where it can be
+                deleted for good.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep it</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={revoking}
+                onClick={confirm}
+                className="bg-destructive/15 text-destructive hover:bg-destructive/25"
+              >
+                {revoking ? "Revoking…" : "Revoke"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </td>
     </tr>
   );

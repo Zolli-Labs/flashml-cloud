@@ -245,6 +245,16 @@ export interface RevokeMachineResult {
   status: string;
 }
 
+/** `DELETE /v1alpha1/machines/{id}`'s 200. Same two fields as
+ * `RevokeMachineResult` and deliberately its own type: these are two
+ * different lifecycle steps in a fixed order, and a shared name would invite
+ * a caller to treat the answers as interchangeable when only one of them is
+ * terminal. */
+export interface DeleteMachineResult {
+  machine_id: string;
+  status: string;
+}
+
 export type JobState =
   | "PENDING"
   | "SUBMITTED"
@@ -1084,6 +1094,36 @@ export function revokeMachine(machineId: string): Promise<RevokeMachineResult> {
   return request<RevokeMachineResult>(
     `/v1alpha1/machines/${encodeURIComponent(machineId)}/revoke`,
     { method: "POST" }
+  );
+}
+
+/** `DELETE /v1alpha1/machines/{id}` — retire a machine that has already been
+ * revoked, so it stops taking up a row in "My machines".
+ *
+ * **Revoked only.** The API answers 409 for a machine that is still
+ * enrolled, because revoking is the security action (it kills the
+ * credential) and deleting is tidying; folding them together would put "kill
+ * this credential" behind a button labelled Delete. The console must
+ * therefore only offer this on a revoked row, which makes the 409 a
+ * disagreement between our list and the server's rather than a state a
+ * reader can reach on purpose.
+ *
+ * **Nothing is erased.** The row is tombstoned and every column describing
+ * the device is scrubbed; the accepted-work credit it earned stays counted,
+ * because `contributions` cascades on the machine id and a total that FALLS
+ * when somebody tidies their fleet is indistinguishable from a bug. What the
+ * caller gets back is the fact that it happened, not a smaller fleet than
+ * the next `listMachines()` will report — a deleted machine simply stops
+ * appearing there, so refetch rather than editing the list in place.
+ *
+ * **404 means "already gone", not "something went wrong".** The route folds
+ * an unknown id, someone else's machine and a second delete into one answer
+ * so the ids cannot be enumerated. A caller that just read the row it is
+ * deleting should treat `NotFound` as a stale list and refetch. */
+export function deleteMachine(machineId: string): Promise<DeleteMachineResult> {
+  return request<DeleteMachineResult>(
+    `/v1alpha1/machines/${encodeURIComponent(machineId)}`,
+    { method: "DELETE" }
   );
 }
 
