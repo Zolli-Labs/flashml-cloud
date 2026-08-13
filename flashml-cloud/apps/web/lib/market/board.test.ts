@@ -7,8 +7,14 @@ import {
   classHistory,
   classRow,
   classSpecLine,
+  dayVerdict,
+  filterRows,
+  hostClassGroups,
   hottestRows,
-  tickerRows,
+  kindChips,
+  paginate,
+  rowKind,
+  rowVramGb,
 } from "./board";
 import { REFERENCE_CLASSES, referenceClass } from "./reference";
 
@@ -147,45 +153,292 @@ describe("classRow", () => {
   });
 });
 
-describe("tickerRows", () => {
-  it("ranks by depth, then observations", () => {
-    const rows = boardRows(
-      view({
-        zc: [
-          rung({ capability_class: "gpu-16gb", depth: 1 }),
-          rung({ capability_class: "gpu-48gb", depth: 9 }),
-          rung({ capability_class: "gpu-80gb", depth: 1, history: [] }),
-        ],
-      })
-    );
-    const top = tickerRows(rows, 3).map((row) => row.klass);
-    expect(top[0]).toBe("gpu-48gb");
-    expect(top[1]).toBe("gpu-16gb");
-    expect(top[2]).toBe("gpu-80gb");
+describe("rowKind", () => {
+  it("takes the seed's word when the seed knows the class", () => {
+    expect(rowKind("CPU-64", referenceClass("CPU-64"))).toBe("cpu");
+    expect(rowKind("TPU-V5E", referenceClass("TPU-V5E"))).toBe("tpu");
   });
 
-  it("puts a priced reference row above a rung with nothing on it", () => {
-    // The quiet-market case: eight rungs exist from the first request and
-    // none of them has a number yet.
-    const rows = boardRows(
-      view({
-        zc: [
-          rung({
-            capability_class: "gpu-24gb",
-            depth: 0,
-            best_ask_zc: null,
-            best_ask_usd: null,
-            change_zc: null,
-            history: [],
-          }),
-        ],
-      })
-    );
-    expect(tickerRows(rows, 1)[0].source.kind).toBe("reference");
+  it("reads the ladder's own prefix when the seed does not", () => {
+    expect(rowKind("gpu-24gb", null)).toBe("gpu");
+    expect(rowKind("cpu-large", null)).toBe("cpu");
+    expect(rowKind("gpu-80gb-hopper", null)).toBe("gpu");
   });
 
-  it("returns at most the limit", () => {
-    expect(tickerRows(boardRows(view()), 4)).toHaveLength(4);
+  it("calls an unrecognised class other rather than guessing a kind", () => {
+    expect(rowKind("npu-shiny", null)).toBe("other");
+    expect(rowKind("", null)).toBe("other");
+  });
+});
+
+describe("rowVramGb", () => {
+  it("parses the VRAM floor out of a gpu-NNgb class name", () => {
+    expect(rowVramGb("gpu-24gb", null)).toBe(24);
+    expect(rowVramGb("gpu-8gb", null)).toBe(8);
+    // The qualifier after the floor is compute capability, not memory.
+    expect(rowVramGb("gpu-80gb-hopper", null)).toBe(80);
+  });
+
+  it("prefers the seed's stated figure", () => {
+    expect(rowVramGb("H100-80G", referenceClass("H100-80G"))).toBe(80);
+  });
+
+  it("is null, never zero, for a class that states no memory", () => {
+    expect(rowVramGb("cpu-large", null)).toBeNull();
+    expect(rowVramGb("CPU-64", referenceClass("CPU-64"))).toBeNull();
+    expect(rowVramGb("gpu-large", null)).toBeNull();
+  });
+});
+
+describe("filterRows", () => {
+  const rows = boardRows(
+    view({
+      zc: [
+        rung({ capability_class: "gpu-24gb" }),
+        rung({ capability_class: "cpu-large" }),
+      ],
+    })
+  );
+
+  it("leaves the board alone when nothing is selected", () => {
+    expect(filterRows(rows, { kind: "all", vram: "any" })).toHaveLength(
+      rows.length
+    );
+  });
+
+  it("keeps live rungs ahead of seed-only rows inside the filtered set", () => {
+    const gpus = filterRows(rows, { kind: "gpu", vram: "any" });
+    expect(gpus[0].klass).toBe("gpu-24gb");
+    expect(gpus[0].source.kind).toBe("live");
+    expect(gpus.slice(1).every((row) => row.source.kind === "reference")).toBe(
+      true
+    );
+  });
+
+  it("composes kind with VRAM rather than picking one", () => {
+    const both = filterRows(rows, { kind: "gpu", vram: "80plus" });
+    expect(both.length).toBeGreaterThan(0);
+    expect(both.every((row) => row.kind === "gpu")).toBe(true);
+    expect(both.every((row) => (row.vramGb ?? 0) >= 80)).toBe(true);
+    expect(filterRows(rows, { kind: "cpu", vram: "80plus" })).toEqual([]);
+  });
+
+  it("bands memory at the edges the labels claim", () => {
+    const klasses = (vram: "le16" | "24" | "32-48") =>
+      filterRows(rows, { kind: "all", vram }).map((row) => row.klass);
+    expect(klasses("le16")).toContain("T4-16G");
+    expect(klasses("le16")).not.toContain("RTX-4000ADA-20G");
+    expect(klasses("24")).toContain("RTX-4000ADA-20G");
+    expect(klasses("24")).toContain("RTX-4090-24G");
+    expect(klasses("32-48")).toContain("RTX-5090-32G");
+    expect(klasses("32-48")).toContain("L40S-48G");
+    expect(klasses("32-48")).not.toContain("A100-80G");
+  });
+
+  it("only lets a band speak about rows it can measure", () => {
+    // A CPU class states no VRAM, so no band claims it — and Unknown is
+    // where it goes, rather than being read as 0 GB.
+    const unknown = filterRows(rows, { kind: "all", vram: "unknown" });
+    expect(unknown.map((row) => row.klass)).toContain("cpu-large");
+    expect(unknown.every((row) => row.vramGb === null)).toBe(true);
+    expect(
+      filterRows(rows, { kind: "all", vram: "le16" }).some(
+        (row) => row.klass === "cpu-large"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("kindChips", () => {
+  it("always offers the ladder's vocabulary, counted", () => {
+    const chips = kindChips(boardRows(view()));
+    expect(chips.map((chip) => chip.value)).toEqual([
+      "all",
+      "gpu",
+      "cpu",
+      "tpu",
+    ]);
+    expect(chips[0].count).toBe(boardRows(view()).length);
+    expect(chips[3].count).toBeGreaterThan(0);
+  });
+
+  it("offers Other only when something is in it", () => {
+    const withOther = kindChips(
+      boardRows(view({ zc: [rung({ capability_class: "npu-shiny" })] }))
+    );
+    expect(withOther.map((chip) => chip.value)).toContain("other");
+    expect(withOther[withOther.length - 1].count).toBe(1);
+  });
+});
+
+describe("paginate", () => {
+  const rows = boardRows(view());
+
+  it("windows ten rows and says which ten", () => {
+    const page = paginate(rows, 1);
+    expect(page.rows).toHaveLength(10);
+    expect(page.rangeText).toBe(`1–10 of ${rows.length}`);
+  });
+
+  it("clamps a page the row set no longer has", () => {
+    // The filter-narrowed case: page 3 is showing and four rows are left.
+    const page = paginate(rows.slice(0, 4), 3);
+    expect(page.page).toBe(1);
+    expect(page.pages).toBe(1);
+    expect(page.rows).toHaveLength(4);
+  });
+
+  it("clamps below the first page too", () => {
+    expect(paginate(rows, 0).page).toBe(1);
+    expect(paginate(rows, -7).page).toBe(1);
+    expect(paginate(rows, Number.NaN).page).toBe(1);
+  });
+
+  it("counts a short last page honestly", () => {
+    const page = paginate(rows.slice(0, 12), 2);
+    expect(page.rows).toHaveLength(2);
+    expect(page.rangeText).toBe("11–12 of 12");
+  });
+
+  it("says nothing rather than 1–0 when there is nothing", () => {
+    const page = paginate([], 1);
+    expect(page.rangeText).toBe("0 of 0");
+    expect(page.pages).toBe(1);
+    expect(page.rows).toEqual([]);
+  });
+});
+
+describe("dayVerdict", () => {
+  const at = (day: string) => `2026-08-${day}T09:00:00Z`;
+
+  it("says cheaper, with the move, off the points the chart drew", () => {
+    const verdict = dayVerdict({
+      source: "live",
+      points: [
+        { at: at("11"), valueMzc: 1_000 },
+        { at: at("12"), valueMzc: 959 },
+      ],
+    });
+    expect(verdict).toEqual({
+      direction: "down",
+      text: "cheaper than yesterday ▼ 4.1%",
+      reference: false,
+    });
+  });
+
+  it("says pricier the same way", () => {
+    const verdict = dayVerdict({
+      source: "live",
+      points: [
+        { at: at("11"), valueMzc: 1_000 },
+        { at: at("12"), valueMzc: 1_023 },
+      ],
+    });
+    expect(verdict.direction).toBe("up");
+    expect(verdict.text).toBe("pricier than yesterday ▲ 2.3%");
+  });
+
+  it("does not claim a day passed between two readings on one day", () => {
+    const verdict = dayVerdict({
+      source: "live",
+      points: [
+        { at: "2026-08-13T09:00:00Z", valueMzc: 1_000 },
+        { at: "2026-08-13T09:05:00Z", valueMzc: 900 },
+      ],
+    });
+    expect(verdict.text).toBe("cheaper than the last reading ▼ 10.0%");
+  });
+
+  it("flags a movement read off the seed so it cannot pass for ours", () => {
+    const verdict = dayVerdict({
+      source: "reference",
+      points: [
+        { at: "2026-08-11", valueMzc: 1_000 },
+        { at: "2026-08-12", valueMzc: 900 },
+      ],
+    });
+    expect(verdict.reference).toBe(true);
+  });
+
+  it("keeps a measured standstill as a standstill", () => {
+    const verdict = dayVerdict({
+      source: "live",
+      points: [
+        { at: at("11"), valueMzc: 900 },
+        { at: at("12"), valueMzc: 900 },
+      ],
+    });
+    expect(verdict).toEqual({
+      direction: "none",
+      text: "unchanged today",
+      reference: false,
+    });
+  });
+
+  it("states the direction without a percentage off a donated baseline", () => {
+    const verdict = dayVerdict({
+      source: "live",
+      points: [
+        { at: at("11"), valueMzc: 0 },
+        { at: at("12"), valueMzc: 500 },
+      ],
+    });
+    expect(verdict.direction).toBe("up");
+    expect(verdict.text).toBe("pricier than yesterday");
+  });
+
+  it("has nothing to say with fewer than two points", () => {
+    expect(dayVerdict(null).text).toBe("no history yet");
+    expect(
+      dayVerdict({ source: "live", points: [{ at: at("12"), valueMzc: 1 }] })
+        .text
+    ).toBe("no history yet");
+  });
+});
+
+describe("hostClassGroups", () => {
+  const machines = [
+    { id: "m1", label: "studio", klass: "gpu-24gb" },
+    { id: "m2", label: "attic-rig", klass: "gpu-80gb-hopper" },
+    { id: "m3", label: "spare", klass: "gpu-24gb" },
+  ];
+
+  it("groups the host's machines by class, first-seen order", () => {
+    const groups = hostClassGroups(view(), machines);
+    expect(groups.map((g) => g.klass)).toEqual(["gpu-24gb", "gpu-80gb-hopper"]);
+    expect(groups[0].machines.map((m) => m.label)).toEqual([
+      "studio",
+      "spare",
+    ]);
+  });
+
+  it("gives a class with a live book the live series and the live row", () => {
+    const groups = hostClassGroups(view(), machines);
+    expect(groups[0].row?.source.kind).toBe("live");
+    expect(groups[0].history?.source).toBe("live");
+    expect(groups[0].verdict.reference).toBe(false);
+  });
+
+  it("falls back to the seed series, flagged, for a class with no book", () => {
+    const groups = hostClassGroups(view(), machines);
+    const hopper = groups[1];
+    expect(hopper.history?.source).toBe("reference");
+    expect(hopper.verdict.reference).toBe(true);
+    expect(hopper.displayName).toContain("H100");
+  });
+
+  it("still makes a card for a class neither source knows", () => {
+    const groups = hostClassGroups(view(), [
+      { id: "m9", label: "mystery", klass: "npu-shiny" },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].row).toBeNull();
+    expect(groups[0].verdict.text).toBe("no history yet");
+    expect(groups[0].href).toBe("/market/prices/npu-shiny");
+  });
+
+  it("is empty when nothing resolved, rather than inventing a class", () => {
+    expect(hostClassGroups(view(), [])).toEqual([]);
   });
 });
 

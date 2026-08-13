@@ -8,7 +8,14 @@ import { PricesPanel } from "@/components/market/PricesPanel";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { PageShell } from "@/components/shell/PageShell";
 import { Button } from "@/components/ui/button";
-import { NotAuthenticated, getPrices, type PricesView } from "@/lib/cloud-api";
+import {
+  NotAuthenticated,
+  getMarketHint,
+  getPrices,
+  listMachines,
+  type PricesView,
+} from "@/lib/cloud-api";
+import type { HostMachine } from "@/lib/market/board";
 
 /** The compute board. Live numbers come from `GET /v1alpha1/prices` and
  * nowhere else; the reference rows beside them come from the generated seed
@@ -20,7 +27,12 @@ import { NotAuthenticated, getPrices, type PricesView } from "@/lib/cloud-api";
  * "did we ever have an answer" is exactly the question a stale closure gets
  * wrong. First read fails: the unreadable panel, there is nothing behind
  * it. Any later read fails: the board stays and says it is stale. Not
- * signed in goes to /sign-in either way. */
+ * signed in goes to /sign-in either way.
+ *
+ * TWO INDEPENDENT READS, same reasoning the class page documents. The
+ * board is one route; the host's own machines are a list route plus one
+ * hint call each. Either can fail without emptying the other, so they keep
+ * separate state words. */
 export default function PricesPage() {
   const router = useRouter();
   const [state, setState] = useState<"loading" | "present" | "unreadable">(
@@ -31,6 +43,10 @@ export default function PricesPage() {
   const [stale, setStale] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const hadData = useRef(false);
+  const [machines, setMachines] = useState<HostMachine[]>([]);
+  const [machinesState, setMachinesState] = useState<
+    "loading" | "present" | "unreadable"
+  >("loading");
 
   // No synchronous setState in here — the effect below calls it on mount,
   // and a setState in an effect body is a cascading render (and a lint
@@ -59,9 +75,51 @@ export default function PricesPage() {
       });
   }, [router]);
 
+  /** The host's own machines, each resolved to the capability class the
+   * market would file it under.
+   *
+   * ONE HINT CALL PER MACHINE, in parallel: the API has no bulk hint
+   * route, and an account has a handful of machines rather than hundreds.
+   * A machine whose hint fails — or that the ladder cannot classify at all
+   * (`capability_class` null, which is the ladder's own refusal and not an
+   * error) — is skipped SILENTLY. It has no class, so there is no card it
+   * belongs on, and an error line per unclassifiable laptop would bury the
+   * section it sits above.
+   *
+   * Revoked machines are excluded: they cannot be listed, so their class
+   * is not a market a host is in. */
+  const loadMachines = useCallback(() => {
+    return listMachines()
+      .then((found) =>
+        Promise.all(
+          found
+            .filter((machine) => machine.status !== "revoked")
+            .map((machine) =>
+              getMarketHint(machine.id)
+                .then((hint): HostMachine | null =>
+                  hint.capability_class === null
+                    ? null
+                    : {
+                        id: machine.id,
+                        label: machine.name || machine.node_id,
+                        klass: hint.capability_class,
+                      }
+                )
+                .catch(() => null)
+            )
+        )
+      )
+      .then((resolved) => {
+        setMachines(resolved.filter((m): m is HostMachine => m !== null));
+        setMachinesState("present");
+      })
+      .catch(() => setMachinesState("unreadable"));
+  }, []);
+
   useEffect(() => {
     load();
-  }, [load]);
+    loadMachines();
+  }, [load, loadMachines]);
 
   const retry = useCallback(() => {
     if (!hadData.current) {
@@ -69,8 +127,11 @@ export default function PricesPage() {
       setError(null);
     }
     setRefreshing(true);
-    load().finally(() => setRefreshing(false));
-  }, [load]);
+    // Both reads, because the refresh button is on the page and not on one
+    // of its panels. The spinner stops when the slower of the two lands,
+    // which is the honest answer to "is it still refreshing".
+    Promise.all([load(), loadMachines()]).finally(() => setRefreshing(false));
+  }, [load, loadMachines]);
 
   return (
     <PageShell width="wide">
@@ -93,6 +154,8 @@ export default function PricesPage() {
         <PricesPanel
           state={state}
           view={view}
+          machines={machines}
+          machinesState={machinesState}
           onRetry={retry}
           error={error}
           stale={stale}

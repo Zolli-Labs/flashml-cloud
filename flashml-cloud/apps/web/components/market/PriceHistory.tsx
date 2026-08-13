@@ -23,8 +23,20 @@ import { Sparkline } from "./Sparkline";
  * `vector-effect="non-scaling-stroke"` so the stretch never thickens a line,
  * and both axes are HTML rather than `<text>` for the same reason. The
  * labels are positioned against the same inset box the plot fills, so no
- * arithmetic here assumes a font size. */
-export function PriceHistory({ data }: { data: PriceHistoryData }) {
+ * arithmetic here assumes a font size.
+ *
+ * `compact` is a HEIGHT, not a lesser chart. The board's own cards stack
+ * one per class and a 160px plot in each pushes the second class below the
+ * fold; nothing else is dropped, because a chart with its axes taken off
+ * is a shape, and the whole point of putting a real one on the front of
+ * the page was that a host can read a number off it. */
+export function PriceHistory({
+  data,
+  compact = false,
+}: {
+  data: PriceHistoryData;
+  compact?: boolean;
+}) {
   // `classHistory` never hands over a single point, and this is what keeps
   // that a decision rather than an assumption: one point has no span to
   // normalise against, and the drawing would be a line to nowhere.
@@ -73,7 +85,9 @@ export function PriceHistory({ data }: { data: PriceHistoryData }) {
           </div>
         </div>
 
-        <div className="relative h-40 min-w-0">
+        <div
+          className={`relative min-w-0 ${compact ? "h-[120px]" : "h-40"}`}
+        >
           <div className="absolute inset-x-0 inset-y-2">
             <svg
               viewBox="0 0 100 100"

@@ -1,3 +1,7 @@
+"use client";
+
+import { useState } from "react";
+
 import type { PriceQuote, PriceUnpriced } from "@/lib/cloud-api";
 import { ageLabel, quoteRow, unpricedRow } from "@/lib/market-prices";
 
@@ -11,6 +15,18 @@ import { ageLabel, quoteRow, unpricedRow } from "@/lib/market-prices";
  * read stay visible, which are the staleness verdict and that a venue with
  * no quote is *not observed* rather than absent.
  *
+ * EIGHT ROWS, THEN A COUNT. In a 300px rail beside a paged board, a full
+ * venue list is the longest thing on the page and it is the least
+ * important thing on the page. The toggle carries the total, so the
+ * collapsed state still says how much is behind it — a cap that hides its
+ * own size is indistinguishable from a short list.
+ *
+ * THE TIER CHIP IS A DISAMBIGUATOR, not a decoration. Providers quote the
+ * same SKU twice, secure and community, at different prices; without the
+ * chip those two rows are the same provider and the same SKU with two
+ * numbers, which reads as a data fault. Null tier stays bare rather than
+ * being defaulted to either word.
+ *
  * Every string still comes from `lib/market-prices.ts`; nothing here
  * converts a currency. */
 export function ExternalVenues({
@@ -20,6 +36,8 @@ export function ExternalVenues({
   quotes: PriceQuote[];
   unpriced: PriceUnpriced[];
 }) {
+  const [showAll, setShowAll] = useState(false);
+
   if (quotes.length === 0 && unpriced.length === 0) {
     return (
       <section>
@@ -31,15 +49,23 @@ export function ExternalVenues({
     );
   }
 
+  const total = quotes.length + unpriced.length;
+  // Priced rows first, so a cap never spends its eight lines on venues we
+  // have no number for.
+  const shownQuotes = showAll ? quotes : quotes.slice(0, VENUE_CAP);
+  const shownUnpriced = showAll
+    ? unpriced
+    : unpriced.slice(0, Math.max(0, VENUE_CAP - shownQuotes.length));
+
   return (
     <section>
       <h2 className="label-caps">External venues</h2>
       <ul className="mt-2 divide-y divide-border">
-        {quotes.map((quote, i) => {
+        {shownQuotes.map((quote, i) => {
           const row = quoteRow(quote);
           return (
             <li
-              key={`${quote.provider}-${quote.sku}-${i}`}
+              key={`${quote.provider}-${quote.sku}-${quote.tier ?? ""}-${i}`}
               title={[
                 row.detail,
                 row.capturedText,
@@ -52,9 +78,16 @@ export function ExternalVenues({
                 row.stale ? "opacity-60" : ""
               }`}
             >
-              <span className="min-w-0 truncate">
-                {quote.provider}
-                <span className="text-muted-foreground"> · {quote.sku}</span>
+              <span className="flex min-w-0 items-baseline gap-1.5">
+                <span className="min-w-0 truncate">
+                  {quote.provider}
+                  <span className="text-muted-foreground"> · {quote.sku}</span>
+                </span>
+                {quote.tier && (
+                  <span className="shrink-0 rounded-full border border-border px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-muted-foreground">
+                    {quote.tier}
+                  </span>
+                )}
               </span>
               <span className="flex shrink-0 items-baseline gap-1.5">
                 <span className="font-mono tabular-nums">
@@ -72,7 +105,7 @@ export function ExternalVenues({
             </li>
           );
         })}
-        {unpriced.map((venue) => {
+        {shownUnpriced.map((venue) => {
           const row = unpricedRow(venue);
           return (
             <li
@@ -88,6 +121,18 @@ export function ExternalVenues({
           );
         })}
       </ul>
+
+      {total > VENUE_CAP && (
+        <button
+          type="button"
+          onClick={() => setShowAll((open) => !open)}
+          className="mt-2 rounded-md border border-border bg-surface px-2.5 py-1 text-xs transition-colors hover:bg-surface-2"
+        >
+          {showAll ? "Show fewer" : `Show all (${total})`}
+        </button>
+      )}
     </section>
   );
 }
+
+const VENUE_CAP = 8;
