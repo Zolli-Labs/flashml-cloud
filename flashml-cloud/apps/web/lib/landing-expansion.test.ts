@@ -14,7 +14,7 @@ const renderPlatformSupport = () =>
 const renderRecoveryDemo = () =>
   renderToStaticMarkup(createElement(RecoveryDemo));
 const visibleText = (markup: string) =>
-  markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  markup.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
 const anchorTags = (markup: string) => markup.match(/<a\b[^>]*>[\s\S]*?<\/a>/g) ?? [];
 const anchorForText = (markup: string, label: string) =>
   anchorTags(markup).find((anchor) => visibleText(anchor).startsWith(label));
@@ -87,14 +87,17 @@ describe("proof-led Zolli landing", () => {
   it("orders evaluation content from proof through conversion", () => {
     const markup = renderLanding();
     const anchors = [
-      'id="evidence"',
-      'id="platform"',
+      'id="network"',
       'id="how-it-works"',
-      'id="workloads"',
-      'id="architecture"',
       'id="recover"',
+      'id="evidence"',
+      'id="workloads"',
+      'id="platform"',
+      'id="technical-workflow"',
+      'id="architecture"',
       'id="services"',
       'id="faq"',
+      'id="start"',
     ];
 
     anchors.reduce((previous, anchor) => {
@@ -104,7 +107,7 @@ describe("proof-led Zolli landing", () => {
     }, -1);
   });
 
-  it("keeps the approved ten-section surface rhythm followed by a dark footer", () => {
+  it("keeps the approved twelve-section surface rhythm followed by a dark footer", () => {
     const markup = renderLanding();
     const sections = (markup.match(/<section\b[^>]*>/g) ?? []).map((tag) => [
       tag.match(/\bid="([^"]+)"/)?.[1],
@@ -114,12 +117,14 @@ describe("proof-led Zolli landing", () => {
 
     expect(sections).toEqual([
       ["hero", "dark"],
-      ["evidence", "light"],
-      ["platform", "sand"],
+      ["network", "light"],
       ["how-it-works", "dark"],
-      ["workloads", "light"],
-      ["architecture", "dark"],
       ["recover", "light"],
+      ["evidence", "light"],
+      ["workloads", "light"],
+      ["platform", "sand"],
+      ["technical-workflow", "dark"],
+      ["architecture", "dark"],
       ["services", "sand"],
       ["faq", "light"],
       ["start", "orange"],
@@ -128,8 +133,35 @@ describe("proof-led Zolli landing", () => {
     expect(markup.indexOf(footer)).toBeGreaterThan(markup.indexOf('id="start"'));
   });
 
-  it("explains the complete machine-to-result workflow in order", () => {
-    const journey = scopedSection(renderLanding(), "how-it-works");
+  it("explains the compute market and a three-step path before mechanics", () => {
+    const markup = renderLanding();
+    const network = scopedSection(markup, "network");
+    const journey = scopedSection(markup, "how-it-works");
+    const humanSteps = [...journey.matchAll(/\bdata-human-step="([^\"]+)"/g)].map(
+      ([, step]) => step,
+    );
+
+    expect(network).toContain('data-surface="light"');
+    for (const copy of [
+      "Compute is everywhere. Access is not.",
+      "From isolated machines to an open compute network.",
+      "Access more machines, compare more choices, and avoid depending on one provider's price or availability.",
+      "Turn unused machines into productive capacity and earn when they complete useful work.",
+      "Early network",
+      "Early testing uses Zolli credits. Cash payout is not live.",
+    ]) expect(visibleText(network)).toContain(copy);
+
+    expect(journey).toContain('data-surface="dark"');
+    expect(humanSteps).toEqual(["1", "2", "3"]);
+    expect([...journey.matchAll(/<h3[^>]*>([\s\S]*?)<\/h3>/g)].map(([, title]) => visibleText(title))).toEqual([
+      "Tell Zolli what you need.",
+      "The network finds suitable machines.",
+      "Your work continues as capacity changes.",
+    ]);
+  });
+
+  it("explains the complete machine-to-result technical workflow in order", () => {
+    const journey = scopedSection(renderLanding(), "technical-workflow");
     const steps = [...journey.matchAll(/\bdata-workflow-step="([^"]+)"/g)].map(
       ([, key]) => key,
     );
@@ -189,7 +221,7 @@ describe("proof-led Zolli landing", () => {
   });
 
   it("keeps each workflow scene small and removes the old topology ticker", () => {
-    const journey = scopedSection(renderLanding(), "how-it-works");
+    const journey = scopedSection(renderLanding(), "technical-workflow");
 
     expect(journey.match(/\bdata-workflow-scene=/g) ?? []).toHaveLength(7);
     expect(journey).not.toContain("workflow / topology");
@@ -199,7 +231,7 @@ describe("proof-led Zolli landing", () => {
   });
 
   it("keeps meaningful workflow labels above the flagged contrast floor", () => {
-    const journey = scopedSection(renderLanding(), "how-it-works");
+    const journey = scopedSection(renderLanding(), "technical-workflow");
 
     expect(journey).not.toMatch(/\btext-white\/(?:35|38|42)\b/);
   });

@@ -1448,6 +1448,7 @@ describe("the seven-scene workflow", () => {
     ]);
     expect(scenes).toEqual(steps);
     expect(markup).toContain("data-workflow-stage");
+    expect(markup).toContain('id="technical-workflow"');
     expect(markup).not.toContain('data-active="false"');
     expect(markup).not.toContain("workflow / topology");
     expect(markup).not.toContain("Protocol events");
