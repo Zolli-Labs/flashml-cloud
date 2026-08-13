@@ -1,0 +1,156 @@
+# Full-pipeline test findings — 2026-08-13
+
+**Method:** the owner drove the real product end to end on dev — sign-up,
+workspace, three host types (Apple-Silicon laptop, RunPod pod, Alibaba FC
+sandbox), repo authoring, submission, execution — while this session diagnosed
+every failure at the source. Everything below was **observed live**, not
+inferred. Fixes were verified at the API level with no UI in the loop.
+
+The one-sentence summary: **three hosts joined the fleet and, for a while,
+zero of them could complete a task — for three unrelated reasons — and every
+one of them enrolled successfully and was allowed to claim work.** Capability
+is what the fleet claims; completion is what it delivers. The gap between
+those two is where every finding below lives.
+
+---
+
+## 1. Fixed tonight
+
+### 1.1 `uv venv` built task environments against whatever Python led PATH
+**flashnode** · `executor/environments.py:388` · **fixed on
+`fix/trusted-tier-execution` (`46df740`), 586 tests passed, pushed**
+
+Bare `uv venv` discovers an interpreter from PATH. On a stock Ubuntu 20.04 pod
+that is Python 3.8, and the resolve then fails with *"numpy==1.26.4 depends on
+Python>=3.9"* — an error naming the **package** while the cause is the
+**interpreter**. Three consecutive live failures, each requeueing the task.
+The venv is now created with `--python sys.executable` — the same interpreter
+the stdlib fallback two lines below always used. Regression test locks the
+failure shape.
+
+### 1.2 The demo workload hardcoded `/work` and died on every trusted host
+**Zolli-Labs/zolli-demo** · `jobs/train.py` · **fixed on all three branches,
+verified on the GitHub remote per branch**
+
+`/work` is a naming convention, not a guaranteed mount. The trusted tier
+(Colab, pods — hosts that cannot nest Docker) has no container; the agent
+delivers the real workdir via `FLASHML_WORK_DIR`, and the argv rewrite only
+covers `/work`-prefixed argv **tokens** — argparse defaults never pass through
+argv. The script wrote checkpoints and `metrics.json` to the host's root
+filesystem as root, exited 0, and failed the attempt with *"produced no
+metrics.json"*. **Five consecutive times on a Python-3.11 pod.**
+
+Worth stating plainly: the workload was written faithfully from
+`writing-flashml-yaml.md`, and the guide never mentions `FLASHML_WORK_DIR`
+(finding 3.1). The docs manufactured this bug.
+
+### 1.3 A record corrected
+Earlier tonight this session claimed machine capabilities are "snapshotted at
+enrolment and never refreshed." **Wrong.** The agent re-registers on every
+`flashnode work` start; the flags come from the **runner tier chosen on the
+command line** (`agent/cli.py:443-447`). The Mac reported `modules-only`
+because `--runner docker` registers no argv capability at all — see 2.1.
+
+### 1.4 A swept variable must exist on every branch's script
+**zolli-demo** · fixed, verified per-branch at the SHA level
+
+The `sweep` branch swept `--hidden` while its `train.py` lacked the flag
+(it lived only on `quick`): argparse **exit 2 on every machine
+simultaneously**, with the visible error led by a Docker platform warning
+that buried the argparse line. The job's code snapshot is pinned at submit,
+so the fix required cancel + resubmit. Two lessons that outlive the demo:
+error surfacing leads with container noise and hides the workload's own
+last line (a flashnode papercut worth fixing), and branch-per-job repos need
+their shared argument surface on **every** branch.
+
+## 2. Open — flashnode (public repo)
+
+### 2.1 The recommended runner registers a laptop as unable to run jobs
+`agent/cli.py:443-447`: `argv_capable=(runner=="argv")`,
+`unsandboxed_argv_capable=(runner=="trusted")` — **`--runner docker` sets
+neither**, so a Docker-capable laptop registers as *Modules only*, is never
+offered command jobs, and prints *"waiting — no work queued"* while six tasks
+sit queued. `flashnode login`'s own post-enrol hint prints `--runner docker`
+(`cli.py:138`; `doctor.py:505` same). Every user following the printed
+instruction lands here; it cost the owner an hour tonight.
+
+Also note `--runner argv` sets `module_capable=False` — the tiers are mutually
+exclusive in registration, which is either deliberate policy or the same bug
+from the other side. Needs a decision, then one-line fixes plus the spec §2.2
+tier-aware hints. **Blocked tonight:** `cli.py` carries a peer session's
+uncommitted `--ephemeral` work.
+
+### 2.2 The trusted-tier contract (approved 2026-08-09) is partly unexecuted
+§3 (workdir delivery) **shipped in 0.4.0** — the ROADMAP note saying otherwise
+is stale. Still open from that spec: §2 (tier-aware health checks — a trusted
+host that fails three times self-quarantines with a report naming Docker) and
+§4/§5 (dependency-environment failure handling and cooldown).
+
+### 2.3 `--ephemeral` is documented but not shipped
+The RunPod guide says it is *required* on rented pods; flashnode 0.4.0 rejects
+it (`unrecognized arguments` — hit live tonight). The implementation exists,
+uncommitted, in the shared public-repo checkout (`cli.py`, `identity/*`,
+tests). Whoever owns it: there is a tester waiting.
+
+### 2.4 The FC-sandbox trusted worker stalls silently and holds its lease
+Claim → code unpacked → `datasets ready` → nothing, forever, renewing every
+~23s. To the coordinator this is indistinguishable from healthy work.
+**Holding is worse than failing** — the RunPod pod's fast failures requeued in
+seconds; the FC stall poisoned three consecutive jobs until revoked. Root
+cause not yet isolated (parked with FC work generally). The scheduler-side
+mitigation is 4.1.
+
+## 3. Open — docs (they manufactured real failures tonight)
+
+1. **`writing-flashml-yaml.md` teaches the `/work` contract without
+   `FLASHML_WORK_DIR`.** A workload written from the guide breaks on every
+   trusted host. This is how 1.2 happened.
+2. **RunPod guide** documents unshipped `--ephemeral` (2.3); says login always
+   suggests `--runner docker` (0.4.0 suggests `trusted` when Docker is absent
+   — stale); names no minimum host anything (moot once 1.1 ships).
+3. **`scripts/dev.sh`** missing-venv hint says `uv pip install -e
+   ../../../flashruntime` — a relative-path install of a directory deleted
+   2026-08-01, the exact pattern `CLAUDE.md` forbids. The owner pasted it
+   tonight; it cannot work.
+
+## 4. Open — scheduler / platform
+
+1. **No progress watchdog on leases.** A machine renewing without ever
+   committing a checkpoint looks identical to one training (2.4). N renewals
+   with zero progress artifacts should surface, then requeue.
+2. **No image-architecture gate.** Curated images are `linux/amd64` only; an
+   arm64 Mac runs them under QEMU at ~1% native (measured: 11 s/epoch vs
+   0.1 s). Nothing errors, nothing warns — the platform string is right there
+   on the machine row. Fix is two-sided: multi-arch image builds (public repo
+   CI) and a placement-time warning.
+3. **Attempt cooldown:** the 3.8 pod claimed the same task three times in 30
+   seconds, failing identically each time. Spec §5 covers this; unexecuted.
+4. **Console:** `FleetPill` pluralisation ("1 machines online"). Trivial;
+   listed so it is not lost.
+
+## 5. What is proven at the API level, no UI
+
+| Step | Status | Evidence |
+|---|---|---|
+| Auth via CLI credential | **proven** | `GET /v1alpha1/me` → 200 |
+| Submit from repo (parse, preflight, dataset admission) | **proven** | `POST /v1alpha1/jobs/from-repo` → 201, job `36c647236e3a` |
+| flashnode unit suite with fixes | **proven** | 586 passed, 12 deselected |
+| Sweep fan-out, claim → run → checkpoint → **accept**, 6 tasks | **proven** | job `f8d6baf207a7` → `SUCCEEDED`; 6× `TASK_COMMIT_ACCEPTED` (12:41:56–12:50:01Z); 54 artifacts incl. all six `task-N/metrics.json` |
+| Trusted tier end-to-end (shipped 0.4.0 agent + fixed workload) | **proven** | the pod committed five of the six tasks ~40 s apart; the workdir delivery was already in the 0.4.0 wheel — only the workload (1.2) was wrong. The fix-branch install is needed only for stock Python-3.8 pods (1.1) |
+| Cancel via API | **proven** | `POST /jobs/36c647236e3a/cancel` → 200 (the poisoned first submit — see 1.4) |
+| `e2e/` suite `LOCAL=1` against the fixed checkout | **not run** | the gate before releasing flashnode 0.4.1 |
+
+## 6. The release gate
+
+The dev environment installs `flashnode` from PyPI, so RunPod/Colab testers
+get 1.1 only via a **flashnode 0.4.1 release** (which should also carry
+`--ephemeral` once its owner lands it, and the 2.1 decision if made). Until
+then, pods can install the fixed agent directly from the branch:
+
+```
+pip install "git+https://github.com/Zolli-Labs/flashml.git@fix/trusted-tier-execution#subdirectory=flashnode"
+```
+
+Before tagging: run the `e2e/` suite `LOCAL=1`, and remember the release
+gotchas already on record — a red release run still publishes, and
+docs-deploy always fails on tags.
