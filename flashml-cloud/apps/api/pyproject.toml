@@ -67,6 +67,26 @@ dependencies = [
     # the first accepted commit rather than at startup, which is the worst
     # possible time to discover a packaging gap.
     "oss2>=2.18",
+    # Alibaba FC Agent Sandbox, which speaks the E2B protocol rather than an
+    # Alibaba-specific one — `alibaba_sandbox.py` drives it through the E2B
+    # SDK and Alibaba's own docs use `E2B_API_KEY` / `E2B_API_URL` /
+    # `E2B_DOMAIN` and the built-in `code-interpreter-v1` template.
+    #
+    # Here for exactly the reason `oss2` is, one step worse. The import is
+    # lazy (`alibaba_sandbox.py` imports `Sandbox` inside the method) and
+    # every path is gated on `settings.fc_sandbox_configured`, so an
+    # unconfigured deploy neither imports it nor behaves differently. But a
+    # CONFIGURED deploy missing the wheel raises "e2b-code-interpreter is not
+    # installed" at the first evaluation — after a training job has already
+    # been accepted and run.
+    #
+    # EXACT versions, not ranges, and not a preference: these two are the
+    # pair Alibaba pins as validated against FC Agent Sandbox, and the
+    # module's own docstring already names them. `_status_from_message`
+    # parses `e2b.api.handle_api_exception`'s formatting, which is the most
+    # likely thing here to break on an unattended upgrade.
+    "e2b==2.31.0",
+    "e2b-code-interpreter==2.8.1",
 ]
 
 [project.optional-dependencies]

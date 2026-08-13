@@ -716,6 +716,26 @@ services:
       # one correct answer, so it lives in version control.
       - key: E2B_REGION
         value: ap-southeast-1
+      # The one secret. `E2B_API_KEY` and NOT `FC_SANDBOX_API_KEY`: the
+      # sandbox speaks the E2B protocol, and `Settings.from_env` reads
+      # Alibaba's own variable names so a value copied out of their console
+      # or docs lands where it is expected.
+      #
+      # Deliberately NOT shared with prod. This key creates sandboxes, kills
+      # them and reads their metadata, with no scope narrower than that.
+      - key: E2B_API_KEY
+        sync: false
+      # Declared rather than left to the default, because it is the value
+      # `api_url` and `domain` are DERIVED from when those are unset — so a
+      # wrong region here silently points a Singapore key at another
+      # continent's endpoint, which Alibaba's docs warn fails at
+      # authentication, template lookup, creation and connection alike.
+      #
+      # Singapore is also one of the eight regions where FC Agent Sandbox
+      # exists at all (cn-beijing, cn-shanghai, cn-hangzhou, cn-shenzhen,
+      # cn-hongkong, ap-southeast-1, us-east-1, us-west-1).
+      - key: E2B_REGION
+        value: ap-southeast-1
       - key: FC_SANDBOX_POOL_ID
         sync: false
       - key: FC_SANDBOX_TEMPLATE
