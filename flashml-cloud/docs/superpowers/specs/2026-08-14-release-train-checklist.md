@@ -38,6 +38,15 @@ them:**
    node's relay retries 410s every 0.3s after any natural lease expiry
    until the fleet upgrades. Land coordinator + fleet in the same window.
    (Also in flashruntime/CHANGELOG.md under Rollout.)
+5. **cli.py is a fifth touchpoint, one line**: the lease branch's only
+   cli.py edit makes the SIGTERM/SIGINT handler call `loop.shutdown()`
+   (instead of only setting stop_event) — that is what lets the CLI-UX
+   branch's `stop` verb (plain SIGTERM via psutil) actually kill the
+   session-detached task child. Keep BOTH sides: the CLI-UX
+   FileHandler/dispatch work AND the `shutdown()` call in the handler.
+   Bonus for `stop`'s docs: SIGTERM inherits the full graceful path —
+   mid-run aborts with no host strike, mid-upload still commits finished
+   work, idle exits clean.
 
 ## 2. Gate
 
