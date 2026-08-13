@@ -1,0 +1,3813 @@
+{
+ "meta": {
+  "generated": true,
+  "generatedAt": "2026-08-13",
+  "basis": "reference bands from live vendor observations"
+ },
+ "classes": [
+  {
+   "klass": "H100-80G",
+   "displayName": "NVIDIA H100 (SXM/PCIe/NVL)",
+   "kind": "gpu",
+   "vramGb": 80,
+   "refPriceUsdHr": 3.29,
+   "bandLowUsdHr": 1.49,
+   "bandHighUsdHr": 6.98,
+   "sources": [
+    "RunPod catalog API (secure, SXM)",
+    "RunPod catalog API (community, PCIe)",
+    "web:lambda-labs-pricing",
+    "web:coreweave-pricing",
+    "web:aws-ec2-pricing",
+    "web:alibaba-cloud-pricing",
+    "web:intuitionlabs-aggregator"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 4.235
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 4.2616
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 4.2607
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 4.1165
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 4.0381
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 3.9887
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 3.9557
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 4.0288
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 3.8997
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 3.8992
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 3.8276
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 3.7855
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 3.6802
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 3.6787
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 3.5817
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 3.5357
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 3.4041
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 3.4662
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 3.4278
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 3.3845
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 3.3929
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 3.3409
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 3.3842
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 3.2548
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 3.2862
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 3.2461
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 3.2732
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 3.3271
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 3.3896
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 3.29
+    }
+   ]
+  },
+  {
+   "klass": "H200-141G",
+   "displayName": "NVIDIA H200 SXM",
+   "kind": "gpu",
+   "vramGb": 141,
+   "refPriceUsdHr": 4.59,
+   "bandLowUsdHr": 3.59,
+   "bandHighUsdHr": 6.31,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:runpod-pricing-page (serverless)",
+    "web:coreweave-pricing"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 4.95
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 5.0063
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 4.844
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 4.8884
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 4.9637
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 4.8121
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 4.8979
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 4.9504
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 4.891
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 4.8229
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 4.8348
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 4.7751
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 4.7648
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 4.7647
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 4.608
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 4.6438
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 4.6719
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 4.7608
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 4.7914
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 4.8051
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 4.8425
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 4.7218
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 4.6919
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 4.7733
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 4.8654
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 4.6964
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 4.773
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 4.7811
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 4.7237
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 4.59
+    }
+   ]
+  },
+  {
+   "klass": "A100-80G",
+   "displayName": "NVIDIA A100 80GB (SXM/PCIe)",
+   "kind": "gpu",
+   "vramGb": 80,
+   "refPriceUsdHr": 1.59,
+   "bandLowUsdHr": 1.07,
+   "bandHighUsdHr": 3.7,
+   "sources": [
+    "RunPod catalog API (secure, SXM)",
+    "RunPod catalog API (community)",
+    "web:lambda-labs-pricing",
+    "web:coreweave-pricing",
+    "web:gcp-pricing",
+    "web:alibaba-cloud-pricing"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 2.385
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 2.3502
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 2.302
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 2.2279
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 2.1445
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 2.1085
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 2.0909
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 2.0728
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 2.0655
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 2.0249
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 1.9395
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 1.8776
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 1.8801
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 1.8416
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 1.8195
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 1.8097
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 1.8087
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 1.7444
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 1.7133
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 1.7016
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 1.7189
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 1.6696
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 1.6831
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 1.6915
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 1.6672
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 1.6485
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 1.6653
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 1.6331
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 1.587
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 1.59
+    }
+   ]
+  },
+  {
+   "klass": "A100-40G",
+   "displayName": "NVIDIA A100 40GB (PCIe)",
+   "kind": "gpu",
+   "vramGb": 40,
+   "refPriceUsdHr": 1.0,
+   "bandLowUsdHr": 0.6,
+   "bandHighUsdHr": 1.99,
+   "sources": [
+    "RunPod catalog API (community, SXM4-40GB)",
+    "web:lambda-labs-pricing",
+    "web:spheron-pricing"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 1.295
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 1.2905
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 1.2755
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 1.2884
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 1.2801
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 1.2723
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 1.2325
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 1.2164
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 1.2106
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 1.2031
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 1.1699
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 1.1518
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 1.1369
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 1.1609
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 1.1722
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 1.1967
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 1.1598
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 1.1373
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 1.1361
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 1.103
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 1.0816
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 1.082
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 1.0466
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 1.0364
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 1.0044
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.9856
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 1.0059
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.9958
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.9788
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 1.0
+    }
+   ]
+  },
+  {
+   "klass": "L40S-48G",
+   "displayName": "NVIDIA L40S",
+   "kind": "gpu",
+   "vramGb": 48,
+   "refPriceUsdHr": 0.99,
+   "bandLowUsdHr": 0.54,
+   "bandHighUsdHr": 2.2,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:computeprices-aggregator"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 1.37
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 1.3464
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 1.3681
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 1.3602
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 1.3588
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 1.3424
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 1.301
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 1.3104
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 1.3211
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 1.282
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 1.2774
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 1.2766
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 1.277
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 1.2846
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 1.295
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 1.2688
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 1.2534
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 1.2542
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 1.2122
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 1.1635
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 1.1253
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 1.1338
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 1.1079
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 1.0811
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 1.0434
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 1.0071
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 1.0229
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.9832
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.9994
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.99
+    }
+   ]
+  },
+  {
+   "klass": "RTX-5090-32G",
+   "displayName": "NVIDIA GeForce RTX 5090",
+   "kind": "gpu",
+   "vramGb": 32,
+   "refPriceUsdHr": 0.99,
+   "bandLowUsdHr": 0.27,
+   "bandHighUsdHr": 0.99,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:vast-ai",
+    "web:runcrate"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.63
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.6376
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.6616
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.6718
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.696
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.7082
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.739
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.7423
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.7593
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.7686
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.782
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.7839
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.8089
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.8347
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.8538
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.8691
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.8567
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.8821
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.8851
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.8751
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.8724
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.8729
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.8645
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.8744
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.9059
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.9229
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.9289
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.9329
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.9648
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.99
+    }
+   ]
+  },
+  {
+   "klass": "RTX-4090-24G",
+   "displayName": "NVIDIA GeForce RTX 4090",
+   "kind": "gpu",
+   "vramGb": 24,
+   "refPriceUsdHr": 0.74,
+   "bandLowUsdHr": 0.13,
+   "bandHighUsdHr": 0.74,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:vast-ai"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.435
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.439
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.4399
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.4351
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.4548
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.4583
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.453
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.4535
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.4624
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.4784
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.4817
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.4805
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.4769
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.4967
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.5001
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.5025
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.5269
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.5444
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.5635
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.5821
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.5767
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.5975
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.6267
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.6572
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.6532
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.67
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.6991
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.7249
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.7329
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.74
+    }
+   ]
+  },
+  {
+   "klass": "RTX-3090-24G",
+   "displayName": "NVIDIA GeForce RTX 3090",
+   "kind": "gpu",
+   "vramGb": 24,
+   "refPriceUsdHr": 0.5,
+   "bandLowUsdHr": 0.12,
+   "bandHighUsdHr": 0.5,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:vast-ai"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.31
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.3206
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.3304
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.3364
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.3485
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.3579
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.3691
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.3676
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.3829
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.3907
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.3969
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.4005
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.4002
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.415
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.4084
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.4119
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.4092
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.425
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.4407
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.4361
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.4526
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.4619
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.4787
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.4976
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.5
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.5
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.5
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.4979
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.5
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.5
+    }
+   ]
+  },
+  {
+   "klass": "RTX-A6000-48G",
+   "displayName": "NVIDIA RTX A6000",
+   "kind": "gpu",
+   "vramGb": 48,
+   "refPriceUsdHr": 0.53,
+   "bandLowUsdHr": 0.29,
+   "bandHighUsdHr": 0.82,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:vast-ai",
+    "web:thunder-compute-pricing",
+    "web:hyperstack-pricing"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.555
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.5573
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.5746
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.5709
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.5798
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.5966
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.5825
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.5899
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.6035
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.619
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.6243
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.6118
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.608
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.5922
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.6045
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.6001
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.592
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.5813
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.5672
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.5569
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.5455
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.5383
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.5351
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.5487
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.5389
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.5316
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.5252
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.5184
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.5303
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.53
+    }
+   ]
+  },
+  {
+   "klass": "RTX-4000ADA-20G",
+   "displayName": "NVIDIA RTX 4000 Ada",
+   "kind": "gpu",
+   "vramGb": 20,
+   "refPriceUsdHr": 0.28,
+   "bandLowUsdHr": 0.16,
+   "bandHighUsdHr": 0.87,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:getdeploying-aggregator"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.515
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.4944
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.4834
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.4612
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.4519
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.4534
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.4538
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.4442
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.4429
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.4415
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.4246
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.4054
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.3897
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.3832
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.3789
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.3633
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.3608
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.3545
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.3462
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.339
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.3245
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.3193
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.3214
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.3078
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.3046
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.2973
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.2958
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.2882
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.2869
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.28
+    }
+   ]
+  },
+  {
+   "klass": "L4-24G",
+   "displayName": "NVIDIA L4",
+   "kind": "gpu",
+   "vramGb": 24,
+   "refPriceUsdHr": 0.49,
+   "bandLowUsdHr": 0.44,
+   "bandHighUsdHr": 0.72,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)",
+    "web:gcp-pricing"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.58
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.5814
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.5893
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.5758
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.5572
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.5506
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.5354
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.5292
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.5323
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.5188
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.5251
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.5213
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.5174
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.5288
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.5271
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.5119
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.5072
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.5115
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.5035
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.487
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.4839
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.4816
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.4717
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.4739
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.4603
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.4568
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.4645
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.4749
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.4793
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.49
+    }
+   ]
+  },
+  {
+   "klass": "T4-16G",
+   "displayName": "NVIDIA T4",
+   "kind": "gpu",
+   "vramGb": 16,
+   "refPriceUsdHr": 0.295,
+   "bandLowUsdHr": 0.06,
+   "bandHighUsdHr": 0.53,
+   "sources": [
+    "web:aws-ec2-pricing",
+    "web:gcp-pricing",
+    "web:vast-ai",
+    "web:alibaba-cloud-pricing"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.295
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.2936
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.2865
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.2819
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.2819
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.2877
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.2877
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.2888
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.2842
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.2846
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.2821
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.2881
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.287
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.29
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.2843
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.2804
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.2801
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.2823
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.2828
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.2757
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.2823
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.2889
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.2905
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.2947
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.2963
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.2914
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.2962
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.2901
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.2987
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.295
+    }
+   ]
+  },
+  {
+   "klass": "RTX-A5000-24G",
+   "displayName": "NVIDIA RTX A5000",
+   "kind": "gpu",
+   "vramGb": 24,
+   "refPriceUsdHr": 0.27,
+   "bandLowUsdHr": 0.16,
+   "bandHighUsdHr": 0.27,
+   "sources": [
+    "RunPod catalog API (secure)",
+    "RunPod catalog API (community)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.215
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.2144
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.2114
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.2092
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.2048
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.2033
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.209
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.2109
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.2086
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.2058
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.2062
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.2064
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.2131
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.2143
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.221
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.2287
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.2301
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.2298
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.2268
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.23
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.237
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.2395
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.2359
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.2395
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.2418
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.2396
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.2446
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.2538
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.2609
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.27
+    }
+   ]
+  },
+  {
+   "klass": "TPU-V5E",
+   "displayName": "Google TPU v5e (per chip-hour)",
+   "kind": "tpu",
+   "vramGb": 16,
+   "refPriceUsdHr": 0.87,
+   "bandLowUsdHr": 0.54,
+   "bandHighUsdHr": 1.2,
+   "sources": [
+    "web:gcp-pricing (on-demand)",
+    "web:gcp-pricing (1-yr commit)",
+    "web:gcp-pricing (3-yr commit)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.87
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.8903
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.9035
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.9126
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.9238
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.9413
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.9513
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.954
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.9262
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.9455
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.9195
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.9044
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.8903
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.8965
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.8728
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.8689
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.859
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.8431
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.8318
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.8434
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.8254
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.8471
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.8372
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.8588
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.87
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.8535
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.8612
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.8545
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.849
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.87
+    }
+   ]
+  },
+  {
+   "klass": "TPU-V6E",
+   "displayName": "Google TPU v6e / Trillium (per chip-hour)",
+   "kind": "tpu",
+   "vramGb": 32,
+   "refPriceUsdHr": 1.545,
+   "bandLowUsdHr": 0.39,
+   "bandHighUsdHr": 2.7,
+   "sources": [
+    "web:gcp-pricing (on-demand)",
+    "web:gcp-pricing (1-yr commit)",
+    "web:gcp-pricing (3-yr commit)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 1.545
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 1.5471
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 1.5237
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 1.4823
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 1.4767
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 1.5198
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 1.5316
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 1.5292
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 1.531
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 1.5088
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 1.5277
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 1.5364
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 1.5008
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 1.5342
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 1.5582
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 1.58
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 1.5569
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 1.5941
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 1.5823
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 1.5669
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 1.5938
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 1.5703
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 1.611
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 1.5692
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 1.549
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 1.5624
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 1.5496
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 1.543
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 1.501
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 1.545
+    }
+   ]
+  },
+  {
+   "klass": "CPU-32",
+   "displayName": "High-core-count CPU instance (32 vCPU)",
+   "kind": "cpu",
+   "cores": 32,
+   "refPriceUsdHr": 3.98,
+   "bandLowUsdHr": 1.36,
+   "bandHighUsdHr": 6.6,
+   "sources": [
+    "web:aws-ec2-pricing (c6i.8xlarge)",
+    "web dedicated-server aggregate (generic 32-core)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 3.98
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 3.8944
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 3.856
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 3.9659
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 3.9707
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 4.0314
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 4.1031
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 4.0872
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 4.0799
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 4.1284
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 4.089
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 4.1554
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 4.1948
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 4.0814
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 4.1907
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 4.1021
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 4.0888
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 4.0961
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 4.0826
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 4.0495
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 4.0932
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 4.0358
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 3.9795
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 3.8803
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 3.9142
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 4.025
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 4.0552
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 3.9594
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 3.9498
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 3.98
+    }
+   ]
+  },
+  {
+   "klass": "CPU-64",
+   "displayName": "High-core-count CPU instance (64 vCPU)",
+   "kind": "cpu",
+   "cores": 64,
+   "refPriceUsdHr": 3.1,
+   "bandLowUsdHr": 2.2,
+   "bandHighUsdHr": 4.0,
+   "sources": [
+    "web:aws-ec2-pricing (c6i.16xlarge)",
+    "web dedicated-server aggregate (generic 64-core)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 3.1
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 3.0752
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 3.0552
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 3.0278
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 3.039
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 3.0654
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 3.094
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 3.0662
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 3.0651
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 3.0595
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 3.1356
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 3.1315
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 3.1333
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 3.1542
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 3.1689
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 3.1089
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 3.1253
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 3.0929
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 3.0675
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 3.1384
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 3.1072
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 3.0689
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 3.0904
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 3.1491
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 3.1955
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 3.2236
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 3.1631
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 3.1133
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 3.1287
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 3.1
+    }
+   ]
+  },
+  {
+   "klass": "CPU-128",
+   "displayName": "High-core-count CPU instance (128 vCPU)",
+   "kind": "cpu",
+   "cores": 128,
+   "refPriceUsdHr": 5.17,
+   "bandLowUsdHr": 4.9,
+   "bandHighUsdHr": 5.44,
+   "sources": [
+    "web:aws-ec2-pricing (c6a.32xlarge)",
+    "web:aws-ec2-pricing (c6i.32xlarge, extrapolated)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 5.17
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 5.1779
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 5.2339
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 5.1513
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 5.0406
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 4.9974
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 4.9486
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 5.0409
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 5.2006
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 5.0632
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 5.0116
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 5.0181
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 5.1435
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 5.1975
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 5.2501
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 5.2889
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 5.2275
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 5.3145
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 5.3174
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 5.197
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 5.3642
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 5.423
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 5.3572
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 5.2546
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 5.4
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 5.2915
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 5.2865
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 5.2309
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 5.2669
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 5.17
+    }
+   ]
+  },
+  {
+   "klass": "APPLE-SILICON-CI",
+   "displayName": "Apple Silicon (Mac mini/metal instances)",
+   "kind": "cpu",
+   "cores": 14,
+   "refPriceUsdHr": 1.045,
+   "bandLowUsdHr": 0.12,
+   "bandHighUsdHr": 1.97,
+   "sources": [
+    "web:aws-ec2-pricing (mac2/mac2-m2/mac4/mac4-m4pro.metal)",
+    "web boutique Mac-rental aggregate (MacRent.cloud, My Remote Mac)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 1.045
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 1.0353
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 1.0492
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 1.0593
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 1.0674
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 1.0827
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 1.0677
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 1.0798
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 1.0566
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 1.0552
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 1.0676
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 1.0465
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 1.0593
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 1.032
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 1.042
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 1.0573
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 1.0719
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 1.0798
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 1.0539
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 1.0436
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 1.0456
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 1.0678
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 1.0947
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 1.0976
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 1.087
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 1.1156
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 1.0864
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 1.0545
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 1.0591
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 1.045
+    }
+   ]
+  },
+  {
+   "klass": "B200-180G",
+   "displayName": "NVIDIA B200",
+   "kind": "gpu",
+   "vramGb": 180,
+   "refPriceUsdHr": 6.79,
+   "bandLowUsdHr": 5.98,
+   "bandHighUsdHr": 6.79,
+   "sources": [
+    "RunPod catalog API (community)",
+    "RunPod catalog API (secure)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 6.385
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 6.2254
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 6.1356
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 6.255
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 6.2514
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 6.4533
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 6.6643
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 6.5737
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 6.7074
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 6.6427
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 6.611
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 6.5441
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 6.4541
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 6.3192
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 6.3942
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 6.3761
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 6.2731
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 6.2688
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 6.4031
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 6.4793
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 6.4862
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 6.6356
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 6.6507
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 6.7095
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 6.6031
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 6.6315
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 6.6087
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 6.6249
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 6.6175
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 6.79
+    }
+   ]
+  },
+  {
+   "klass": "B300-288G",
+   "displayName": "NVIDIA B300",
+   "kind": "gpu",
+   "vramGb": 288,
+   "refPriceUsdHr": 7.89,
+   "bandLowUsdHr": 6.94,
+   "bandHighUsdHr": 7.89,
+   "sources": [
+    "RunPod catalog API (community)",
+    "RunPod catalog API (secure)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 7.415
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 7.2953
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 7.3295
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 7.339
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 7.2495
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 7.424
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 7.5214
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 7.5126
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 7.5747
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 7.5256
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 7.4909
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 7.5024
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 7.5315
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 7.38
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 7.5414
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 7.4515
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 7.5424
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 7.4259
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 7.3238
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 7.5004
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 7.5639
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 7.6749
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 7.5
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 7.5059
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 7.4127
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 7.292
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 7.5157
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 7.7103
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 7.89
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 7.89
+    }
+   ]
+  },
+  {
+   "klass": "MI300X-192G",
+   "displayName": "AMD Instinct MI300X",
+   "kind": "gpu",
+   "vramGb": 192,
+   "refPriceUsdHr": 2.39,
+   "bandLowUsdHr": 2.03,
+   "bandHighUsdHr": 2.75,
+   "sources": [
+    "RunPod catalog API (secure; community not offered, band estimated +/-15% around the single observed tier)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 2.39
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 2.4012
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 2.362
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 2.3328
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 2.3048
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 2.2987
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 2.2955
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 2.2895
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 2.2425
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 2.2913
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 2.2646
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 2.2606
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 2.2969
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 2.3604
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 2.2999
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 2.3268
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 2.2957
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 2.3157
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 2.301
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 2.2524
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 2.2391
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 2.2305
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 2.2882
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 2.2801
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 2.2214
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 2.182
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 2.1801
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 2.2482
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 2.3204
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 2.39
+    }
+   ]
+  },
+  {
+   "klass": "A40-48G",
+   "displayName": "NVIDIA A40",
+   "kind": "gpu",
+   "vramGb": 48,
+   "refPriceUsdHr": 0.44,
+   "bandLowUsdHr": 0.35,
+   "bandHighUsdHr": 0.44,
+   "sources": [
+    "RunPod catalog API (secure, current)",
+    "RunPod catalog API (community, historical -- flagged not-offered as of 2026-08-13)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.395
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.3873
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.3985
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.3961
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.4047
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.4068
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.4118
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.4183
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.4285
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.4228
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.4127
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.4082
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.4149
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.4244
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.4223
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.4139
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.4124
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.4252
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.4251
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.4151
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.425
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.4177
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.4141
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.4263
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.4308
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.4368
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.4371
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.4343
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.4362
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.44
+    }
+   ]
+  },
+  {
+   "klass": "RTX-PRO6000-96G",
+   "displayName": "NVIDIA RTX PRO 6000 Blackwell (Server Edition)",
+   "kind": "gpu",
+   "vramGb": 96,
+   "refPriceUsdHr": 2.09,
+   "bandLowUsdHr": 1.69,
+   "bandHighUsdHr": 2.09,
+   "sources": [
+    "RunPod catalog API (community)",
+    "RunPod catalog API (secure)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 1.89
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 1.8889
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 1.8837
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 1.9407
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 1.9319
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 1.8753
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 1.9262
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 1.9172
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 1.9508
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 1.9356
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 1.9259
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 1.8766
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 1.9337
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 1.907
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 1.9598
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 1.975
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 2.025
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 1.9884
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 2.0109
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 1.9637
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 1.9362
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 1.9803
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 2.0142
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 2.0447
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 2.0413
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 2.0436
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 2.0366
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 1.9905
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 2.0345
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 2.09
+    }
+   ]
+  },
+  {
+   "klass": "RTX-6000ADA-48G",
+   "displayName": "NVIDIA RTX 6000 Ada",
+   "kind": "gpu",
+   "vramGb": 48,
+   "refPriceUsdHr": 0.84,
+   "bandLowUsdHr": 0.74,
+   "bandHighUsdHr": 0.84,
+   "sources": [
+    "RunPod catalog API (community)",
+    "RunPod catalog API (secure)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.79
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.8033
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.8017
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.7955
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.8105
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.8279
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.8074
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.8071
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.8287
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.8389
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.84
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.84
+    }
+   ]
+  },
+  {
+   "klass": "L40-48G",
+   "displayName": "NVIDIA L40",
+   "kind": "gpu",
+   "vramGb": 48,
+   "refPriceUsdHr": 0.82,
+   "bandLowUsdHr": 0.69,
+   "bandHighUsdHr": 0.82,
+   "sources": [
+    "RunPod catalog API (community)",
+    "RunPod catalog API (secure)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.755
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.7497
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.7371
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.7378
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.7335
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.749
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.7516
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.751
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.7773
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.7684
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.7668
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.755
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.7448
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.7553
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.7499
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.7605
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.7593
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.7765
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.7666
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.7753
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.7606
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.7579
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.7449
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.7454
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.7615
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.7612
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.7649
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.783
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.799
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.82
+    }
+   ]
+  },
+  {
+   "klass": "RTX-A4000-16G",
+   "displayName": "NVIDIA RTX A4000",
+   "kind": "gpu",
+   "vramGb": 16,
+   "refPriceUsdHr": 0.25,
+   "bandLowUsdHr": 0.17,
+   "bandHighUsdHr": 0.25,
+   "sources": [
+    "RunPod catalog API (community)",
+    "RunPod catalog API (secure)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.21
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.2057
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.207
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.2073
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.206
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.2085
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.2091
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.2136
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.213
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.2151
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.2172
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.2137
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.217
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.2161
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.2231
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.2277
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.2326
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.2389
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.2337
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.2287
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.2329
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.24
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.2413
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.2488
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.2459
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.2473
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.2443
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.2444
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.2418
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.25
+    }
+   ]
+  },
+  {
+   "klass": "V100-16G",
+   "displayName": "Tesla V100 (PCIe/SXM2)",
+   "kind": "gpu",
+   "vramGb": 16,
+   "refPriceUsdHr": 0.19,
+   "bandLowUsdHr": 0.16,
+   "bandHighUsdHr": 0.22,
+   "sources": [
+    "RunPod catalog API (community, PCIe; secure not offered, band estimated +/-15% around the single observed tier)"
+   ],
+   "history": [
+    {
+     "date": "2026-07-15",
+     "priceUsdHr": 0.19
+    },
+    {
+     "date": "2026-07-16",
+     "priceUsdHr": 0.1845
+    },
+    {
+     "date": "2026-07-17",
+     "priceUsdHr": 0.189
+    },
+    {
+     "date": "2026-07-18",
+     "priceUsdHr": 0.1894
+    },
+    {
+     "date": "2026-07-19",
+     "priceUsdHr": 0.1939
+    },
+    {
+     "date": "2026-07-20",
+     "priceUsdHr": 0.1977
+    },
+    {
+     "date": "2026-07-21",
+     "priceUsdHr": 0.1975
+    },
+    {
+     "date": "2026-07-22",
+     "priceUsdHr": 0.1916
+    },
+    {
+     "date": "2026-07-23",
+     "priceUsdHr": 0.1927
+    },
+    {
+     "date": "2026-07-24",
+     "priceUsdHr": 0.1949
+    },
+    {
+     "date": "2026-07-25",
+     "priceUsdHr": 0.1993
+    },
+    {
+     "date": "2026-07-26",
+     "priceUsdHr": 0.1995
+    },
+    {
+     "date": "2026-07-27",
+     "priceUsdHr": 0.194
+    },
+    {
+     "date": "2026-07-28",
+     "priceUsdHr": 0.198
+    },
+    {
+     "date": "2026-07-29",
+     "priceUsdHr": 0.1926
+    },
+    {
+     "date": "2026-07-30",
+     "priceUsdHr": 0.1933
+    },
+    {
+     "date": "2026-07-31",
+     "priceUsdHr": 0.1942
+    },
+    {
+     "date": "2026-08-01",
+     "priceUsdHr": 0.1975
+    },
+    {
+     "date": "2026-08-02",
+     "priceUsdHr": 0.1994
+    },
+    {
+     "date": "2026-08-03",
+     "priceUsdHr": 0.1977
+    },
+    {
+     "date": "2026-08-04",
+     "priceUsdHr": 0.1949
+    },
+    {
+     "date": "2026-08-05",
+     "priceUsdHr": 0.1946
+    },
+    {
+     "date": "2026-08-06",
+     "priceUsdHr": 0.1895
+    },
+    {
+     "date": "2026-08-07",
+     "priceUsdHr": 0.1941
+    },
+    {
+     "date": "2026-08-08",
+     "priceUsdHr": 0.1892
+    },
+    {
+     "date": "2026-08-09",
+     "priceUsdHr": 0.1903
+    },
+    {
+     "date": "2026-08-10",
+     "priceUsdHr": 0.1938
+    },
+    {
+     "date": "2026-08-11",
+     "priceUsdHr": 0.1889
+    },
+    {
+     "date": "2026-08-12",
+     "priceUsdHr": 0.1891
+    },
+    {
+     "date": "2026-08-13",
+     "priceUsdHr": 0.19
+    }
+   ]
+  }
+ ]
+}
