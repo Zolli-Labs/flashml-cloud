@@ -60,6 +60,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from flashml_cloud_api import marketplace as marketplacemod
+from flashml_cloud_api.agent_identity import AgentPrincipal, InvalidScope, normalise_scopes
+from flashml_cloud_api.auth import hash_machine_token, new_machine_token
 from flashml_cloud_api.observability import require_correlation_id
 from flashml_cloud_api.router.estimator import hardware_class
 from flashml_cloud_api.settings import Settings
@@ -1164,6 +1166,241 @@ def revoke_cli_credential_row(
             # Not even a uuid. Same answer as "no such credential".
             return False
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# agent principals (AG-6)
+#
+# An agent's own scoped, revocable identity, minted the same way a sandbox
+# machine's is (``sandbox_identity.provision_sandbox_machine``): no human in
+# the loop at mint time, ``auth.new_machine_token``/``hash_machine_token`` for
+# the credential itself, raw value returned exactly once and never stored.
+# ``AgentPrincipal`` and the scope-validation rules live in
+# ``agent_identity.py`` (a pure, dependency-free module — see its header for
+# why); this section is the only code that ever reads or writes
+# ``public.agent_principals`` (migration 0027).
+#
+# Every function below is owner-scoped in the WHERE clause itself, the same
+# pervasive rule the rest of this module states at the top of the file: a
+# stranger's guessed principal id returns exactly what an unknown id returns,
+# never a distinguishing error.
+# ---------------------------------------------------------------------------
+
+#: The columns every reader of this table is allowed to see. No
+#: ``token_hash``, no ``token_prefix`` — nothing in this module's public
+#: surface ever hands a credential digest back to a caller. Mirrors
+#: ``MACHINE_PUBLIC_COLUMNS``/``CLI_CREDENTIAL_PUBLIC_COLUMNS`` for the same
+#: reason: a ``select *`` feeding a JSON response is exactly how a digest
+#: ends up in a browser.
+AGENT_PRINCIPAL_COLUMNS = (
+    "id", "owner_id", "label", "scopes", "pool_id", "allowance_zc", "status",
+)
+
+#: How much of the raw token is kept for display, matching
+#: ``sandbox_identity.TOKEN_PREFIX_LENGTH`` and ``redeem_device_code`` — one
+#: consistent prefix length across every credential kind this system mints.
+AGENT_TOKEN_PREFIX_LENGTH = 12
+
+
+def _agent_principal_from_row(row: Mapping[str, Any]) -> AgentPrincipal:
+    """Build the dataclass from a row already restricted to
+    :data:`AGENT_PRINCIPAL_COLUMNS` — never from a ``select *``, so a future
+    column (a credential digest included) cannot ride along by accident."""
+    return AgentPrincipal(
+        id=str(row["id"]),
+        owner_id=str(row["owner_id"]),
+        label=row["label"],
+        scopes=tuple(row["scopes"]),
+        pool_id=str(row["pool_id"]) if row["pool_id"] is not None else None,
+        allowance_zc=int(row["allowance_zc"]),
+        status=row["status"],
+    )
+
+
+def create_agent_principal(
+    db: psycopg.Connection,
+    *,
+    owner_id: str,
+    label: str,
+    scopes: Sequence[str],
+    pool_id: str | None,
+    allowance_zc: int,
+) -> tuple[AgentPrincipal, str]:
+    """Mint a new agent principal and return it together with its raw token
+    — the ONLY moment that raw value ever exists outside this process's
+    memory for this call. Nothing later can recover it; a caller that loses
+    it must revoke and mint again, the same discipline every other credential
+    in this schema keeps.
+
+    Validates before ever touching the database, so a rejected request burns
+    no row and no token:
+
+    - ``scopes`` must be a non-empty subset of
+      :data:`agent_identity.VALID_SCOPES` — delegated to
+      :func:`agent_identity.normalise_scopes`, which raises
+      :class:`agent_identity.InvalidScope` for an unknown name or an empty
+      list.
+    - ``'submit' in scopes`` requires a ``pool_id`` — an agent that may submit
+      work must submit it into exactly one named pool, never "wherever the
+      owner can."
+    - ``'spend' in scopes`` requires ``allowance_zc > 0`` — ``0`` is the value
+      that means "may not spend," so a spend-scoped principal with no
+      allowance would be a contradiction between what it claims and what it
+      could ever be approved to do.
+
+    Every one of these is enforced a SECOND time by migration 0027's own
+    CHECK constraints — deliberately, so a future caller that bypasses this
+    function (or a bug in it) still cannot write an invalid row. Raising
+    :class:`agent_identity.InvalidScope` here exists only to give a route a
+    clean, specific 400 instead of a raw ``psycopg.errors.CheckViolation``.
+    """
+    owner_id = str(owner_id)
+    label = (label or "").strip()
+    if not label:
+        raise ValueError("label is required to create an agent principal")
+
+    scope_tuple = normalise_scopes(scopes)
+    if "submit" in scope_tuple and not pool_id:
+        raise InvalidScope("'submit' scope requires a pool_id")
+    if "spend" in scope_tuple and int(allowance_zc) <= 0:
+        raise InvalidScope("'spend' scope requires allowance_zc > 0")
+
+    token = new_machine_token()
+    token_hash = hash_machine_token(token)
+    token_prefix = token[:AGENT_TOKEN_PREFIX_LENGTH]
+
+    columns = ", ".join(AGENT_PRINCIPAL_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            insert into public.agent_principals
+                (owner_id, label, token_hash, token_prefix, scopes, pool_id,
+                 allowance_zc)
+            values (%s, %s, %s, %s, %s, %s, %s)
+            returning {columns}
+            """,
+            (
+                owner_id, label, token_hash, token_prefix,
+                list(scope_tuple), pool_id, int(allowance_zc),
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+
+    return _agent_principal_from_row(row), token
+
+
+def authenticate_agent_token(
+    db: psycopg.Connection, token: str | None
+) -> AgentPrincipal | None:
+    """Look up the principal an agent token belongs to. Returns None for an
+    empty/missing token, an unknown token, and a revoked principal's token —
+    all three indistinguishably, so a caller cannot use this as an oracle for
+    which tokens ever existed.
+
+    The ``status = 'active'`` filter is in the SQL, the same rule every other
+    owner-scoped read in this module follows: never trust a caller to check
+    it afterwards in Python. It is also, here, redundant with the schema
+    itself — migration 0027's CHECK constraint means a revoked row's
+    ``token_hash`` is already NULL and cannot match a real digest — but the
+    filter stays as the primary, readable guard rather than leaning on that
+    as the only one.
+    """
+    if not token:
+        return None
+    columns = ", ".join(AGENT_PRINCIPAL_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {columns} from public.agent_principals
+             where token_hash = %s and status = 'active'
+            """,
+            (hash_machine_token(token),),
+        )
+        row = cur.fetchone()
+    return _agent_principal_from_row(row) if row is not None else None
+
+
+def revoke_agent_principal(
+    db: psycopg.Connection, *, principal_id: str, owner_id: str
+) -> bool:
+    """Owner-scoped revoke. Returns True only if a row belonging to
+    ``owner_id`` was actually updated — an unknown id, someone else's id, and
+    an already-revoked id all return False, indistinguishably, the same
+    convention ``revoke_machine_row`` keeps so a caller cannot use this to
+    enumerate other owners' principal ids.
+
+    **Total, in one statement.** Clears ``token_hash`` AND ``token_prefix``
+    in the same ``UPDATE`` that flips ``status`` and stamps ``revoked_at`` —
+    "the revoked token must stay dead," the same phrase
+    ``reactivate_machine`` uses for a machine row, except here it is the
+    revoke path itself that clears the credential rather than a later
+    re-enrolment. ``authenticate_agent_token`` would already refuse a revoked
+    row on ``status`` alone; clearing the hash too means there is no digest
+    left to leak even if that filter were ever weakened, and migration 0027's
+    CHECK constraint makes the two changes impossible to write apart.
+    """
+    with db.cursor() as cur:
+        try:
+            cur.execute(
+                """
+                update public.agent_principals
+                   set status = 'revoked',
+                       revoked_at = now(),
+                       token_hash = null,
+                       token_prefix = null
+                 where id = %s and owner_id = %s and status <> 'revoked'
+                """,
+                (principal_id, owner_id),
+            )
+        except psycopg.errors.InvalidTextRepresentation:
+            # Not even a uuid. Same answer as "no such principal".
+            return False
+        return cur.rowcount > 0
+
+
+def list_agent_principals(
+    db: psycopg.Connection, owner_id: str
+) -> list[AgentPrincipal]:
+    """Every principal belonging to ``owner_id``, and nothing else. The owner
+    filter is in the SQL, not applied afterwards in Python — omitting it
+    would be a missing argument, not a missing ``if``. Never carries a
+    credential: see :data:`AGENT_PRINCIPAL_COLUMNS`."""
+    columns = ", ".join(AGENT_PRINCIPAL_COLUMNS)
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {columns} from public.agent_principals
+             where owner_id = %s
+             order by created_at
+            """,
+            (owner_id,),
+        )
+        return [_agent_principal_from_row(r) for r in cur.fetchall()]
+
+
+def get_agent_principal(
+    db: psycopg.Connection, principal_id: str, owner_id: str
+) -> AgentPrincipal | None:
+    """Owner-scoped read: returns None if ``principal_id`` does not exist
+    *or* belongs to someone else — callers must not distinguish those two
+    cases in a response, the same rule ``fetch_machine_for_owner`` states for
+    itself, for the same reason: that would confirm to a guesser that the id
+    is real."""
+    columns = ", ".join(AGENT_PRINCIPAL_COLUMNS)
+    with db.cursor() as cur:
+        try:
+            cur.execute(
+                f"""
+                select {columns} from public.agent_principals
+                 where id = %s and owner_id = %s
+                """,
+                (principal_id, owner_id),
+            )
+        except psycopg.errors.InvalidTextRepresentation:
+            return None
+        row = cur.fetchone()
+    return _agent_principal_from_row(row) if row is not None else None
 
 
 # ---------------------------------------------------------------------------

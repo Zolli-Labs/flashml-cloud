@@ -8,6 +8,8 @@ import uuid
 import psycopg
 import pytest
 
+from flashml_cloud_api import db as dbmod
+
 # One test below asserts against a real, freshly-migrated database rather
 # than against the SQL text: a column list read out of `information_schema`
 # is the only check that proves the migration *applies*, not merely that it
@@ -31,6 +33,7 @@ TABLES = ["profiles", "machines", "device_codes", "jobs", "contributions"]
 ALL_TABLES = TABLES + [
     "job_rounds", "pools", "pool_members", "pool_invites", "machine_pools",
     "sandbox_sessions", "sandbox_events", "credit_requests", "rented_capacity",
+    "agent_principals",
 ]
 
 
@@ -674,3 +677,245 @@ def test_credit_request_pending_uniqueness_preserves_decided_history(db):
             (owner,),
         )
         assert [row["status"] for row in cur.fetchall()] == ["declined", "pending"]
+
+
+# ---------------------------------------------------------------------------
+# agent_principals (0027, AG-6)
+# ---------------------------------------------------------------------------
+
+
+def _agent_owner(db) -> str:
+    owner = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into auth.users (id, email) values (%s::uuid, %s)",
+            (owner, f"{owner}@example.test"),
+        )
+        cur.execute("insert into public.profiles (id) values (%s::uuid)", (owner,))
+    return owner
+
+
+def _agent_pool(db, owner: str) -> str:
+    return str(dbmod.create_pool(db, name="agent-schema-test", owner_id=owner)["id"])
+
+
+#: Sentinel meaning "derive a fresh value" — distinct from an explicit
+#: ``None``, which several tests below pass on purpose to prove the
+#: active/revoked coupling check refuses it.
+_AUTO = object()
+
+
+def _insert_agent_principal(
+    db,
+    owner: str,
+    *,
+    scopes: list[str],
+    pool_id: str | None = None,
+    allowance_zc: int = 0,
+    status: str = "active",
+    token_hash=_AUTO,
+    token_prefix=_AUTO,
+    revoked_at: str | None = None,
+) -> None:
+    """Raw insert, bypassing agent_identity.py entirely, so these tests prove
+    the CHECK constraints hold even against a caller that skips the Python
+    validation layer altogether — the same posture
+    ``test_machine_lifecycle_admits_leased_and_still_refuses_anything_else``
+    takes toward ``machines.lifecycle``.
+
+    ``token_hash`` defaults to a freshly-random value for an ``active`` row
+    (``token_hash`` is ``unique``, so a fixed constant would collide across
+    the many active rows these tests insert) and to ``None`` for a
+    ``revoked`` one, matching what a real create/revoke pair would leave
+    behind. Pass either explicitly to test a row that violates that shape on
+    purpose.
+    """
+    if token_hash is _AUTO:
+        token_hash = f"test-hash-{uuid.uuid4()}" if status == "active" else None
+    if token_prefix is _AUTO:
+        token_prefix = f"fmk_{token_hash[:8]}" if token_hash else None
+    db.execute(
+        """
+        insert into public.agent_principals
+            (owner_id, label, token_hash, token_prefix, scopes, pool_id,
+             allowance_zc, status, revoked_at)
+        values (%s::uuid, 'test principal', %s, %s, %s, %s::uuid, %s, %s,
+                %s::timestamptz)
+        """,
+        (owner, token_hash, token_prefix, scopes, pool_id, allowance_zc,
+         status, revoked_at),
+    )
+
+
+def test_agent_principals_table_exists_with_the_expected_shape(db):
+    """Migration 0027, checked against the applied schema rather than the
+    file that was typed — the same discipline every other table test in this
+    file follows, for the reason stated at the top of the file: only an
+    insert (or, here, a column listing) proves the migration *applied*."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select column_name, data_type, is_nullable"
+            "  from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'agent_principals'"
+        )
+        cols = {r["column_name"]: r for r in cur.fetchall()}
+    assert cols, "migration 0027 did not apply"
+
+    assert cols["id"]["is_nullable"] == "NO"
+    assert cols["owner_id"]["is_nullable"] == "NO"
+    assert cols["label"]["is_nullable"] == "NO"
+    assert cols["scopes"]["data_type"] == "ARRAY"
+    assert cols["scopes"]["is_nullable"] == "NO"
+    assert cols["allowance_zc"]["data_type"] == "bigint"
+    assert cols["allowance_zc"]["is_nullable"] == "NO"
+    assert cols["status"]["is_nullable"] == "NO"
+    # Nullable so revoke can clear a live credential down to nothing.
+    assert cols["token_hash"]["is_nullable"] == "YES"
+    assert cols["token_prefix"]["is_nullable"] == "YES"
+    assert cols["pool_id"]["is_nullable"] == "YES"
+    assert cols["revoked_at"]["is_nullable"] == "YES"
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select relrowsecurity from pg_class"
+            " where oid = 'public.agent_principals'::regclass"
+        )
+        assert cur.fetchone()["relrowsecurity"] is True
+
+
+def test_agent_principals_owner_id_cascades_from_profiles(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "select confdeltype from pg_constraint"
+            " where conrelid = 'public.agent_principals'::regclass"
+            "   and contype = 'f'"
+            "   and confrelid = 'public.profiles'::regclass"
+        )
+        row = cur.fetchone()
+    assert row is not None, "agent_principals has no owner_id foreign key"
+    assert row["confdeltype"] == "c", "expected ON DELETE CASCADE"
+
+
+def test_agent_principals_scopes_are_constrained_to_exactly_the_three_known(db):
+    owner = _agent_owner(db)
+
+    pool = _agent_pool(db, owner)
+    for scopes in (["read"], ["submit"], ["spend"], ["read", "submit", "spend"]):
+        with db.transaction():
+            _insert_agent_principal(
+                db, owner, scopes=scopes,
+                pool_id=pool if "submit" in scopes else None,
+                allowance_zc=100 if "spend" in scopes else 0,
+            )
+
+    # A near-miss that is not one of the three, and an empty list: both
+    # refused at the schema, not merely by agent_identity.normalise_scopes.
+    for garbage in (["reads"], ["Read"], [], ["read", "unknown"]):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            with db.transaction():
+                _insert_agent_principal(db, owner, scopes=garbage)
+
+
+def test_agent_principals_submit_scope_requires_a_pool_id(db):
+    owner = _agent_owner(db)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with db.transaction():
+            _insert_agent_principal(db, owner, scopes=["submit"], pool_id=None)
+
+    # The same request, with a pool named, succeeds.
+    with db.transaction():
+        _insert_agent_principal(
+            db, owner, scopes=["submit"], pool_id=_agent_pool(db, owner)
+        )
+
+
+def test_agent_principals_spend_scope_requires_a_positive_allowance(db):
+    owner = _agent_owner(db)
+
+    for bad_allowance in (0, -1):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            with db.transaction():
+                _insert_agent_principal(
+                    db, owner, scopes=["spend"], allowance_zc=bad_allowance
+                )
+
+    with db.transaction():
+        _insert_agent_principal(db, owner, scopes=["spend"], allowance_zc=1)
+
+
+def test_agent_principals_active_and_revoked_states_are_mutually_exclusive(db):
+    """The coupling `revoke_agent_principal` relies on, enforced as a row
+    invariant: `token_hash`/`token_prefix` are present if and only if
+    `status = 'active'`, and `revoked_at` is set if and only if it is not.
+    A bug that flips one half without the other must be unwritable, not
+    merely untested."""
+    owner = _agent_owner(db)
+
+    # Active with no credential material: refused.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with db.transaction():
+            _insert_agent_principal(
+                db, owner, scopes=["read"], status="active",
+                token_hash=None, token_prefix=None,
+            )
+
+    # Active with a revoked_at timestamp already set: refused.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with db.transaction():
+            _insert_agent_principal(
+                db, owner, scopes=["read"], status="active",
+                revoked_at="2026-01-01T00:00:00Z",
+            )
+
+    # Revoked but still carrying a hash: refused — the exact shape a
+    # half-finished revoke must never be allowed to leave behind.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with db.transaction():
+            _insert_agent_principal(
+                db, owner, scopes=["read"], status="revoked",
+                token_hash="still-here", token_prefix="fmk_still",
+                revoked_at="2026-01-01T00:00:00Z",
+            )
+
+    # Revoked with no revoked_at: refused.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with db.transaction():
+            _insert_agent_principal(
+                db, owner, scopes=["read"], status="revoked",
+                token_hash=None, token_prefix=None, revoked_at=None,
+            )
+
+    # The only two legal shapes: active-with-credential and
+    # revoked-with-nothing-and-a-timestamp.
+    with db.transaction():
+        _insert_agent_principal(db, owner, scopes=["read"], status="active")
+    with db.transaction():
+        _insert_agent_principal(
+            db, owner, scopes=["read"], status="revoked",
+            token_hash=None, token_prefix=None,
+            revoked_at="2026-01-01T00:00:00Z",
+        )
+
+
+def test_agent_principals_token_hash_allows_multiple_nulls(db):
+    """`token_hash` is `unique`, and Postgres treats every NULL as distinct
+    from every other NULL — so many revoked principals coexisting with a
+    cleared hash must not collide with each other. If this ever failed it
+    would mean the column had been declared NOT NULL UNIQUE by mistake, which
+    would make the second revoke in a session fail with a UniqueViolation
+    instead of a clean no-op."""
+    owner = _agent_owner(db)
+
+    with db.transaction():
+        _insert_agent_principal(
+            db, owner, scopes=["read"], status="revoked",
+            token_hash=None, token_prefix=None,
+            revoked_at="2026-01-01T00:00:00Z",
+        )
+    with db.transaction():
+        _insert_agent_principal(
+            db, owner, scopes=["read"], status="revoked",
+            token_hash=None, token_prefix=None,
+            revoked_at="2026-01-01T00:00:00Z",
+        )
