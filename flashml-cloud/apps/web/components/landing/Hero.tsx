@@ -60,17 +60,19 @@ function useCompactMap() {
 }
 
 export function Hero() {
-  const { phase, ref } = useMapStory();
+  const { phase } = useMapStory();
   const compact = useCompactMap();
 
-  // At `xl` the hero is pinned by the scroll track in `app/(marketing)/page.tsx`,
-  // so it takes exactly one viewport and centres itself in it: its bottom border
-  // then lands on the bottom of the frame instead of leaving a seam of bare
-  // track under it. Below `xl` nothing pins and the section stays an ordinary
-  // block, which is what tells `useMapStory` to run the timer instead.
+  // At `xl` the hero still fills exactly one viewport and centres itself in
+  // it, so its bottom border lands on the bottom of the frame instead of
+  // leaving a seam of bare track under it — that part of the layout, and the
+  // sticky scroll track still wrapping it in `app/(marketing)/page.tsx`, are
+  // unchanged by this hook. What changed is only that `useMapStory`'s timer
+  // no longer cares where in that track the reader has scrolled to: it runs
+  // the same way, on a loop, whether or not anything outside it is pinning
+  // this section at all.
   return (
     <section
-      ref={ref}
       id="hero"
       data-surface="dark"
       className="relative isolate overflow-hidden border-b border-border pt-20 xl:flex xl:min-h-svh xl:flex-col xl:justify-center"

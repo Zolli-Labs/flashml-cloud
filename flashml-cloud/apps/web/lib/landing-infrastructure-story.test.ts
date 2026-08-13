@@ -599,45 +599,25 @@ async function mountMap({
 /**
  * The hero as the page mounts it.
  *
- * `track` decides which of the story's two drivers is in force, and it decides
- * it the way the browser does: a track with spare height over the pinned hero
- * drives the beat from scroll, and one without hands the story to the timer.
- * No test asks for a driver by name.
+ * There is one driver — a timer — so there is nothing here to choose between.
+ * `motion` still varies, because `reduced` and `documentVisible` are the only
+ * two things left that change whether it runs at all.
  */
 async function mountHero({
-  track = false,
   motion = ACTIVE_MOTION,
-  heroHeight = 900,
-  trackHeight = 2100,
 }: {
-  track?: boolean;
   motion?: MotionState;
-  heroHeight?: number;
-  trackHeight?: number;
 } = {}) {
   vi.useFakeTimers();
   const environment = installMotionEnvironment();
   motionHarness.motion = { ...motion };
-  let scrolled = 0;
-  environment.document.measure = (element) => {
-    if (element.hasAttribute("data-hero-scroll")) {
-      return { height: trackHeight, top: -scrolled };
-    }
-    return { height: element.getAttribute("id") === "hero" ? heroHeight : 0, top: 0 };
-  };
 
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
   const { createRoot } = await import("react-dom/client");
   const reactRoot = createRoot(environment.container as never);
-  const tree = () =>
-    track
-      ? createElement("div", { "data-hero-scroll": true }, createElement(Hero))
-      : createElement(Hero);
 
-  await act(async () => reactRoot.render(tree()));
-  // The first measurement happens in a frame, exactly as it does in a browser.
-  await act(async () => environment.runAnimationFrames());
+  await act(async () => reactRoot.render(createElement(Hero)));
 
   const hero = () => elementsByAttribute(environment.container, "data-coordinator-map")[0];
 
@@ -646,16 +626,9 @@ async function mountHero({
     phase: () => hero()?.getAttribute("data-coordinator-map"),
     section: () => findElements(environment.container, (element) =>
       element.getAttribute("id") === "hero")[0],
-    async scrollTo(offset: number) {
-      scrolled = offset;
-      await act(async () => {
-        environment.window.dispatchEvent({ type: "scroll" });
-        environment.runAnimationFrames();
-      });
-    },
     async renderMotion(next: MotionState) {
       motionHarness.motion = { ...next };
-      await act(async () => reactRoot.render(tree()));
+      await act(async () => reactRoot.render(createElement(Hero)));
     },
     async cleanup() {
       await act(async () => reactRoot.unmount());
@@ -1054,8 +1027,8 @@ describe("the coordinator map hero", () => {
   });
 });
 
-describe("the hero's scroll story", () => {
-  it("walks the four beats once where nothing pins the hero", async () => {
+describe("the hero's looping story", () => {
+  it("walks the four beats in order", async () => {
     const mounted = await mountHero();
     try {
       expect(mounted.phase()).toBe("running");
@@ -1073,85 +1046,45 @@ describe("the hero's scroll story", () => {
     }
   });
 
-  it("rests on the accepted result instead of looping like a banner", async () => {
+  it("holds on the accepted result for one beat's worth of time, then loops back to the start", async () => {
     const mounted = await mountHero();
     try {
       await act(async () => { vi.advanceTimersByTime(12_000); });
       expect(mounted.phase()).toBe("accepted");
-      expect(vi.getTimerCount()).toBe(0);
+      // Forever means the timer never stops, even resting on the last beat.
+      expect(vi.getTimerCount()).toBe(1);
 
-      await act(async () => { vi.advanceTimersByTime(120_000); });
+      // The hold is the accepted beat's own duration (4s here), not a second
+      // constant that could drift from the first — comfortably inside the
+      // ~3-4s the design calls for.
+      await act(async () => { vi.advanceTimersByTime(3_999); });
       expect(mounted.phase()).toBe("accepted");
-      expect(vi.getTimerCount()).toBe(0);
+
+      await act(async () => { vi.advanceTimersByTime(1); });
+      expect(mounted.phase()).toBe("running");
+      expect(vi.getTimerCount()).toBe(1);
     } finally {
       await mounted.cleanup();
     }
   });
 
-  it.each([["pointerenter"], ["focusin"]])(
-    "replays from rest on %s and ignores it mid-story",
-    async (event) => {
-      const mounted = await mountHero();
-      try {
-        await act(async () => { vi.advanceTimersByTime(12_000); });
-        expect(mounted.phase()).toBe("accepted");
-
-        await act(async () => send(mounted.section(), event));
-        expect(mounted.phase()).toBe("running");
-
-        // Mid-story the same event does nothing: restarting would punish the
-        // reader for moving the mouse across the hero.
-        await act(async () => { vi.advanceTimersByTime(4_800); });
-        expect(mounted.phase()).toBe("lost");
-        await act(async () => send(mounted.section(), event));
-        expect(mounted.phase()).toBe("lost");
-      } finally {
-        await mounted.cleanup();
-      }
-    },
-  );
-
-  it("takes the beat from scroll progress where the hero is pinned in a track", async () => {
-    // 2100 of track less a 900 hero leaves 1200px of travel for the story.
-    const mounted = await mountHero({ track: true });
+  it("repeats the same four beats on the second lap, indefinitely", async () => {
+    const mounted = await mountHero();
     try {
+      // First lap, then the loop back to `running` asserted above.
+      await act(async () => { vi.advanceTimersByTime(16_000); });
       expect(mounted.phase()).toBe("running");
-      expect(vi.getTimerCount()).toBe(0);
 
-      await mounted.scrollTo(120);
-      expect(mounted.phase()).toBe("running");
-      await mounted.scrollTo(480);
+      // Second lap walks the identical sequence.
+      await act(async () => { vi.advanceTimersByTime(4_800); });
       expect(mounted.phase()).toBe("lost");
-      await mounted.scrollTo(720);
+      await act(async () => { vi.advanceTimersByTime(3_200); });
       expect(mounted.phase()).toBe("resumed");
-      await mounted.scrollTo(1_050);
+      await act(async () => { vi.advanceTimersByTime(4_000); });
       expect(mounted.phase()).toBe("accepted");
-
-      // Rubber-band overshoot at either end, which every touch platform does.
-      await mounted.scrollTo(-300);
+      await act(async () => { vi.advanceTimersByTime(4_000); });
       expect(mounted.phase()).toBe("running");
-      await mounted.scrollTo(4_000);
-      expect(mounted.phase()).toBe("accepted");
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("listens to scroll only while the hero is on screen", async () => {
-    const mounted = await mountHero({ track: true });
-    try {
-      expect(mounted.windowListeners("scroll")).toBe(1);
-
-      await act(async () => {
-        for (const observer of mounted.observers) observer.setIntersecting(false);
-      });
-      expect(mounted.windowListeners("scroll")).toBe(0);
-
-      await act(async () => {
-        for (const observer of mounted.observers) observer.setIntersecting(true);
-      });
-      expect(mounted.windowListeners("scroll")).toBe(1);
+      expect(vi.getTimerCount()).toBe(1);
     } finally {
       await mounted.cleanup();
     }
@@ -1209,17 +1142,14 @@ describe("the hero's scroll story", () => {
     }
   });
 
-  it("releases every timer, frame and listener on unmount", async () => {
-    const mounted = await mountHero({ track: true });
+  it("releases its timer and the map's frame on unmount", async () => {
+    const mounted = await mountHero();
     await act(async () => { vi.advanceTimersByTime(4_800); });
 
     await mounted.cleanup();
 
     expect(vi.getTimerCount()).toBe(0);
     expect(mounted.pendingAnimationFrames()).toBe(0);
-    expect(mounted.windowListeners("scroll")).toBe(0);
-    expect(mounted.windowListeners("resize")).toBe(0);
-    expect(mounted.observers.size).toBe(0);
   });
 });
 

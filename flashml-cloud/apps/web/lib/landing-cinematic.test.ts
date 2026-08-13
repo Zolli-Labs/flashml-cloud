@@ -182,10 +182,10 @@ describe("cinematic landing foundation", () => {
     expect(heroMotion).toContain("useLandingMotion");
     expect(heroMotion).toContain("reduced");
     expect(heroMotion).toContain("documentVisible");
-    // The story reads the page's own scroll position. It never takes the
-    // wheel away from the reader to do it.
-    expect(heroMotion).toContain('window.addEventListener("scroll", schedule, { passive: true })');
-    expect(heroMotion).not.toMatch(/addEventListener\(["'](?:wheel|touchmove)/);
+    // The story is a timer, not a scroll reader. It never takes the wheel, or
+    // any other input, away from the reader.
+    expect(heroMotion).not.toMatch(/addEventListener\(["'](?:scroll|wheel|touchmove)/);
+    expect(heroMotion).not.toMatch(/\brequestAnimationFrame\(/);
     expect(heroMotion).not.toMatch(/preventDefault\(/);
   });
 
@@ -246,8 +246,7 @@ describe("cinematic landing foundation", () => {
     // surface uses, so there is one place a reader's preference is honoured.
     expect(story).toContain("useLandingMotion");
     expect(story).toContain("documentVisible");
-    expect(story).toContain("if (reduced) return");
-    expect(story).toContain("if (reduced || scrollLinked !== false || !documentVisible) return");
+    expect(story).toContain("if (reduced || !documentVisible) return");
     expect(map).toContain("const { reduced, documentVisible } = useLandingMotion()");
     expect(map).toContain("paused={!documentVisible}");
     expect(supportingMotion).toContain("documentVisible");
