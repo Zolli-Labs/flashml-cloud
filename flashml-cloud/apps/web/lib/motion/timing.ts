@@ -1,14 +1,15 @@
 /** The one duration/easing/cadence table for this app, in both dialects.
  *
  * WHY THIS MODULE EXISTS. Three motion systems already run here — GSAP +
- * `useGSAP` (`components/landing/motion/SectionReveal.tsx`, `SystemJourney`,
- * `CommitSignal`, `RecoveryStack`), `motion/react` (`WorkflowScene`,
- * `WorkloadRows`) and a bespoke rAF loop (`coordinator-map/useMapStory.ts`) —
- * and each one picked its own numbers. `"power2.out"` here, `[0.22, 1, 0.36,
- * 1]` there, `"easeOut"` next door; durations spread from 0.28s to 1s with no
- * rule behind any of them. Nothing was wrong; nothing agreed either, and two
- * screens animating at almost-but-not-quite the same rate is exactly what
- * reads as unfinished.
+ * `useGSAP` (`components/landing/motion/SectionReveal.tsx`, `CommitSignal`,
+ * `RecoveryStack`), `motion/react` (`components/motion/Reveal.tsx`, `Trace.tsx`)
+ * and a timer (`coordinator-map/useMapStory.ts`, walking its beats on a
+ * chained `setTimeout` and looping forever — no `requestAnimationFrame`,
+ * nothing read off scroll) — and each one picked its own numbers.
+ * `"power2.out"` here, `[0.22, 1, 0.36, 1]` there, `"easeOut"` next door;
+ * durations spread from 0.28s to 1s with no rule behind any of them.
+ * Nothing was wrong; nothing agreed either, and two screens animating at
+ * almost-but-not-quite the same rate is exactly what reads as unfinished.
  *
  * So this file is a TABLE, not a helper library. It exports every value in
  * every form the two libraries need, from a single definition, so GSAP and

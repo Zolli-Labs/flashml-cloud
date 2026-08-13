@@ -35,9 +35,9 @@ export function ProfessionalServices() {
   return (
     <section
       id="services"
-      data-surface="sand"
+      data-surface="dark"
       data-layout="service-rows"
-      className="landing-surface-sand scroll-mt-20 border-b border-border py-20 md:py-28"
+      className="landing-surface-dark scroll-mt-20 border-b border-border py-20 md:py-28"
     >
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
         <div className="grid gap-10 lg:grid-cols-[.95fr_1.05fr] lg:gap-16">
@@ -50,10 +50,7 @@ export function ProfessionalServices() {
             </h2>
           </div>
 
-          <SectionReveal
-            className="lg:pt-8"
-            lineClassName="h-px w-full bg-[var(--z-border-strong)]"
-          >
+          <SectionReveal className="lg:pt-8">
             <div className="pt-7">
               <p className="max-w-[55ch] text-base leading-relaxed text-muted-foreground">
                 Zolli can help determine fit, connect a fleet, and adapt a divisible or checkpointable
@@ -65,7 +62,7 @@ export function ProfessionalServices() {
                   target="_blank"
                   rel="noreferrer"
                   aria-label="Schedule with Zolli (opens in a new tab)"
-                  className="interactive inline-flex min-h-10 items-center gap-2 rounded-[7px] border border-foreground bg-foreground px-4 text-[13px] font-semibold text-[var(--landing-sand)] hover:bg-[#25292a]"
+                  className="interactive inline-flex min-h-10 items-center gap-2 rounded-[7px] border border-foreground bg-foreground px-4 text-[13px] font-semibold text-background hover:opacity-90"
                 >
                   Schedule with Zolli
                   <ArrowUpRight weight="bold" className="h-4 w-4" />

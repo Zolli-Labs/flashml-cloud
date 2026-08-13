@@ -22,7 +22,15 @@ export function SectionReveal({
 }: {
   children: ReactNode;
   className?: string;
+  /**
+   * No longer rendered. `SectionReveal` used to draw a hairline alongside
+   * its content on a clip-path wipe; that read as more motion than the page
+   * needed, so the reveal below is a plain fade-up now and this prop is a
+   * no-op. Still accepted so call sites this pass did not touch — they keep
+   * their own static hairline in markup instead — typecheck without an edit.
+   */
   lineClassName?: string;
+  /** Same shim as `lineClassName`, for the line below the content. */
   bottomLineClassName?: string;
 }) {
   const root = useRef<HTMLDivElement>(null);
@@ -33,21 +41,16 @@ export function SectionReveal({
       const rootElement = root.current;
       if (!rootElement) return;
 
-      const line = rootElement.querySelectorAll("[data-reveal-line]");
       const content = rootElement.querySelectorAll("[data-reveal-content]");
 
       if (reduced || !desktop) {
-        gsap.set(line, { clipPath: "inset(0 0% 0 0)" });
         gsap.set(content, { y: 0, opacity: 1 });
         return;
       }
 
-      // WRITTEN IN THE ORDER IT PLAYS. The previous form put the rule first
-      // and the content at `"<-0.2"`, but GSAP does not clamp a negative
-      // relative position — it rebases the timeline on the earliest child.
-      // Measured, that made the CONTENT the thing that started at zero and
-      // the rule trail it by 200ms. Same picture, so it is preserved; the
-      // source now says so, and the 200ms is the table's `state` beat.
+      // One subtle fade-up, once: `TRAVEL.tight` (8px) over `DURATIONS.enter`
+      // (320ms — under the 400ms ceiling) on the house `settle` curve, the
+      // same reveal every other first-sight arrival on this page uses.
       gsap
         .timeline({
           scrollTrigger: {
@@ -57,34 +60,18 @@ export function SectionReveal({
           },
         })
         .from(content, {
-          // Was `yPercent: 10` — a percentage of the section's own height,
-          // which on a tall block is the 40px slide-up spec §2 rule 2 calls
-          // a template. A fixed 12px travels the same distance everywhere.
-          y: TRAVEL.base,
+          y: TRAVEL.tight,
           opacity: 0,
-          duration: seconds(DURATIONS.reveal),
+          duration: seconds(DURATIONS.enter),
           ease: gsapEase("settle"),
-        })
-        .from(
-          line,
-          {
-            clipPath: "inset(0 100% 0 0)",
-            duration: seconds(DURATIONS.reveal),
-            ease: gsapEase("settle"),
-          },
-          seconds(DURATIONS.state),
-        );
+        });
     },
     { scope: root, dependencies: [reduced, desktop], revertOnUpdate: true },
   );
 
   return (
     <div ref={root} className={className} data-motion="section-reveal">
-      <div data-reveal-line aria-hidden className={lineClassName} />
       <div data-reveal-content>{children}</div>
-      {bottomLineClassName ? (
-        <div data-reveal-line aria-hidden className={bottomLineClassName} />
-      ) : null}
     </div>
   );
 }

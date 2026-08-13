@@ -1,16 +1,36 @@
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+import { prerenderToNodeStream } from "react-dom/static.node";
 import { describe, expect, it } from "vitest";
 import Home from "@/app/(marketing)/page";
-import { WorkloadRows } from "@/components/landing/WorkloadRows";
+import { HowItWorks } from "@/components/landing/HowItWorks";
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(`${root}/${path}`, "utf8");
-const renderLanding = () => renderToStaticMarkup(createElement(Home));
+
+// `Home` renders `PriceBoard`, an async server component, so the classic
+// synchronous `renderToStaticMarkup` throws ("A component suspended while
+// responding to synchronous input") the moment it reaches it. `prerender`
+// is the React 19 API built for exactly this — resolve every async Server
+// Component in the tree, then hand back a static stream. Production never
+// takes this path (Next's own RSC pipeline resolves `PriceBoard` before
+// `react-dom/server` ever sees the tree); this is a test-only substitute for
+// that pipeline, not a change to how the page itself is written.
+async function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk as Uint8Array));
+  return Buffer.concat(chunks).toString("utf8");
+}
+const renderLanding = async () => {
+  const { prelude } = await prerenderToNodeStream(createElement(Home));
+  return streamToString(prelude);
+};
 const visibleText = (markup: string) =>
   markup.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
-const renderWorkloadRows = () => renderToStaticMarkup(createElement(WorkloadRows));
+const renderHowItWorks = async () => {
+  const { prelude } = await prerenderToNodeStream(createElement(HowItWorks));
+  return streamToString(prelude);
+};
 
 describe("cinematic landing foundation", () => {
   it("pins the approved motion packages", () => {
@@ -20,8 +40,8 @@ describe("cinematic landing foundation", () => {
     expect(pkg.dependencies.motion).toBe("^12.42.2");
   });
 
-  it("contains landing motion without hiding server content", () => {
-    const markup = renderLanding();
+  it("contains landing motion without hiding server content", async () => {
+    const markup = await renderLanding();
     expect(markup).toContain('data-landing="cinematic"');
     expect(markup).toContain("Computing power,");
     expect(markup).toContain("without the lock-in.");
@@ -66,8 +86,8 @@ describe("cinematic landing foundation", () => {
     expect(reducedRole).toBeGreaterThan(animatedRole);
   });
 
-  it("renders the editorial hero and the live coordinator map", () => {
-    const markup = renderLanding();
+  it("renders the editorial hero and the live coordinator map", async () => {
+    const markup = await renderLanding();
     const hero = markup.match(/<section[^>]*id="hero"[\s\S]*?<\/section>/)?.[0] ?? "";
     expect(hero).toContain('data-surface="dark"');
     // The map is the hero's illustration: the coordinator at the centre, the
@@ -87,62 +107,57 @@ describe("cinematic landing foundation", () => {
     expect(hero).not.toMatch(/data-evidence-value|production attempts/);
   });
 
-  it("pins the hero inside a scroll track that drives the map's story", () => {
-    const markup = renderLanding();
+  it("renders the hero as a plain section, with no scroll track or sticky wrapper", async () => {
+    const markup = await renderLanding();
     const page = source("app/(marketing)/page.tsx");
-    const track = markup.match(/<div data-hero-scroll[^>]*>/)?.[0] ?? "";
 
-    // `useMapStory` measures this track rather than reading a breakpoint, so
-    // the sticky child and the spare height are what hand the story to scroll
-    // instead of to the timer fallback.
-    expect(track).toContain("xl:h-[220svh]");
-    expect(markup).toContain("xl:sticky xl:top-0");
-    expect(page).toContain("data-hero-scroll");
+    // `useMapStory` loops on its own timer now; the pinned scroll track and
+    // its sticky child used to hand it a scroll position to read, and both
+    // are gone along with the reading. (The comment above `<Hero />` still
+    // names the retired track's height for context — that is prose, not a
+    // wrapper, so it is not what these assertions are checking for.)
+    expect(page).not.toContain("data-hero-scroll");
+    expect(page).not.toContain("xl:h-[220svh]");
+    expect(page).not.toContain("xl:sticky");
+    expect(markup).not.toContain("data-hero-scroll");
     expect(page).not.toMatch(/ScrollSmoother|addEventListener\(["']wheel/);
   });
 
-  it("uses sand evidence and sand machine lanes without metric cards", () => {
-    const markup = renderLanding();
-    const evidence = markup.match(/<section[^>]*id="evidence"[\s\S]*?<\/section>/)?.[0] ?? "";
+  it("keeps the market board and platform strip sand, with no metric-card grid", async () => {
+    const markup = await renderLanding();
+    const market = markup.match(/<section[^>]*id="market"[\s\S]*?<\/section>/)?.[0] ?? "";
     const platform = markup.match(/<section[^>]*id="platform"[\s\S]*?<\/section>/)?.[0] ?? "";
 
-    expect(evidence).toContain('data-surface="sand"');
+    expect(market).toContain('data-surface="sand"');
     expect(platform).toContain('data-surface="sand"');
-    expect(evidence.match(/data-evidence-value=/g)).toHaveLength(4);
-    expect(evidence).toContain('data-layout="evidence-ledger"');
-    expect(visibleText(evidence)).toContain("Proven with real work.");
-    expect(platform).toContain('data-layout="machine-lanes"');
-    expect(platform).toContain("macOS Apple silicon");
-    expect(platform).toContain("Windows 11");
+    expect(visibleText(market)).toContain("Today");
+    expect(platform).toContain('data-os-badge="macOS Apple silicon"');
+    expect(platform).toContain('data-os-badge="Linux x86_64"');
+    expect(platform).toContain('data-os-badge="Windows 11"');
+    expect(platform).not.toContain("data-host-card");
+    expect(platform).not.toContain("data-runtime-button");
+    expect(platform).not.toContain("Network expansion");
   });
 
-  it("classifies workloads by mode and the architecture by real lanes", () => {
-    const markup = renderLanding();
-    const workloads = markup.match(/<section[^>]*id="workloads"[\s\S]*?<\/section>/)?.[0] ?? "";
-    const architecture = markup.match(/<section[^>]*id="architecture"[\s\S]*?<\/section>/)?.[0] ?? "";
+  it("absorbs the three-step journey and the two module facts worth keeping, with no pinned scroll story", async () => {
+    const markup = await renderHowItWorks();
 
-    expect(workloads).toContain('data-surface="light"');
-    expect(workloads).toContain('data-mode="divide"');
-    expect(workloads).toContain('data-mode="resume"');
-    expect(architecture).toContain('data-surface="dark"');
-    expect(architecture).toContain('data-layout="runtime-lanes"');
-    for (const value of ["01 Host", "02 Runtime", "03 Recovery"])
-      expect(architecture).toContain(value);
-    expect(architecture).toContain("lg:grid-cols-3");
-    expect(architecture).toContain("--network none · read-only rootfs · cpu/mem caps");
-    expect(architecture).toContain("DDP / FSDP");
-  });
-
-  it("keeps workload copy visible while rows reveal independently", () => {
-    const rows = renderWorkloadRows();
-    const rowSource = source("components/landing/WorkloadRows.tsx");
-    const fitSource = source("components/landing/WorkloadFit.tsx");
-
-    expect(rows.match(/data-workload-row=/g) ?? []).toHaveLength(5);
-    expect(rows.match(/data-workload-machines/g) ?? []).toHaveLength(5);
-    expect(rowSource).toContain("whileInView");
-    expect(rowSource).not.toMatch(/(?:opacity|autoAlpha)\s*:\s*0/);
-    expect(fitSource).not.toMatch(/WorkloadVelocityRail/);
+    expect(markup).toContain('id="how-it-works"');
+    expect(markup).toContain('data-surface="dark"');
+    expect(markup.match(/data-human-step=/g) ?? []).toHaveLength(3);
+    expect(markup).toContain('data-module-fact="Host"');
+    expect(markup).toContain('data-module-fact="Runtime"');
+    expect(visibleText(markup)).toContain(
+      "Every machine answers to flashnode. Shared machines run only allowlisted Docker images, sandboxed from the host.",
+    );
+    expect(visibleText(markup)).toContain(
+      "Independent tasks lease across machines. Inside one machine, multi-GPU DDP and FSDP run as PyTorch intends.",
+    );
+    // The three-lane "Recovery" fact and the pinned/scroll-triggered
+    // technical workflow are both cut, not folded in here.
+    expect(markup).not.toContain('data-module-fact="Recovery"');
+    expect(markup).not.toContain("data-workflow-step");
+    expect(markup).not.toContain("data-workflow-scene");
   });
 
   it("balances the services headline and reveals the supporting actions", () => {
@@ -156,8 +171,8 @@ describe("cinematic landing foundation", () => {
 
   it("does not add unsupported performance, scale, provider, or guarantee claims", () => {
     const supportingSources = [
-      "components/landing/WorkloadRows.tsx",
-      "components/landing/SystemModules.tsx",
+      "components/landing/HowItWorks.tsx",
+      "components/landing/PlatformStrip.tsx",
       "components/landing/ProfessionalServices.tsx",
     ].map(source).join("\n");
 
@@ -167,14 +182,26 @@ describe("cinematic landing foundation", () => {
     expect(supportingSources).not.toMatch(/\bguarantee(?:d|s)?\b/i);
   });
 
-  it("renders visible ledger and lane rules for SectionReveal to animate", () => {
-    const markup = renderLanding();
-    const evidence = markup.match(/<section[^>]*id="evidence"[\s\S]*?<\/section>/)?.[0] ?? "";
-    const platform = markup.match(/<section[^>]*id="platform"[\s\S]*?<\/section>/)?.[0] ?? "";
-    const visibleRevealRule = /<div[^>]*data-reveal-line[^>]*class="[^"]*\bh-px\b[^"]*\bbg-\[[^"]*"[^>]*><\/div>/g;
+  it("gives SectionReveal a plain fade-up, once, at or under a 400ms ceiling, honoring reduced motion", () => {
+    const reveal = source("components/landing/motion/SectionReveal.tsx");
 
-    expect(evidence.match(visibleRevealRule) ?? []).toHaveLength(2);
-    expect(platform.match(visibleRevealRule) ?? []).toHaveLength(2);
+    expect(reveal).toContain("TRAVEL.tight");
+    expect(reveal).toContain("DURATIONS.enter");
+    expect(reveal).not.toMatch(/clipPath/);
+    expect(reveal).not.toContain("data-reveal-line");
+    expect(reveal).toContain("once: true");
+    expect(reveal).toContain("if (reduced || !desktop)");
+    // The exported API stays compatible — call sites this pass did not
+    // touch still pass `lineClassName`/`bottomLineClassName` and typecheck.
+    expect(reveal).toContain("lineClassName?: string");
+    expect(reveal).toContain("bottomLineClassName?: string");
+  });
+
+  it("renders no reveal-line elements — the wipe is retired for a fade-up", async () => {
+    const markup = await renderLanding();
+
+    expect(markup).not.toContain("data-reveal-line");
+    expect(markup.match(/data-reveal-content/g)?.length ?? 0).toBeGreaterThan(0);
   });
 
   it("keeps the hero motion scoped and reduced-motion aware", () => {
@@ -187,25 +214,6 @@ describe("cinematic landing foundation", () => {
     expect(heroMotion).not.toMatch(/addEventListener\(["'](?:scroll|wheel|touchmove)/);
     expect(heroMotion).not.toMatch(/\brequestAnimationFrame\(/);
     expect(heroMotion).not.toMatch(/preventDefault\(/);
-  });
-
-  it("keeps the workflow progressive and does not hijack scrolling", () => {
-    const journey = source("components/landing/SystemJourney.tsx");
-    const markup = renderLanding();
-    expect(journey).toContain("useGSAP");
-    expect(journey).toContain("useLandingMotion");
-    expect(journey).toContain("trigger: stage");
-    expect(journey).toContain("pin: stage");
-    expect(journey).toContain("onEnterBack");
-    expect(journey).toContain("trigger.kill()");
-    expect(journey).toContain("desktop");
-    expect(journey).toContain("reduced");
-    expect(journey).not.toContain("trigger: root");
-    expect(markup.match(/data-workflow-scene=/g) ?? []).toHaveLength(7);
-    expect(markup).not.toContain("workflow / topology");
-    expect(journey).not.toMatch(
-      /preventDefault\(|ScrollSmoother|addEventListener\(["']wheel|touchmove/,
-    );
   });
 
   it("contains the workflow canvas inside the pinned 1024px grid column", () => {
@@ -221,9 +229,9 @@ describe("cinematic landing foundation", () => {
       "components/landing/coordinator-map/CoordinatorMap.tsx",
       "components/landing/coordinator-map/MapParticles.tsx",
       "components/landing/coordinator-map/useMapStory.ts",
-      "components/landing/SystemJourney.tsx",
-      "components/landing/WorkflowScene.tsx",
-      "components/landing/WorkloadRows.tsx",
+      "components/landing/HowItWorks.tsx",
+      "components/landing/PlatformStrip.tsx",
+      "components/landing/motion/SectionReveal.tsx",
     ].map(source).join("\n");
 
     expect(motionSources).not.toMatch(/\blayout(?:Id)?=/);
@@ -235,9 +243,6 @@ describe("cinematic landing foundation", () => {
     const provider = source("components/landing/motion/LandingMotionProvider.tsx");
     const story = source("components/landing/coordinator-map/useMapStory.ts");
     const map = source("components/landing/coordinator-map/CoordinatorMap.tsx");
-    const supportingMotion = [
-      "components/landing/WorkloadRows.tsx",
-    ].map(source).join("\n");
 
     expect(provider).toContain("prefers-reduced-motion: reduce");
     expect(provider).toContain("visibilitychange");
@@ -249,24 +254,29 @@ describe("cinematic landing foundation", () => {
     expect(story).toContain("if (reduced || !documentVisible) return");
     expect(map).toContain("const { reduced, documentVisible } = useLandingMotion()");
     expect(map).toContain("paused={!documentVisible}");
-    expect(supportingMotion).toContain("documentVisible");
-    expect(supportingMotion).toContain("!reduced");
   });
 
-  it("finishes with light buying sections and one orange action peak", () => {
-    const markup = renderLanding();
+  it("finishes with a dark services section, light FAQ, and one orange action peak", async () => {
+    const markup = await renderLanding();
     const surfaces = [
       ...markup.matchAll(
-        /<section[^>]*id="(recover|services|faq|start)"[^>]*data-surface="([^"]+)"/g,
+        /<section[^>]*id="(recover|platform|services|faq|start)"[^>]*data-surface="([^"]+)"/g,
       ),
     ].map(([, id, surface]) => [id, surface]);
 
     expect(surfaces).toEqual([
       ["recover", "light"],
-      ["services", "sand"],
+      ["platform", "sand"],
+      ["services", "dark"],
       ["faq", "light"],
       ["start", "orange"],
     ]);
+    // No two adjacent sections share a surface, all the way through.
+    for (let index = 1; index < surfaces.length; index++) {
+      expect(surfaces[index][1], `section ${surfaces[index][0]}`).not.toBe(
+        surfaces[index - 1][1],
+      );
+    }
     expect(markup).toContain('data-motion="recovery-stack"');
     expect(markup).toContain('data-motion="commit-signal"');
     expect(markup).toContain("TASK_COMMIT_ACCEPTED");

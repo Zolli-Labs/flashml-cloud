@@ -1,16 +1,27 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { prerenderToNodeStream } from "react-dom/static.node";
 import { describe, expect, it } from "vitest";
 import Home from "@/app/(marketing)/page";
-import { PlatformSupport } from "@/components/landing/PlatformSupport";
 import { RecoveryDemo } from "@/components/landing/RecoveryDemo";
 import { Navbar } from "@/components/nav/Navbar";
 import { MARKETING } from "@/lib/marketing";
 
-const renderLanding = () => renderToStaticMarkup(createElement(Home));
+// `Home` renders `PriceBoard`, an async server component, so the classic
+// synchronous `renderToStaticMarkup` throws the moment it reaches it.
+// `prerender` is the React 19 API built to resolve async Server Components
+// before handing back a static stream — see the longer note in
+// `lib/landing-cinematic.test.ts`.
+async function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk as Uint8Array));
+  return Buffer.concat(chunks).toString("utf8");
+}
+const renderLanding = async () => {
+  const { prelude } = await prerenderToNodeStream(createElement(Home));
+  return streamToString(prelude);
+};
 const renderNavbar = () => renderToStaticMarkup(createElement(Navbar));
-const renderPlatformSupport = () =>
-  renderToStaticMarkup(createElement(PlatformSupport));
 const renderRecoveryDemo = () =>
   renderToStaticMarkup(createElement(RecoveryDemo));
 const visibleText = (markup: string) =>
@@ -26,7 +37,7 @@ const scopedSection = (markup: string, id: string) =>
   markup.match(new RegExp(`<section\\b[^>]*\\bid="${id}"[^>]*>[\\s\\S]*?</section>`))?.[0] ?? "";
 
 describe("proof-led Zolli landing", () => {
-  it("uses one canonical console, schedule, runtime, and contact destination", () => {
+  it("uses one canonical console, schedule, runtime, and contact destination", async () => {
     expect(MARKETING).toEqual({
       consolePath: "/workspaces",
       machinesPath: "/account/machines",
@@ -35,7 +46,7 @@ describe("proof-led Zolli landing", () => {
       runtimeRepo: "https://github.com/Zolli-Labs/flashml",
     });
 
-    const markup = renderLanding();
+    const markup = await renderLanding();
     expect(markup).toContain(`href="${MARKETING.consolePath}"`);
     const calendlyAnchors = anchorTags(markup).filter((anchor) =>
       anchor.includes("calendly.com"),
@@ -84,18 +95,15 @@ describe("proof-led Zolli landing", () => {
     expect(mobile).toContain('hidden=""');
   });
 
-  it("orders evaluation content from proof through conversion", () => {
-    const markup = renderLanding();
+  it("orders evaluation content from proof through conversion", async () => {
+    const markup = await renderLanding();
     const anchors = [
-      'id="network"',
+      'id="hero"',
+      'id="market"',
       'id="how-it-works"',
       'id="recover"',
-      'id="evidence"',
-      'id="workloads"',
       'id="platform"',
-      'id="architecture"',
       'id="services"',
-      'id="technical-workflow"',
       'id="faq"',
       'id="start"',
     ];
@@ -107,8 +115,8 @@ describe("proof-led Zolli landing", () => {
     }, -1);
   });
 
-  it("keeps the approved twelve-section surface rhythm followed by a dark footer", () => {
-    const markup = renderLanding();
+  it("keeps the approved seven-section surface rhythm followed by a dark footer", async () => {
+    const markup = await renderLanding();
     const sections = (markup.match(/<section\b[^>]*>/g) ?? []).map((tag) => [
       tag.match(/\bid="([^"]+)"/)?.[1],
       tag.match(/\bdata-surface="([^"]+)"/)?.[1],
@@ -117,20 +125,16 @@ describe("proof-led Zolli landing", () => {
 
     expect(sections).toEqual([
       ["hero", "dark"],
-      ["network", "light"],
+      ["market", "sand"],
       ["how-it-works", "dark"],
       ["recover", "light"],
-      ["evidence", "sand"],
-      ["workloads", "light"],
       ["platform", "sand"],
-      ["architecture", "dark"],
-      ["services", "sand"],
-      ["technical-workflow", "dark"],
+      ["services", "dark"],
       ["faq", "light"],
       ["start", "orange"],
     ]);
-    // The original design language never repeats a surface on adjacent
-    // sections; the alternation is what gives the page its chapter rhythm.
+    // No two adjacent sections share a surface; the alternation is what
+    // gives the page its chapter rhythm.
     for (let index = 1; index < sections.length; index++) {
       expect(sections[index][1], `section ${sections[index][0]}`).not.toBe(
         sections[index - 1][1],
@@ -140,27 +144,15 @@ describe("proof-led Zolli landing", () => {
     expect(markup.indexOf(footer)).toBeGreaterThan(markup.indexOf('id="start"'));
   });
 
-  it("explains the compute market and a three-step path before mechanics", () => {
-    const markup = renderLanding();
-    const network = scopedSection(markup, "network");
+  it("shows today's GPU prices before the three-step path and its two module facts", async () => {
+    const markup = await renderLanding();
+    const market = scopedSection(markup, "market");
     const journey = scopedSection(markup, "how-it-works");
-    const humanSteps = [...journey.matchAll(/\bdata-human-step="([^\"]+)"/g)].map(
+    const humanSteps = [...journey.matchAll(/\bdata-human-step="([^"]+)"/g)].map(
       ([, step]) => step,
     );
 
-    expect(network).toContain('data-surface="light"');
-    // The market story reveals on scroll like every other original section.
-    expect(network.match(/data-motion="section-reveal"/g) ?? []).toHaveLength(3);
-    expect(journey).toContain('data-motion="section-reveal"');
-    for (const copy of [
-      "Compute is everywhere. Access is not.",
-      "From isolated machines to an open compute network.",
-      "One request puts every source to work — your machines, community hosts, RunPod, and Alibaba Cloud compete on price.",
-      "Idle machines already cost you. Connect them and earn when they complete useful work.",
-      "Early network",
-      "Early testing uses Zolli credits. Cash payout is not live.",
-    ]) expect(visibleText(network)).toContain(copy);
-
+    expect(market).toContain('data-surface="sand"');
     expect(journey).toContain('data-surface="dark"');
     expect(humanSteps).toEqual(["1", "2", "3"]);
     expect([...journey.matchAll(/<h3[^>]*>([\s\S]*?)<\/h3>/g)].map(([, title]) => visibleText(title))).toEqual([
@@ -168,92 +160,35 @@ describe("proof-led Zolli landing", () => {
       "The network finds suitable machines.",
       "Your work continues as capacity changes.",
     ]);
-  });
-
-  it("explains the complete machine-to-result technical workflow in order", () => {
-    const journey = scopedSection(renderLanding(), "technical-workflow");
-    const steps = [...journey.matchAll(/\bdata-workflow-step="([^"]+)"/g)].map(
-      ([, key]) => key,
+    expect(visibleText(journey)).toContain(
+      "Every machine answers to flashnode. Shared machines run only allowlisted Docker images, sandboxed from the host.",
     );
-
-    expect(journey).toContain('data-surface="dark"');
-    expect(journey).toContain('data-motion="system-journey"');
-    expect(steps).toEqual([
-      "connect",
-      "register",
-      "submit",
-      "parallel",
-      "checkpoint",
-      "recover",
-      "accept",
-    ]);
-    for (const [title, body] of [
-      [
-        "Connect machines",
-        "Connect machines you operate or capacity you choose to add.",
-      ],
-      [
-        "Register capacity",
-        "The control plane records the node information available to it.",
-      ],
-      [
-        "Submit one job",
-        "The operator supplies the repository and workload definition through the existing console flow.",
-      ],
-      [
-        "Split and lease tasks",
-        "The control plane assigns bounded parallel work to available nodes.",
-      ],
-      [
-        "Checkpoint progress",
-        "Workers commit checkpoint manifests as progress becomes available.",
-      ],
-      [
-        "Recover interrupted work",
-        "A missing heartbeat can requeue work from its recorded checkpoint.",
-      ],
-      [
-        "Accept one result",
-        "The control plane records the accepted task commit.",
-      ],
-    ]) {
-      expect(visibleText(journey)).toContain(`${title} ${body}`);
-    }
-    for (const event of [
-      "LEASE_CLAIMED",
-      "CHECKPOINT_MANIFEST_COMMITTED",
-      "NODE_HEARTBEAT_LOST",
-      "TASK_REQUEUED",
-      "TASK_COMMIT_ACCEPTED",
-    ]) expect(journey).toContain(event);
-    expect(journey).not.toMatch(/NODE_REGISTERED|NODE_HEARTBEAT\b|JOB_SUBMITTED/);
-    expect((journey.match(/<li\b/g) ?? [])).toHaveLength(7);
+    expect(visibleText(journey)).toContain(
+      "Independent tasks lease across machines. Inside one machine, multi-GPU DDP and FSDP run as PyTorch intends.",
+    );
   });
 
-  it("keeps each workflow scene small and removes the old topology ticker", () => {
-    const journey = scopedSection(renderLanding(), "technical-workflow");
+  it("keeps the flashnode allowlist and DDP/FSDP facts, and drops the old three-lane module grid", async () => {
+    const markup = await renderLanding();
+    const journey = scopedSection(markup, "how-it-works");
+    const text = visibleText(journey);
 
-    expect(journey.match(/\bdata-workflow-scene=/g) ?? []).toHaveLength(7);
-    expect(journey).not.toContain("workflow / topology");
-    expect(journey).not.toContain("Protocol events");
-    expect(journey).not.toContain("data-journey-node");
-    expect(journey).not.toContain("data-journey-event");
+    expect(text).toContain("Host");
+    expect(text).toContain("Runtime");
+    expect(text).not.toContain("01 Host");
+    expect(text).not.toContain("03 Recovery");
+    expect(journey).not.toContain("LEASE_CLAIMED");
+    expect(journey).not.toContain("CHECKPOINT_MANIFEST_COMMITTED");
+    expect(journey).not.toContain("data-workflow-step");
+    expect(journey).not.toContain("data-workflow-scene");
   });
 
-  it("keeps meaningful workflow labels above the flagged contrast floor", () => {
-    const journey = scopedSection(renderLanding(), "technical-workflow");
-
-    expect(journey).not.toMatch(/\btext-white\/(?:35|38|42)\b/);
-  });
-
-  it("enforces the approved outcome-level evidence and rejects unsupported comparisons", () => {
-    const markup = renderLanding();
+  it("enforces the approved outcome-level evidence inside the recovery section, and rejects unsupported comparisons", async () => {
+    const markup = await renderLanding();
     const text = visibleText(markup);
-    const evidenceSection = markup.match(
-      /<section\b[^>]*\bid="evidence"[^>]*>([\s\S]*?)<\/section>/,
-    )?.[1];
+    const recover = scopedSection(markup, "recover");
     const evidenceValues = [
-      ...(evidenceSection ?? "").matchAll(/\bdata-evidence-value="([^"]*)"/g),
+      ...recover.matchAll(/\bdata-evidence-value="([^"]*)"/g),
     ].map(([, value]) => value);
 
     // Documented engineering benchmarks, pinned so they cannot drift.
@@ -275,17 +210,15 @@ describe("proof-led Zolli landing", () => {
       "Recovered from the last verified checkpoint.",
       "1 accepted result per task",
       "Idempotent commits reject duplicate outcomes.",
-      "macOS arm64",
+      "macOS Apple silicon",
       "Linux x86_64",
       "Windows 11",
-      "Preview",
       "PyTorch CUDA 12.4",
     ]) expect(text).toContain(claim);
-    expect(text).not.toContain("Windows 11 Proven");
   });
 
-  it("rejects universal support, customer, provider, and unverified performance claims", () => {
-    const markup = renderLanding();
+  it("rejects universal support, customer, provider, and unverified performance claims", async () => {
+    const markup = await renderLanding();
     const text = visibleText(markup);
     const nonFaqText = visibleText(markup.replace(scopedSection(markup, "faq"), ""));
 
@@ -296,61 +229,44 @@ describe("proof-led Zolli landing", () => {
     expect(nonFaqText).not.toMatch(/\bguarantee(?:d|s)?\b/i);
   });
 
-  it("qualifies platform compatibility without overstating Windows", () => {
-    const text = visibleText(renderLanding());
-    expect(text).toContain("Proven today");
-    expect(text).toContain("macOS Apple silicon Proven");
-    expect(text).toContain("Linux x86_64 Proven");
-    expect(text).toContain("RunPod NVIDIA GPUs Proven");
-    expect(text).toContain("Windows 11 Preview");
+  it("qualifies platform compatibility without overstating any host, and never badges one 'Proven'", async () => {
+    const markup = await renderLanding();
+    const text = visibleText(markup);
+    // "Proven" is retired as UI status wording — `Preview` is the only tag
+    // the platform strip is allowed to print. The FAQ's own prose ("Proven
+    // hosts are...") is unaffected copy from an earlier task, not a badge,
+    // so the stricter check is scoped to the platform section alone.
+    const platform = visibleText(scopedSection(markup, "platform"));
+
+    expect(text).toContain("macOS Apple silicon");
+    expect(text).toContain("Linux x86_64");
+    expect(text).toContain("Windows 11");
+    expect(platform).toContain("Preview");
+    expect(platform).not.toContain("Proven");
     expect(text).toContain("Docker");
     expect(text).toContain("GitHub");
     expect(text).not.toMatch(/customers|uptime|faster|savings/i);
   });
 
-  it("replaces the old integration rows with an icon-led runtime explorer and host cards", () => {
-    const markup = renderPlatformSupport();
+  it("replaces the interactive runtime explorer and host-card grid with plain OS badges and runtime chips", async () => {
+    const markup = await renderLanding();
+    const platform = scopedSection(markup, "platform");
 
-    expect(markup.match(/data-runtime-button="[^"]*"/g) ?? []).toHaveLength(9);
-    expect(markup.match(/data-host-card="[^"]*"/g) ?? []).toHaveLength(4);
-    expect(markup).not.toContain("Python workloads");
-    expect(markup).not.toContain("Local/cloud machine supply");
-    expect(markup).not.toContain("data-machine-result");
+    expect(platform.match(/data-os-badge="[^"]*"/g) ?? []).toHaveLength(3);
+    expect(platform.match(/data-runtime-chip="[^"]*"/g) ?? []).toHaveLength(9);
+    expect(platform).not.toContain("data-runtime-button");
+    expect(platform).not.toContain("data-host-card");
+    expect(platform).not.toContain("data-runtime-detail");
+    expect(platform).not.toContain("data-machine-result");
+    expect(platform).not.toContain("Network expansion");
     for (const label of [
       "Python 3.11", "NumPy", "pandas", "scikit-learn", "SciPy",
       "PyTorch CPU", "PyTorch CUDA 12.4", "Docker", "GitHub",
-    ]) expect(visibleText(markup)).toContain(label);
+    ]) expect(visibleText(platform)).toContain(label);
   });
 
-  it("names five workloads with their supported machine context", () => {
-    const text = visibleText(renderLanding());
-    for (const workload of [
-      "Model configuration search",
-      "AI model evaluation",
-      "Independent file processing",
-      "Simulations and research trials",
-      "Checkpointable model training",
-    ]) expect(text).toContain(workload);
-  });
-
-  it("lists every workload once under its mode", () => {
-    const workloads = scopedSection(renderLanding(), "workloads");
-
-    expect(workloads).toContain('aria-label="Supported workloads — Divide mode"');
-    expect(workloads).toContain('aria-label="Supported workloads — Resume mode"');
-    expect(workloads.match(/<li\b/g) ?? []).toHaveLength(5);
-  });
-
-  it("groups the runtime into host, runtime, and recovery lanes", () => {
-    const text = visibleText(renderLanding());
-    for (const lane of ["01 Host", "02 Runtime", "03 Recovery"])
-      expect(text).toContain(lane);
-    for (const moduleName of ["Coordinate", "Enroll", "Execute", "Checkpoint", "Recover", "Verify"])
-      expect(text).toContain(moduleName);
-  });
-
-  it("connects the recovery ledger to the documented recovery outcome", () => {
-    const text = visibleText(renderLanding());
+  it("connects the recovery ledger to the documented recovery outcome", async () => {
+    const text = visibleText(await renderLanding());
     expect(text).toContain("Machines disappear. Progress doesn't.");
     expect(text).toContain("RTX 4090 machine destroyed");
     expect(text).toContain("Resumed on an RTX 3090");
@@ -366,8 +282,8 @@ describe("proof-led Zolli landing", () => {
     expect(markup).not.toContain("sm:not-last:border-l");
   });
 
-  it("offers assisted adoption without displacing self service", () => {
-    const markup = renderLanding();
+  it("offers assisted adoption without displacing self service", async () => {
+    const markup = await renderLanding();
     const text = visibleText(markup);
     const services = scopedSection(markup, "services");
     const serviceTitles = [...services.matchAll(/<h3\b[^>]*>([\s\S]*?)<\/h3>/g)].map(
@@ -384,18 +300,18 @@ describe("proof-led Zolli landing", () => {
     expect(text).toContain("Start with the machines and workloads you already have.");
   });
 
-  it("uses editorial services instead of four equal cards", () => {
-    const markup = renderLanding();
-    const services =
-      markup.match(/<section[^>]*id="services"[\s\S]*?<\/section>/)?.[0] ?? "";
+  it("uses editorial services instead of four equal cards", async () => {
+    const markup = await renderLanding();
+    const services = scopedSection(markup, "services");
 
     expect(services).toContain('data-layout="service-rows"');
+    expect(services).toContain('data-surface="dark"');
     expect(services.match(/data-service-row=/g) ?? []).toHaveLength(2);
     expect(services.match(/<article\b/g) ?? []).toHaveLength(4);
   });
 
-  it("answers the eight market-fit questions with native disclosures", () => {
-    const markup = renderLanding();
+  it("answers the nine market-fit questions with native disclosures, including the honest training-fit boundary", async () => {
+    const markup = await renderLanding();
     const disclosures = markup.match(/<details\b[^>]*>[\s\S]*?<\/details>/g) ?? [];
     const expectedFaqs = [
       "What is Zolli?",
@@ -404,6 +320,7 @@ describe("proof-led Zolli landing", () => {
       "Will Zolli always be cheaper?",
       "Which machines work?",
       "Which workloads fit?",
+      "What kind of training doesn't fit?",
       "What happens if a machine disappears?",
       "How mature is the network?",
     ] as const;
@@ -417,10 +334,13 @@ describe("proof-led Zolli landing", () => {
     expect(text).toContain("Cash payout is not live");
     expect(text).toContain("cannot guarantee every job is cheaper");
     expect(text).toContain("Tightly synchronized multi-machine training is not the current target");
+    expect(text).toContain(
+      "It is not currently designed for tightly synchronized training where every GPU must communicate continuously over a very fast network.",
+    );
   });
 
-  it("ends with the demand choice before the provider choice", () => {
-    const start = scopedSection(renderLanding(), "start");
+  it("ends with the demand choice before the provider choice", async () => {
+    const start = scopedSection(await renderLanding(), "start");
 
     expect(visibleText(start)).toContain("Join the open compute network.");
     expect(anchorForText(start, "I need compute")).toContain(`href="${MARKETING.consolePath}"`);
@@ -428,8 +348,8 @@ describe("proof-led Zolli landing", () => {
     expect(start.indexOf("I need compute")).toBeLessThan(start.indexOf("I want to provide compute"));
   });
 
-  it("provides complete product, resource, company, and legal navigation", () => {
-    const markup = renderLanding();
+  it("provides complete product, resource, company, and legal navigation", async () => {
+    const markup = await renderLanding();
     const groups = [
       [
         "Product footer navigation",

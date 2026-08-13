@@ -5,14 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hero } from "@/components/landing/Hero";
 import { HeroMarketSwitch } from "@/components/landing/HeroMarketSwitch";
 import { CoordinatorMap } from "@/components/landing/coordinator-map/CoordinatorMap";
-import { PlatformSupport } from "@/components/landing/PlatformSupport";
-import { SystemJourney } from "@/components/landing/SystemJourney";
-import { WorkloadRows } from "@/components/landing/WorkloadRows";
-import {
-  WORKFLOW_SCENES,
-  WorkflowScene,
-} from "@/components/landing/WorkflowScene";
-import { WORKLOADS } from "@/lib/landing/workloads";
 import { isPublicPath } from "@/middleware";
 import {
   MAP_NODES,
@@ -285,8 +277,9 @@ class TestElement extends TestEventTarget {
     );
   }
 
-  /** Only the attribute selectors this landing actually uses — the hero finds
-   * its scroll track with `[data-hero-scroll]` and nothing else calls this. */
+  /** Nothing in this landing calls `closest()` any more — the hero no longer
+   * has a scroll track to find. Kept for parity with the real DOM's shape,
+   * on the small selector subset this fake ever needs. */
   closest(selector: string): TestElement | null {
     if (this.hasAttribute(selector.replace(/^\[|\]$/g, ""))) return this;
     return this.parentNode?.closest(selector) ?? null;
@@ -520,12 +513,6 @@ function elementsByAttribute(root: TestElement, name: string, value?: string) {
   );
 }
 
-function findButtonWithText(root: TestElement, text: string): TestElement | undefined {
-  return findElements(root, (element) => element.tagName === "BUTTON").find(
-    (element) => element.textContent.trim() === text,
-  );
-}
-
 /** React derives `onFocus`/`onKeyDown` from real bubbling events on the root,
  * so a test has to send the event the browser would rather than call the prop. */
 function send(element: TestElement, type: string, key?: string) {
@@ -633,28 +620,6 @@ async function mountHero({
     async cleanup() {
       await act(async () => reactRoot.unmount());
       environment.restore();
-    },
-  };
-}
-
-function installNavigator(overrides: {
-  userAgent: string;
-  platform?: string;
-  maxTouchPoints?: number;
-}) {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  Object.defineProperty(globalThis, "navigator", {
-    configurable: true,
-    value: {
-      userAgent: overrides.userAgent,
-      platform: overrides.platform ?? "",
-      maxTouchPoints: overrides.maxTouchPoints ?? 0,
-    },
-  });
-
-  return {
-    restore() {
-      if (previous) Object.defineProperty(globalThis, "navigator", previous);
     },
   };
 }
@@ -1214,235 +1179,5 @@ describe("inspecting a source on the map", () => {
     } finally {
       await mounted.cleanup();
     }
-  });
-});
-
-describe("the platform support section", () => {
-  it("renders nine labeled runtime buttons beside one stable detail panel", () => {
-    const markup = renderToStaticMarkup(createElement(PlatformSupport));
-    const buttons = [
-      ...markup.matchAll(/<button[^>]*data-runtime-button="[^"]*"[^>]*>([\s\S]*?)<\/button>/g),
-    ];
-
-    expect(buttons).toHaveLength(9);
-    expect(
-      buttons.map(([, inner]) => inner.replace(/<[^>]+>/g, "").trim()),
-    ).toEqual(RUNTIME_SUPPORT.map(({ label }) => label));
-    expect((markup.match(/data-runtime-detail\b/g) ?? [])).toHaveLength(1);
-  });
-
-  it("keeps every runtime icon decorative beside a real text label", () => {
-    const markup = renderToStaticMarkup(createElement(PlatformSupport));
-    const buttons = [
-      ...markup.matchAll(/<button[^>]*data-runtime-button="[^"]*"[^>]*>([\s\S]*?)<\/button>/g),
-    ];
-
-    for (const [, inner] of buttons) {
-      expect(inner).toContain("<svg");
-      expect(inner).toContain('aria-hidden="true"');
-      expect(inner.replace(/<[^>]+>/g, "").trim().length).toBeGreaterThan(0);
-    }
-  });
-
-  it("shows a registered image alias only when the selected runtime has one", async () => {
-    const environment = installMotionEnvironment();
-    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
-      .IS_REACT_ACT_ENVIRONMENT = true;
-    const { createRoot } = await import("react-dom/client");
-    const root = createRoot(environment.container as never);
-
-    await act(async () => root.render(createElement(PlatformSupport)));
-
-    const numpyRuntime = RUNTIME_SUPPORT.find(({ label }) => label === "NumPy");
-    const numpyButton = findButtonWithText(environment.container, numpyRuntime?.label ?? "");
-    expect(numpyButton).toBeDefined();
-    await act(async () => numpyButton?.click());
-    const detailAfterNumpy = elementsByAttribute(environment.container, "data-runtime-detail");
-    expect(detailAfterNumpy).toHaveLength(1);
-    expect(detailAfterNumpy[0].textContent).not.toContain("python-slim");
-    expect(detailAfterNumpy[0].textContent).toContain(
-      "No curated image is registered for this runtime.",
-    );
-    expect(detailAfterNumpy[0].textContent).not.toContain(
-      "Available on every proven and preview host",
-    );
-
-    const sklearnRuntime = RUNTIME_SUPPORT.find(({ label }) => label === "scikit-learn");
-    const sklearnButton = findButtonWithText(environment.container, sklearnRuntime?.label ?? "");
-    await act(async () => sklearnButton?.click());
-    const detailAfterSklearn = elementsByAttribute(environment.container, "data-runtime-detail");
-    expect(detailAfterSklearn).toHaveLength(1);
-    expect(detailAfterSklearn[0]).toBe(detailAfterNumpy[0]);
-    expect(detailAfterSklearn[0].textContent).toContain("sklearn");
-
-    await act(async () => root.unmount());
-    environment.restore();
-  });
-
-  it("groups qualified hosts into Proven today, Preview, and Network expansion", () => {
-    const markup = renderToStaticMarkup(createElement(PlatformSupport));
-
-    expect((markup.match(/data-host-card="[^"]*"/g) ?? [])).toHaveLength(4);
-    for (const label of ["Proven today", "Preview", "Network expansion"]) {
-      expect(markup).toContain(label);
-    }
-    for (const { platform, state } of HOST_SUPPORT) {
-      const card = markup.match(
-        new RegExp(`<article[^>]*data-host-card="${platform}"[^>]*>([\\s\\S]*?)</article>`),
-      )?.[1] ?? "";
-      const visible = card.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      expect(visible, platform).toContain(platform);
-      expect(visible, platform).toContain(state);
-    }
-    for (const item of [
-      "More cloud providers",
-      "More GPU and hardware configurations",
-      "Automatic capacity purchasing",
-      "Cash earnings for machine hosts",
-    ]) expect(markup).toContain(item);
-    expect(markup).toContain("not currently designed for tightly synchronized training");
-  });
-
-  it("keeps the machine result out of the DOM until the check is requested", () => {
-    const markup = renderToStaticMarkup(createElement(PlatformSupport));
-
-    expect(markup).not.toContain("data-machine-result");
-    expect(markup).toContain("Check this browser");
-    expect(markup).toContain("It cannot verify CPU architecture, Docker, or GPU availability.");
-  });
-
-  it("reads navigator only after Check this browser is clicked, then announces a polite host-family hint", async () => {
-    const environment = installMotionEnvironment();
-    const navigator = installNavigator({
-      userAgent: "Macintosh; Intel Mac OS X 10_15",
-      platform: "MacIntel",
-      maxTouchPoints: 0,
-    });
-    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
-      .IS_REACT_ACT_ENVIRONMENT = true;
-    const { createRoot } = await import("react-dom/client");
-    const root = createRoot(environment.container as never);
-
-    await act(async () => root.render(createElement(PlatformSupport)));
-    expect(elementsByAttribute(environment.container, "data-machine-result")).toHaveLength(0);
-
-    const checkButton = findButtonWithText(environment.container, "Check this browser");
-    expect(checkButton).toBeDefined();
-    await act(async () => checkButton?.click());
-
-    const results = elementsByAttribute(environment.container, "data-machine-result");
-    expect(results).toHaveLength(1);
-    expect(results[0].getAttribute("role")).toBe("status");
-    expect(results[0].getAttribute("aria-live")).toBe("polite");
-    expect(results[0].textContent).toContain(MACHINE_HINTS.macos.headline);
-    expect(results[0].textContent?.endsWith("Run flashnode doctor for a real host check.")).toBe(true);
-    expect(results[0].textContent).not.toContain("Your machine is supported");
-
-    await act(async () => root.unmount());
-    navigator.restore();
-    environment.restore();
-  });
-});
-
-describe("the seven-scene workflow", () => {
-  it("keeps every scene within landing-page density limits and preserves event chronology", () => {
-    expect(WORKFLOW_SCENES.map(({ id }) => id)).toEqual([
-      "connect", "register", "submit", "parallel", "checkpoint", "recover", "accept",
-    ]);
-    expect(WORKFLOW_SCENES.map(({ objects, paths }) => [objects.length, paths.length])).toEqual([
-      [5, 2],
-      [4, 1],
-      [3, 1],
-      [5, 2],
-      [4, 1],
-      [4, 2],
-      [3, 1],
-    ]);
-    expect(WORKFLOW_SCENES.flatMap(({ events }) => events)).toEqual([
-      "LEASE_CLAIMED",
-      "CHECKPOINT_MANIFEST_COMMITTED",
-      "NODE_HEARTBEAT_LOST",
-      "TASK_REQUEUED",
-      "TASK_COMMIT_ACCEPTED",
-    ]);
-  });
-
-  it("renders primary scene objects, paths, and relevant events as inspectable states", () => {
-    for (const scene of WORKFLOW_SCENES) {
-      const markup = renderToStaticMarkup(
-        createElement(WorkflowScene, { step: scene.id, compact: true }),
-      );
-
-      expect(markup.match(/data-scene-object=/g) ?? []).toHaveLength(scene.objects.length);
-      expect(markup.match(/data-scene-path=/g) ?? []).toHaveLength(scene.paths.length);
-      expect(markup.match(/data-scene-event=/g) ?? []).toHaveLength(scene.events.length);
-      expect(markup).toContain(`data-workflow-scene="${scene.id}"`);
-    }
-  });
-
-  it("replaces the shared topology and protocol ticker with seven adjacent story scenes", () => {
-    const markup = renderToStaticMarkup(createElement(SystemJourney));
-    const steps = [...markup.matchAll(/data-workflow-step="([^"]+)"/g)].map(([, id]) => id);
-    const scenes = [...markup.matchAll(/data-workflow-scene="([^"]+)"/g)].map(([, id]) => id);
-
-    expect(steps).toEqual([
-      "connect", "register", "submit", "parallel", "checkpoint", "recover", "accept",
-    ]);
-    expect(scenes).toEqual(steps);
-    expect(markup).toContain("data-workflow-stage");
-    expect(markup).toContain('id="technical-workflow"');
-    expect(markup).not.toContain('data-active="false"');
-    expect(markup).not.toContain("workflow / topology");
-    expect(markup).not.toContain("Protocol events");
-    expect(markup).not.toContain("data-journey-node");
-    expect(markup).not.toContain("data-journey-event");
-  });
-});
-
-describe("the supporting landing story", () => {
-  it("pairs each approved workload with a machine context", () => {
-    const markup = renderToStaticMarkup(createElement(WorkloadRows));
-
-    expect(WORKLOADS.map(({ title }) => title)).toEqual([
-      "Model configuration search",
-      "AI model evaluation",
-      "Independent file processing",
-      "Simulations and research trials",
-      "Checkpointable model training",
-    ]);
-    expect(WORKLOADS).toHaveLength(5);
-    expect(WORKLOADS.map(({ mode }) => mode)).toEqual([
-      "divide", "divide", "divide", "divide", "resume",
-    ]);
-    expect(WORKLOADS.every(({ machineContext }) => machineContext.length > 0)).toBe(true);
-    expect(markup.match(/data-workload-machines/g) ?? []).toHaveLength(WORKLOADS.length);
-    for (const machineContext of [
-      "Suitable machines: Laptops, CPU workstations, or rented GPUs.",
-      "Suitable machines: CPU or GPU machines across a team.",
-      "Suitable machines: Supported macOS, Linux, and compatible cloud machines.",
-      "Suitable machines: Mixed personal, lab, and cloud machines.",
-      "Suitable machines: Linux machines with supported NVIDIA GPUs.",
-    ]) expect(markup).toContain(machineContext);
-  });
-
-  it("keeps visual controls and live results named by accessible semantics", () => {
-    const hero = renderToStaticMarkup(
-      createElement(CoordinatorMap, { phase: "resumed", viewport: MAP_VIEWPORT_DESKTOP }),
-    );
-    const platform = renderToStaticMarkup(createElement(PlatformSupport));
-    const architecture = renderToStaticMarkup(createElement(WorkflowScene, {
-      step: "recover",
-      compact: true,
-    }));
-
-    expect(hero).toContain('role="group"');
-    expect(hero.match(/role="button"/g) ?? []).toHaveLength(4);
-    expect(hero.match(/aria-label=/g) ?? []).toHaveLength(5);
-    expect(hero).toContain('aria-live="polite"');
-    expect(hero).toContain('role="status"');
-    expect(platform.match(/data-runtime-button=/g) ?? []).toHaveLength(9);
-    expect(platform).toContain("Check this browser");
-    expect(platform).not.toContain("data-machine-result");
-    expect(architecture).toContain('aria-hidden="true"');
   });
 });
