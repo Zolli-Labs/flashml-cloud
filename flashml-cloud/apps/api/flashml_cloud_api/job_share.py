@@ -581,6 +581,24 @@ def public_ledger_view(events: Iterable[Any]) -> list[dict[str, Any]]:
     ``job_id``. An entry whose kind is not in :data:`PUBLIC_EVENT_TYPES` is
     dropped entirely — which is also what makes a coordinator answering
     something unexpected harmless here.
+
+    **``at`` IS A WIRE VALUE, NOT ONE THIS PROCESS ASSIGNS**, and the publish
+    list said otherwise until it was checked. It is tempting to cite
+    ``Event.timestamp``'s ``default_factory=utcnow`` as its provenance, but a
+    ``default_factory`` fires only when the field is ABSENT from the payload
+    — and this function reads ``event["timestamp"]`` off the coordinator's
+    answer, so that default never runs on this path at all. ``Event.source``
+    names ``"flashnode"`` among its origins, so a host-influenced clock cannot
+    be ruled out from this repository.
+
+    It is published anyway, and the reason is the AS-16.2 split rather than an
+    exception to it: the two questions are *who assigned this* and *does it
+    re-identify*. A clock fails the first (uncertainly) and passes the second
+    cleanly — it carries no submitter content and identifies nobody. What was
+    actually wrong was the CLAIM, not the field, and the claim is corrected
+    here. Every timestamp on the page that is genuinely ours — an attempt's
+    ``claimed_at`` and ``resolved_at`` — comes from our own table, so a reader
+    who needs a trustworthy clock has one.
     """
     out: list[dict[str, Any]] = []
     for event in events:
