@@ -23,7 +23,7 @@ import {
   type PreflightFinding,
   type SubmitFromRepoResult,
 } from "@/lib/cloud-api";
-import { isMachineOnline } from "@/lib/machine-scope";
+import { poolFleetCounts } from "@/lib/machine-scope";
 import { workspacePath } from "@/lib/workspace-scope";
 
 type Status = "idle" | "submitting" | "rejected" | "submitted" | "error";
@@ -52,6 +52,7 @@ export default function SubmitPage() {
   // null once read from inside that closure).
   const poolId = pool.id;
   const canSubmit = repo.trim().length > 0 && status !== "submitting";
+  const fleet = poolFleetCounts(machines);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -225,15 +226,30 @@ export default function SubmitPage() {
               code this job stages.
             </p>
 
-            {machines.filter(isMachineOnline).length === 0 ? (
-              <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5 text-sm text-warning-foreground">
+            {/* The real ratio, always — not only when it hits zero. A
+                binary "0 online" warning that goes silent at "1 of 40" told
+                a submitter nothing about how thin their fleet actually is
+                (density audit §3, gap 5). `poolFleetCounts` reuses
+                `isMachineOnline`, so this cannot disagree with the Machines
+                tab's own header row. */}
+            <div
+              className={`flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm ${
+                fleet.online === 0
+                  ? "border-warning/40 bg-warning/10 text-warning-foreground"
+                  : "border-border bg-surface text-muted-foreground"
+              }`}
+            >
+              {fleet.online === 0 && (
                 <Warning className="w-4 h-4 shrink-0 mt-0.5" weight="fill" />
-                <span>
-                  0 Machines online in this Workspace right now — the job
-                  will queue until one connects.
-                </span>
-              </div>
-            ) : null}
+              )}
+              <span>
+                {fleet.online} of {fleet.total} machine
+                {fleet.total === 1 ? "" : "s"} online in this Workspace
+                {fleet.online === 0
+                  ? " right now — the job will queue until one connects."
+                  : "."}
+              </span>
+            </div>
 
             {status === "error" && errorMessage ? (
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
