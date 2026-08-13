@@ -140,6 +140,58 @@ export function RoutingCard({
         </div>
       )}
 
+      {panel.candidates.length > 0 && (
+        <div className="mt-4 border-t border-border pt-4">
+          <p className="label-caps">Priced machines</p>
+          <p className="mt-1 max-w-prose text-xs text-muted-foreground">
+            Every machine this account can reach, at its own ask — the fleet
+            the plans below are built from.
+          </p>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[560px] text-left">
+              <thead>
+                <tr className="border-b border-border">
+                  {["Machine", "Venue", "Price", "Reliability", "Acceptance", "Eligible"].map(
+                    (h) => (
+                      <th key={h} className="label-caps px-3 py-2 font-medium">
+                        {h}
+                      </th>
+                    )
+                  )}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {panel.candidates.map((c) => (
+                  <tr key={c.machineId}>
+                    <td className="px-3 py-2.5 font-mono text-xs">{c.display}</td>
+                    <td className="px-3 py-2.5 font-mono text-xs text-muted-foreground">
+                      {c.venue ?? NOT_OBSERVED}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-xs tabular-nums">
+                      {c.priceLabel}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-xs text-muted-foreground">
+                      {c.reliabilityTier}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-xs tabular-nums text-muted-foreground">
+                      {c.acceptanceRate == null
+                        ? NOT_OBSERVED
+                        : `${(c.acceptanceRate * 100).toFixed(0)}%`}{" "}
+                      <span className="text-[10px]">
+                        ({basisLabel(c.basis, c.n)})
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-muted-foreground">
+                      {c.eligible ? "eligible" : "excluded"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {panel.plans.length > 0 ? (
         <div className="mt-4 border-t border-border pt-4">
           <p className="label-caps">Ways to run it</p>

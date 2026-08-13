@@ -41,6 +41,7 @@
 
 import type {
   PlanPreview,
+  PreviewCandidate,
   PreviewCanary,
   PreviewEstimate,
   PreviewPlan,
@@ -179,6 +180,49 @@ export interface FleetCounts {
   unplannable: number;
 }
 
+/** One machine in the reachable fleet, priced — what
+ * `POST /v1alpha1/jobs/preview-plans`'s `candidates` array carries and,
+ * until now, `RoutingCard` never rendered at all
+ * (`docs/superpowers/specs/2026-08-13-console-density-audit.md` §3.1: "the
+ * whole per-machine pricing/reliability array"). The venue table above says
+ * WHICH kinds of place can run this work; this is the actual fleet those
+ * verdicts are drawn from, each machine at its own ask. */
+export interface CandidateRow {
+  machineId: string;
+  /** The machine's name when the API has one, its id otherwise — never both
+   * shown redundantly. */
+  display: string;
+  venue: string | null;
+  currency: string;
+  priceZcPerHour: number;
+  /** The API's own formatted price string (e.g. "12 ZC/hr, $3.50 est."),
+   * rendered verbatim rather than reformatted from `priceZcPerHour`. */
+  priceLabel: string;
+  reliabilityTier: string;
+  /** `null` — not observed — when nobody has run enough on this machine to
+   * measure it. Never a fabricated 0. */
+  acceptanceRate: number | null;
+  basis: string | null;
+  n: number | null;
+  eligible: boolean;
+}
+
+function candidateRow(c: PreviewCandidate): CandidateRow {
+  return {
+    machineId: c.machine_id,
+    display: c.name ?? c.machine_id,
+    venue: c.venue,
+    currency: c.currency,
+    priceZcPerHour: c.price_zc_per_hour,
+    priceLabel: c.price_label,
+    reliabilityTier: c.reliability_tier,
+    acceptanceRate: c.acceptance_rate,
+    basis: c.basis,
+    n: c.n,
+    eligible: c.eligible,
+  };
+}
+
 export type RoutingPanelState =
   | "loading"
   | "routed"
@@ -203,6 +247,9 @@ export interface RoutingPanel {
   tasks: number | null;
   /** Every venue, including the refused ones. Empty outside `routed`. */
   venues: VenueRow[];
+  /** Every reachable machine, priced — empty outside `routed`, same as
+   * `venues`: the fleet only exists once the router has actually run. */
+  candidates: CandidateRow[];
   plans: PlanRow[];
   /** The name of the recommended plan, or `null` when nothing is quoted. */
   recommended: string | null;
@@ -223,6 +270,7 @@ const EMPTY: RoutingPanel = {
   kindEvidence: null,
   tasks: null,
   venues: [],
+  candidates: [],
   plans: [],
   recommended: null,
   duration: null,
@@ -347,6 +395,7 @@ export function summariseRouting(read: RoutingRead): RoutingPanel {
     kindEvidence: p.kind_evidence ?? null,
     tasks: p.tasks ?? null,
     venues: (p.venues ?? []).map(venueRow),
+    candidates: (p.candidates ?? []).map(candidateRow),
     plans,
     recommended: p.recommended ?? null,
     duration: p.duration ?? null,
