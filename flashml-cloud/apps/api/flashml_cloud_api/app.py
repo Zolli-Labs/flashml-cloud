@@ -4910,6 +4910,15 @@ def create_cloud_app(
             except HTTPException:
                 raise  # the deliberate 402 (only when enforce is on)
             except Exception:
+                # No-op under autocommit (the current mode); if a future
+                # non-autocommit/pooled connection ever fails the guard's own
+                # read, this clears the aborted transaction so the fallthrough
+                # insert is not itself broken by it. Fail open must stay fail
+                # open regardless of connection mode.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 log.warning(
                     json.dumps({
                         "text": "human spend guard failed open",
@@ -6207,6 +6216,15 @@ def create_cloud_app(
             except HTTPException:
                 raise  # the deliberate 402 (only when enforce is on)
             except Exception:
+                # No-op under autocommit (the current mode); if a future
+                # non-autocommit/pooled connection ever fails the guard's own
+                # read, this clears the aborted transaction so the fallthrough
+                # insert is not itself broken by it. Fail open must stay fail
+                # open regardless of connection mode.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 log.warning(
                     json.dumps({
                         "text": "human spend guard failed open",
