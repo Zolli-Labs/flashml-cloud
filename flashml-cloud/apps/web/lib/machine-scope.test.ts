@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isMachineOnline, poolFleetCounts } from "./machine-scope";
+import {
+  isMachineOnline,
+  poolFleetCounts,
+  teamMachineRollup,
+} from "./machine-scope";
 
 function machine(overrides: Partial<{ status: string; last_seen_at: string | null }> = {}) {
   return {
@@ -84,5 +88,26 @@ describe("poolFleetCounts", () => {
     // too — the two axes (enrolment status, heartbeat recency) are not
     // mutually exclusive, and this must not silently pick one.
     expect(counts.online).toBe(1);
+  });
+});
+
+describe("teamMachineRollup", () => {
+  it("is all zeroes for a team with no members, a real answer not a gap", () => {
+    expect(teamMachineRollup([])).toEqual({ total: 0, online: 0 });
+  });
+
+  it("sums machine_count and machines_online across every member", () => {
+    const members = [
+      { machine_count: 3, machines_online: 2 },
+      { machine_count: 5, machines_online: 0 },
+      { machine_count: 0, machines_online: 0 },
+    ];
+    expect(teamMachineRollup(members)).toEqual({ total: 8, online: 2 });
+  });
+
+  it("sums a single member's own row unchanged", () => {
+    expect(
+      teamMachineRollup([{ machine_count: 4, machines_online: 4 }])
+    ).toEqual({ total: 4, online: 4 });
   });
 });

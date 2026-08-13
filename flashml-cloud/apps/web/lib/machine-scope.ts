@@ -44,3 +44,31 @@ export function poolFleetCounts(
   }
   return { total: machines.length, online, pending, revoked };
 }
+
+/** The workspace-wide rollup `w/[poolId]/people` showed nowhere — the
+ * per-member `machine_count`/`machines_online` columns already existed on
+ * every row `MemberTable` renders, and nothing summed them (density audit
+ * §3, gap 7).
+ *
+ * Deliberately sums the PER-MEMBER fields the People page already has
+ * rather than reusing `poolFleetCounts` over a separately-fetched machines
+ * array: the two are different reads of possibly-different scope, and this
+ * rollup's whole claim is "what this table already shows you, added up" —
+ * a number that disagrees with its own table would be worse than no rollup
+ * at all. */
+export interface TeamMachineRollup {
+  total: number;
+  online: number;
+}
+
+export function teamMachineRollup(
+  members: readonly { machine_count: number; machines_online: number }[]
+): TeamMachineRollup {
+  return members.reduce(
+    (acc, member) => ({
+      total: acc.total + member.machine_count,
+      online: acc.online + member.machines_online,
+    }),
+    { total: 0, online: 0 }
+  );
+}
