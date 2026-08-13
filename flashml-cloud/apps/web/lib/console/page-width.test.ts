@@ -143,7 +143,7 @@ describe("widthForConsolePath", () => {
   });
 
   it("answers for a live pathname with its query attached", () => {
-    expect(widthForConsolePath("/market/listings?state=open")).toBe("standard");
+    expect(widthForConsolePath("/market/listings?state=open")).toBe("wide");
   });
 });
 

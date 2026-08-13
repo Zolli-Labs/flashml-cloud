@@ -98,7 +98,9 @@ export default function CliAccessPage() {
   );
 
   return (
-    <PageShell width="wide">
+    // "reading", matching the other two Settings tabs: the widest thing
+    // here is a 560px-min table, which fits the 768px column.
+    <PageShell width="reading">
       <PageHeader
         title="CLI access"
         description="Credentials a program holds on your behalf. Each one acts as you, with exactly your access — never more — and can be revoked on its own without touching your browser session."

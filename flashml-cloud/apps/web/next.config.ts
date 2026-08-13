@@ -50,8 +50,22 @@ const nextConfig: NextConfig = {
     root: path.resolve(__dirname),
   },
   async redirects() {
+    // The 2026-08-13 IA regrouping: six rail destinations with in-page tabs.
+    // Every old URL keeps working. All non-permanent, deliberately — the old
+    // /machines → /account/machines rule was permanent, so browsers that
+    // cached that 308 must not now be handed its cached inverse (a permanent
+    // pair in both directions is a client-side redirect loop). That old rule
+    // is REMOVED rather than reversed: /account/machines stays a live route,
+    // and /machines is simply a real page again, which a cached 308 resolves
+    // to correctly.
     return [
-      { source: "/machines", destination: "/account/machines", permanent: true },
+      { source: "/submit", destination: "/deploy", permanent: false },
+      { source: "/activate", destination: "/machines/add", permanent: false },
+      { source: "/account", destination: "/settings", permanent: false },
+      { source: "/account/cli", destination: "/settings/cli", permanent: false },
+      // Exact match only: /account/github/callback stays where GitHub has it
+      // registered.
+      { source: "/account/github", destination: "/settings/github", permanent: false },
     ];
   },
 };

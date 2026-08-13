@@ -57,7 +57,7 @@ export function UserMenu() {
   return (
     <div className="flex items-center gap-2">
       <Link
-        href="/account"
+        href="/settings"
         title={session.email ?? undefined}
         className="flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors hover:bg-primary/10"
       >

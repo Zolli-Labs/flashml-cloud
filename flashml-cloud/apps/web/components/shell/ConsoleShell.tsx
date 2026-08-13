@@ -2,26 +2,20 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   BookOpen,
   ChartLineUp,
-  Coins,
-  Compass,
-  Gauge,
   Gear,
   GithubLogo,
   House,
   ListChecks,
   MagnifyingGlass,
-  Plus,
   Desktop,
+  RocketLaunch,
   ShieldCheck,
   SidebarSimple,
-  Storefront,
-  Terminal,
   UsersThree,
-  UserCircle,
   type Icon,
 } from "@phosphor-icons/react";
 import { FleetPill } from "@/components/shell/FleetPill";
@@ -227,12 +221,12 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
               allowed to shrink below its content and scroll on short
               viewports instead of pushing the footer off-screen. */}
           <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
-            {currentWorkspace && (
+            {currentWorkspace ? (
               <div className="space-y-0.5">
                 {WORKSPACE_TABS.map((tab) => {
                   const { label, icon } = WORKSPACE_TAB_ITEMS[tab];
                   const href = workspacePath(currentWorkspace, tab);
-                  return (
+                  const item = (
                     <NavItem
                       key={tab}
                       href={href}
@@ -241,80 +235,75 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                       active={isActive(href)}
                     />
                   );
+                  if (tab !== "overview") return item;
+                  // Deploy sits directly under Overview: the workspace's
+                  // submit route, deliberately not a WorkspaceTab
+                  // (lib/workspace-scope.ts keeps that union for the pages
+                  // every workspace always has) — rendered here so the one
+                  // action the product exists for is one click from
+                  // anywhere.
+                  const deployHref = workspacePath(currentWorkspace, "submit");
+                  return (
+                    <Fragment key={tab}>
+                      {item}
+                      <NavItem
+                        href={deployHref}
+                        label="Deploy"
+                        icon={RocketLaunch}
+                        active={isActive(deployHref)}
+                      />
+                    </Fragment>
+                  );
                 })}
+              </div>
+            ) : (
+              // No workspace resolved yet: the same three destinations,
+              // through the resolver routes, so the rail never renders
+              // empty. Each one forwards into the right workspace (or to
+              // /workspaces when there is none to resolve).
+              <div className="space-y-0.5">
+                <NavItem
+                  href="/overview"
+                  label="Overview"
+                  icon={House}
+                  active={isActive("/overview")}
+                />
+                <NavItem
+                  href="/deploy"
+                  label="Deploy"
+                  icon={RocketLaunch}
+                  active={isActive("/deploy")}
+                />
+                <NavItem
+                  href="/jobs"
+                  label="Jobs"
+                  icon={ListChecks}
+                  active={isActive("/jobs")}
+                />
               </div>
             )}
 
-            {/* Personal section: always shown, independent of whether the
-                current route is workspace-scoped. It holds the fleet of
-                machines the signed-in user personally owns, so it stays
-                reachable from every screen, not just workspace-scoped
-                ones. */}
+            {/* Cross-workspace surfaces. Market and the personally-owned
+                fleet are not scoped to any workspace, so they live in their
+                own group under whatever workspace group renders above.
+                Each is ONE destination — its inner pages (Prices · Listings
+                · Credits; My machines · Add) are in-page tabs, not rail
+                items. */}
             <div className="mt-5 space-y-0.5">
-              <p className="label-caps px-2.5 pb-1">My account</p>
-              <NavItem
-                href="/account/machines"
-                label="My machines"
-                icon={Desktop}
-                active={isActive("/account/machines")}
-              />
-              <NavItem
-                href="/account/cli"
-                label="CLI access"
-                icon={Terminal}
-                active={isActive("/account/cli")}
-              />
-              <NavItem
-                href="/account/github"
-                label="GitHub"
-                icon={GithubLogo}
-                active={isActive("/account/github")}
-              />
-            </div>
-
-            {/* The marketplace: the account's credits and ledger, the book
-                of listings, and the price comparison. Reads are open to
-                every signed-in account; the API gates the writes. */}
-            <div className="mt-5 space-y-0.5">
-              <p className="label-caps px-2.5 pb-1">Market</p>
-              <NavItem
-                href="/market"
-                label="Credits"
-                icon={Coins}
-                // Exact match: `isActive` would keep Credits lit under
-                // /market/listings and /market/prices too.
-                active={pathname === "/market"}
-              />
-              <NavItem
-                href="/market/listings"
-                label="Listings"
-                icon={Storefront}
-                active={isActive("/market/listings")}
-              />
+              <p className="label-caps px-2.5 pb-1">Global</p>
               <NavItem
                 href="/market/prices"
-                label="Prices"
+                label="Market"
                 icon={ChartLineUp}
-                active={isActive("/market/prices")}
+                active={isActive("/market")}
+              />
+              <NavItem
+                href="/machines"
+                label="My machines"
+                icon={Desktop}
+                active={isActive("/machines")}
               />
             </div>
-
-            <Link
-              href="/activate"
-              className="mt-5 flex items-center gap-2.5 rounded-[7px] border border-border bg-surface px-2.5 py-2 text-left transition-colors hover:border-primary/40 hover:bg-surface-2"
-            >
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[4px] border border-border text-primary">
-                <Plus size={16} weight="bold" />
-              </span>
-              <span className="min-w-0">
-                <span className="block text-xs font-semibold text-foreground">
-                  Add a machine
-                </span>
-                <span className="mt-0.5 block text-[11px] leading-tight text-muted-foreground">
-                  Enter an activation code
-                </span>
-              </span>
-            </Link>
 
             {/* Hidden until `GET /me` says otherwise, so a non-admin never
                 sees it flash. The API enforces admin on every queue route
@@ -328,30 +317,16 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
         </>
       )}
 
+      {/* Two entries, deliberately: Help is the door to every explanatory
+          page (docs links how-it-works and reliability from inside), and
+          Settings lives behind the avatar menu. The old five-item footer
+          was a second nav competing with the first. */}
       <div className="mt-auto space-y-0.5 border-t border-border px-3 py-3">
         <NavItem
-          href="/how-it-works"
-          label="How it works"
-          icon={Compass}
-          active={isActive("/how-it-works")}
-        />
-        <NavItem
-          href="/metrics"
-          label="Reliability"
-          icon={Gauge}
-          active={isActive("/metrics")}
-        />
-        <NavItem
           href="/docs"
-          label="Docs"
+          label="Help"
           icon={BookOpen}
           active={isActive("/docs")}
-        />
-        <NavItem
-          href="/account"
-          label="Account"
-          icon={UserCircle}
-          active={isActive("/account")}
         />
         <a
           href={REPO}

@@ -31,7 +31,14 @@ function readCookie(name: string): string | null {
  * returning to. Pushing it would mean Back from inside a workspace lands
  * back on this skeleton, which immediately forwards again — a dead hop in
  * history for no benefit. */
-export function WorkspaceResolver({ tab }: { tab: WorkspaceTab }) {
+export function WorkspaceResolver({
+  tab,
+}: {
+  // `"submit"` beside the tab union for the same reason `workspacePath`
+  // accepts it: submit is a real workspace route that is deliberately not a
+  // rail tab, and /deploy resolves straight into it.
+  tab: WorkspaceTab | "submit";
+}) {
   const router = useRouter();
   const pathname = usePathname();
 

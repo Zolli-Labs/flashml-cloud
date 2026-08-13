@@ -3,12 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  ChartLineUp,
+  Compass,
   Desktop,
   DeviceMobile,
+  Gauge,
   House,
   ListChecks,
   MagnifyingGlass,
-  Plus,
+  RocketLaunch,
   BookOpen,
   UserCircle,
   type Icon,
@@ -39,12 +42,17 @@ interface Item {
 
 const STATIC: Item[] = [
   { id: "nav-overview", label: "Overview", href: "/overview", icon: House, group: "Go to" },
+  { id: "nav-deploy", label: "Deploy a job", href: "/deploy", icon: RocketLaunch, group: "Go to" },
   { id: "nav-jobs", label: "Jobs", href: "/jobs", icon: ListChecks, group: "Go to" },
-  { id: "nav-submit", label: "Submit a job", href: "/submit", icon: Plus, group: "Go to" },
-  { id: "nav-machines", label: "Machines", href: "/machines", icon: Desktop, group: "Go to" },
-  { id: "nav-activate", label: "Add a Machine", href: "/activate", icon: DeviceMobile, group: "Go to" },
+  { id: "nav-market", label: "Market", href: "/market/prices", icon: ChartLineUp, group: "Go to" },
+  { id: "nav-machines", label: "My machines", href: "/machines", icon: Desktop, group: "Go to" },
+  { id: "nav-activate", label: "Add a machine", href: "/machines/add", icon: DeviceMobile, group: "Go to" },
+  { id: "nav-settings", label: "Settings", href: "/settings", icon: UserCircle, group: "Go to" },
   { id: "nav-docs", label: "Documentation", href: "/docs", icon: BookOpen, group: "Go to" },
-  { id: "nav-account", label: "Account", href: "/account", icon: UserCircle, group: "Go to" },
+  // Off the rail, still one keystroke away: the two explanatory pages the
+  // footer used to list.
+  { id: "nav-how", label: "How it works", href: "/how-it-works", icon: Compass, group: "Go to" },
+  { id: "nav-reliability", label: "Reliability", href: "/metrics", icon: Gauge, group: "Go to" },
 ];
 
 /** Subsequence match, the behaviour people expect from a palette: "fmr"

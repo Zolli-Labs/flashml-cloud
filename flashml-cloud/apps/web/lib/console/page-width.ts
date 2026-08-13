@@ -87,20 +87,28 @@ export const CONSOLE_PAGE_WIDTH: Record<string, ConsoleWidth> = {
   "/w/[poolId]/settings": "wide",
   "/jobs/[jobId]": "wide",
   "/account/machines": "wide",
-  "/account/cli": "wide",
+  "/machines": "wide",
+  // The market tabs share one column so the tab bar (drawn at `wide` by
+  // app/(console)/market/layout.tsx) lines up with every page under it.
   "/market/prices": "wide",
+  "/market/listings": "wide",
+  "/market/credits": "wide",
 
   // standard — stacked panels and short lists of records
   "/admin/requests": "standard",
-  "/market": "standard",
-  "/market/listings": "standard",
   "/metrics": "standard",
 
   // reading — prose, or one form
   "/docs": "reading",
   "/how-it-works": "reading",
   "/account": "reading",
+  // The settings tabs share one column, same reason as the market's; the
+  // CLI table's 560px floor fits the 768px reading column.
+  "/account/cli": "reading",
   "/account/github": "reading",
+  "/settings": "reading",
+  "/settings/cli": "reading",
+  "/settings/github": "reading",
   "/w/[poolId]/submit": "reading",
 
   // focused — a single decision
@@ -128,10 +136,12 @@ export const CONSOLE_ROUTES_WITHOUT_SHELL: Record<string, string> = {
   "/pools": "Redirect. Renders WorkspaceResolver, no content of its own.",
   "/pools/[poolId]": "Server redirect to /w/[poolId]/overview.",
   "/jobs": "Redirect. Renders WorkspaceResolver, no content of its own.",
-  "/submit": "Redirect. Renders WorkspaceResolver, no content of its own.",
+  "/deploy": "Redirect. Renders WorkspaceResolver, no content of its own.",
+  "/market": "Server redirect to /market/prices.",
   "/w/[poolId]": "Server redirect to /w/[poolId]/overview.",
   "/activate":
     "A viewport-centred card, not a content column. That container is ConsoleShell's (it already centres the three access screens the same way) and duplicating its viewport-height calculation here would put the same magic number in a fifth place.",
+  "/machines/add": "The /activate card under the Machines tabs — same shape.",
   "/pools/join": "A viewport-centred card. Same container as /activate.",
   "/account/github/callback":
     "A viewport-centred status card that exists for one round trip.",

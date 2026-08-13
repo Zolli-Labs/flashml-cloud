@@ -113,7 +113,7 @@ export default function ListingsPage() {
   const books = data ? groupBookByClass(data.asks) : [];
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="title">Listings</h1>
