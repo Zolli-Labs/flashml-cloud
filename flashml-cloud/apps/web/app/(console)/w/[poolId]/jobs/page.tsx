@@ -4,9 +4,26 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { ArrowClockwise, Plus } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
+import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { PageShell } from "@/components/shell/PageShell";
+import { StatePanel } from "@/components/shell/StatePanel";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
+import {
+  isEmptyList,
+  resolvePanelState,
+  type PanelRead,
+} from "@/lib/console/panel-state";
 import { isActiveJob } from "@/lib/job-scope";
+import { cn } from "@/lib/utils";
 import { workspacePath } from "@/lib/workspace-scope";
 import type { JobRecord } from "@/lib/cloud-api";
 
@@ -21,6 +38,8 @@ const FILTERS = [
 ] as const;
 type Filter = (typeof FILTERS)[number]["id"];
 
+const COLUMNS = ["Job", "Submitted by", "Mode", "Started", "State"];
+
 function started(job: JobRecord): string {
   if (!job.created_at) return "—";
   const d = new Date(job.created_at);
@@ -28,7 +47,7 @@ function started(job: JobRecord): string {
 }
 
 export default function WorkspaceJobsPage() {
-  const { pool, jobs, reload } = useWorkspace();
+  const { pool, jobs, reload, reloading } = useWorkspace();
   const [filter, setFilter] = useState<Filter>("all");
 
   // Hooks stay above the `pool` guard below: it never actually fires at
@@ -55,8 +74,20 @@ export default function WorkspaceJobsPage() {
   // runtime — it exists to satisfy `Pool | null` at the type level.
   if (!pool) return null;
 
+  // `"read"` because the provider's `Promise.all` already succeeded before
+  // this tab could mount — see `people/page.tsx` for the full note. What
+  // this panel classifies is the FILTERED list, so `empty` here means "the
+  // filter matched nothing", which is a different sentence from "this
+  // workspace has no jobs" and is why the empty copy below branches.
+  const read: PanelRead<JobRecord[]> = { status: "read", data: shown };
+  const panel = resolvePanelState(read, isEmptyList);
+
+  // A filter matching nothing is not the same as having no jobs, and telling
+  // a workspace with 40 finished jobs that it has none would be a lie.
+  const filtered = jobs.length > 0;
+
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+    <PageShell width="wide">
       {/* Same header as the other four tabs. This one used to hand-build its
           own `<h1>Jobs</h1>` plus a second "New job" button — a duplicate of
           the one `WorkspaceHeader` already renders, and the only tab of the
@@ -70,20 +101,27 @@ export default function WorkspaceJobsPage() {
             Everything submitted in this Workspace.
           </p>
         </div>
-        {/* No spin-while-loading here, unlike the source page: this tab
-            only ever mounts while `useWorkspace().state === "ready"` —
-            WorkspaceGate swaps in a skeleton for every other state — so
-            `state === "loading"` inside this component is always false.
-            Wiring the spin to it would be a condition that can never
-            fire, which reads as intentional and is not. */}
-        <button
-          type="button"
+        {/* This used to carry a comment explaining that it deliberately does
+            NOT spin, because the only flag available was `state === "loading"`
+            — which WorkspaceGate makes unreachable here, so wiring the spin
+            to it would have been a condition that could never fire. The
+            provider now carries `reloading`, a flag for a reload somebody
+            ASKED for, which is a condition that can fire and is exactly what
+            this control means. The reason for not spinning is gone, so the
+            spin is here. */}
+        <Button
+          variant="ghost"
+          size="icon"
           onClick={reload}
+          disabled={reloading}
           aria-label="Refresh"
-          className="rounded-md p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+          className="text-muted-foreground hover:text-foreground"
         >
-          <ArrowClockwise size={15} />
-        </button>
+          <ArrowClockwise
+            size={15}
+            className={cn(reloading && "animate-spin")}
+          />
+        </Button>
       </div>
 
       {jobs.length > 0 && (
@@ -109,94 +147,99 @@ export default function WorkspaceJobsPage() {
       )}
 
       <div className="mt-4">
-        {shown.length === 0 ? (
-          <Empty hasAny={jobs.length > 0} filter={filter} poolId={pool.id} />
-        ) : (
-          // Hairline rows on the page, not cards. A real <thead> so the
-          // columns are announced rather than being visual-only labels.
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-left">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Job", "Submitted by", "Mode", "Started", "State"].map(
-                    (h, i) => (
-                      <th
-                        key={h}
-                        className={`label-caps px-3 py-2 font-medium ${i === 4 ? "text-right" : ""}`}
-                      >
-                        {h}
-                      </th>
-                    )
-                  )}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {shown.map((j) => (
-                  <tr
-                    key={j.job_id}
-                    className="group transition-colors hover:bg-surface-2/70"
-                  >
-                    <td className="px-3 py-3">
+        <StatePanel
+          state={panel}
+          label="this Workspace's jobs"
+          empty={
+            filtered
+              ? {
+                  // DEFECT FIX. This state was a bare `<p className="py-12
+                  // text-center text-sm text-muted-foreground">` — one muted
+                  // sentence, no heading, and no way out of a filter that
+                  // matches nothing. The sentence itself is unchanged and is
+                  // now the heading; the action is new, and it is new
+                  // because the state was a dead end: the only escape from
+                  // "Failed (0)" was to notice the filter chips above and
+                  // work out that one of them was still selected.
+                  title: `No jobs match the ${filter === "active" ? "running" : filter} filter.`,
+                  action: (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setFilter("all")}
+                    >
+                      Show all jobs
+                    </Button>
+                  ),
+                }
+              : {
+                  title: "No jobs in this workspace yet.",
+                  action: (
+                    <Link
+                      href={workspacePath(pool.id, "submit")}
+                      className={buttonVariants()}
+                    >
+                      <Plus size={15} weight="bold" />
+                      Submit a job
+                    </Link>
+                  ),
+                }
+          }
+          unreadable={{ retry: reload }}
+        >
+          {(rows) => (
+            // Hairline rows on the page, not cards. A real <thead> so the
+            // columns are announced rather than being visual-only labels.
+            // `min-w-[640px]` is the floor that keeps five columns from
+            // collapsing; the primitive supplies the `overflow-x-auto`
+            // container this used to hand-write.
+            <Table className="min-w-[640px]">
+              <TableHeader>
+                <TableRow>
+                  {COLUMNS.map((h, i) => (
+                    <TableHead
+                      key={h}
+                      className={cn("label-caps", i === 4 && "text-right")}
+                    >
+                      {h}
+                    </TableHead>
+                  ))}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((j) => (
+                  // The one table in the console whose rows navigate, so the
+                  // one that opts into a hover fill — see the note on
+                  // `TableRow` in `components/ui/table.tsx`.
+                  <TableRow key={j.job_id} className="group hover:bg-surface-2/70">
+                    <TableCell>
                       <Link href={`/jobs/${j.job_id}`} className="block min-w-0">
                         <span className="block truncate font-mono text-sm group-hover:text-brand-foreground">
                           {j.spec?.metadata?.name ?? j.name ?? j.job_id}
                         </span>
                         <span className="meta block truncate">{j.job_id}</span>
                       </Link>
-                    </td>
-                    <td className="meta px-3 py-3">
+                    </TableCell>
+                    {/* `?? "—"`: the API returning no submitter is a thing
+                        we observed about an old row, not a gap in the read,
+                        and a dash says that without inventing a name. */}
+                    <TableCell className="meta">
                       {j.submitted_by ?? "—"}
-                    </td>
-                    <td className="meta px-3 py-3">
+                    </TableCell>
+                    <TableCell className="meta">
                       {j.mode === "federated" ? "federated" : "independent"}
-                    </td>
-                    <td className="meta px-3 py-3 whitespace-nowrap">
-                      {started(j)}
-                    </td>
-                    <td className="px-3 py-3 text-right">
+                    </TableCell>
+                    <TableCell className="meta">{started(j)}</TableCell>
+                    <TableCell className="text-right">
                       <StateBadge state={j.state} />
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+              </TableBody>
+            </Table>
+          )}
+        </StatePanel>
       </div>
-    </div>
-  );
-}
-
-function Empty({
-  hasAny,
-  filter,
-  poolId,
-}: {
-  hasAny: boolean;
-  filter: Filter;
-  poolId: string;
-}) {
-  // A filter matching nothing is not the same as having no jobs, and telling
-  // a workspace with 40 finished jobs that it has none would be a lie.
-  if (hasAny) {
-    return (
-      <p className="py-12 text-center text-sm text-muted-foreground">
-        No jobs match the {filter === "active" ? "running" : filter} filter.
-      </p>
-    );
-  }
-  return (
-    <div className="flex flex-col items-center gap-3 py-16 text-center">
-      <p className="max-w-sm text-sm text-muted-foreground">
-        No jobs in this workspace yet.
-      </p>
-      <Link
-        href={workspacePath(poolId, "submit")}
-        className="interactive inline-flex items-center gap-2 rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
-      >
-        <Plus size={15} weight="bold" />
-        Submit a job
-      </Link>
-    </div>
+    </PageShell>
   );
 }

@@ -1,6 +1,14 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { relativeTime } from "@/lib/machine-status";
 import {
   MACHINE_BADGE_LABELS,
@@ -10,40 +18,34 @@ import {
 import { isMachineOnline } from "@/lib/machine-scope";
 import type { PoolMachine } from "@/lib/cloud-api";
 
+const COLUMNS = ["Machine", "Owner", "Trust", "Last seen"];
+
 /** Every machine bound to this workspace, across every member — not just the
  * viewer's own. `YourMachines` below this table is the per-device opt-in;
- * this is the read-only fleet-wide view it feeds. */
+ * this is the read-only fleet-wide view it feeds.
+ *
+ * ROWS ONLY, like `MemberTable`: an empty `machines` array does not say
+ * whether the read succeeded, so `machines/page.tsx` owns that call through
+ * `StatePanel`. The empty sentence that used to live here moved there
+ * unchanged. */
 export function PoolFleetTable({ machines }: { machines: PoolMachine[] }) {
-  if (machines.length === 0) {
-    return (
-      <div className="flex items-center gap-4 rounded-[7px] border border-border bg-surface px-4 py-4">
-        <p className="text-sm text-muted-foreground">
-          No machines are serving this workspace yet. Select one of yours below,
-          or connect a new one.
-        </p>
-      </div>
-    );
-  }
-
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[640px] text-left">
-        <thead>
-          <tr className="border-b border-border">
-            {["Machine", "Owner", "Trust", "Last seen"].map((h) => (
-              <th key={h} className="label-caps px-3 py-2 font-medium">
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {machines.map((m) => (
-            <FleetRow key={m.id} machine={m} />
+    <Table className="min-w-[640px]">
+      <TableHeader>
+        <TableRow>
+          {COLUMNS.map((h) => (
+            <TableHead key={h} className="label-caps">
+              {h}
+            </TableHead>
           ))}
-        </tbody>
-      </table>
-    </div>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {machines.map((m) => (
+          <FleetRow key={m.id} machine={m} />
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 
@@ -61,8 +63,8 @@ function FleetRow({ machine }: { machine: PoolMachine }) {
   const revoked = machine.status === "revoked";
 
   return (
-    <tr>
-      <td className="px-3 py-3">
+    <TableRow>
+      <TableCell>
         <div className="flex items-center gap-2.5">
           <span
             className="status-dot"
@@ -83,18 +85,21 @@ function FleetRow({ machine }: { machine: PoolMachine }) {
             </Badge>
           )}
         </div>
-      </td>
-      <td className="meta px-3 py-3">
+      </TableCell>
+      {/* `?? "unnamed"` and not `?? "—"`: the API returning null here means
+          the owner has not set a display name, which is a thing we observed,
+          not a gap in the read. */}
+      <TableCell className="meta">
         {machine.owner_display_name ?? "unnamed"}
-      </td>
-      <td className="px-3 py-3">
+      </TableCell>
+      <TableCell>
         <Badge variant="outline" className={MACHINE_BADGE_STYLES[badge]}>
           {MACHINE_BADGE_LABELS[badge]}
         </Badge>
-      </td>
-      <td className="meta px-3 py-3 whitespace-nowrap">
+      </TableCell>
+      <TableCell className="meta">
         {relativeTime(machine.last_seen_at)}
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }

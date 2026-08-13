@@ -4,6 +4,9 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -65,12 +68,17 @@ export default function WorkspacesPage() {
   }
 
   return (
-    <div className="mx-auto max-w-xl px-4 py-8 sm:px-6">
+    <PageShell width="focused">
+      {/* The eyebrow stays a sibling of the header rather than becoming a
+          prop: `PageHeader` has no eyebrow slot, and adding one to a shared
+          primitive for a single page is how a primitive turns back into a
+          grab-bag. */}
       <p className="label-caps text-brand-foreground">Zolli Cloud</p>
-      <h1 className="title mt-2">Build your workspace</h1>
-      <p className="mt-1.5 text-sm text-muted-foreground">
-        A Workspace is where you and the people you invite share Machines and jobs.
-      </p>
+      <PageHeader
+        className="mt-2"
+        title="Build your workspace"
+        description="A Workspace is where you and the people you invite share Machines and jobs."
+      />
 
       <Card className="mt-6 border-border bg-surface shadow-sm">
         <CardHeader>
@@ -104,13 +112,12 @@ export default function WorkspacesPage() {
                 <p className="mt-1.5 text-xs text-destructive">{error}</p>
               )}
             </div>
-            <button
+            <Button
               type="submit"
               disabled={submitting || name.trim().length === 0}
-              className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {submitting ? "Creating…" : "Create Workspace"}
-            </button>
+            </Button>
           </form>
         </CardContent>
       </Card>
@@ -130,6 +137,6 @@ export default function WorkspacesPage() {
       >
         Have a Workspace invite code?
       </Link>
-    </div>
+    </PageShell>
   );
 }

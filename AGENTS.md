@@ -88,24 +88,22 @@ before it improvises the unsafe one:
 | "Was this error pre-existing?" | `git show <ref>:<path>` — never stash to find out |
 | "What did this look like before my change?" | `git show HEAD:<path>` |
 | "Is this diff mine?" | `git log -1 --format=%s -- <path>`, or ask the other session. **Never infer ownership from `git status`** — a file being modified in a shared checkout says nothing about who modified it |
-| "What has my branch actually changed?" | `git diff main...HEAD` — **three dots**, see below |
+| "What did MY branch change?" | `git diff develop...HEAD` — **three dots.** See below |
 | "Is my work intact after an incident?" | **Run the suite.** Presence is not integrity — a green typecheck and a passing suite over the exact files is evidence a file listing cannot give |
 
-**`git diff A..B` and `git diff A...B` differ by one character and by which
-question they answer.** Two-dot compares the two tips; three-dot compares
-against the **merge base**, i.e. what *your branch* changed.
+**Two dots versus three is the nastiest of these, because the wrong answer is
+specific, plausible, and accuses someone.** On 2026-08-12 a session checked its
+own branch with `git diff develop..HEAD` and was told it had **838 deletions of
+`test_public_job_share.py`** — the test guarding the G-1 no-login route. It had
+deleted nothing, and had never touched `apps/api` at all. `develop` had simply
+moved 15 commits past its merge-base, and **two-dot renders "develop has
+something I don't" identically to "I deleted it."**
 
-On 2026-08-12 a session checked its branch with `develop..HEAD` and saw **838
-deletions of another session's G-1 test file** — reading, cold, as *"my branch
-deleted the disqualification-gate test."* It had touched no API file at all.
-`develop` had simply moved past its merge base, and two-dot renders *"develop
-has something I don't"* **identically to** *"I deleted it."* Three-dot showed
-zero API changes.
+Three-dot diffs against the merge-base and answers the question you meant —
+*what did my commits change?* Two-dot answers *how do these two tips differ?*,
+which on a branch cut hours ago from a repo three sessions are committing to is
+mostly other people's work, reported as your deletions.
 
-That trap is worse than an ordinary wrong answer, because the wrong answer is
-specific, plausible, and **accuses a colleague**. Use three dots whenever the
-question is "what did I change"; two dots only when you genuinely mean "how do
-these two tips differ".
 
 **Work in a worktree when your task is broad** (`.worktrees/` is gitignored).
 That removes the whole class — but only if your agents are also told which

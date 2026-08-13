@@ -1,5 +1,8 @@
 import Link from "next/link";
 
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
+
 // How ownership actually works: who owns what, what a workspace is and is
 // not, and the two contracts (authoring, sandboxing) every job runs under.
 //
@@ -19,17 +22,31 @@ const SECTIONS = [
 
 export default function HowItWorksPage() {
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+    // `wide`, the width this page already had, NOT the `reading` that
+    // `lib/console/page-width.ts` files it under — and here the table is
+    // wrong by its own criterion ("the widest thing the page has to lay
+    // out"). The widest thing on this page is the `Ownership` diagram: a
+    // 760-unit viewBox drawn into whatever the column gives it. At `wide`
+    // the prose column is ~876px and the diagram sits at its 672px cap, so
+    // its 12px labels render at ~10.6px. At `reading` the column is 492px,
+    // the panel inset takes 40px, and the same labels render at ~7.1px —
+    // below what anyone can read. Reported, not resolved: the table and its
+    // test belong to another session.
+    <PageShell width="wide">
       <div className="lg:grid lg:grid-cols-[1fr_180px] lg:gap-12">
         <div className="min-w-0">
-          <h1 className="title">How it works</h1>
-          <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted-foreground">
-            Who owns a machine, who a workspace&apos;s jobs actually run on, and
-            where the credit for finished work goes. None of this is
-            enforced by convention &mdash; it is how the schema and the
-            scheduler are built, so treat every claim on this page as a
-            description of what already happens, not a policy.
-          </p>
+          <PageHeader
+            title="How it works"
+            description={
+              <>
+                Who owns a machine, who a workspace&apos;s jobs actually run
+                on, and where the credit for finished work goes. None of this
+                is enforced by convention &mdash; it is how the schema and the
+                scheduler are built, so treat every claim on this page as a
+                description of what already happens, not a policy.
+              </>
+            }
+          />
 
           {/* Naming, acknowledged once and up front, so it never has to be
               re-explained inline below. Three words for one row in one
@@ -205,7 +222,7 @@ export default function HowItWorksPage() {
           </div>
         </nav>
       </div>
-    </div>
+    </PageShell>
   );
 }
 

@@ -4,7 +4,13 @@ import { useRef, type ReactNode } from "react";
 import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { useLandingMotion } from "./LandingMotionProvider";
+import {
+  DURATIONS,
+  TRAVEL,
+  scrollTriggerStart,
+  seconds,
+} from "@/lib/motion/timing";
+import { gsapEase, useLandingMotion } from "./LandingMotionProvider";
 
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 
@@ -32,32 +38,41 @@ export function SectionReveal({
 
       if (reduced || !desktop) {
         gsap.set(line, { clipPath: "inset(0 0% 0 0)" });
-        gsap.set(content, { yPercent: 0, opacity: 1 });
+        gsap.set(content, { y: 0, opacity: 1 });
         return;
       }
 
+      // WRITTEN IN THE ORDER IT PLAYS. The previous form put the rule first
+      // and the content at `"<-0.2"`, but GSAP does not clamp a negative
+      // relative position — it rebases the timeline on the earliest child.
+      // Measured, that made the CONTENT the thing that started at zero and
+      // the rule trail it by 200ms. Same picture, so it is preserved; the
+      // source now says so, and the 200ms is the table's `state` beat.
       gsap
         .timeline({
           scrollTrigger: {
-            trigger: root.current,
-            start: "top 82%",
+            trigger: rootElement,
+            start: scrollTriggerStart(),
             once: true,
           },
         })
-        .from(line, {
-          clipPath: "inset(0 100% 0 0)",
-          duration: 0.6,
-          ease: "power2.out",
+        .from(content, {
+          // Was `yPercent: 10` — a percentage of the section's own height,
+          // which on a tall block is the 40px slide-up spec §2 rule 2 calls
+          // a template. A fixed 12px travels the same distance everywhere.
+          y: TRAVEL.base,
+          opacity: 0,
+          duration: seconds(DURATIONS.reveal),
+          ease: gsapEase("settle"),
         })
         .from(
-          content,
+          line,
           {
-            yPercent: 10,
-            opacity: 0,
-            duration: 0.55,
-            ease: "power2.out",
+            clipPath: "inset(0 100% 0 0)",
+            duration: seconds(DURATIONS.reveal),
+            ease: gsapEase("settle"),
           },
-          "<-0.2",
+          seconds(DURATIONS.state),
         );
     },
     { scope: root, dependencies: [reduced, desktop], revertOnUpdate: true },

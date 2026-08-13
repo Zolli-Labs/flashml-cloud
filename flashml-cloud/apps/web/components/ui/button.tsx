@@ -8,7 +8,34 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/80",
+        // Matched to the primary-CTA treatment eight console files already
+        // hand-roll: `bg-primary px-3.5 py-2 text-sm font-semibold
+        // text-primary-foreground hover:brightness-110`.
+        //
+        // The primitive moved to them, not the other way round. It is imported
+        // by 3 of 37 console files, so its defaults have had no pressure on
+        // them; the eight copies are the treatment someone looked at and
+        // accepted. That makes adopting `<Button>` across the console a
+        // refactor rather than a redesign, which matters because no session
+        // here can sign in to review the result on screen.
+        //
+        // Measured equivalence, not assumed: height 36px, weight 600, 14px
+        // text and `rgb(243,107,50)` all match. Horizontal padding does NOT —
+        // the size scale's `px-3` (12px) wins over a `px-3.5` written here,
+        // and moving the SIZE would widen every outline and ghost button too.
+        // 2px per side on a CTA is imperceptible and 12px is the scale's own
+        // value, so the difference stands. Visually equivalent, not pixel
+        // identical — stated because "no visual change" is the claim this
+        // comment exists to support.
+        //
+        // `hover:brightness-110` is kept for the same reason and is NOT the
+        // end state: it is a filter, so its result depends on the base colour
+        // rather than on the design system, and `--brand-hover` exists for
+        // exactly this and is currently orphaned. Migrating to it is a
+        // separate, deliberate commit with someone looking — see D-12 in
+        // docs/superpowers/specs/2026-08-12-frontend-ux-elevation.md.
+        default:
+          "bg-primary font-semibold text-primary-foreground hover:brightness-110",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
         secondary:

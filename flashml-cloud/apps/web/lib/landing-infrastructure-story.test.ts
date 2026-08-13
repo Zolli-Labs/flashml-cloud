@@ -3,10 +3,11 @@ import { act, createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hero } from "@/components/landing/Hero";
+import { HeroMarketSwitch } from "@/components/landing/HeroMarketSwitch";
 import { CoordinatorMap } from "@/components/landing/coordinator-map/CoordinatorMap";
 import { PlatformSupport } from "@/components/landing/PlatformSupport";
 import { SystemJourney } from "@/components/landing/SystemJourney";
-import { ARCHITECTURE_SIGNALS } from "@/components/landing/ArchitectureSignal";
+import { WorkloadRows } from "@/components/landing/WorkloadRows";
 import {
   WORKFLOW_SCENES,
   WorkflowScene,
@@ -700,8 +701,9 @@ describe("the infrastructure story", () => {
 
   it("qualifies every host state", () => {
     expect(HOST_SUPPORT.map(({ platform, state }) => [platform, state])).toEqual([
-      ["macOS arm64", "Proven"],
+      ["macOS Apple silicon", "Proven"],
       ["Linux x86_64", "Proven"],
+      ["RunPod NVIDIA GPUs", "Proven"],
       ["Windows 11", "Preview"],
     ]);
   });
@@ -796,19 +798,29 @@ describe("the infrastructure story", () => {
     environment.restore();
   });
 
-  it("renders the approved hero definition and action hierarchy", () => {
+  it("renders the open-compute hero and its two market paths", () => {
     const markup = renderToStaticMarkup(createElement(Hero));
-    const renderedText = markup.replace(/<[^>]+>/g, "").replace(/\s+/g, " ");
-    const definition = "Zolli unifies compatible cloud capacity, rented compute, owned GPU infrastructure, and everyday machines under one control plane, then recovers work when a node disappears.";
+    const roleMarkup = renderToStaticMarkup(createElement(HeroMarketSwitch));
+    const text = markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
-    expect(renderedText).toContain("Compute that finishes the job.");
-    expect(renderedText).toContain(definition);
-    expect(markup.indexOf("Open console")).toBeLessThan(markup.indexOf("Talk to Zolli"));
+    expect(text).toContain("Computing power, without the lock-in.");
+    expect(text).toContain("Need computing power?");
+    expect(text).toContain("Access more compute at a competitive price.");
+    expect(text).toContain("Have unused computing power?");
+    expect(text).toContain("Host it and earn from the work it completes.");
+    expect(markup).toContain('data-market-role="demand"');
+    expect(markup).toContain('data-market-role="supply"');
+    expect(roleMarkup).not.toContain("aria-live");
+    expect(markup).toContain('href="/workspaces"');
+    expect(markup).toContain('href="/account/machines"');
+    expect(markup.indexOf("Get early access")).toBeLessThan(
+      markup.indexOf("Provide compute"),
+    );
   });
 });
 
 describe("the coordinator map hero", () => {
-  it("promotes the coordinator map without changing the hero message", () => {
+  it("keeps the coordinator map while the hero leads with the open compute network", () => {
     const hero = source("components/landing/Hero.tsx");
 
     expect(hero).toContain(
@@ -819,8 +831,8 @@ describe("the coordinator map hero", () => {
     expect(hero).toContain("useMapStory()");
     expect(hero).not.toContain("HeroComputeFabric");
     expect(hero).not.toContain("HeroInfrastructureStack");
-    expect(hero.indexOf("Compute that ")).toBeLessThan(hero.indexOf("finishes the job."));
-    expect(hero.indexOf("Open console")).toBeLessThan(hero.indexOf("Talk to Zolli"));
+    expect(hero.indexOf("Computing power,")).toBeLessThan(hero.indexOf("without the lock-in."));
+    expect(hero.indexOf("Get early access")).toBeLessThan(hero.indexOf("Provide compute"));
   });
 
   it("removes the three.js compute fabric and everything generated for it", () => {
@@ -1337,10 +1349,13 @@ describe("the platform support section", () => {
     environment.restore();
   });
 
-  it("renders three host cards with visible Proven or Preview labels", () => {
+  it("groups qualified hosts into Proven today, Preview, and Network expansion", () => {
     const markup = renderToStaticMarkup(createElement(PlatformSupport));
 
-    expect((markup.match(/data-host-card="[^"]*"/g) ?? [])).toHaveLength(3);
+    expect((markup.match(/data-host-card="[^"]*"/g) ?? [])).toHaveLength(4);
+    for (const label of ["Proven today", "Preview", "Network expansion"]) {
+      expect(markup).toContain(label);
+    }
     for (const { platform, state } of HOST_SUPPORT) {
       const card = markup.match(
         new RegExp(`<article[^>]*data-host-card="${platform}"[^>]*>([\\s\\S]*?)</article>`),
@@ -1349,6 +1364,13 @@ describe("the platform support section", () => {
       expect(visible, platform).toContain(platform);
       expect(visible, platform).toContain(state);
     }
+    for (const item of [
+      "More cloud providers",
+      "More GPU and hardware configurations",
+      "Automatic capacity purchasing",
+      "Cash earnings for machine hosts",
+    ]) expect(markup).toContain(item);
+    expect(markup).toContain("not currently designed for tightly synchronized training");
   });
 
   it("keeps the machine result out of the DOM until the check is requested", () => {
@@ -1356,6 +1378,7 @@ describe("the platform support section", () => {
 
     expect(markup).not.toContain("data-machine-result");
     expect(markup).toContain("Check this browser");
+    expect(markup).toContain("It cannot verify CPU architecture, Docker, or GPU availability.");
   });
 
   it("reads navigator only after Check this browser is clicked, then announces a polite host-family hint", async () => {
@@ -1437,6 +1460,7 @@ describe("the seven-scene workflow", () => {
     ]);
     expect(scenes).toEqual(steps);
     expect(markup).toContain("data-workflow-stage");
+    expect(markup).toContain('id="technical-workflow"');
     expect(markup).not.toContain('data-active="false"');
     expect(markup).not.toContain("workflow / topology");
     expect(markup).not.toContain("Protocol events");
@@ -1446,21 +1470,29 @@ describe("the seven-scene workflow", () => {
 });
 
 describe("the supporting landing story", () => {
-  it("keeps the four workload messages factual and in the approved order", () => {
+  it("pairs each approved workload with a machine context", () => {
+    const markup = renderToStaticMarkup(createElement(WorkloadRows));
+
     expect(WORKLOADS.map(({ title }) => title)).toEqual([
-      "Federated training",
-      "Hyperparameter search",
-      "Shared data processing",
+      "Model configuration search",
+      "AI model evaluation",
+      "Independent file processing",
+      "Simulations and research trials",
       "Checkpointable model training",
     ]);
-  });
-
-  it("limits the architecture trace to lease, checkpoint, and recovery", () => {
-    expect(ARCHITECTURE_SIGNALS.map(({ id, event }) => [id, event])).toEqual([
-      ["lease", "LEASE_CLAIMED"],
-      ["checkpoint", "CHECKPOINT_MANIFEST_COMMITTED"],
-      ["recovery", "TASK_REQUEUED"],
+    expect(WORKLOADS).toHaveLength(5);
+    expect(WORKLOADS.map(({ mode }) => mode)).toEqual([
+      "divide", "divide", "divide", "divide", "resume",
     ]);
+    expect(WORKLOADS.every(({ machineContext }) => machineContext.length > 0)).toBe(true);
+    expect(markup.match(/data-workload-machines/g) ?? []).toHaveLength(WORKLOADS.length);
+    for (const machineContext of [
+      "Suitable machines: Laptops, CPU workstations, or rented GPUs.",
+      "Suitable machines: CPU or GPU machines across a team.",
+      "Suitable machines: Supported macOS, Linux, and compatible cloud machines.",
+      "Suitable machines: Mixed personal, lab, and cloud machines.",
+      "Suitable machines: Linux machines with supported NVIDIA GPUs.",
+    ]) expect(markup).toContain(machineContext);
   });
 
   it("keeps visual controls and live results named by accessible semantics", () => {

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -179,13 +180,16 @@ function JoinByCode({ invalidLink }: { invalidLink: boolean }) {
                 <span>{error}</span>
               </p>
             )}
-            <button
+            {/* No size override: `py-2` + `text-sm` already computed to
+                36px, which is the primitive's default height, and the
+                button is a stretched item in a `flex-col` form so its
+                horizontal padding never showed. */}
+            <Button
               type="submit"
               disabled={submitting || value.trim().length === 0}
-              className="interactive rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {submitting ? "Joining…" : "Join Workspace"}
-            </button>
+            </Button>
           </form>
         </CardContent>
       </Card>

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowClockwise, Terminal, Warning } from "@phosphor-icons/react";
+import { ArrowClockwise } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -16,6 +16,11 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
+import { StatePanel } from "@/components/shell/StatePanel";
+import { isEmptyList, resolvePanel } from "@/lib/console/panel-state";
 import { credentialBadge, credentialLabel } from "@/lib/cli-credential-status";
 import { relativeTime } from "@/lib/machine-status";
 import {
@@ -83,88 +88,94 @@ export default function CliAccessPage() {
     );
   }
 
-  const active = credentials.filter((c) => c.status !== "revoked");
+  // `resolvePanel` orders the read error BEFORE the loading flag and before
+  // the rows, which is the same order this page switched on by hand. The one
+  // thing it changes is that there is no longer a branch that can reach the
+  // empty state from a failed read — see `lib/console/panel-state.ts`.
+  const panel = resolvePanel(
+    { loading: state === "loading", error, data: credentials },
+    isEmptyList
+  );
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="title">CLI access</h1>
-          <p className="mt-1.5 max-w-prose text-sm text-muted-foreground">
-            Credentials a program holds on your behalf. Each one acts as you,
-            with exactly your access — never more — and can be revoked on its
-            own without touching your browser session.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={load}
-          aria-label="Refresh"
-          className="rounded-md p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
-        >
-          <ArrowClockwise
-            size={15}
-            className={state === "loading" ? "animate-spin" : ""}
-          />
-        </button>
-      </div>
+    <PageShell width="wide">
+      <PageHeader
+        title="CLI access"
+        description="Credentials a program holds on your behalf. Each one acts as you, with exactly your access — never more — and can be revoked on its own without touching your browser session."
+        actions={
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={load}
+            aria-label="Refresh"
+          >
+            <ArrowClockwise
+              className={state === "loading" ? "animate-spin" : ""}
+            />
+          </Button>
+        }
+      />
 
-      {active.length > 0 && (
-        <div className="mt-7">
-          <div className="metric-lg">{active.length}</div>
-          <div className="label-caps mt-1">Active</div>
-        </div>
-      )}
-
-      <div className="mt-6">
-        {state === "loading" && credentials.length === 0 ? (
-          <div className="space-y-px">
-            <div className="skeleton h-14" />
-            <div className="skeleton h-14" />
-          </div>
-        ) : state === "error" ? (
-          <div className="flex flex-col items-center gap-3 py-12 text-center">
-            <Warning className="h-5 w-5 text-destructive" weight="fill" />
-            <p className="text-sm text-muted-foreground">{error}</p>
-            <button
-              type="button"
-              onClick={load}
-              className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
-            >
-              Try again
-            </button>
-          </div>
-        ) : credentials.length === 0 ? (
-          <Empty />
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] text-left">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Credential", "Added", "Last used", ""].map((h, i) => (
-                    <th
-                      key={h || i}
-                      className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {credentials.map((c) => (
-                  <CredentialRow
-                    key={c.id}
-                    credential={c}
-                    onRevoke={handleRevoke}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
+      <StatePanel
+        state={panel}
+        className="mt-6"
+        label="your CLI credentials"
+        empty={{
+          title: "No CLI credentials yet",
+          description: (
+            <>
+              Run <code className="font-mono text-xs">flashml login</code> and
+              approve the code it prints. The credential appears here, and you
+              can revoke it from this page at any time.
+            </>
+          ),
+        }}
+        unreadable={{ retry: load }}
+      >
+        {(rows) => {
+          // Inside the `present` branch on purpose. This count used to render
+          // above the switch, so a failed poll left a stale "3 Active" sitting
+          // over a "could not read this" panel — a number presented as current
+          // by a page that had just said it could not read anything.
+          const activeCount = rows.filter((c) => c.status !== "revoked").length;
+          return (
+            <>
+              {activeCount > 0 && (
+                <div className="mb-6">
+                  <div className="metric-lg">{activeCount}</div>
+                  <div className="label-caps mt-1">Active</div>
+                </div>
+              )}
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[560px] text-left">
+                  <thead>
+                    <tr className="border-b border-border">
+                      {["Credential", "Added", "Last used", ""].map((h, i) => (
+                        <th
+                          key={h || i}
+                          className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {rows.map((c) => (
+                      <CredentialRow
+                        key={c.id}
+                        credential={c}
+                        onRevoke={handleRevoke}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          );
+        }}
+      </StatePanel>
+    </PageShell>
   );
 }
 
@@ -230,12 +241,13 @@ function CredentialRow({
           <AlertDialog>
             <AlertDialogTrigger
               render={
-                <button
-                  type="button"
-                  className="rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                 >
                   Revoke
-                </button>
+                </Button>
               }
             />
             <AlertDialogContent>
@@ -263,23 +275,5 @@ function CredentialRow({
         )}
       </td>
     </tr>
-  );
-}
-
-function Empty() {
-  return (
-    <div className="flex flex-col items-center gap-4 py-14 text-center">
-      <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-border">
-        <Terminal size={19} className="text-muted-foreground" />
-      </div>
-      <div>
-        <h2 className="text-base font-semibold">No CLI credentials yet</h2>
-        <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted-foreground">
-          Run <code className="font-mono text-xs">flashml login</code> and
-          approve the code it prints. The credential appears here, and you can
-          revoke it from this page at any time.
-        </p>
-      </div>
-    </div>
   );
 }

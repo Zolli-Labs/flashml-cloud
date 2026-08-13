@@ -2,9 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowClockwise, Warning } from "@phosphor-icons/react";
+import { ArrowClockwise } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
+import { StatePanel } from "@/components/shell/StatePanel";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import { queuePanelState, type QueueLoadState } from "@/lib/console/queue-panel";
 import {
   formatRequestedAt,
   fullNameFor,
@@ -59,10 +70,10 @@ import {
 // `lib/cloud-api.ts` — so this page only ever approves or declines a
 // pending REQUEST, never elevates the account reviewing it.
 
-type LoadState = "loading" | "ready" | "forbidden" | "error";
+// The queue load states, named once in `lib/console/queue-panel.ts` so the
+// page and the mapping cannot drift apart.
+type LoadState = QueueLoadState;
 type RequestTab = "access" | "credits";
-
-const REQUEST_TABS: RequestTab[] = ["access", "credits"];
 
 export default function AdminRequestsPage() {
   const router = useRouter();
@@ -75,10 +86,6 @@ export default function AdminRequestsPage() {
   const [tab, setTab] = useState<RequestTab>("access");
   const creditQueueGeneration = useRef(0);
   const blockedCreditRequestIds = useRef(new Set<string>());
-  const tabRefs = useRef<Record<RequestTab, HTMLButtonElement | null>>({
-    access: null,
-    credits: null,
-  });
 
   const load = useCallback(() => {
     listAccessRequests("pending")
@@ -272,144 +279,89 @@ export default function AdminRequestsPage() {
     advanceCreditQueueGeneration();
   }
 
-  function selectTab(nextTab: RequestTab, focus = false) {
-    setTab(nextTab);
-    if (focus) tabRefs.current[nextTab]?.focus();
-  }
-
-  function handleTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
-    const currentIndex = REQUEST_TABS.indexOf(tab);
-    let nextIndex: number | null = null;
-    if (event.key === "ArrowLeft") nextIndex = (currentIndex + REQUEST_TABS.length - 1) % REQUEST_TABS.length;
-    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % REQUEST_TABS.length;
-    if (event.key === "Home") nextIndex = 0;
-    if (event.key === "End") nextIndex = REQUEST_TABS.length - 1;
-    if (nextIndex === null) return;
-    event.preventDefault();
-    selectTab(REQUEST_TABS[nextIndex], true);
-  }
-
   return (
-    <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="title">Requests</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">
-            Access and testing-credit requests, reviewed by hand.
-          </p>
-        </div>
-        {activeState !== "forbidden" && (
-          <button
-            type="button"
-            onClick={refresh}
-            aria-label="Refresh"
-            className="rounded-md p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
-          >
-            <ArrowClockwise
-              size={15}
-              className={activeState === "loading" ? "animate-spin" : ""}
-            />
-          </button>
-        )}
-      </div>
+    <PageShell width="standard">
+      <PageHeader
+        title="Requests"
+        description="Access and testing-credit requests, reviewed by hand."
+        actions={
+          activeState !== "forbidden" ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={refresh}
+              aria-label="Refresh"
+            >
+              <ArrowClockwise
+                size={15}
+                className={activeState === "loading" ? "animate-spin" : ""}
+              />
+            </Button>
+          ) : null
+        }
+      />
 
-      <div className="mt-6">
-        <div
-          role="tablist"
+      {/* `components/ui/tabs.tsx` replaces a hand-rolled ARIA tablist —
+          roving tabindex, ArrowLeft/ArrowRight/Home/End, focus management,
+          `aria-controls`. Both were mounted side by side and driven by a
+          real browser pressing real keys (`preview/tabs-keyboard/`); every
+          key landed on the same tab, the same `aria-selected` and the same
+          `tabIndex` in both. Two props carry behaviour the default would
+          have dropped:
+
+          `activateOnFocus` — Base UI defaults to MANUAL activation (arrow
+          moves focus, Enter/Space selects). The hand-rolled list activated
+          on arrow. Without this, arrowing to Credits would leave the Access
+          queue on screen.
+
+          `keepMounted` — Base UI unmounts a hidden panel by default. The
+          hand-rolled panels used `hidden`, so both stayed mounted, and
+          `CreditRequestCard` holds a per-row approval amount in local
+          state. Without this, an admin who typed an amount, checked the
+          access queue and came back would find their edit gone. Verified in
+          the same rig: typed value survives a tab round trip in both.
+
+          The classNames restore the page's own surfaces. The default
+          variant paints the strip `bg-muted` (#f0eee8) and the active tab
+          `bg-background` (#f1efe9) — one value per channel apart on this
+          cream page, so the strip would have been invisible and the active
+          tab a hole in it. */}
+      <Tabs
+        className="mt-6 gap-4"
+        value={tab}
+        onValueChange={(value) => setTab(value as RequestTab)}
+      >
+        <TabsList
+          activateOnFocus
           aria-label="Request type"
-          className="mb-4 inline-flex rounded-md border border-border bg-surface p-1 text-sm"
+          className="h-auto border border-border bg-surface p-1 text-sm"
         >
-          <button
-            type="button"
-            ref={(element) => {
-              tabRefs.current.access = element;
-            }}
-            id="admin-requests-access-tab"
-            role="tab"
-            aria-selected={tab === "access"}
-            aria-controls="admin-requests-access-panel"
-            tabIndex={tab === "access" ? 0 : -1}
-            onClick={() => selectTab("access")}
-            onKeyDown={handleTabKeyDown}
-            className={`rounded px-3 py-1.5 ${tab === "access" ? "bg-surface-2 text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          <TabsTrigger
+            value="access"
+            className="px-3 py-1.5 data-active:bg-surface-2"
           >
             Access
-          </button>
-          <button
-            type="button"
-            ref={(element) => {
-              tabRefs.current.credits = element;
-            }}
-            id="admin-requests-credits-tab"
-            role="tab"
-            aria-selected={tab === "credits"}
-            aria-controls="admin-requests-credits-panel"
-            tabIndex={tab === "credits" ? 0 : -1}
-            onClick={() => selectTab("credits")}
-            onKeyDown={handleTabKeyDown}
-            className={`rounded px-3 py-1.5 ${tab === "credits" ? "bg-surface-2 text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          </TabsTrigger>
+          <TabsTrigger
+            value="credits"
+            className="px-3 py-1.5 data-active:bg-surface-2"
           >
             Credits
-          </button>
-        </div>
+          </TabsTrigger>
+        </TabsList>
 
-        <div
-          id="admin-requests-access-panel"
-          role="tabpanel"
-          aria-labelledby="admin-requests-access-tab"
-          tabIndex={0}
-          hidden={tab !== "access"}
-        >
-        {state === "forbidden" ? (
-          <div className="flex flex-col items-center gap-2 py-14 text-center">
-            <p className="text-sm text-muted-foreground">
-              You don&apos;t have access to this page.
-            </p>
-          </div>
-        ) : state === "loading" && rows.length === 0 ? (
-          <div className="space-y-3">
-            <div className="skeleton h-40 rounded-lg" />
-            <div className="skeleton h-40 rounded-lg" />
-          </div>
-        ) : state === "error" ? (
-          <div className="flex flex-col items-center gap-3 py-12 text-center">
-            <Warning className="h-5 w-5 text-destructive" weight="fill" />
-            <p className="text-sm text-muted-foreground">{error}</p>
-            <button
-              type="button"
-              onClick={load}
-              className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
-            >
-              Try again
-            </button>
-          </div>
-        ) : rows.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 py-14 text-center">
-            <p className="text-sm text-muted-foreground">
-              Nothing waiting. New requests show up here.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {rows.map((row) => (
-              <RequestCard
-                key={row.user_id}
-                row={row}
-                onApprove={handleApprove}
-                onDecline={handleDecline}
-              />
-            ))}
-          </div>
-        )}
-        </div>
+        <TabsContent value="access" keepMounted>
+          <AccessRequestQueue
+            rows={rows}
+            state={state}
+            error={error}
+            onRetry={load}
+            onApprove={handleApprove}
+            onDecline={handleDecline}
+          />
+        </TabsContent>
 
-        <div
-          id="admin-requests-credits-panel"
-          role="tabpanel"
-          aria-labelledby="admin-requests-credits-tab"
-          tabIndex={0}
-          hidden={tab !== "credits"}
-        >
+        <TabsContent value="credits" keepMounted>
           <CreditRequestQueue
             rows={creditRows}
             state={creditState}
@@ -418,9 +370,65 @@ export default function AdminRequestsPage() {
             onApprove={handleApproveCredit}
             onDecline={handleDeclineCredit}
           />
-        </div>
-      </div>
+        </TabsContent>
+      </Tabs>
+    </PageShell>
+  );
+}
+
+/** A 403 here is not a failed read. The caller is signed in; they are simply
+ * not an admin, and this page's doctrine is a flat refusal rather than an
+ * error dump. Kept out of `StatePanel` deliberately — `queuePanelState`'s
+ * type refuses to accept `forbidden` so this cannot be quietly folded into
+ * a destructive "Could not read this." banner. */
+function Forbidden() {
+  return (
+    <div className="flex flex-col items-center gap-2 py-14 text-center">
+      <p className="text-sm text-muted-foreground">
+        You don&apos;t have access to this page.
+      </p>
     </div>
+  );
+}
+
+function AccessRequestQueue({
+  rows,
+  state,
+  error,
+  onRetry,
+  onApprove,
+  onDecline,
+}: {
+  rows: AccessRequestRow[];
+  state: LoadState;
+  error: string | null;
+  onRetry: () => void;
+  onApprove: (row: AccessRequestRow) => void;
+  onDecline: (row: AccessRequestRow) => void;
+}) {
+  if (state === "forbidden") return <Forbidden />;
+
+  return (
+    <StatePanel
+      state={queuePanelState(state, error, rows)}
+      label="the access queue"
+      loadingRows={2}
+      empty={{ title: "Nothing waiting. New requests show up here." }}
+      unreadable={{ retry: onRetry }}
+    >
+      {(pending) => (
+        <div className="space-y-3">
+          {pending.map((row) => (
+            <RequestCard
+              key={row.user_id}
+              row={row}
+              onApprove={onApprove}
+              onDecline={onDecline}
+            />
+          ))}
+        </div>
+      )}
+    </StatePanel>
   );
 }
 
@@ -439,54 +447,29 @@ function CreditRequestQueue({
   onApprove: (row: AdminCreditRequest, approvedZc: number) => Promise<void>;
   onDecline: (row: AdminCreditRequest) => Promise<void>;
 }) {
-  if (state === "forbidden") {
-    return <EmptyQueue message="You don&apos;t have access to this page." />;
-  }
-  if (state === "loading" && rows.length === 0) {
-    return (
-      <div className="space-y-3">
-        <div className="skeleton h-52 rounded-lg" />
-        <div className="skeleton h-52 rounded-lg" />
-      </div>
-    );
-  }
-  if (state === "error") {
-    return (
-      <div className="flex flex-col items-center gap-3 py-12 text-center">
-        <Warning className="h-5 w-5 text-destructive" weight="fill" />
-        <p className="text-sm text-muted-foreground">{error}</p>
-        <button
-          type="button"
-          onClick={onRetry}
-          className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-  if (rows.length === 0) {
-    return <EmptyQueue message="Nothing waiting. New credit requests show up here." />;
-  }
-  return (
-    <div className="space-y-3">
-      {rows.map((row) => (
-        <CreditRequestCard
-          key={row.id}
-          row={row}
-          onApprove={onApprove}
-          onDecline={onDecline}
-        />
-      ))}
-    </div>
-  );
-}
+  if (state === "forbidden") return <Forbidden />;
 
-function EmptyQueue({ message }: { message: React.ReactNode }) {
   return (
-    <div className="flex flex-col items-center gap-2 py-14 text-center">
-      <p className="text-sm text-muted-foreground">{message}</p>
-    </div>
+    <StatePanel
+      state={queuePanelState(state, error, rows)}
+      label="the credit queue"
+      loadingRows={2}
+      empty={{ title: "Nothing waiting. New credit requests show up here." }}
+      unreadable={{ retry: onRetry }}
+    >
+      {(pending) => (
+        <div className="space-y-3">
+          {pending.map((row) => (
+            <CreditRequestCard
+              key={row.id}
+              row={row}
+              onApprove={onApprove}
+              onDecline={onDecline}
+            />
+          ))}
+        </div>
+      )}
+    </StatePanel>
   );
 }
 
@@ -540,21 +523,19 @@ function CreditRequestCard({
             className="h-9 w-32 rounded-md border border-border bg-background px-2.5 font-mono text-sm outline-none focus:border-primary"
           />
         </label>
-        <button
-          type="button"
+        <Button
           disabled={approvedZc === null}
           onClick={() => approvedZc !== null && onApprove(row, approvedZc)}
-          className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
         >
           Approve
-        </button>
-        <button
-          type="button"
-          onClick={() => onDecline(row)}
-          className="rounded-md border border-destructive/30 px-3.5 py-2 text-sm text-destructive hover:bg-destructive/10"
-        >
+        </Button>
+        {/* `variant="destructive"` is a tinted fill where this was a thin
+            destructive-bordered outline. Same token, different weight — the
+            one visible change in this file, taken because the primitive is
+            where the console's destructive treatment is decided. */}
+        <Button variant="destructive" onClick={() => onDecline(row)}>
           Decline
-        </button>
+        </Button>
       </div>
     </section>
   );
@@ -658,20 +639,10 @@ function RequestCard({
       {invited && <p className="mt-3.5 text-xs text-muted-foreground">{invited}</p>}
 
       <div className="mt-4 flex items-center gap-2 border-t border-border pt-4">
-        <button
-          type="button"
-          onClick={() => onApprove(row)}
-          className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
-        >
-          Approve
-        </button>
-        <button
-          type="button"
-          onClick={() => onDecline(row)}
-          className="rounded-md border border-destructive/30 px-3.5 py-2 text-sm text-destructive hover:bg-destructive/10"
-        >
+        <Button onClick={() => onApprove(row)}>Approve</Button>
+        <Button variant="destructive" onClick={() => onDecline(row)}>
           Decline
-        </button>
+        </Button>
       </div>
     </section>
   );

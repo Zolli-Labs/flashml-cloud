@@ -3,18 +3,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import Home from "@/app/(marketing)/page";
-import { ArchitectureSignal } from "@/components/landing/ArchitectureSignal";
 import { WorkloadRows } from "@/components/landing/WorkloadRows";
-import { WorkloadVelocityRail } from "@/components/landing/WorkloadVelocityRail";
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(`${root}/${path}`, "utf8");
 const renderLanding = () => renderToStaticMarkup(createElement(Home));
-const renderWorkloadRail = () => renderToStaticMarkup(
-  createElement(WorkloadVelocityRail, { labels: ["Federated training"] }),
-);
+const visibleText = (markup: string) =>
+  markup.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
 const renderWorkloadRows = () => renderToStaticMarkup(createElement(WorkloadRows));
-const renderArchitectureSignal = () => renderToStaticMarkup(createElement(ArchitectureSignal));
 
 describe("cinematic landing foundation", () => {
   it("pins the approved motion packages", () => {
@@ -27,8 +23,10 @@ describe("cinematic landing foundation", () => {
   it("contains landing motion without hiding server content", () => {
     const markup = renderLanding();
     expect(markup).toContain('data-landing="cinematic"');
-    expect(markup).toContain("Compute that");
-    expect(markup).toContain("Open console");
+    expect(markup).toContain("Computing power,");
+    expect(markup).toContain("without the lock-in.");
+    expect(markup).toContain('data-market-role="demand"');
+    expect(markup).toContain('data-market-role="supply"');
     expect(markup).not.toContain('style="opacity:0"');
   });
 
@@ -46,6 +44,28 @@ describe("cinematic landing foundation", () => {
     expect(css).toContain("prefers-reduced-motion: reduce");
   });
 
+  it("places the hero's reduced-motion rules after its animated rules", () => {
+    const css = source("app/globals.css");
+    const animatedSwitch = css.indexOf(
+      ".hero-market-switch {\n  display: grid;",
+    );
+    const animatedRole = css.indexOf(
+      ".hero-market-role {\n  grid-area: 1 / 1;",
+    );
+    const reducedMotion = css.indexOf(
+      "@media (prefers-reduced-motion: reduce) {\n  .hero-market-switch {\n    display: block;",
+    );
+    const reducedRole = css.indexOf(
+      ".hero-market-role {\n    animation: none;",
+      reducedMotion,
+    );
+
+    expect(animatedSwitch).toBeGreaterThanOrEqual(0);
+    expect(animatedRole).toBeGreaterThanOrEqual(0);
+    expect(reducedMotion).toBeGreaterThan(animatedSwitch);
+    expect(reducedRole).toBeGreaterThan(animatedRole);
+  });
+
   it("renders the editorial hero and the live coordinator map", () => {
     const markup = renderLanding();
     const hero = markup.match(/<section[^>]*id="hero"[\s\S]*?<\/section>/)?.[0] ?? "";
@@ -57,10 +77,13 @@ describe("cinematic landing foundation", () => {
     expect(hero).toContain('data-map-core="coordinator"');
     expect(hero.match(/data-map-node=/g) ?? []).toHaveLength(4);
     expect(hero).toMatch(/data-map-readout="(?:running|lost|resumed|accepted)"/);
-    expect(hero).toContain("Compute that");
-    expect(hero).toContain("finishes the job.");
+    expect(hero).toContain("Computing power,");
+    expect(hero).toContain("without the lock-in.");
+    expect(hero).toContain("One open network connecting people who need compute with machines ready to work.");
+    expect(hero).toContain('data-market-role="demand"');
+    expect(hero).toContain('data-market-role="supply"');
     expect(hero).toContain('href="/workspaces"');
-    expect(hero).toContain('href="https://calendly.com/phongct1105/zolli-ai"');
+    expect(hero).toContain('href="/account/machines"');
     expect(hero).not.toMatch(/data-evidence-value|production attempts/);
   });
 
@@ -78,74 +101,54 @@ describe("cinematic landing foundation", () => {
     expect(page).not.toMatch(/ScrollSmoother|addEventListener\(["']wheel/);
   });
 
-  it("uses light evidence and sand machine lanes without metric cards", () => {
+  it("uses sand evidence and sand machine lanes without metric cards", () => {
     const markup = renderLanding();
     const evidence = markup.match(/<section[^>]*id="evidence"[\s\S]*?<\/section>/)?.[0] ?? "";
     const platform = markup.match(/<section[^>]*id="platform"[\s\S]*?<\/section>/)?.[0] ?? "";
 
-    expect(evidence).toContain('data-surface="light"');
+    expect(evidence).toContain('data-surface="sand"');
     expect(platform).toContain('data-surface="sand"');
     expect(evidence.match(/data-evidence-value=/g)).toHaveLength(4);
     expect(evidence).toContain('data-layout="evidence-ledger"');
+    expect(visibleText(evidence)).toContain("Proven with real work.");
     expect(platform).toContain('data-layout="machine-lanes"');
-    expect(platform).toContain("macOS arm64");
+    expect(platform).toContain("macOS Apple silicon");
     expect(platform).toContain("Windows 11");
   });
 
-  it("pairs an ivory workload rail with a gapless graphite architecture", () => {
+  it("classifies workloads by mode and the architecture by real lanes", () => {
     const markup = renderLanding();
     const workloads = markup.match(/<section[^>]*id="workloads"[\s\S]*?<\/section>/)?.[0] ?? "";
     const architecture = markup.match(/<section[^>]*id="architecture"[\s\S]*?<\/section>/)?.[0] ?? "";
 
     expect(workloads).toContain('data-surface="light"');
-    expect(workloads).toContain('data-motion="velocity-rail"');
+    expect(workloads).toContain('data-mode="divide"');
+    expect(workloads).toContain('data-mode="resume"');
     expect(architecture).toContain('data-surface="dark"');
-    expect(architecture).toContain('data-layout="dense-architecture"');
-    for (const value of ["01 Control", "02 Execution", "03 Integrity"])
+    expect(architecture).toContain('data-layout="runtime-lanes"');
+    for (const value of ["01 Host", "02 Runtime", "03 Recovery"])
       expect(architecture).toContain(value);
-    expect(architecture).toContain("lg:col-span-7");
-    expect(architecture).toContain("lg:col-span-5");
-    expect(architecture).toContain("lg:row-span-2");
-    expect(architecture).toContain("grid-flow-dense");
+    expect(architecture).toContain("lg:grid-cols-3");
+    expect(architecture).toContain("--network none · read-only rootfs · cpu/mem caps");
+    expect(architecture).toContain("DDP / FSDP");
   });
 
-  it("uses the readable ivory foreground for decorative workload rail labels", () => {
-    const rail = renderWorkloadRail();
-
-    expect(rail).toContain("text-[var(--muted-foreground)]");
-  });
-
-  it("keeps workload copy visible while decorative rules animate independently", () => {
+  it("keeps workload copy visible while rows reveal independently", () => {
     const rows = renderWorkloadRows();
     const rowSource = source("components/landing/WorkloadRows.tsx");
     const fitSource = source("components/landing/WorkloadFit.tsx");
 
-    expect(rows.match(/data-workload-row=/g) ?? []).toHaveLength(4);
-    expect(rows.match(/data-workload-rule/g) ?? []).toHaveLength(4);
+    expect(rows.match(/data-workload-row=/g) ?? []).toHaveLength(5);
+    expect(rows.match(/data-workload-machines/g) ?? []).toHaveLength(5);
     expect(rowSource).toContain("whileInView");
-    expect(rowSource).toContain("data-animated");
     expect(rowSource).not.toMatch(/(?:opacity|autoAlpha)\s*:\s*0/);
-    expect(fitSource).toContain("@/lib/landing/workloads");
-    expect(fitSource).not.toMatch(/import\s*\{[^}]*WORKLOADS[^}]*\}\s*from\s*["']@\/components\/landing\/WorkloadRows/);
-  });
-
-  it("draws one restrained three-path architecture signal", () => {
-    const signal = renderArchitectureSignal();
-    const signalSource = source("components/landing/ArchitectureSignal.tsx");
-
-    expect(signal.match(/data-signal-path=/g) ?? []).toHaveLength(3);
-    expect(signal).toContain("LEASE_CLAIMED");
-    expect(signal).toContain("CHECKPOINT_MANIFEST_COMMITTED");
-    expect(signal).toContain("TASK_REQUEUED");
-    expect(signalSource).toContain("useLandingMotion");
-    expect(signalSource).toContain("once: true");
+    expect(fitSource).not.toMatch(/WorkloadVelocityRail/);
   });
 
   it("balances the services headline and reveals the supporting actions", () => {
     const services = source("components/landing/ProfessionalServices.tsx");
 
     expect(services).toContain("landing-heading-balance");
-    expect(services).toContain("block text-muted-foreground");
     expect(services).toContain("SectionReveal");
     expect(services).toContain("MARKETING.calendlyUrl");
     expect(services).toContain("MARKETING.contactEmail");
@@ -154,7 +157,7 @@ describe("cinematic landing foundation", () => {
   it("does not add unsupported performance, scale, provider, or guarantee claims", () => {
     const supportingSources = [
       "components/landing/WorkloadRows.tsx",
-      "components/landing/ArchitectureSignal.tsx",
+      "components/landing/SystemModules.tsx",
       "components/landing/ProfessionalServices.tsx",
     ].map(source).join("\n");
 
@@ -221,7 +224,6 @@ describe("cinematic landing foundation", () => {
       "components/landing/SystemJourney.tsx",
       "components/landing/WorkflowScene.tsx",
       "components/landing/WorkloadRows.tsx",
-      "components/landing/ArchitectureSignal.tsx",
     ].map(source).join("\n");
 
     expect(motionSources).not.toMatch(/\blayout(?:Id)?=/);
@@ -235,8 +237,6 @@ describe("cinematic landing foundation", () => {
     const map = source("components/landing/coordinator-map/CoordinatorMap.tsx");
     const supportingMotion = [
       "components/landing/WorkloadRows.tsx",
-      "components/landing/WorkloadVelocityRail.tsx",
-      "components/landing/ArchitectureSignal.tsx",
     ].map(source).join("\n");
 
     expect(provider).toContain("prefers-reduced-motion: reduce");

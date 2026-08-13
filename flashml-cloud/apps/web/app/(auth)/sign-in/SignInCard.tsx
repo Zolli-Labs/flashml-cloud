@@ -234,7 +234,7 @@ function SignInCardContent() {
           </p>
           <button
             type="button"
-            className="mt-5 text-sm font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
+            className="interactive mt-5 rounded-[4px] text-sm font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
             onClick={() => {
               setNeedsConfirmation(false);
               switchMode("signin");
@@ -387,7 +387,7 @@ function SignInCardContent() {
         <button
           type="button"
           onClick={() => switchMode(signingUp ? "signin" : "signup")}
-          className="font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
+          className="interactive rounded-[4px] font-medium text-brand-foreground underline underline-offset-4 hover:no-underline"
         >
           {signingUp ? "Sign in" : "Create one"}
         </button>

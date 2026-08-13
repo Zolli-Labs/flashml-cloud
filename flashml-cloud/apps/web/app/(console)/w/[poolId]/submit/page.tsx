@@ -12,6 +12,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageShell } from "@/components/shell/PageShell";
+import { PageHeader } from "@/components/shell/PageHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import {
   ApiError,
@@ -110,14 +112,20 @@ export default function SubmitPage() {
   // the job rather than being silently redirected as if nothing was flagged.
   if (status === "submitted" && result) {
     return (
-      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold font-mono">Job submitted</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {result.spec?.metadata?.name ?? result.name ?? result.job_id} ·{" "}
-            {result.job_id}
-          </p>
-        </div>
+      // `reading` — one form read top to bottom, which is what
+      // `lib/console/page-width.ts` files this route as. Same container as
+      // before: the hand-written `max-w-3xl mx-auto px-4 sm:px-6 py-8` is
+      // `PageShell`'s string with the classes in a different order.
+      <PageShell width="reading" className="space-y-6">
+        {/* Was `<h1 className="text-2xl font-bold font-mono">` — a FIFTH
+            heading treatment, and the only page setting a human-written
+            title in the mono face. `PageHeader`'s rule is that the mono face
+            marks text a MACHINE emitted, which here is the job name and id
+            on the line below, not the words "Job submitted". */}
+        <PageHeader
+          title="Job submitted"
+          meta={`${result.spec?.metadata?.name ?? result.name ?? result.job_id} · ${result.job_id}`}
+        />
 
         {findings.length > 0 && (
           <Card className="border-warning/40 bg-surface">
@@ -140,20 +148,22 @@ export default function SubmitPage() {
         >
           View job <ArrowRight className="w-4 h-4" data-icon="inline-end" />
         </Button>
-      </div>
+      </PageShell>
     );
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold font-mono">Submit a repo</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Paste a public GitHub repo with a <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">flashml.yaml</code> at its
-          root. We stage the code, run it through preflight, and hand it to
-          the next available Machine.
-        </p>
-      </div>
+    <PageShell width="reading" className="space-y-6">
+      <PageHeader
+        title="Submit a repo"
+        description={
+          <>
+            Paste a public GitHub repo with a <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">flashml.yaml</code> at its
+            root. We stage the code, run it through preflight, and hand it to
+            the next available Machine.
+          </>
+        }
+      />
 
       <Card>
         <CardHeader>
@@ -264,7 +274,7 @@ export default function SubmitPage() {
           </CardContent>
         </Card>
       )}
-    </div>
+    </PageShell>
   );
 }
 

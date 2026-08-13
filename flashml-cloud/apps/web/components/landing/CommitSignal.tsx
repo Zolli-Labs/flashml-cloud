@@ -4,7 +4,16 @@ import { useRef } from "react";
 import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { useLandingMotion } from "@/components/landing/motion/LandingMotionProvider";
+import {
+  gsapEase,
+  useLandingMotion,
+} from "@/components/landing/motion/LandingMotionProvider";
+import {
+  DURATIONS,
+  TRAVEL,
+  scrollTriggerStart,
+  seconds,
+} from "@/lib/motion/timing";
 
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 
@@ -26,24 +35,33 @@ export function CommitSignal({ event }: { event: "TASK_COMMIT_ACCEPTED" }) {
         return;
       }
 
+      // The rule is the trace (spec §2 rule 4), and it is the same shape as
+      // the `trace` variant and `@keyframes workflow-scene-draw`: scale from
+      // the leading edge over `draw`. The event name then lands exactly as
+      // the trace completes — one `enter` back from the end.
       gsap
         .timeline({
           scrollTrigger: {
             trigger: rootElement,
-            start: "top 86%",
+            start: scrollTriggerStart(),
             once: true,
           },
         })
         .from(line, {
           scaleX: 0,
           transformOrigin: "left center",
-          duration: 0.55,
-          ease: "power2.out",
+          duration: seconds(DURATIONS.draw),
+          ease: gsapEase("settle"),
         })
         .from(
           label,
-          { y: 10, opacity: 0, duration: 0.4, ease: "power2.out" },
-          "-=0.2",
+          {
+            y: TRAVEL.base,
+            opacity: 0,
+            duration: seconds(DURATIONS.enter),
+            ease: gsapEase("settle"),
+          },
+          `-=${seconds(DURATIONS.enter)}`,
         );
     },
     { scope: root, dependencies: [reduced, desktop], revertOnUpdate: true },

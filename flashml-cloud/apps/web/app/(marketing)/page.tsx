@@ -8,6 +8,8 @@ import { RecoveryDemo } from "@/components/landing/RecoveryDemo";
 import { ProfessionalServices } from "@/components/landing/ProfessionalServices";
 import { Faq } from "@/components/landing/Faq";
 import { ClosingCta } from "@/components/landing/ClosingCta";
+import { MarketStory } from "@/components/landing/MarketStory";
+import { SimpleJourney } from "@/components/landing/SimpleJourney";
 import { LandingMotionProvider } from "@/components/landing/motion/LandingMotionProvider";
 
 export default function Home() {
@@ -37,25 +39,31 @@ export default function Home() {
           </div>
         </div>
         <div data-surface="light" className="landing-surface-light">
-          <EvidenceBand />
-        </div>
-        <div data-surface="sand" className="landing-surface-sand">
-          <PlatformSupport />
+          <MarketStory />
         </div>
         <div data-surface="dark" className="landing-surface-dark">
-          <SystemJourney />
-        </div>
-        <div data-surface="light" className="landing-surface-light">
-          <WorkloadFit />
-        </div>
-        <div data-surface="dark" className="landing-surface-dark">
-          <SystemModules />
+          <SimpleJourney />
         </div>
         <div data-surface="light" className="landing-surface-light">
           <RecoveryDemo />
         </div>
         <div data-surface="sand" className="landing-surface-sand">
+          <EvidenceBand />
+        </div>
+        <div data-surface="light" className="landing-surface-light">
+          <WorkloadFit />
+        </div>
+        <div data-surface="sand" className="landing-surface-sand">
+          <PlatformSupport />
+        </div>
+        <div data-surface="dark" className="landing-surface-dark">
+          <SystemModules />
+        </div>
+        <div data-surface="sand" className="landing-surface-sand">
           <ProfessionalServices />
+        </div>
+        <div data-surface="dark" className="landing-surface-dark">
+          <SystemJourney />
         </div>
         <div data-surface="light" className="landing-surface-light">
           <Faq />

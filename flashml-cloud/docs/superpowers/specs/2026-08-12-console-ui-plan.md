@@ -150,7 +150,16 @@ not regress — measured 2026-08-12 ~22:00: **web 866 passed / 52 files**,
 **Measure them yourself before you start, including these.** The figures this
 replaced (web 767/46, api 2177) were stale by roughly 100 and 450 tests. A
 baseline that is too low certifies a regression as an improvement, which is
-strictly worse than having no baseline at all.
+strictly worse than having no baseline at all. Run the suite, write what it
+said, and date it.
+
+**And state the scope beside the number.** The gate above cannot be run as one
+command: `npm run build` needs `.env.dev` sourced, and sourcing it makes
+`middleware.test.ts` fail, because that test asserts the signed-out contract
+when Supabase config is *absent*. Run tests, typecheck and lint with no env;
+run the build in its own subshell. "tests, tsc, lint green; build **not run**"
+is four extra words and it is the difference between a verified claim and a
+claim about a smaller scope than the reader assumes.
 
 ## 6. §C — After the deadline
 

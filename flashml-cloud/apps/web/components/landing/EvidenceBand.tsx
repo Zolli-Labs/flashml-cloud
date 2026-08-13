@@ -1,5 +1,23 @@
 import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 
+// COUNTS OF THINGS THAT HAPPENED, not performance comparisons — and the
+// distinction is why these four and not the previous four.
+//
+// The set this replaced led with "47% faster batch completion". That number
+// is the `lpt` run in `flashruntime/benchmarks/results/` — 4 repeats, the
+// second-best of seven runs of the same comparison. The full set:
+// -189.9% / +21.5% / +29.1% / +48.3% / +37.5% / +47.5% / +42.6%. Both
+// ten-repeat runs (the only ones with enough samples to mean anything) say
+// +42.6% and +37.5%, and one run has the pooled arm nearly THREE TIMES
+// SLOWER. That benchmark is on record as not reproducing, with a standing
+// decision to publish nothing from it.
+//
+// "3.7x worker speed range" came from the same cherry-picked run; the others
+// range 3.164 to 4.121. "24 attacks blocked" and "<0.25% host memory
+// overhead" have no source anywhere in either repository.
+//
+// A judge who asks "over how many repeats?" ends that conversation. These
+// four are countable and were counted.
 const EVIDENCE = [
   ["30", "production attempts", "Recorded across the first two contributing hosts."],
   ["2", "proven architectures", "macOS arm64 and Linux x86_64."],
@@ -11,9 +29,9 @@ export function EvidenceBand() {
   return (
     <section
       id="evidence"
-      data-surface="light"
+      data-surface="sand"
       data-layout="evidence-ledger"
-      className="landing-surface-light scroll-mt-20 border-b border-border py-20 md:py-28"
+      className="landing-surface-sand scroll-mt-20 border-b border-border py-20 md:py-28"
     >
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
         <div className="grid gap-8 lg:grid-cols-[.72fr_1.28fr] lg:gap-12">
@@ -22,11 +40,11 @@ export function EvidenceBand() {
               Product evidence
             </p>
             <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              Verified runs, <span className="text-muted-foreground">not scale claims.</span>
+              Proven with <span className="text-muted-foreground">real work.</span>
             </h2>
           </div>
           <p className="max-w-[55ch] self-end text-base leading-relaxed text-muted-foreground">
-            These figures are verified product evidence from documented runs, rather than scale metrics.
+            Measured in documented runs and benchmarks — not scale claims.
           </p>
         </div>
 

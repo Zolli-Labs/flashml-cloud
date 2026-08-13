@@ -46,8 +46,7 @@ export function ProfessionalServices() {
               Professional services
             </p>
             <h2 className="landing-heading-balance mt-5 max-w-[720px] text-[clamp(2.25rem,9.4vw,3.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              Start with the system you have.
-              <span className="block text-muted-foreground">Design the operating model together.</span>
+              Start with the machines and workloads you already have.
             </h2>
           </div>
 
@@ -57,9 +56,8 @@ export function ProfessionalServices() {
           >
             <div className="pt-7">
               <p className="max-w-[55ch] text-base leading-relaxed text-muted-foreground">
-                For teams that want assisted adoption, Zolli can help define and implement the path from
-                existing machines and workloads to a recoverable compute fleet. Engagement scope is agreed
-                directly with Zolli.
+                Zolli can help determine fit, connect a fleet, and adapt a divisible or checkpointable
+                workload. Engagement scope is agreed directly with Zolli.
               </p>
               <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
                 <a
