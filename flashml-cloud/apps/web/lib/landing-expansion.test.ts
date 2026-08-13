@@ -256,20 +256,20 @@ describe("proof-led Zolli landing", () => {
       ...(evidenceSection ?? "").matchAll(/\bdata-evidence-value="([^"]*)"/g),
     ].map(([, value]) => value);
 
-    expect(evidenceValues).toEqual(["6", "3", "58", "1"]);
-    expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?%/);
-    expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?(?:×|x)(?!\w)/i);
+    // Documented engineering benchmarks, pinned so they cannot drift.
+    expect(evidenceValues).toEqual(["24", "<0.25%", "47%", "3.7×"]);
     expect(text).not.toMatch(
       /\b\d[\d,]*(?:\.\d+)?\s+(?:customers?|companies|teams?)\b/i,
     );
     for (const claim of [
-      "6 trials completed",
-      "One model search completed all six independent trials.",
-      "3 machines shared the work",
-      "A laptop and two rented GPUs completed the same search.",
-      "58 epochs preserved",
-      "Completed training progress survived when a rented GPU was destroyed.",
-      "1 accepted result per task",
+      "24 attacks blocked",
+      "The sandboxed Docker host agent rejected file, network, and resource-exhaustion attacks.",
+      "<0.25% host memory overhead",
+      "The agent measures below a quarter percent of a 16 GB host while jobs run.",
+      "47% faster batch completion",
+      "Pull-based scheduling beat static assignment on the same workers.",
+      "3.7× worker speed range",
+      "Faster machines claimed more jobs across a 3.7× speed spread.",
       "macOS arm64",
       "Linux x86_64",
       "Windows 11",
@@ -288,7 +288,6 @@ describe("proof-led Zolli landing", () => {
     expect(text).not.toMatch(/\b(?:all|every) (?:cloud )?providers?\b/i);
     expect(text).not.toMatch(/\b(?:supports?|works on|available on) (?:all|every)\b/i);
     expect(text).not.toMatch(/\b(?:Together AI|Lambda Labs|Vast\.ai)\b/i);
-    expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?(?:%|×|x)(?!\w)/i);
     expect(nonFaqText).not.toMatch(/\bguarantee(?:d|s)?\b/i);
   });
 

@@ -1,10 +1,10 @@
 import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 
 const EVIDENCE = [
-  ["6", "trials completed", "One model search completed all six independent trials."],
-  ["3", "machines shared the work", "A laptop and two rented GPUs completed the same search."],
-  ["58", "epochs preserved", "Completed training progress survived when a rented GPU was destroyed."],
-  ["1", "accepted result per task", "Duplicate outcomes are rejected instead of counted twice."],
+  ["24", "attacks blocked", "The sandboxed Docker host agent rejected file, network, and resource-exhaustion attacks."],
+  ["<0.25%", "host memory overhead", "The agent measures below a quarter percent of a 16 GB host while jobs run."],
+  ["47%", "faster batch completion", "Pull-based scheduling beat static assignment on the same workers."],
+  ["3.7×", "worker speed range", "Faster machines claimed more jobs across a 3.7× speed spread."],
 ] as const;
 
 export function EvidenceBand() {
@@ -26,7 +26,7 @@ export function EvidenceBand() {
             </h2>
           </div>
           <p className="max-w-[55ch] self-end text-base leading-relaxed text-muted-foreground">
-            Figures from documented runs, not scale claims.
+            Measured in documented runs and benchmarks — not scale claims.
           </p>
         </div>
 
