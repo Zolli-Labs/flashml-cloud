@@ -540,6 +540,50 @@ Both shipped at `wide` — the width they already had — so nothing moved, and 
 disagreement is now visible in `data-console-width` rather than silent. **The
 rule, not the pages, is what needs a decision.**
 
+### 7k. Near-miss: a subagent ran `git stash` in the shared checkout
+
+**What happened.** A subagent, trying to establish whether a `tsc` error was
+pre-existing, ran `git stash push` **in the shared checkout** rather than in this
+worktree. That reverted every session's uncommitted work — two peer sessions'
+included — for a few seconds. It ran `git stash pop` immediately, reported no
+conflicts, and disclosed it unprompted.
+
+**Verified after the fact:** both stash lists empty; the shared tree still
+carries the expected uncommitted work (API sources and tests, `share/[token]`,
+`components/share/`, `observability.py`, `migrations/0026`, the `select.tsx`
+orphan); HEAD `c01f412`. Both peers were told directly and asked to check
+contents, because **presence is not integrity** and only they know what their
+trees should hold.
+
+**The lesson, which is the reason this is written down.** D-1 put this session in
+a separate worktree precisely so its work could not reach the shared checkout —
+and then an agent it dispatched reached in anyway. Every agent brief listed
+*files* not to touch. **None of them said which checkout not to run git commands
+in.** Path-level isolation does not constrain a repository-level command, and a
+subagent reasoning about "is this pre-existing?" will reach for `git stash` as
+naturally as for `grep`.
+
+**For the next session running parallel agents:** state the working directory as
+a constraint, not just the file list — *"run no git command that writes, in any
+directory other than X"* — and prefer answering "was this pre-existing?" with
+`git show <ref>:<path>`, which reads without touching the working tree.
+
+### 7l. Two follow-ups worth more than what shipped
+
+Both from `zolli-labs-d7`, both sharper than the versions in this document:
+
+1. **Stub the absent Supabase config in `middleware.test.ts`** so §7h's gate
+   becomes one runnable command. Absence is a *deployment* state currently
+   simulated by the ambient environment, which is exactly why sourcing
+   `.env.dev` breaks it. Documenting the split makes both failure modes
+   avoidable; stubbing makes them **impossible**.
+2. **Move the contrast assertions into each primitive's own test file.** §7f/§7i
+   state the rule — a token whose job is contrast needs a distance assertion —
+   but a rule in a spec is a rule someone has to remember, and only `Skeleton`
+   currently has a guard. `Badge variant="secondary"` and `TabsList` have the
+   same defect and no test. This is the day's own through-line applied to itself:
+   **written rules did not fire; executed checks did.**
+
 ## 8. Decision log
 
 Appended as decisions are made. Newest last.
