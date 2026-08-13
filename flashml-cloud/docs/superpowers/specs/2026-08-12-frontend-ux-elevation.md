@@ -584,6 +584,36 @@ Both from `zolli-labs-d7`, both sharper than the versions in this document:
    same defect and no test. This is the day's own through-line applied to itself:
    **written rules did not fire; executed checks did.**
 
+### 7m. How to land this branch — an explicit step, not a thing to remember
+
+`agent/zolli-frontend-motion-system` is **unpushed and unmerged**, and it was cut
+from `daaa9188` while three sessions committed to `develop`. It has been merged
+with `develop` once already, at `1089997a` — and `develop` reached `9adc6ce2`
+within minutes of that merge. **It will be stale again by the time anyone reads
+this.** That is the point of writing the procedure rather than a number.
+
+```bash
+cd flashml-cloud/.worktrees/frontend-motion-system
+git merge develop                       # expect conflicts only in docs
+cd flashml-cloud/apps/web
+npx vitest run && npx tsc --noEmit && npm run lint     # NO env — see §7h
+( set -a; . ../../../.env.dev; set +a; npm run build ) # env, subshell only
+cd ../api && .venv/bin/python -m pytest -q             # BOTH suites
+```
+
+**Why the API suite, when this branch changes no API file.** Verified twice with
+`git diff develop...HEAD -- flashml-cloud/apps/api/` — empty, both before and
+after the merge. So nothing here *should* touch it. But "should" is the word this
+document has spent 900 lines distrusting: the branch carries a merge commit, the
+merge resolved conflicts, and an isolated worktree means **nothing in it has ever
+been run against the API suite at all**. A green web suite is a claim about the
+web suite.
+
+**Do not reuse a number from this document as evidence.** Every figure here —
+web `1082 / 62` at the last merge, api `2799` measured by a peer — was true when
+written and is a snapshot, not a fact about now. Measure at the moment you land,
+and state the scope beside the number.
+
 ## 8. Decision log
 
 Appended as decisions are made. Newest last.
