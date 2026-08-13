@@ -174,6 +174,25 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-12 — Verify the vision-led Zolli landing (flashml-cloud, web verification)
+What/why: Verified the completed vision-led landing slices: the coordinator-map
+SVG/source boundary remains unchanged, the landing distinguishes current early
+testing (Zolli credits; no host cash payout) from the network vision, and both
+conversion paths remain routed to the existing console and machine flows.
+How verified: `npm test` — 50 files / 825 tests passed; `npx tsc --noEmit
+  --incremental false`; `npm run lint`; canonical-environment `npx next
+  typegen`; and canonical-environment `npm run build` (32/32 static pages)
+  all exited 0. `git diff --name-only $(git merge-base develop HEAD)..HEAD --
+  flashml-cloud/apps/web/components/landing/coordinator-map
+  flashml-cloud/apps/web/lib/coordinator-map.ts` printed nothing, and `git
+  diff --check` passed. Chrome inspection at effective 1600x1000 desktop and
+  433x938 mobile found readable copy, stable H1/map geometry, no horizontal
+  overflow, the unchanged map, and `/workspaces` plus `/account/machines`
+  closing routes. The browser could not emulate reduced motion, so that visual
+  state was not claimed; its CSS/test coverage is recorded in the task report.
+Next: Perform a real OS-level reduced-motion visual check before release, then
+  deploy the approved landing when the product owner is ready.
+
 ### 2026-08-12 — Define the vision-led Zolli landing story (flashml-cloud, web design)
 What/why: Reframed the landing from fault-tolerance mechanics to the open
 compute-allocation network Zolli is building: people seeking competitively
