@@ -14,6 +14,7 @@ import { JobResultCard } from "@/components/jobs/JobResultCard";
 import { CheckpointsCard } from "@/components/jobs/CheckpointsCard";
 import { RoutingCard } from "@/components/jobs/RoutingCard";
 import { TradeoffCard } from "@/components/jobs/TradeoffCard";
+import { VerificationCard } from "@/components/jobs/VerificationCard";
 import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
 import {
   deriveAttempts,
@@ -665,6 +666,12 @@ function ProgressView({
           exists, and it was the one thing this page never said. Renders
           nothing when there is no task breakdown to say it about. */}
       <CheckpointsCard panel={checkpoints} />
+
+      {/* Same family as the checkpoint card directly above it — a per-task
+          reading of the coordinator's own evidence, advisory rather than a
+          verdict on the run. Polls only while the job is not terminal; a
+          finished job's verdicts do not change underneath it. */}
+      <VerificationCard jobId={job.job_id} active={!TERMINAL.has(job.state)} />
 
       {/* Renders nothing for a job with no recorded contributions — most
           jobs, since this data only exists for a pool job. */}
