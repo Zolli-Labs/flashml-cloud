@@ -50,6 +50,11 @@
   --color-surface-elevated: var(--surface-elevated);
   --color-bg-rail: var(--bg-rail);
   --color-accent-text: var(--accent-text);
+  /* Without this, `bg-skeleton` generates NOTHING — same failure mode as the
+     `--color-popover` note above and the `--color-muted` one that
+     `lib/theme-tokens.test.ts` was written for. `lib/loading-token.test.ts`
+     asserts against the COMPILED output, because source alone cannot catch it. */
+  --color-skeleton: var(--skeleton);
 }
 
 /* Zolli's product register is warm mineral light. The marketing route
@@ -110,6 +115,16 @@
   --focus: var(--z-orange);
   --ring: var(--focus);
   --accent-text: var(--brand-hover);
+
+  /* The loading surface, and deliberately NOT `--surface-2`.
+     `--surface-2` is #f0eee8 against a --cream #f1efe9 page: one value per
+     channel. `components/ui/skeleton.tsx` painted `bg-muted` (which resolves
+     through `--surface-2`) and was therefore invisible — a panel mid-load
+     looked like a panel that was empty, which is exactly the distinction the
+     honesty rules require the UI to keep. This value is the one the working
+     `.skeleton` class already used as a bare hex; it is a token now so both
+     the class and the primitive read from one place. */
+  --skeleton: #eee5dc;
 
   /* Migration shims for unconverted console components. Do not use in new
      UI; pages will move to `brand` and `evergreen` as they are reskinned. */
@@ -890,7 +905,7 @@ body [class~="hover:bg-white/[0.08]"]:hover {
 .skeleton {
   position: relative;
   overflow: hidden;
-  background: #eee5dc;
+  background: var(--skeleton);
   border-radius: var(--radius-sm);
 }
 
