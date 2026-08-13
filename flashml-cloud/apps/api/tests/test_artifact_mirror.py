@@ -30,25 +30,35 @@ from flashml_cloud_api.artifact_mirror import (
     ACCEPTED_TASK,
     ALREADY_MIRRORED,
     CONTROL_PLANE,
+    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_MANIFEST_SCHEMA,
     FOREIGN,
     MANIFEST_SCHEMA,
+    MIRROR_DIR,
     MIRRORED,
+    NO_DIAGNOSTICS,
     NOT_CONFIGURED,
     RESERVED,
     UNACCEPTED_TASK,
     MirrorError,
+    build_diagnostics_manifest,
     build_manifest,
     classify_key,
+    diagnostics_manifest_key,
     etag_matches,
+    failed_task_ids,
     manifest_covers,
     manifest_key,
+    mirror_diagnostics,
     mirror_job,
     mirror_jobs,
+    parse_diagnostics_manifest,
     parse_manifest,
     presign_job_artifacts,
     presign_mirrored_artifact,
     reserved_collision,
     select_accepted_keys,
+    select_failed_keys,
     unmirror_job,
     valid_job_id,
     verify_job,
@@ -386,6 +396,264 @@ def test_a_manifest_covering_a_different_key_set_does_not_count():
     payload = json.loads(build_manifest(JOB, [], ("t",)))
     assert manifest_covers(payload, [])
     assert not manifest_covers(payload, [f"jobs/{JOB}/t/x"])
+
+
+# -- diagnostics: a FAILED task's debris, mirrored SEPARATELY -----------------
+#
+# Build #12 (owner-approved, 2026-08-13-architectural-pieces-design.md §4a):
+# `mirror_job` is accepted-work-only by hard rule 4, so a FAILED task's
+# stderr/diagnostics never reach OSS and vanish the moment the coordinator
+# forgets the job. `mirror_diagnostics` is the parallel, clearly-labelled
+# record that saves them anyway — under its own `_diagnostics/` prefix, with
+# its own manifest schema, never touching `_mirror/manifest.json`. The
+# accepted manifest feeds billing/goodput accounting, so every test below
+# that mirrors both halves re-checks that the accepted one stayed untouched.
+
+
+FAILED_KEYS = [f"jobs/{JOB}/shard-001/logs/stderr.txt"]
+
+
+def test_a_failed_tasks_output_is_selected_for_diagnostics():
+    source = a_job()
+    listing = [{"key": k, "size_bytes": len(v)} for k, v in source.blobs.items()]
+    assert select_failed_keys(JOB, listing, source.tasks) == FAILED_KEYS
+
+
+@pytest.mark.parametrize("state", ["COMPLETED", "PENDING", "LEASED", "CANCELLED"])
+def test_no_other_task_state_is_selected_for_diagnostics(state):
+    # Deliberately narrower than "not accepted": a PENDING/LEASED task may
+    # still be writing, and CANCELLED is an operator decision, not a failure
+    # anyone is investigating. Only FAILED, exactly, is diagnosable.
+    tasks = {"shard-000": state}
+    listing = [{"key": f"jobs/{JOB}/shard-000/x", "size_bytes": 1}]
+    assert select_failed_keys(JOB, listing, tasks) == []
+
+
+def test_control_plane_output_is_never_selected_for_diagnostics():
+    # `round-000/weights.json` belongs to no task at all — it cannot be "why
+    # did THIS task fail" no matter what any task's state is.
+    tasks = {"shard-000": "FAILED"}
+    listing = [{"key": f"jobs/{JOB}/round-000/weights.json", "size_bytes": 3}]
+    assert select_failed_keys(JOB, listing, tasks) == []
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_mirror_copies_the_failed_tasks_artifacts():
+    source, oss = a_job(), FakeOSS()
+    result = await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+
+    assert result.state == MIRRORED
+    assert result.mirrored
+    assert result.failed_tasks == ("shard-001",)
+    assert [o.key for o in result.objects] == FAILED_KEYS
+    for key in FAILED_KEYS:
+        assert oss.objects[key] == source.blobs[key]
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_land_under_their_own_reserved_prefix():
+    source, oss = a_job(), FakeOSS()
+    await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+
+    dkey = diagnostics_manifest_key(JOB)
+    assert dkey == f"jobs/{JOB}/{DIAGNOSTICS_DIR}/manifest.json"
+    assert dkey in oss.objects
+    # Never under the accepted mirror's own reserved directory.
+    assert not dkey.startswith(f"jobs/{JOB}/{MIRROR_DIR}/")
+
+
+@pytest.mark.asyncio
+async def test_the_accepted_manifest_stays_accepted_only_after_diagnostics_mirror():
+    """The invariant this whole feature is built around not breaking. Both
+    halves run against the same job; the accepted record must come out
+    identical to what it would be with no diagnostics mirror at all."""
+    source, oss = a_job(), FakeOSS()
+
+    await mirror_job(JOB, source, FakeSettings(), oss=oss)
+    await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+
+    accepted = json.loads(oss.objects[manifest_key(JOB)])
+    accepted_keys = {o["key"] for o in accepted["objects"]}
+    assert accepted_keys == set(ACCEPTED_KEYS)
+    assert accepted_keys.isdisjoint(FAILED_KEYS)
+    assert all(k not in accepted_keys for k in FAILED_KEYS)
+    # And the failed debris really did land somewhere — this is not a test
+    # that passes because nothing was mirrored at all.
+    assert diagnostics_manifest_key(JOB) in oss.objects
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_mirroring_leaves_the_accepted_manifest_untouched_even_run_first():
+    """Order independence: run diagnostics before the accepted mirror and the
+    accepted manifest — once it exists — still names only accepted keys."""
+    source, oss = a_job(), FakeOSS()
+
+    await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    await mirror_job(JOB, source, FakeSettings(), oss=oss)
+
+    accepted = json.loads(oss.objects[manifest_key(JOB)])
+    assert {o["key"] for o in accepted["objects"]} == set(ACCEPTED_KEYS)
+
+
+@pytest.mark.asyncio
+async def test_a_job_with_no_failed_tasks_writes_no_diagnostics_manifest():
+    source = FakeSource(
+        {"shard-000": "COMPLETED"},
+        {f"jobs/{JOB}/shard-000/metrics.json": b"{}"},
+    )
+    oss = FakeOSS()
+
+    result = await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+
+    assert result.state == NO_DIAGNOSTICS
+    assert result.objects == ()
+    assert not result.mirrored
+    # Absent, not an empty-but-present record.
+    assert diagnostics_manifest_key(JOB) not in oss.objects
+    assert oss.puts == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_task_with_no_artifacts_still_writes_no_manifest():
+    """The other way a diagnostics mirror can have nothing to certify: the
+    task is FAILED, but its lease died before writing a single byte."""
+    source = FakeSource({"shard-000": "COMPLETED", "shard-001": "FAILED"}, {
+        f"jobs/{JOB}/shard-000/metrics.json": b"{}",
+    })
+    oss = FakeOSS()
+
+    result = await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+
+    assert result.state == NO_DIAGNOSTICS
+    assert result.failed_tasks == ("shard-001",)
+    assert diagnostics_manifest_key(JOB) not in oss.objects
+
+
+def test_the_diagnostics_manifest_carries_its_own_schema_and_a_non_accepted_marker():
+    payload = json.loads(build_diagnostics_manifest(JOB, [], ("shard-001",)))
+    assert payload["schema"] == DIAGNOSTICS_MANIFEST_SCHEMA
+    assert payload["schema"] != MANIFEST_SCHEMA
+    assert payload["accepted"] is False
+    assert payload["failed_tasks"] == ["shard-001"]
+
+
+def test_an_accepted_manifest_does_not_parse_as_a_diagnostics_manifest():
+    accepted = build_manifest(JOB, [], ("shard-000",))
+    assert parse_diagnostics_manifest(accepted) is None
+
+
+def test_a_diagnostics_manifest_does_not_parse_as_an_accepted_manifest():
+    diagnostics = build_diagnostics_manifest(JOB, [], ("shard-001",))
+    assert parse_manifest(diagnostics) is None
+
+
+@pytest.mark.asyncio
+async def test_mirroring_diagnostics_twice_copies_nothing_the_second_time():
+    source, oss = a_job(), FakeOSS()
+    first = await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    oss.puts.clear()
+    second = await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+
+    assert second.state == ALREADY_MIRRORED
+    assert oss.puts == []
+    assert second.objects == first.objects
+    assert second.failed_tasks == first.failed_tasks
+
+
+@pytest.mark.asyncio
+async def test_mirroring_diagnostics_twice_reads_nothing_from_the_coordinator_twice():
+    source, oss = a_job(), FakeOSS()
+    await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    source.reads.clear()
+    await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    assert source.reads == []
+
+
+@pytest.mark.asyncio
+async def test_a_newly_failed_task_re_mirrors_its_diagnostics():
+    source, oss = a_job(), FakeOSS()
+    await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    source.tasks["shard-000"] = "FAILED"
+    source.blobs[f"jobs/{JOB}/shard-000/logs/stderr.txt"] = b"second failure\n"
+
+    result = await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+
+    assert result.state == MIRRORED
+    assert result.failed_tasks == ("shard-000", "shard-001")
+    assert f"jobs/{JOB}/shard-000/logs/stderr.txt" in oss.objects
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_oss_mirrors_no_diagnostics_and_asks_nobody():
+    source = a_job()
+    result = await mirror_diagnostics(JOB, source, FakeSettings(oss_configured=False))
+    assert result.state == NOT_CONFIGURED
+    assert result.objects == ()
+    assert not result.mirrored
+    assert source.reads == []
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_refuse_a_job_the_coordinator_does_not_know():
+    source, oss = FakeSource({}, {}), FakeOSS()
+    with pytest.raises(MirrorError, match="no tasks"):
+        await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    assert oss.objects == {}
+
+
+def test_reserved_collision_now_also_guards_the_diagnostics_directory():
+    assert reserved_collision({DIAGNOSTICS_DIR: "FAILED"}) == DIAGNOSTICS_DIR
+    assert reserved_collision({MIRROR_DIR: "COMPLETED"}) == MIRROR_DIR
+    assert reserved_collision({"shard-000": "FAILED"}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_task_named_like_the_diagnostics_directory_refuses_the_whole_job():
+    source, oss = a_job(tasks={DIAGNOSTICS_DIR: "FAILED"}), FakeOSS()
+    with pytest.raises(MirrorError, match="collide"):
+        await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    with pytest.raises(MirrorError, match="collide"):
+        await mirror_job(JOB, source, FakeSettings(), oss=oss)
+
+
+def test_a_key_under_the_diagnostics_directory_is_reserved_not_control_plane():
+    """The hardening this feature adds to `classify_key`: without it, a key
+    under `_diagnostics/` would have no matching task id and would be
+    classified CONTROL_PLANE — which is mirrored into the ACCEPTED manifest.
+    That would be exactly the leak this feature must not create."""
+    assert classify_key(JOB, diagnostics_manifest_key(JOB), {}) == RESERVED
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_job_id_never_reaches_oss_for_diagnostics():
+    oss = FakeOSS()
+    with pytest.raises(MirrorError, match="malformed"):
+        await mirror_diagnostics("../escape", a_job(), FakeSettings(), oss=oss)
+    assert oss.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_diagnostics_manifest_is_re_mirrored_not_trusted():
+    source, oss = a_job(), FakeOSS()
+    await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    oss.objects[diagnostics_manifest_key(JOB)] = b"{ this is not json"
+    result = await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    assert result.state == MIRRORED
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_diagnostics_mirror_leaves_no_manifest():
+    source, oss = a_job(), FakeOSS()
+    oss.fail_on = {f"jobs/{JOB}/shard-001/logs/stderr.txt"}
+    with pytest.raises(MirrorError):
+        await mirror_diagnostics(JOB, source, FakeSettings(), oss=oss)
+    assert diagnostics_manifest_key(JOB) not in oss.objects
+
+
+def test_failed_task_ids_matches_the_exact_failed_state():
+    assert failed_task_ids(
+        {"a": "FAILED", "b": "COMPLETED", "c": "CANCELLED"}
+    ) == ("a",)
 
 
 # -- integrity ----------------------------------------------------------------

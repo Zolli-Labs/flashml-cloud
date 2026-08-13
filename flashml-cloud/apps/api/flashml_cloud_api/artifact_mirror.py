@@ -84,6 +84,23 @@ NO CREDENTIAL EVER LEAVES THIS PROCESS. Consumers of a mirrored artifact get
 The OSS key pair is held by the control plane and by nothing else; a sandbox
 running user ML code receives URLs (see ``alibaba_oss``'s module docstring on
 why, and on re-minting them after a hibernation).
+
+THE DIAGNOSTICS SIBLING (build #12, owner-approved 2026-08-13; see
+``docs/superpowers/specs/2026-08-13-architectural-pieces-design.md`` §4).
+Rule 2 above means a FAILED task's stderr — the "why did it fail" bytes —
+is never in ``jobs/{job_id}/_mirror/manifest.json``, by design: that manifest
+feeds billing and goodput accounting, and must stay provably accepted-only.
+But that leaves those bytes reachable only while the coordinator remembers
+the job, which is exactly the durability gap this module exists to close for
+everything else. ``mirror_diagnostics`` is the resolution: a SEPARATE
+function that copies a FAILED task's output under its OWN reserved prefix
+(``jobs/{job_id}/_diagnostics/``), certified by its OWN manifest
+(``DIAGNOSTICS_MANIFEST_SCHEMA``, carrying an explicit ``"accepted": false``)
+— never written to, and never read from, ``_mirror/manifest.json``. Same
+discipline throughout: parts first, manifest last, sha256-verified,
+idempotent, and silent (no manifest at all, not an empty one) when there is
+nothing FAILED to certify. Presenting these to a browser is a separate,
+later change; this module only makes the bytes survive.
 """
 from __future__ import annotations
 
@@ -118,8 +135,41 @@ MANIFEST_SCHEMA = "flashml.artifact-mirror/v1"
 MIRROR_DIR = "_mirror"
 MANIFEST_NAME = "manifest.json"
 
+#: Manifest format for the DIAGNOSTICS side — a FAILED task's stderr, logs,
+#: whatever debris its attempt left behind. A different schema string from
+#: ``MANIFEST_SCHEMA`` on purpose: the two are never supposed to parse as
+#: each other, and ``parse_manifest``/``parse_diagnostics_manifest`` each
+#: check theirs and reject the other's. See the module docstring's design
+#: note (``2026-08-13-architectural-pieces-design.md`` §4) for why this is a
+#: SEPARATE, non-accepted record rather than a fourth ``classify_key`` verdict
+#: folded into the accepted manifest: the accepted manifest feeds
+#: billing/goodput accounting and must stay provably accepted-only.
+DIAGNOSTICS_MANIFEST_SCHEMA = "flashml.artifact-diagnostics/v1"
+
+#: Reserved directory under a job's prefix, holding the diagnostics manifest
+#: and nothing else. Same shape and same reason as ``MIRROR_DIR`` — a task id
+#: never starts with ``_``, and ``reserved_collision``/``classify_key`` treat
+#: this one exactly like the accepted mirror's directory: a task that could
+#: write here could forge a "this is what failed" record.
+DIAGNOSTICS_DIR = "_diagnostics"
+
+#: Every underscore-prefixed directory this module reserves for itself.
+#: Checked as a set, not two separate ``==`` comparisons, so adding a third
+#: reserved directory later is a one-line change here rather than a hunt
+#: through every place ``MIRROR_DIR`` was compared by name.
+RESERVED_DIRS = frozenset({MIRROR_DIR, DIAGNOSTICS_DIR})
+
 #: The only task state whose output has been accepted. Repo hard rule 4.
 ACCEPTED_TASK_STATE = "COMPLETED"
+
+#: The one task state whose output the diagnostics side mirrors. Deliberately
+#: narrower than "anything but ACCEPTED_TASK_STATE": that would sweep in
+#: ``PENDING``/``LEASED`` (an attempt that may still be writing — mirroring
+#: its partial bytes as "why it failed" would be wrong on its face) and
+#: ``CANCELLED`` (an operator or scheduler decision, not a failure anyone is
+#: investigating). ``FAILED``, exactly, is the state whose bytes answer "why
+#: did this task fail".
+FAILED_TASK_STATE = "FAILED"
 
 
 class MirrorError(RuntimeError):
@@ -142,6 +192,12 @@ NOT_CONFIGURED = "not-configured"
 ALREADY_MIRRORED = "already-mirrored"
 #: Objects were copied and the manifest was written.
 MIRRORED = "mirrored"
+#: ``mirror_diagnostics`` only: no diagnostics manifest exists and none was
+#: written, because there was nothing to certify — either no task was
+#: FAILED, or a FAILED task left no bytes under its prefix. Absent is the
+#: honest record here, not an empty manifest a consumer would have to learn
+#: to treat as "nothing failed" rather than "we didn't check".
+NO_DIAGNOSTICS = "no-diagnostics"
 
 
 @dataclass(frozen=True)
@@ -189,6 +245,40 @@ class MirrorResult:
     @property
     def mirrored(self) -> bool:
         """Whether the artifacts are in OSS *now* — however they got there."""
+        return self.state in (MIRRORED, ALREADY_MIRRORED)
+
+
+@dataclass(frozen=True)
+class DiagnosticsMirrorResult:
+    """What one ``mirror_diagnostics`` call did.
+
+    A separate type from ``MirrorResult``, deliberately, so nothing can pass
+    a FAILED task's debris to a function expecting accepted output by
+    matching shape alone. ``failed_tasks`` must never be read as
+    ``accepted_tasks`` — the fields have different names for that reason —
+    and ``NO_DIAGNOSTICS`` has no analogue on the accepted side: a job with
+    nothing accepted is refused (``mirror_job``'s empty-task-listing guard),
+    but a job with nothing FAILED is the ordinary, hoped-for case and not an
+    error.
+    """
+
+    job_id: str
+    state: str
+    objects: tuple[MirroredObject, ...] = ()
+    failed_tasks: tuple[str, ...] = ()
+    manifest_key: str | None = None
+
+    @property
+    def object_count(self) -> int:
+        return len(self.objects)
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(o.size_bytes for o in self.objects)
+
+    @property
+    def mirrored(self) -> bool:
+        """Whether diagnostics are in OSS *now* — however they got there."""
         return self.state in (MIRRORED, ALREADY_MIRRORED)
 
 
@@ -299,6 +389,12 @@ def manifest_key(job_id: str) -> str:
     return f"{job_prefix(job_id)}{MIRROR_DIR}/{MANIFEST_NAME}"
 
 
+def diagnostics_manifest_key(job_id: str) -> str:
+    """Where the diagnostics record lives — a sibling of ``manifest_key``,
+    never mixed into it. ``jobs/{id}/_diagnostics/manifest.json``."""
+    return f"{job_prefix(job_id)}{DIAGNOSTICS_DIR}/{MANIFEST_NAME}"
+
+
 def accepted_task_ids(task_states: dict[str, str]) -> tuple[str, ...]:
     """The tasks whose commit the coordinator accepted, sorted.
 
@@ -313,22 +409,42 @@ def accepted_task_ids(task_states: dict[str, str]) -> tuple[str, ...]:
     )
 
 
+def failed_task_ids(task_states: dict[str, str]) -> tuple[str, ...]:
+    """The tasks whose attempt the coordinator reports FAILED, sorted.
+
+    Exact string match on ``FAILED_TASK_STATE`` — the diagnostics-side
+    sibling of ``accepted_task_ids``, and for the same reason: an unknown
+    future state must not silently start being treated as diagnosable, any
+    more than it should silently start being treated as accepted.
+    """
+    return tuple(
+        sorted(t for t, s in task_states.items() if s == FAILED_TASK_STATE)
+    )
+
+
 def reserved_collision(task_states: dict[str, str]) -> str | None:
-    """A task id that shares the manifest's directory name, or None.
+    """A task id that shares a reserved directory's name, or None.
 
     Never expected: task ids are minted by the coordinator's expanders as
     ``trial-000`` / ``shard-000`` / ``it00-shard-000``. And ``classify_key``
-    already refuses to mirror anything under ``_mirror/`` whatever wrote it,
-    so this is the second of two guards rather than the only one. It is here
-    because the failure it prevents — a task's own upload being mistaken for
-    the object that certifies a mirror complete — is not one to leave resting
-    on a naming convention in another repo, and because refusing the whole
-    job is a legible outcome where silently skipping one key is not.
+    already refuses to mirror anything under a reserved directory whatever
+    wrote it, so this is the second of two guards rather than the only one.
+    It is here because the failure it prevents — a task's own upload being
+    mistaken for the object that certifies a mirror complete — is not one to
+    leave resting on a naming convention in another repo, and because
+    refusing the whole job is a legible outcome where silently skipping one
+    key is not. Covers ``DIAGNOSTICS_DIR`` too: a task able to write
+    ``…/_diagnostics/manifest.json`` could forge a diagnostics record the
+    same way one writing ``…/_mirror/manifest.json`` could forge an accepted
+    one.
 
-    Checked against EVERY task, not just the accepted ones: a task that
-    failed still chose that name.
+    Checked against EVERY task, not just the accepted or failed ones: a task
+    that failed still chose that name, and so did one still pending.
     """
-    return MIRROR_DIR if MIRROR_DIR in task_states else None
+    for name in sorted(RESERVED_DIRS):
+        if name in task_states:
+            return name
+    return None
 
 
 #: ``classify_key`` verdicts. Only ``ACCEPTED_TASK`` and ``CONTROL_PLANE`` are
@@ -362,7 +478,7 @@ def classify_key(job_id: str, key: str, task_states: dict[str, str]) -> str:
         return FOREIGN
     rest = key[len(prefix):]
     head, _, _tail = rest.partition("/")
-    if not head or head == MIRROR_DIR:
+    if not head or head in RESERVED_DIRS:
         return RESERVED
     state = task_states.get(head)
     if state is None:
@@ -409,6 +525,34 @@ def select_accepted_keys(
     return sorted(keys)
 
 
+def select_failed_keys(
+    job_id: str,
+    listing: list[dict[str, Any]],
+    task_states: dict[str, str],
+) -> list[str]:
+    """The keys from ``listing`` that belong to a FAILED task, sorted and
+    de-duplicated — the debris ``select_accepted_keys`` deliberately drops.
+
+    Deliberately narrower than "everything ``select_accepted_keys`` excludes":
+    that set also holds ``PENDING``/``LEASED`` output (an attempt that may
+    still be writing) and control-plane output (belongs to no task, so it
+    cannot answer "why did THIS task fail"). Only a key whose task is FAILED,
+    exactly, is diagnostics.
+    """
+    prefix = job_prefix(job_id)
+    keys: set[str] = set()
+    for entry in listing:
+        key = entry.get("key")
+        if not isinstance(key, str) or not key.startswith(prefix):
+            continue
+        head, _, _tail = key[len(prefix):].partition("/")
+        if not head or head in RESERVED_DIRS:
+            continue
+        if task_states.get(head) == FAILED_TASK_STATE:
+            keys.add(key)
+    return sorted(keys)
+
+
 # -- the manifest ------------------------------------------------------------
 
 
@@ -447,6 +591,45 @@ def build_manifest(
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
 
+def build_diagnostics_manifest(
+    job_id: str,
+    objects: list[MirroredObject],
+    failed: tuple[str, ...],
+    *,
+    now: datetime | None = None,
+) -> bytes:
+    """The diagnostics record, serialised. ``build_manifest``'s sibling, never
+    its substitute.
+
+    ``"accepted": False`` is written unconditionally, the same way
+    ``build_manifest`` writes ``"complete": True`` unconditionally — not a
+    field a caller could ever set the other way, so its presence is a marker
+    a reader can trust rather than a claim someone made about this call.
+    Combined with ``DIAGNOSTICS_MANIFEST_SCHEMA`` (never equal to
+    ``MANIFEST_SCHEMA``), a consumer has two independent reasons to refuse to
+    read this as accepted output — schema mismatch and an explicit
+    ``accepted: false`` — rather than one that could be typo'd away.
+
+    Sorted keys and a stable separator, same reason as ``build_manifest``:
+    the same inputs must serialise to the same bytes for the idempotence
+    check that reads this back to mean anything.
+    """
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    payload = {
+        "schema": DIAGNOSTICS_MANIFEST_SCHEMA,
+        "accepted": False,
+        "job_id": job_id,
+        "source": "coordinator-local-disk",
+        "mirrored_at": stamp.isoformat().replace("+00:00", "Z"),
+        "complete": True,
+        "failed_tasks": list(failed),
+        "object_count": len(objects),
+        "total_bytes": sum(o.size_bytes for o in objects),
+        "objects": [o.as_json() for o in sorted(objects, key=lambda o: o.key)],
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
 def parse_manifest(data: bytes) -> dict[str, Any] | None:
     """A manifest we are willing to trust, or None.
 
@@ -463,6 +646,44 @@ def parse_manifest(data: bytes) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     if payload.get("schema") != MANIFEST_SCHEMA:
+        return None
+    if payload.get("complete") is not True:
+        return None
+    objects = payload.get("objects")
+    if not isinstance(objects, list):
+        return None
+    for entry in objects:
+        if not isinstance(entry, dict):
+            return None
+        if not isinstance(entry.get("key"), str):
+            return None
+        if not isinstance(entry.get("sha256"), str):
+            return None
+        size = entry.get("size_bytes")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            return None
+    return payload
+
+
+def parse_diagnostics_manifest(data: bytes) -> dict[str, Any] | None:
+    """A diagnostics manifest we are willing to trust, or None.
+
+    ``parse_manifest``'s sibling, checking the diagnostics schema and the
+    explicit ``accepted: false`` marker instead of ``MANIFEST_SCHEMA`` — so a
+    manifest built by ``build_manifest`` fails this (wrong schema, no
+    ``accepted`` key) and one built by ``build_diagnostics_manifest`` fails
+    ``parse_manifest`` (wrong schema there too). Neither parser can be handed
+    the other's manifest and mistake it for its own.
+    """
+    try:
+        payload = json.loads(data)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema") != DIAGNOSTICS_MANIFEST_SCHEMA:
+        return None
+    if payload.get("accepted") is not False:
         return None
     if payload.get("complete") is not True:
         return None
@@ -687,6 +908,170 @@ async def mirror_job(
     )
 
 
+async def mirror_diagnostics(
+    job_id: str,
+    source: ArtifactSource,
+    settings: "Settings",
+    *,
+    oss: OSSArtifacts | None = None,
+    now: datetime | None = None,
+    correlation_id: str | None = None,
+) -> DiagnosticsMirrorResult:
+    """Copy one finished job's FAILED-task artifacts to OSS. Idempotent.
+
+    ``mirror_job``'s sibling for the debris hard rule 4 keeps off the accepted
+    record — the "why did it fail" bytes (a shard's ``stderr.txt``, whatever
+    else a dying attempt left under its own prefix) that would otherwise live
+    only on the coordinator's disk and vanish the moment it forgets the job.
+    See the module docstring and
+    ``docs/superpowers/specs/2026-08-13-architectural-pieces-design.md`` §4
+    for why this is a SEPARATE function writing a SEPARATE, clearly-marked
+    record rather than a change to ``mirror_job``'s selection: the accepted
+    manifest feeds billing and goodput accounting, and must stay provably
+    accepted-only. Nothing in this function ever touches ``manifest_key``,
+    ``MANIFEST_SCHEMA``, or the ``_mirror/`` directory — it writes under its
+    own reserved prefix (``diagnostics_manifest_key``,
+    ``DIAGNOSTICS_MANIFEST_SCHEMA``, ``_diagnostics/``) with its own
+    explicit ``"accepted": false`` marker, so nothing downstream can mistake
+    this record for accepted output even by accident.
+
+    **Call this only for a job the coordinator reports terminal** — the same
+    caller obligation ``mirror_job`` states, and for the same reason: nothing
+    here can tell a FAILED task's bytes are final from a task still writing
+    a fresh attempt at the same id.
+
+    **No manifest is written when there is nothing to certify** — no task is
+    FAILED, or every FAILED task left nothing under its own prefix. Absent is
+    the honest answer there: an empty-but-present manifest would read as "we
+    checked and nothing failed" when what actually happened is "there was
+    nothing to record", and a consumer should not have to learn to treat
+    those the same.
+
+    Raises ``MirrorError`` on any failure, having written no manifest — same
+    discipline as ``mirror_job``: log it, record nothing, let the next
+    observation retry.
+    """
+    chain = Chain(correlation_id=correlation_id, job_id=job_id)
+    if not settings.oss_configured:
+        return DiagnosticsMirrorResult(job_id=job_id, state=NOT_CONFIGURED)
+
+    if not valid_job_id(job_id):
+        raise MirrorError(f"refusing to mirror under a malformed job id: {job_id!r}")
+
+    if oss is None:
+        try:
+            oss = OSSArtifacts.from_settings(settings)
+        except OSSUnavailable as exc:
+            raise MirrorError(f"OSS is configured but unusable: {exc}") from exc
+
+    task_states = await source.task_states(job_id)
+    if not task_states:
+        # Same refusal as `mirror_job`, and for the same reason: `[]` means
+        # either "no tasks" or "never heard of this job", and certifying
+        # either verdict off that answer is a permanent claim built on a
+        # question that was never actually answered.
+        raise MirrorError(
+            f"coordinator reports no tasks for {job_id}; refusing to certify "
+            f"an empty diagnostics mirror"
+        )
+
+    collision = reserved_collision(task_states)
+    if collision is not None:
+        raise MirrorError(
+            f"job {job_id} has a task named {collision!r}, which would collide "
+            f"with a reserved mirror directory"
+        )
+
+    failed = failed_task_ids(task_states)
+    if not failed:
+        return DiagnosticsMirrorResult(job_id=job_id, state=NO_DIAGNOSTICS)
+
+    listing = await source.list_artifacts(job_id)
+    keys = select_failed_keys(job_id, listing, task_states)
+
+    mkey = diagnostics_manifest_key(job_id)
+    existing = await _read_diagnostics_manifest(oss, mkey, chain=chain)
+    if existing is not None and manifest_covers(existing, keys):
+        return DiagnosticsMirrorResult(
+            job_id=job_id,
+            state=ALREADY_MIRRORED,
+            objects=manifest_objects(existing),
+            failed_tasks=failed,
+            manifest_key=mkey,
+        )
+
+    if not keys:
+        # Every FAILED task left nothing under its own prefix — a lease that
+        # died before writing a single byte. There is still nothing to
+        # certify, so the answer is the same as "no task failed": no
+        # manifest, not an empty one.
+        return DiagnosticsMirrorResult(
+            job_id=job_id, state=NO_DIAGNOSTICS, failed_tasks=failed,
+        )
+
+    objects: list[MirroredObject] = []
+    for key in keys:
+        data = await source.read(key)
+        digest = _sha256(data)
+        try:
+            stored = await asyncio.to_thread(oss.put_bytes, key, data)
+        except Exception as exc:  # noqa: BLE001 - normalised, never swallowed
+            raise MirrorError(
+                f"could not mirror diagnostic {key}: {type(exc).__name__}"
+            ) from exc
+        verdict = etag_matches(stored.etag, data)
+        if verdict is False:
+            raise MirrorError(
+                f"OSS stored different bytes than were sent for {key}"
+            )
+        if verdict is None:
+            # Same omission as `mirror_job`'s equivalent line, and for the
+            # same reason: past `jobs/{job_id}/{task_id}/` a key is a path
+            # the submitted code chose, and a log is a publication
+            # (`PROGRESS.md` Rule 7). The task id here is one this system
+            # assigned and `select_failed_keys` already matched against
+            # `task_states`, so the line stays findable without the key.
+            task_id = key[len(job_prefix(job_id)):].partition("/")[0]
+            log_event(
+                log, "mirror.diagnostics.etag_unverifiable", level=logging.WARNING,
+                chain=replace(chain, task_id=task_id),
+                bytes=len(data),
+                reason="no_usable_etag",
+            )
+        if stored.size_bytes != len(data):
+            raise MirrorError(
+                f"OSS stored {stored.size_bytes} bytes for {key}, sent {len(data)}"
+            )
+        objects.append(
+            MirroredObject(key=key, size_bytes=len(data), sha256=digest)
+        )
+
+    # LAST, same discipline as `mirror_job`: everything above has to have
+    # succeeded to get here, and anything that did not raised, leaving
+    # objects in the bucket with no diagnostics manifest — readable as
+    # incomplete, retried on the next observation.
+    manifest = build_diagnostics_manifest(job_id, objects, failed, now=now)
+    try:
+        await asyncio.to_thread(oss.put_bytes, mkey, manifest)
+    except Exception as exc:  # noqa: BLE001 - normalised, never swallowed
+        raise MirrorError(
+            f"could not write the diagnostics manifest for {job_id}"
+        ) from exc
+
+    log_event(
+        log, "mirror.diagnostics.completed", chain=chain,
+        objects=len(objects),
+        bytes=sum(o.size_bytes for o in objects),
+    )
+    return DiagnosticsMirrorResult(
+        job_id=job_id,
+        state=MIRRORED,
+        objects=tuple(objects),
+        failed_tasks=failed,
+        manifest_key=mkey,
+    )
+
+
 async def mirror_jobs(
     job_ids: list[str],
     source: ArtifactSource,
@@ -794,6 +1179,27 @@ async def _read_manifest(
     if payload is None:
         log_event(
             log, "mirror.manifest_unreadable", level=logging.WARNING,
+            chain=chain, reason="unparseable_manifest", bytes=len(data),
+        )
+    return payload
+
+
+async def _read_diagnostics_manifest(
+    oss: OSSArtifacts, key: str, *, chain: Chain | None = None,
+) -> dict[str, Any] | None:
+    """``_read_manifest``'s sibling for the diagnostics side. Same ``head``
+    first, same reason: a transport failure must read as "could not check",
+    never as "nothing failed" — the second would re-run the diagnostics copy
+    on every poll while OSS was having a bad minute, same as the accepted
+    side would.
+    """
+    if await asyncio.to_thread(oss.head, key) is None:
+        return None
+    data = await asyncio.to_thread(oss.get_bytes, key)
+    payload = parse_diagnostics_manifest(data)
+    if payload is None:
+        log_event(
+            log, "mirror.diagnostics.manifest_unreadable", level=logging.WARNING,
             chain=chain, reason="unparseable_manifest", bytes=len(data),
         )
     return payload
