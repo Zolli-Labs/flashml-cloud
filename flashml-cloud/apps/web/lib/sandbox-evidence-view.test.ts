@@ -374,9 +374,11 @@ describe("the public share page", () => {
     ok({ session: SESSION, events: EVENTS });
     await renderPage();
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(
-      `http://localhost:8000/v1alpha1/public/sandbox-sessions/${SHARE_TOKEN}`
-    );
+    // The resolver moved to `/v1alpha1/public/share/{token}`, which answers
+    // for a session OR a job off one token space — the session-only route it
+    // replaced could not show the fault-tolerance story at all. The path is
+    // still one segment, so `middleware.ts`'s anchored rule is unchanged.
+    expect(url).toBe(`http://localhost:8000/v1alpha1/public/share/${SHARE_TOKEN}`);
     // No credential of any kind: this route answers without one, and
     // attaching one would make the page's own claim untrue.
     expect(init).toEqual({ cache: "no-store" });
