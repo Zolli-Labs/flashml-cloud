@@ -470,6 +470,55 @@ def test_the_jobs_list_settles_them_too(
     assert venue.live_handles() == []
 
 
+def test_deleting_a_finished_jobs_artifacts_settles_its_rental_too(
+    armed_client, db, an_owner, a_pool, transport, venue
+):
+    """The FOURTH place this API observes a job stopping, and the one the
+    module docstring's inventory used to miss.
+
+    It is also the strongest evidence of the four: ``app._require_stopped``
+    asks the coordinator directly, precisely because the local status column is
+    a cache. And it is reachable for a job whose page nobody ever opened —
+    which is exactly the rental the two poll-driven hooks cannot see. Somebody
+    freeing a finished job's outputs should not leave a rented GPU billing for
+    it.
+    """
+    token = _token(an_owner)
+    job_id = _submit(armed_client, token)
+    rid = _rent(db, owner_id=an_owner, pool_id=a_pool, job_id=job_id,
+                handle=venue.rent())
+    transport.finish(job_id)
+
+    r = armed_client.delete(
+        f"/v1alpha1/jobs/{job_id}/artifacts",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    assert _state(db, rid)["state"] == "RELEASED"
+    assert venue.live_handles() == []
+
+
+def test_deleting_the_artifacts_of_a_RUNNING_job_settles_nothing(
+    armed_client, db, an_owner, a_pool, transport, venue
+):
+    """The refusal comes first. A 409 must leave the rental exactly as it was:
+    the hook hangs below the coordinator's own verdict that the job stopped,
+    not beside it."""
+    token = _token(an_owner)
+    job_id = _submit(armed_client, token)
+    handle = venue.rent()
+    rid = _rent(db, owner_id=an_owner, pool_id=a_pool, job_id=job_id,
+                handle=handle)
+
+    r = armed_client.delete(
+        f"/v1alpha1/jobs/{job_id}/artifacts",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 409
+    assert _state(db, rid)["state"] == "ACTIVE"
+    assert venue.live_handles() == [handle]
+
+
 def test_the_default_deployment_reports_and_destroys_nothing(
     client, db, an_owner, a_pool, transport, venue
 ):
@@ -519,6 +568,47 @@ def test_the_deployed_app_runs_a_rented_capacity_reconciler(client):
     task = client.app.state.rented_capacity_reconciler
     assert isinstance(task, asyncio.Task)
     assert not task.done()
+
+
+def test_the_first_sweep_runs_on_the_startup_edge(
+    postgres_dsn, db, an_owner, a_pool, transport, venue
+):
+    """**A backstop that starts five minutes late is missing for the event it
+    exists for.**
+
+    The row here is created before the app is — the shape of a rental that
+    outlived the process that opened it. A redeploy is exactly what abandons
+    one mid-flight, and a process that redeploys or crash-loops more often than
+    FLASHML_RENTED_RECONCILE_S would never reach a first sweep at all if that
+    sweep waited an interval. It did wait, for a while, to keep
+    ``test_agent_proxy.py::test_anonymous_traffic_costs_no_database_connection``
+    green; that test now measures the per-request property it always described,
+    and this edge is back.
+    """
+    rid = _rent(db, owner_id=an_owner, pool_id=a_pool,
+                job_id="job-the-process-that-opened-me-is-gone",
+                handle=venue.rent())
+    with db.cursor() as cur:
+        # Old enough for ABANDONED: no machine was ever bound, and nobody is
+        # coming back for it.
+        cur.execute(
+            "update public.rented_capacity set "
+            "created_at = now() - make_interval(secs => 10800), "
+            "acquired_at = now() - make_interval(secs => 10800) where id = %s",
+            (rid,),
+        )
+
+    with _make_client(postgres_dsn, transport, {VENUE: venue}, destroy=True):
+        deadline = time.monotonic() + 10.0
+        while (time.monotonic() < deadline
+               and _state(db, rid)["state"] != "RELEASED"):
+            time.sleep(0.05)
+
+    assert _state(db, rid)["state"] == "RELEASED", (
+        "the startup sweep never ran: a redeploy's abandoned rental would "
+        "bill for a whole interval, and a crash loop for ever"
+    )
+    assert venue.live_handles() == []
 
 
 @pytest.mark.parametrize(

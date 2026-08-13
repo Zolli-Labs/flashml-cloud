@@ -2308,7 +2308,7 @@ def create_cloud_app(
             await asyncio.sleep(ephemeral_reconcile_s)
 
     async def _rented_capacity_loop() -> None:
-        """Sweep rented GPUs on a timer, for ever.
+        """Sweep rented GPUs at startup and then on a timer, for ever.
 
         **The only thing in this deployment that stops a rented machine
         billing.** `capacity.settle_finished_jobs` runs on the job routes and
@@ -2316,18 +2316,22 @@ def create_cloud_app(
         nobody. A redeploy is exactly the event that abandons a rental
         mid-flight, and the surviving evidence is a `rented_capacity` row.
 
-        THE FIRST SWEEP IS DELAYED BY ONE INTERVAL, following
-        `_ephemeral_machine_loop` above rather than `_reconcile_loop`, and the
-        reason is not cost — these rows ARE costing money during that first
-        interval, unlike the rental sessions that loop was written for. It is
-        that the agent routes are the public door and
-        `test_anonymous_traffic_costs_no_database_connection` pins that merely
-        starting this app opens no Postgres connection at all: a sweep on the
-        startup edge would open one before any credential had been checked.
-        Five minutes is well inside every teardown window
-        (`quiet_after_s` is fifteen, `boot_grace_s` sixty), so the trade costs
-        one interval of a redeploy's abandoned rental and keeps a property of
-        the front door that has nothing to do with rented GPUs.
+        BOTH EDGES, following `_reconcile_loop` above and not
+        `_ephemeral_machine_loop`. The startup edge is not a nicety here: a
+        process that redeploys or crash-loops more often than
+        FLASHML_RENTED_RECONCILE_S never reaches its first sweep AT ALL, and
+        the abandoned rental this loop exists for is created by exactly that
+        event. A crash-looping API with a rented GPU behind it is the shape of
+        the unbounded bill.
+
+        It was delayed by one interval for a while because a startup sweep
+        opens a Postgres connection before any request arrives, and
+        `test_anonymous_traffic_costs_no_database_connection` asserted that
+        merely starting the app opened none. That test's own subject is a PER
+        REQUEST property — an anonymous flood must not cost connections — and
+        one connection at startup, unreachable by any attacker, was never part
+        of it. The test now takes its baseline after startup and the sweep has
+        its edge back.
 
         Not gated on any venue being configured. With an empty registry the
         pass is one indexed query that reports what it cannot reach, and that
@@ -2339,8 +2343,6 @@ def create_cloud_app(
         backstop for the life of the process — and here that is the difference
         between a bounded bill and an unbounded one.
         """
-        if rented_reconcile_s > 0:
-            await asyncio.sleep(rented_reconcile_s)
         while True:
             conn = None
             try:
@@ -5316,6 +5318,18 @@ def create_cloud_app(
         # this column, so recording it here as well means a job whose only
         # visit was its deletion still counts.
         dbmod.sync_observed_job_states(db, [(job_id, str(state))])
+        # THE SETTLE HOOK, third site — see `capacity/settle.py`'s inventory of
+        # where a terminal state is observed at all. This one is the strongest
+        # evidence of the four: the coordinator was asked directly, just above,
+        # rather than a cached column being read. Somebody deleting a finished
+        # job's outputs should not leave a rented GPU billing for it, and the
+        # cost when there is no rental — the overwhelming majority — is one
+        # indexed lookup that matches nothing. Never raises, so it cannot turn
+        # a delete into a 500.
+        await capacitysettlemod.settle_finished_jobs(
+            db, capacity_providers, job_ids=[job_id],
+            dry_run=not rented_destroy,
+        )
 
     @app.delete("/v1alpha1/jobs/{job_id}/artifacts", tags=["browser"])
     async def delete_job_artifacts(

@@ -233,7 +233,23 @@ def test_anonymous_traffic_costs_no_database_connection(settings, postgres_dsn,
     """The agent routes are the public door: anyone on the internet can hit
     them. If resolving the request opened a Postgres connection *before*
     checking for a credential, an unauthenticated flood would exhaust the
-    connection pool for free."""
+    connection pool for free.
+
+    THE PROPERTY IS PER REQUEST, and the assertion used to be per PROCESS:
+    ``opened == []`` across the whole ``with TestClient(app)`` block, startup
+    included. Nothing about the front door needs that. An attacker controls how
+    many REQUESTS arrive, not how many times the process boots, so a fixed
+    handful of connections opened once at startup is not the resource this test
+    protects — and asserting the stronger thing had a cost paid somewhere else
+    entirely: it is why ``app._rented_capacity_loop`` gave up its startup
+    sweep, leaving a process that redeploys faster than
+    ``FLASHML_RENTED_RECONCILE_S`` never reaching a first sweep at all, with a
+    rented GPU billing behind it.
+
+    So the baseline is taken after startup and the assertion is about what the
+    anonymous requests did. What it proves about request handling is unchanged:
+    zero.
+    """
     opened = []
 
     def counting_connect():
@@ -244,12 +260,31 @@ def test_anonymous_traffic_costs_no_database_connection(settings, postgres_dsn,
 
     app = create_cloud_app(settings, connect=counting_connect, transport=transport)
     with TestClient(app) as c:
+        # The startup sweeps are background tasks, so "after startup" is not a
+        # moment TestClient hands back. Wait for the rented-capacity sweep's
+        # one connection rather than racing it: a baseline snapshotted before
+        # it lands would be indistinguishable from the failure this test looks
+        # for, and would make the test flaky in the direction that passes.
+        deadline = time.monotonic() + 10.0
+        while not opened and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert opened, (
+            "the rented-capacity sweep should have run on the startup edge "
+            "and opened exactly one connection"
+        )
+        at_startup = len(opened)
+
         for method, path in _agent_routes(app):
             c.request(method, path, content=b"{}")
         c.get("/v1alpha1/machines")
         c.get("/v1alpha1/me")
         c.post("/v1alpha1/device/approve", json={"user_code": "AAAAAAAA"})
-    assert opened == [], f"{len(opened)} connection(s) opened for anonymous traffic"
+        # Measured before the block exits, so shutdown cannot be mistaken for
+        # request handling.
+        during_requests = len(opened) - at_startup
+    assert during_requests == 0, (
+        f"{during_requests} connection(s) opened for anonymous traffic"
+    )
 
 
 def test_bearer_prefix_is_required(client, machine, transport):

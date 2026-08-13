@@ -26,6 +26,7 @@ feature.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 
@@ -1243,6 +1244,122 @@ async def test_a_rental_whose_job_is_over_is_swept_though_it_is_heartbeating(
     assert venue.live_handles() == []
 
 
+@pytest.mark.asyncio
+async def test_a_finished_job_never_sweeps_a_machine_holding_a_live_lease(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The reproduction that blocked arming.**
+
+    ``JOB_FINISHED`` had no in-flight guard at all: the guard was written
+    inside ``IDLE`` only, so a rental whose own job succeeded an hour ago, on a
+    machine holding an unresolved attempt for a DIFFERENT job with ten minutes
+    left on its lease, was selected — and armed, destroyed mid-task.
+
+    A rented machine sits in the submitter's own pool and is an eligible
+    claimant for that pool's OTHER jobs; the runtime is pull-based, so nothing
+    about "the job we rented it for" bounds what the machine is running now.
+    The test is one expression read by both cost branches, which is the only
+    shape in which it cannot go missing from one of them again.
+    """
+    venue = _Venue()
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    over = _job(db, an_owner, status="SUCCEEDED", finished_s=3600.0)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=machine_id, age_s=OLD, job_id=over,
+    )
+    _attempt(db, machine_id, job_id="job-somebody-elses", claimed_s=300.0,
+             resolved=False, deadline_s=-600.0)
+
+    assert rid not in _swept(db)
+    assert await reconcile_rented(db, {"fake": venue}) == []
+    assert venue.release_calls == []
+    assert len(venue.live_handles()) == 1
+
+    # ...and when that lease is finished, the rental is swept — correctly.
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts set resolved_at = now(), "
+            "outcome = 'accepted' where machine_id = %s", (machine_id,)
+        )
+    db.commit()
+    assert await reconcile_rented(db, {"fake": venue}) == [rid]
+    assert venue.live_handles() == []
+
+
+def test_a_machine_between_two_tasks_of_a_running_job_is_not_idle(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The second reproduction that blocked arming.**
+
+    The in-flight test protects a machine HOLDING a lease. A machine waiting
+    for its next one holds nothing at all, and waiting longer than
+    ``idle_after_s`` is ordinary: federated aggregation between rounds, a long
+    checkpoint upload, a straggler barrier, a coordinator with nothing queued
+    this instant. One attempt claimed twenty minutes ago and resolved, with the
+    job still ``RUNNING``, used to read as IDLE — a machine destroyed between
+    two tasks of a job that was still going.
+    """
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    job_id = _job(db, an_owner, status="RUNNING", finished_s=None)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-between-tasks",
+        machine_id=machine_id, age_s=OLD, job_id=job_id,
+    )
+    _attempt(db, machine_id, job_id=job_id, claimed_s=1200.0, resolved=True,
+             deadline_s=1140.0)
+    assert rid not in _swept(db)
+
+    # The same row, once the job's own state says it stopped. Note this is
+    # still IDLE and not JOB_FINISHED: the job finished a minute ago, inside
+    # the grace that branch measures, while the machine has been empty for
+    # twenty.
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.jobs set status = 'SUCCEEDED', finished_at = "
+            "now() - make_interval(secs => %s) where id = %s", (60.0, job_id)
+        )
+    db.commit()
+    assert {str(r["id"]): r["sweep_reason"] for r in unreleased_rows(db)}.get(
+        rid
+    ) == "IDLE"
+
+
+def test_the_price_of_that_guard_is_a_finished_job_nobody_observed(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The cost of the test above, pinned so nobody pays it by accident.**
+
+    ``jobs.status`` is a cache written only when somebody looks
+    (``db.sync_observed_job_states``), and routing around exactly that
+    staleness is why ``IDLE`` was invented. Consulting it costs that
+    independence back: a job that finished at 3am with nobody watching reads
+    ``RUNNING`` for ever, and its rental is now caught by neither cost branch.
+
+    That is a bounded, logged bill weighed against a silent, irreversible
+    destruction of somebody's running job, and it was taken deliberately. It is
+    a test rather than a comment because the next reader's instinct will be to
+    delete the guard, and this says what deleting it buys and what it costs.
+
+    The liveness branches still work, which is the floor under the trade: the
+    moment the machine stops talking, the rental goes.
+    """
+    machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
+    # Terminal at the coordinator hours ago; nobody ever opened the page, so
+    # this column has never been written.
+    job_id = _job(db, an_owner, status="RUNNING", finished_s=None)
+    rid = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle="h-unobserved",
+        machine_id=machine_id, age_s=OLD, job_id=job_id,
+    )
+    _attempt(db, machine_id, job_id=job_id, claimed_s=OLD, resolved=True,
+             deadline_s=OLD)
+    assert rid not in _swept(db)
+
+    _seen(db, machine_id, QUIET)
+    assert rid in _swept(db)
+
+
 def test_a_job_that_has_only_just_finished_keeps_the_idle_grace(
     db, an_owner, a_pool  # noqa: F811
 ):
@@ -1308,13 +1425,27 @@ def test_a_machine_running_one_long_task_is_never_idle(
     assert rid not in _swept(db, idle_after_s=60.0)
 
 
-def test_an_attempt_with_no_deadline_counts_as_work_in_flight_for_ever(
+def test_an_attempt_with_no_deadline_is_work_in_flight_but_not_for_ever(
     db, an_owner, a_pool  # noqa: F811
 ):
     """``lease_deadline`` is null for an attempt claimed before migration 0015
     or one whose claim response could not be parsed. ``reconcile_expired_
     attempts`` refuses to resolve such a row for the same reason this refuses
-    to sweep it: "we never learned when this lease ends" is not "it ended"."""
+    to sweep it: "we never learned when this lease ends" is not "it ended".
+
+    **And "it never ends" is not the answer either**, which is the half this
+    test grew. Read as eternal, one null-deadline attempt made its rental match
+    NO branch in this query, at any ``idle_after_s`` down to a second — and a
+    job nobody polls never goes terminal to catch it either, so nothing in the
+    system could stop that machine billing. The cautious reading arrived at the
+    same place as the careless one.
+
+    The bound is ``DEFAULT_UNKNOWN_DEADLINE_MAX_S`` from ``claimed_at``, and it
+    is an argument about evidence: every accepted heartbeat writes the deadline
+    (``db.note_attempt_deadline``) and the agent renews at a third of the lease
+    window, so hours of silence on that column is not a long task, it is a
+    record we never managed to write.
+    """
     machine_id = _machine(db, an_owner, status="active", last_seen_s=5.0)
     rid = _insert_row(
         db, owner_id=an_owner, pool_id=a_pool, handle="h-unknown-deadline",
@@ -1322,6 +1453,17 @@ def test_an_attempt_with_no_deadline_counts_as_work_in_flight_for_ever(
     )
     _attempt(db, machine_id, claimed_s=OLD, resolved=False, deadline_s=None)
     assert rid not in _swept(db)
+    # Not even at a one-second idle window: unknown outranks idleness.
+    assert rid not in _swept(db, idle_after_s=1.0)
+
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts set claimed_at = "
+            "now() - make_interval(secs => %s) where machine_id = %s",
+            (reconcile_mod.DEFAULT_UNKNOWN_DEADLINE_MAX_S + 60.0, machine_id),
+        )
+    db.commit()
+    assert rid in _swept(db)
 
 
 def test_a_deadline_long_past_is_not_evidence_of_work(
@@ -1445,6 +1587,99 @@ async def test_a_dry_run_reports_and_destroys_nothing(
     # ...and armed, the same pass does the work.
     assert await reconcile_rented(db, {"fake": venue}) == [rid]
     assert venue.live_handles() == []
+
+
+@pytest.mark.asyncio
+async def test_a_log_only_pass_still_ends_a_finished_rentals_lease(
+    db, an_owner, a_pool  # noqa: F811
+):
+    """**The one thing a dry run does, and why it is not a hole in the gate.**
+
+    ``dry_run`` exists because destroying a machine is irreversible and can
+    take a running job with it. Revoking the credential of a rental that is
+    ALREADY over destroys nothing at any venue: it touches our own row and our
+    own token, both describing hardware we have already handed back. There is
+    no irreversible act to withhold and no report to read first.
+
+    Meanwhile it is the only thing in this system that ends a lease at all —
+    D6 removed the isolation assertion that used to make a leftover binding
+    fail loudly — so behind the gate, the shipped default was a deployment
+    where leases never end. The money half is still untouched below, which is
+    what makes this a split rather than a weakening.
+    """
+    venue = _Venue()
+    finished_m = _machine(db, an_owner, status="active", pool_id=a_pool)
+    _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, state="RELEASED",
+        handle="h-done", machine_id=finished_m,
+    )
+    live_m = _machine(db, an_owner, status="active", last_seen_s=QUIET)
+    live = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=live_m, age_s=OLD,
+    )
+
+    assert await reconcile_rented(db, {"fake": venue}, dry_run=True) == []
+
+    # The money half: nothing destroyed, nothing annotated, nothing revoked.
+    assert venue.release_calls == []
+    assert len(venue.live_handles()) == 1
+    assert _row(db, live)["state"] == "ACTIVE"
+    assert _row(db, live)["failure_code"] is None
+    assert _machine_status(db, live_m) == "active"
+
+    # The lease half: over is over, log-only or not.
+    assert _machine_status(db, finished_m) == "revoked"
+    assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == []
+
+
+@pytest.mark.asyncio
+async def test_the_dry_run_headline_counts_what_arming_would_destroy(
+    db, an_owner, a_pool, caplog  # noqa: F811
+):
+    """The number an operator reads before arming the sweep.
+
+    It used to be "would destroy N rental(s)" for N = every row the query
+    matched, which over-states it in the direction that matters. An armed pass
+    destroys nothing at a venue it has no adapter for, and nothing it cannot
+    name — a handleless row is annotated and left, deliberately. With the
+    production registry empty, the old headline claimed every row and the true
+    answer was zero.
+    """
+    venue = _Venue()
+    reachable_m = _machine(db, an_owner, status="active", last_seen_s=QUIET)
+    reachable = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, handle=venue.rent(),
+        machine_id=reachable_m, age_s=OLD,
+    )
+    handleless = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, state="REQUESTED", handle=None,
+    )
+    orphan_m = _machine(db, an_owner, status="active", last_seen_s=QUIET)
+    orphan = _insert_row(
+        db, owner_id=an_owner, pool_id=a_pool, venue_id="a-venue-nobody-wired",
+        handle="h-unknown", machine_id=orphan_m, age_s=OLD,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=reconcile_mod.log.name):
+        assert await reconcile_rented(db, {"fake": venue}, dry_run=True) == []
+
+    headline = [r for r in caplog.records if "LOG ONLY" in str(r.msg)][-1]
+    selected, would, cannot, would_rows, cannot_rows = headline.args
+    assert selected == would + cannot
+    assert would == len(would_rows) and cannot == len(cannot_rows)
+
+    by_id = {e["rented_id"] for e in would_rows}
+    unreachable = {e["rented_id"] for e in cannot_rows}
+    assert reachable in by_id
+    # Neither of these is a machine an armed pass could destroy, and counting
+    # them was the whole bug.
+    assert {handleless, orphan} <= unreachable
+    assert not ({handleless, orphan} & by_id)
+
+    # ...and the pass still wrote nothing.
+    assert _row(db, handleless)["failure_code"] is None
+    assert _row(db, reachable)["state"] == "ACTIVE"
 
 
 def test_the_plan_says_which_rows_no_configured_venue_can_reach(

@@ -10,12 +10,30 @@ WHERE "THE JOB FINISHED" ACTUALLY ARRIVES, AND WHY IT IS NOT A CALLBACK
 It arrives on a **page poll**. The runtime is pull-based and this API is a
 thin wrapper over it: a machine claims leases and commits work against the
 coordinator, and the coordinator finishes a job without telling us. Nothing
-calls in. The only places this process observes a terminal state are
-``GET /v1alpha1/jobs`` and ``GET /v1alpha1/jobs/{id}`` in ``app.py``, where the
-coordinator's own answer is already in hand -- which is why
-``db.sync_observed_job_states`` exists at all, and why ``app.py`` says of the
-detail route that it is "THE ONLY PLACE A NON-FEDERATED JOB IS EVER OBSERVED
-TO HAVE STOPPED".
+calls in. Four places in this process ever observe a job's terminal state, and
+every one of them is somebody's request:
+
+* ``GET /v1alpha1/jobs`` and ``GET /v1alpha1/jobs/{id}`` in ``app.py``, where
+  the coordinator's own answer is already in hand -- which is why
+  ``db.sync_observed_job_states`` exists at all, and why ``app.py`` says of the
+  detail route that it is "THE ONLY PLACE A NON-FEDERATED JOB IS EVER OBSERVED
+  TO HAVE STOPPED" (true of the *poll-driven* hooks; the two below are not
+  polls);
+* ``app._require_stopped``, behind ``DELETE /v1alpha1/jobs/{id}/artifacts``,
+  which asks the coordinator directly *because* the local column is a cache
+  and then writes what it learned. It is hooked here too: a caller deleting a
+  finished job's artifacts has proved the job is over more thoroughly than any
+  page poll does, and a rental still billing for it should not outlive the
+  files;
+* ``fedavg._finish``, for federated runs, which is deliberately NOT hooked --
+  see below.
+
+This list said "the only places" and named the two routes (plus ``fedavg``
+below) until 2026-08-12, when the delete route was found to be a fourth. That
+is the kind of error that matters in this file: the entire argument for the
+sweep is a claim about how few places learn this fact, so a reader who checks
+the list, finds a route it does not mention, and cannot tell whether the
+omission was an oversight or a decision has lost the argument with it.
 
 So the settle hook is only as reliable as somebody's browser. That is a fine
 property for recording a status and a hopeless one for stopping money: a job
