@@ -37,6 +37,31 @@ Rules:
    conclusion and links any ADR it produced.
 6. Keep entries ≤ ~15 lines; depth belongs in ADRs/HANDBOOK, linked from
    the entry.
+7. **Provenance, not just evidence.** Rule 1 asks for numbers. It does not
+   ask *who assigned them*, and on 2026-08-12 that gap produced two false
+   claims in one day — both green, both true statements about the wrong
+   thing:
+   - `e2e/test_training_resume.py` passed throughout a period when the
+     checkpoint relay was **never switched on for a single
+     console-submitted job**. It hand-built its JobSpec and bypassed the
+     authoring surface, so it tested the runtime and not the product.
+   - `RESUMED at step 16298` was quoted as proven evidence. The relay
+     discovers steps by globbing `step-*.json` under `workdir/out/ckpt`
+     (`preflight.py:125`) — **filenames the task's own code writes.** Key
+     ours, value the submitter's. The `\d+` in `_CKPT_CONVENTION` is a
+     preflight advisory, not a guarantee; non-numeric step names occur at
+     runtime (`2026-08-11-open-gaps.md` §5 item 4).
+
+   So before a number enters an entry, an evidence document or a slide:
+   **name the line in our code that assigned it, with no user input
+   reaching it.** A value read back from a file the task wrote, parsed from
+   its stdout, or derived from a name the submitter chose is *the task's
+   claim*, not our measurement — quote it attributed, never as something
+   the platform verified. **Numbers are not safer than strings here; they
+   are just harder to notice.** And prefer the claim that survives on
+   control-plane facts alone: "the host was destroyed, a different GPU in
+   another country claimed the lease ~30 s later, the job finished" needs
+   no caveat, because every fact in it is one this codebase assigned.
 
 ---
 
