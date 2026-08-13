@@ -2385,7 +2385,8 @@ def machine_gpu_label(capabilities: Any) -> str | None:
 
     ``"NVIDIA GeForce RTX 4090 · 24 GB · 1 GPU"`` for a single readable
     card, the smallest card's memory naming the class promise when several
-    differ; ``"8 cores"`` for a CPU-only machine. ``None`` when the
+    differ; ``"8 cores · 16 GB"`` for a CPU-only machine, or bare ``"8
+    cores"`` when the agent never reported system RAM. ``None`` when the
     capabilities say nothing a reader could stand behind — the same
     under-claiming rule :func:`capability_class` uses, one surface down.
 
@@ -2414,8 +2415,29 @@ def machine_gpu_label(capabilities: Any) -> str | None:
         return f"{name} · {gib} GB · {count} GPU" if count > 1 else f"{name} · {gib} GB"
     cores = capabilities.get("cpu_cores")
     if isinstance(cores, (int, float)) and not isinstance(cores, bool):
-        return f"{int(cores)} cores"
+        label = f"{int(cores)} cores"
+        ram_gb = _system_memory_gb(capabilities)
+        # RAM is APPENDED, never required: a registration that predates
+        # `memory_bytes` (or one whose probe could not read it) still has a
+        # true core count to show, and the under-claiming rule here is to
+        # say less rather than to guess the missing half of the line.
+        return f"{label} · {ram_gb} GB" if ram_gb is not None else label
     return None
+
+
+def _system_memory_gb(capabilities: Mapping[str, Any]) -> int | None:
+    """Whole-GiB system RAM for the CPU-only spec line, or ``None`` if unread.
+
+    ``NodeCapabilities.memory_bytes`` is the only RAM figure the agent
+    reports, and it is optional — ``None`` for a registration that predates
+    the field, the same polarity every other optional capability uses here.
+    Rounded for display exactly like the VRAM figure above; nothing derived
+    from this rounded value ever feeds a class or a price.
+    """
+    value = capabilities.get("memory_bytes")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(value / (1024**3))
 
 
 def lifetime_for_owner(db: psycopg.Connection, owner_id: str) -> dict[str, int]:
@@ -2457,9 +2479,27 @@ def class_board(
     empty), ``depth`` the open asks behind it, ``history`` the last N
     observations for a sparkline, and ``change_zc`` the newest best ask
     minus the newest observation older than 24 h — null when there is no
-    such pair, rendered as "no history", never as 0. Every input is a row
-    ``record_price_observation`` wrote as the book moved; nothing here is
-    interpolated between them.
+    such pair, rendered as "no history", never as 0. ``last``, ``depth`` and
+    ``history`` are every input ``record_price_observation`` wrote as the
+    book moved, read back verbatim; nothing here is interpolated between
+    them, and ``last``/``depth`` are deliberately read from ONE row rather
+    than recomputed separately — see ``_record_observation_locked``, whose
+    whole reason for writing six numbers in one statement is that a best ask
+    from one instant beside a depth from another looks correct and is not.
+
+    ``median_ask_zc`` is the one field NOT sourced from the observation
+    row, and that is also deliberate rather than an oversight: it is drawn
+    from :func:`open_asks` — the same live book :func:`match_bid` and the
+    listings route walk, joined to ``machines`` on ``status = 'active'`` —
+    rather than a raw scan of ``public.listings``. A listing whose machine
+    was since revoked is not real supply (see :func:`open_asks`'s own
+    docstring); letting it keep pulling the median is the same mistake
+    leaving it in the matching book would be, one surface later. This can
+    make ``median_ask_zc`` describe a very slightly different instant than
+    ``last_zc``/``depth`` do — the trade this module makes on purpose is a
+    median that always agrees with what a buyer's bid would actually clear
+    against, over one that is byte-for-byte synchronous with a best ask
+    nobody is claiming matters to the millisecond.
     """
     series = price_series(db, capability_class_name, limit=history_limit)
     last = series[0] if series else None
@@ -2472,10 +2512,7 @@ def class_board(
             if age >= timedelta(hours=24):
                 change = int(last["best_ask_zc"]) - int(older["best_ask_zc"])
                 break
-    asks = [
-        int(row["ask_zc_per_hour"])
-        for row in _open_listings_in_class(db, capability_class_name)
-    ]
+    asks = [ask.ask_zc_per_hour for ask in open_asks(db, capability_class_name)]
     median: int | None = None
     if asks:
         ordered = sorted(asks)
@@ -2502,18 +2539,6 @@ def class_board(
             for row in series
         ],
     }
-
-
-def _open_listings_in_class(
-    db: psycopg.Connection, capability_class_name: str
-) -> list[dict[str, Any]]:
-    with db.cursor() as cur:
-        cur.execute(
-            "select ask_zc_per_hour from public.listings"
-            " where capability_class = %s and state = 'open'",
-            (capability_class_name,),
-        )
-        return list(cur.fetchall())
 
 
 def machines_for_ids(
