@@ -6376,6 +6376,43 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown job")
         return [_jsonable(r) for r in dbmod.list_job_contributions(db, job_id)]
 
+    @app.get("/v1alpha1/jobs/{job_id}/verifications", tags=["browser"])
+    async def get_job_verifications(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The read half of D-4: every verdict this API has recorded against
+        this job's tasks, exactly as ``record_verification`` wrote it.
+
+        **These are observations, never gates.** ``record_verification``'s
+        own docstring states the rule this route must not violate — nothing
+        in this system reads that table to refuse a lease, withhold a
+        credit or change placement, and a ``flag`` here withheld nothing
+        and refused nobody. A UI that implied otherwise would turn an
+        advisory layer into a perceived one, which is the accident its
+        author explicitly warned against (design spec §3 D-4). This route
+        does not decide what the console shows; it only makes the verdicts
+        visible.
+
+        ``unknown`` is passed through unchanged, never collapsed into
+        ``pass`` and never dropped — it is a first-class verdict meaning
+        "could not tell", not the absence of one. A task with no
+        verification rows at all is simply absent from the list; this
+        route never synthesizes a verdict for it.
+
+        Visibility matches the sibling read routes exactly — the owner, or
+        any member of the job's pool, via ``fetch_job_for_viewer`` —
+        answering 404 (not 403) for a job that exists and the caller
+        cannot see. ``list_verifications_for_job`` takes no viewer argument
+        by design, the same reasoning ``list_job_contributions`` documents
+        for itself: it trusts its caller to have authorized first, so this
+        check must run before it, never after or not at all.
+        """
+        if dbmod.fetch_job_for_viewer(db, job_id, user_id) is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return [_jsonable(r) for r in dbmod.list_verifications_for_job(db, job_id)]
+
     @app.post("/v1alpha1/jobs/{job_id}/cancel", tags=["browser"])
     async def cancel_job_route(
         job_id: str,

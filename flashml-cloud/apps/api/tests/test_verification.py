@@ -249,6 +249,132 @@ def test_two_verdicts_for_one_task_both_survive(db):
 
 
 # ---------------------------------------------------------------------------
+# 1b. list_verifications_for_job — the read half of D-4
+#
+# record_verification had exactly one caller and zero readers before this.
+# These tests are about the reader alone: the route (test_job_verifications
+# _route.py) covers the viewer check and the JSON shape on top of it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_job_with_no_verifications_reads_an_empty_list_not_a_fabricated_pass(db):
+    """Absent is absent. A task nothing has ever checked must not read as a
+    task that passed — the same rule §2 of 0006 states for `unknown`,
+    applied one layer up: silence is not a verdict."""
+    assert dbmod.list_verifications_for_job(db, _job()) == []
+
+
+def test_the_reader_returns_a_seeded_row_verbatim(db):
+    machine, job = _enrol(db), _job()
+    dbmod.record_verification(
+        db,
+        machine_id=machine,
+        job_id=job,
+        task_id="task-000",
+        slice_name="timing",
+        verdict="flag",
+        detail={"observed_s": 0.3, "peer_median_s": 9.1},
+    )
+
+    rows = dbmod.list_verifications_for_job(db, job)
+    assert len(rows) == 1
+    assert str(rows[0]["machine_id"]) == str(machine)
+    assert rows[0]["job_id"] == job
+    assert rows[0]["task_id"] == "task-000"
+    assert rows[0]["slice"] == "timing"
+    assert rows[0]["verdict"] == "flag"
+    assert rows[0]["detail"] == {"observed_s": 0.3, "peer_median_s": 9.1}
+
+
+def test_the_reader_preserves_unknown_it_never_becomes_pass(db):
+    """The one property this file exists to pin at the reader, not only the
+    writer: `unknown` must survive a round trip through the reader exactly
+    as it was written, never silently upgraded to `pass`."""
+    machine, job = _enrol(db), _job()
+    dbmod.record_verification(
+        db,
+        machine_id=machine,
+        job_id=job,
+        task_id="task-000",
+        slice_name="timing",
+        verdict="unknown",
+        detail={"reason": "too_few_peers", "peers": 1},
+    )
+
+    rows = dbmod.list_verifications_for_job(db, job)
+    assert [r["verdict"] for r in rows] == ["unknown"]
+
+
+def test_the_reader_is_scoped_to_one_job(db):
+    machine = _enrol(db)
+    job, other = _job(), _job()
+    dbmod.record_verification(
+        db, machine_id=machine, job_id=job, task_id="task-000",
+        slice_name="timing", verdict="pass", detail={},
+    )
+    dbmod.record_verification(
+        db, machine_id=machine, job_id=other, task_id="task-000",
+        slice_name="timing", verdict="flag", detail={},
+    )
+
+    rows = dbmod.list_verifications_for_job(db, job)
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == job
+
+
+def test_the_reader_orders_deterministically_by_task_then_slice(db):
+    """No unique index backs this table (0006's header), so ordering must
+    come from the query, not from insertion or wall-clock order. Written in
+    the opposite order from how it must read back, so a query that merely
+    preserved insertion order would fail this."""
+    machine, job = _enrol(db), _job()
+    for task_id, slice_name in (
+        ("task-002", "timing"),
+        ("task-000", "timing"),
+        ("task-000", "evidence"),
+    ):
+        dbmod.record_verification(
+            db, machine_id=machine, job_id=job, task_id=task_id,
+            slice_name=slice_name, verdict="pass", detail={},
+        )
+
+    rows = dbmod.list_verifications_for_job(db, job)
+    assert [(r["task_id"], r["slice"]) for r in rows] == [
+        ("task-000", "evidence"),
+        ("task-000", "timing"),
+        ("task-002", "timing"),
+    ]
+
+
+def test_the_reader_returns_a_null_machine_id_as_none(db):
+    """A redundancy finding names no machine (§8.5) — the reader must not
+    invent one on the way out."""
+    job = _job()
+    dbmod.record_verification(
+        db, machine_id=None, job_id=job, task_id="shard-003",
+        slice_name="redundancy", verdict="flag",
+        detail={"machines": ["a", "b"]},
+    )
+
+    rows = dbmod.list_verifications_for_job(db, job)
+    assert rows[0]["machine_id"] is None
+
+
+def test_the_reader_returns_every_slice_for_a_task_not_just_one(db):
+    machine, job = _enrol(db), _job()
+    for slice_name, verdict in (("timing", "pass"), ("evidence", "flag")):
+        dbmod.record_verification(
+            db, machine_id=machine, job_id=job, task_id="task-000",
+            slice_name=slice_name, verdict=verdict, detail={},
+        )
+
+    rows = dbmod.list_verifications_for_job(db, job)
+    assert {(r["slice"], r["verdict"]) for r in rows} == {
+        ("timing", "pass"), ("evidence", "flag")
+    }
+
+
+# ---------------------------------------------------------------------------
 # 2. timing_verdict — slice 1, and the wrong-`pass` paths it must not take
 #
 # Peers are OTHER machines' `duration_s` on the same job. The function is

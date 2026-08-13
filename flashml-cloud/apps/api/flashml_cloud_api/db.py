@@ -3189,6 +3189,50 @@ def record_verification(
         )
 
 
+def list_verifications_for_job(
+    db: psycopg.Connection, job_id: str
+) -> list[dict[str, Any]]:
+    """Every verdict ever recorded against ``job_id``'s tasks, verbatim.
+
+    The read half of D-4 (``docs/superpowers/specs/
+    2026-08-12-observability-and-verification-gaps.md``, §3). Until this
+    function existed, ``record_verification`` had exactly one caller and
+    zero readers: the layer wrote to a table nothing looked at, and its own
+    docstring's justification — "so an operator can look" — was satisfied by
+    nothing in the product.
+
+    **Verbatim, on purpose.** No filtering, no collapsing, no coercion.
+    ``verdict`` stays one of ``pass`` / ``flag`` / ``unknown`` exactly as
+    ``record_verification`` refused to normalise it on the way in; a reader
+    that turned ``unknown`` into ``pass`` here would recreate the one
+    mistake that table's design exists to avoid, just one layer up. A task
+    nothing has ever checked has no row and this returns none for it —
+    absent stays absent, never a synthesized ``pass``.
+
+    No viewer argument, matching ``list_job_contributions``'s own reasoning
+    (Task 9): this trusts its caller to have authorized the job first via
+    ``fetch_job_for_viewer``, so that check must run before this is called,
+    never after or not at all.
+
+    Ordered by ``task_id``, then ``slice``, then ``created_at``, then ``id``
+    — deterministic regardless of insertion order or wall-clock ties, since
+    there is no unique index on this table to lean on (three slices judge
+    one task independently and each gets its own row; see 0006's header).
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select id, machine_id, job_id, task_id, slice, verdict, detail,
+                   created_at
+              from public.verifications
+             where job_id = %s
+             order by task_id, slice, created_at, id
+            """,
+            (job_id,),
+        )
+        return list(cur.fetchall())
+
+
 def list_federated_jobs_for_owner(
     db: psycopg.Connection, owner_id: str
 ) -> list[dict[str, Any]]:
