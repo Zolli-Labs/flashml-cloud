@@ -625,3 +625,215 @@ def test_peers_never_come_from_another_job(db):
             duration=9.0)
 
     assert dbmod.peer_task_durations(db, job_id=job, machine_id=mine) == []
+
+
+# ---------------------------------------------------------------------------
+# 4. artifact_presence_verdict — slice 2 (G-D), and the wrong-`pass` paths
+#
+# `registered` and `observed` are both `{"key", "size_bytes"}` records — the
+# shape `artifact_mirror.MirroredObject.as_json()` and the coordinator's own
+# artifact listing already use. Deliberately pure: no db, no store.
+# ---------------------------------------------------------------------------
+
+
+def _art(key: str, size: int) -> dict:
+    return {"key": key, "size_bytes": size}
+
+
+def test_all_registered_artifacts_present_at_size_is_a_pass():
+    registered = [_art("out/model.pt", 100), _art("out/metrics.json", 42)]
+    observed = [_art("out/model.pt", 100), _art("out/metrics.json", 42)]
+    verdict, detail = verify.artifact_presence_verdict(registered, observed)
+    assert verdict == "pass"
+    assert detail["registered"] == 2
+    assert detail["missing"] == []
+    assert detail["wrong_size"] == []
+
+
+def test_a_missing_artifact_is_flagged():
+    registered = [_art("out/model.pt", 100), _art("out/metrics.json", 42)]
+    observed = [_art("out/model.pt", 100)]
+    verdict, detail = verify.artifact_presence_verdict(registered, observed)
+    assert verdict == "flag"
+    assert detail["missing"] == ["out/metrics.json"]
+    assert detail["wrong_size"] == []
+
+
+def test_a_wrong_size_artifact_is_flagged():
+    registered = [_art("out/model.pt", 100)]
+    observed = [_art("out/model.pt", 99)]
+    verdict, detail = verify.artifact_presence_verdict(registered, observed)
+    assert verdict == "flag"
+    assert detail["missing"] == []
+    assert detail["wrong_size"] == [
+        {"key": "out/model.pt", "registered_bytes": 100, "observed_bytes": 99}
+    ]
+
+
+def test_nothing_registered_is_unknown():
+    """A task that registered no artifacts is not this slice's business
+    either way — saying `pass` about zero claims would certify a check that
+    never ran."""
+    verdict, detail = verify.artifact_presence_verdict([], [_art("x", 1)])
+    assert verdict == "unknown"
+    assert detail["reason"] == "nothing_registered"
+
+    verdict, _ = verify.artifact_presence_verdict(None, [_art("x", 1)])
+    assert verdict == "unknown"
+
+
+def test_an_empty_observed_listing_is_a_real_answer_not_unknown():
+    """`observed == []` means the store WAS asked and holds nothing under
+    scope — a definite absence, not a missing observation. Every registered
+    key is reported missing and the verdict is `flag`, never `unknown`."""
+    registered = [_art("out/model.pt", 100)]
+    verdict, detail = verify.artifact_presence_verdict(registered, [])
+    assert verdict == "flag"
+    assert detail["missing"] == ["out/model.pt"]
+
+
+def test_malformed_entries_are_dropped_not_crashed():
+    registered = [_art("out/model.pt", 100), {"key": "bad"}, "not-a-dict", None]
+    observed = [_art("out/model.pt", 100)]
+    verdict, detail = verify.artifact_presence_verdict(registered, observed)
+    assert verdict == "pass"
+    assert detail["registered"] == 1
+
+
+def test_artifact_presence_missing_data_is_unknown_never_pass():
+    """The single most important property in this section, mirrored from
+    `timing_verdict`'s own file: "could not tell" must never arrive as a
+    tolerant `pass`. Two distinct kinds of missing data, both `unknown`."""
+    registered = [_art("out/model.pt", 100)]
+
+    # The store could not be asked at all.
+    verdict, _ = verify.artifact_presence_verdict(registered, None)
+    assert verdict == "unknown"
+    assert verdict != "pass"
+
+    # Nothing was ever registered to check in the first place.
+    verdict, _ = verify.artifact_presence_verdict([], None)
+    assert verdict == "unknown"
+    assert verdict != "pass"
+
+    verdict, _ = verify.artifact_presence_verdict(None, None)
+    assert verdict == "unknown"
+    assert verdict != "pass"
+
+
+def test_artifact_presence_verdict_is_only_ever_one_of_the_three_the_schema_allows():
+    cases = [
+        (None, None), ([], []), ([_art("a", 1)], None),
+        ([_art("a", 1)], []), ([_art("a", 1)], [_art("a", 1)]),
+        ([_art("a", 1)], [_art("a", 2)]), ([_art("a", 1)], [_art("b", 1)]),
+    ]
+    for registered, observed in cases:
+        verdict, detail = verify.artifact_presence_verdict(registered, observed)
+        assert verdict in {"pass", "flag", "unknown"}, (registered, observed)
+        assert isinstance(detail, dict)
+
+
+# ---------------------------------------------------------------------------
+# 5. checkpoint_monotonicity_verdict — slice 3 (G-D): did the relayed steps
+# advance, or did a resumed attempt silently restart from zero?
+#
+# `steps` is the ordered sequence of step numbers the relay reported
+# committing for a task. Deliberately pure: no db, no coordinator.
+# ---------------------------------------------------------------------------
+
+
+def test_increasing_steps_is_a_pass():
+    verdict, detail = verify.checkpoint_monotonicity_verdict([0, 10, 20, 30])
+    assert verdict == "pass"
+    assert detail["steps"] == [0, 10, 20, 30]
+
+
+def test_repeated_steps_are_not_a_reset():
+    """Recommitting the same step (a retried commit, not a resumed attempt)
+    is not evidence of a restart. Ties are allowed."""
+    assert verify.checkpoint_monotonicity_verdict([0, 10, 10, 20])[0] == "pass"
+
+
+def test_a_reset_to_zero_mid_sequence_is_flagged():
+    verdict, detail = verify.checkpoint_monotonicity_verdict([10, 20, 30, 0, 40])
+    assert verdict == "flag"
+    assert detail["reset_index"] == 3
+    assert detail["reset_from"] == 30
+    assert detail["reset_to"] == 0
+
+
+def test_any_decrease_is_flagged_not_only_a_reset_to_zero():
+    verdict, detail = verify.checkpoint_monotonicity_verdict([10, 20, 15])
+    assert verdict == "flag"
+    assert detail["reset_from"] == 20
+    assert detail["reset_to"] == 15
+
+
+def test_a_single_step_is_unknown():
+    """One step has no earlier step to compare against — not evidence of a
+    healthy run OR a reset."""
+    verdict, detail = verify.checkpoint_monotonicity_verdict([0])
+    assert verdict == "unknown"
+    assert detail["reason"] == "too_few_steps"
+
+
+def test_empty_steps_is_unknown():
+    verdict, detail = verify.checkpoint_monotonicity_verdict([])
+    assert verdict == "unknown"
+    assert detail["reason"] == "too_few_steps"
+
+    verdict, _ = verify.checkpoint_monotonicity_verdict(None)
+    assert verdict == "unknown"
+
+
+def test_a_non_integer_step_name_is_unknown_not_a_crash():
+    """§5 of `2026-08-11-open-gaps.md` records a non-numeric `step-*.json`
+    occurring at runtime. It must not crash this function and it must not
+    silently drop out of the sequence — order is the whole question, so the
+    WHOLE result is `unknown`, not just the bad entry."""
+    verdict, detail = verify.checkpoint_monotonicity_verdict([0, "step-broken", 20])
+    assert verdict == "unknown"
+    assert detail["reason"] == "unparseable_step"
+    assert detail["unparseable"] == 1
+
+    verdict, _ = verify.checkpoint_monotonicity_verdict([0, None, 20])
+    assert verdict == "unknown"
+
+    verdict, _ = verify.checkpoint_monotonicity_verdict([0, 1.5, 20])
+    assert verdict == "unknown"
+
+
+def test_digit_string_steps_are_parsed():
+    """A step surviving only as a filename fragment (already stripped of
+    'step-' and '.json' upstream) is still a usable step number."""
+    verdict, detail = verify.checkpoint_monotonicity_verdict(["0", "10", "20"])
+    assert verdict == "pass"
+    assert detail["steps"] == [0, 10, 20]
+
+
+def test_a_negative_step_is_unknown_not_treated_as_a_reset():
+    """Wire-validated `ge=0` everywhere this comes from, so a negative value
+    reaching here means the record is not to be trusted at all — not that a
+    reset to below zero happened."""
+    verdict, detail = verify.checkpoint_monotonicity_verdict([0, -5, 20])
+    assert verdict == "unknown"
+    assert detail["reason"] == "unparseable_step"
+
+
+def test_checkpoint_monotonicity_missing_data_is_unknown_never_pass():
+    """The property this section exists to pin, same as slice 2's: "could
+    not tell" must never arrive as a tolerant `pass`."""
+    for steps in ([], [0], None, [0, "garbage"], [0, None, 5]):
+        verdict, _ = verify.checkpoint_monotonicity_verdict(steps)
+        assert verdict == "unknown", steps
+        assert verdict != "pass", steps
+
+
+def test_checkpoint_monotonicity_verdict_is_only_ever_one_of_the_three_the_schema_allows():
+    cases = [
+        None, [], [0], [0, 1], [5, 2], [0, "x", 3], [0, 0, 0], [1, 2, 0, 3],
+    ]
+    for steps in cases:
+        verdict, detail = verify.checkpoint_monotonicity_verdict(steps)
+        assert verdict in {"pass", "flag", "unknown"}, steps
+        assert isinstance(detail, dict)

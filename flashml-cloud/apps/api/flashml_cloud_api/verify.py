@@ -32,6 +32,7 @@ cheap to enumerate as tests.
 from __future__ import annotations
 
 import math
+import re
 import statistics
 
 #: How many usable peer samples a baseline needs before this slice will say
@@ -168,3 +169,226 @@ def timing_verdict(
         "floor_ratio": floor_ratio,
         "min_peers": min_peers,
     }
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 (G-D): artifact presence — the task claimed success; do the
+# artifacts it registered actually exist in the store at the sizes recorded?
+# ---------------------------------------------------------------------------
+
+
+def _artifact_entry(value: object) -> tuple[str, int] | None:
+    """``(key, size_bytes)`` from one artifact record, or ``None``.
+
+    Mirrors ``_as_finite_float``: an entry this cannot read cleanly is
+    dropped rather than guessed at. Matches the shape this codebase already
+    produces for an artifact record — ``artifact_mirror.MirroredObject
+    .as_json()`` (``{"key", "size_bytes", "sha256"}``) and the coordinator's
+    own ``GET /jobs/{job_id}/artifacts`` listing
+    (``flashruntime.service.modea.job_artifacts``, ``{"uri", "key",
+    "size_bytes"}``) both carry a string ``key`` and an int ``size_bytes``.
+
+    ``bool`` is rejected as a size for the same reason ``_as_finite_float``
+    rejects it as a duration: a plausible-looking number that was never a
+    measurement. A negative size is rejected outright — nothing this system
+    writes can produce one, so seeing one means the record is not to be
+    trusted, not that the artifact is unusually small.
+    """
+    if not isinstance(value, dict):
+        return None
+    key = value.get("key")
+    if not isinstance(key, str) or not key:
+        return None
+    size = value.get("size_bytes")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        return None
+    return key, size
+
+
+def artifact_presence_verdict(
+    registered: list[dict] | None,
+    observed: list[dict] | None,
+) -> tuple[str, dict]:
+    """``('pass'|'flag'|'unknown', detail)`` for the artifacts one task
+    claims against what the store actually holds.
+
+    ``registered`` is what the task claims it produced: artifact records in
+    the ``{"key": ..., "size_bytes": ...}`` shape used throughout this
+    codebase (``artifact_mirror.MirroredObject.as_json()``; the
+    coordinator's own artifact listing). ``observed`` is a listing of that
+    same shape read back from wherever the durable store actually is
+    (today: the OSS mirror manifest's ``objects``, once this slice is
+    wired to a fetch for it — see this module's caller-facing notes).
+
+    The rules, in the order they are applied:
+
+    1. Nothing usable in ``registered`` is ``unknown``. There is nothing to
+       check, which is not the same as everything checking out — a task
+       that registered no artifacts is not this slice's business either
+       way, and saying ``pass`` about zero claims would certify a check
+       that never ran.
+    2. ``observed is None`` is ``unknown`` REGARDLESS of what ``registered``
+       says. ``None`` means the store could not be asked — an absent fetch,
+       a failed listing — not "the store was asked and is empty". Folding
+       those together would be the exact tolerant-``pass``-shaped mistake
+       this layer forbids, just wearing a ``flag`` instead of a ``pass``:
+       an observation that was never made must not enter the record as if
+       it had been.
+    3. ``observed == []`` is a real answer, not a missing one: the store
+       WAS asked and holds nothing under scope. Every entry in
+       ``registered`` is then reported missing and the verdict is ``flag``
+       (rule 1 already guarantees at least one registered entry survives
+       to this point).
+    4. Otherwise: any registered key absent from ``observed``, or present
+       at a different ``size_bytes``, is ``flag``. Every registered key
+       present at its recorded size is ``pass``.
+
+    ``detail`` carries counts and the specific keys that disagreed, so a
+    row read later shows what was actually compared rather than only the
+    verdict.
+    """
+    reg_entries = [
+        e for e in (_artifact_entry(r) for r in (registered or [])) if e is not None
+    ]
+    if not reg_entries:
+        return "unknown", {
+            "registered": 0,
+            "observed": None,
+            "reason": "nothing_registered",
+        }
+
+    if observed is None:
+        return "unknown", {
+            "registered": len(reg_entries),
+            "observed": None,
+            "reason": "no_observation",
+        }
+
+    obs_entries = [
+        e for e in (_artifact_entry(o) for o in observed) if e is not None
+    ]
+    obs_by_key = dict(obs_entries)
+
+    missing: list[str] = []
+    wrong_size: list[dict] = []
+    for key, size in reg_entries:
+        if key not in obs_by_key:
+            missing.append(key)
+        elif obs_by_key[key] != size:
+            wrong_size.append({
+                "key": key,
+                "registered_bytes": size,
+                "observed_bytes": obs_by_key[key],
+            })
+
+    detail: dict = {
+        "registered": len(reg_entries),
+        "observed": len(obs_entries),
+        "missing": sorted(missing),
+        "wrong_size": wrong_size,
+    }
+    if missing or wrong_size:
+        return "flag", {**detail, "reason": "missing_or_wrong_size"}
+    return "pass", detail
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 (G-D): checkpoint monotonicity — did the relayed steps advance, or
+# did a resumed attempt silently restart from zero?
+# ---------------------------------------------------------------------------
+
+#: An all-ASCII-digit string, the shape a step survives as if something
+#: upstream only got as far as extracting it from a ``step-<N>.json``
+#: filename rather than handing over the manifest's own typed ``step``.
+_STEP_RE = re.compile(r"[0-9]+")
+
+
+def _as_step_int(value: object) -> int | None:
+    """One checkpoint step as a non-negative ``int``, or ``None``.
+
+    Mirrors ``_as_finite_float``: coercion is refused rather than attempted,
+    because a step number sits inside an ORDER comparison, and a garbage
+    value coerced into *some* integer could land on either side of that
+    comparison and manufacture a reset that never happened — or hide one
+    that did. ``bool`` is rejected for the same reason ``_as_finite_float``
+    rejects it: ``True`` was never a measured step.
+
+    Accepts a plain ``int`` (the shape a checkpoint manifest's own ``step``
+    field already has — wire-validated ``ge=0`` by
+    ``flashruntime.service.checkpoints.CommitRequest``) and an all-digit
+    ``str`` (the shape a step survives as if something upstream only
+    extracted it from a filename). Anything else — a negative int, a float,
+    or the non-numeric ``step-*.json`` filename fragment
+    ``docs/superpowers/specs/2026-08-11-open-gaps.md`` §5 records occurring
+    at runtime — is unusable.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and _STEP_RE.fullmatch(value.strip()):
+        return int(value.strip())
+    return None
+
+
+def checkpoint_monotonicity_verdict(steps: list | None) -> tuple[str, dict]:
+    """``('pass'|'flag'|'unknown', detail)`` for one task's relayed
+    checkpoint steps, oldest first.
+
+    ``steps`` is whatever the caller collected as the ordered sequence of
+    step numbers the relay reported committing for this task, across
+    however many attempts it took — see ``flashruntime.checkpoint
+    .CheckpointCatalog.commit``'s ``step`` argument, the value this slice
+    ultimately judges. Deliberately pure: it does not care where the list
+    came from or how it was assembled, only whether it climbs.
+
+    The rules, in the order they are applied:
+
+    1. Fewer than two entries is ``unknown``. One step has no earlier step
+       to be compared against, and zero has nothing at all — neither state
+       is evidence of a healthy run OR a reset, and reporting one anyway
+       would be exactly the tolerant-``pass``-on-no-data bug this layer
+       forbids: a single "step 0" logged so far is not a silent restart, it
+       may be all that has happened yet.
+    2. Any entry that does not parse as a non-negative integer (see
+       ``_as_step_int``) makes the WHOLE result ``unknown`` — not just that
+       entry dropped. Order is the entire question this function answers,
+       and a hole of unknown value in the middle of a sequence cannot be
+       silently closed the way an unusable timing peer can be discarded:
+       dropping it would silently re-derive an adjacency that was never
+       actually observed, in either direction.
+    3. Otherwise, walk the parsed sequence pairwise. Non-decreasing
+       throughout (ties allowed — recommitting the same step is not a
+       reset) is ``pass``. The first place a later step is LOWER than the
+       one immediately before it is a silent reset — ``flag`` — most
+       legibly back to 0, but any decrease qualifies: a resumed attempt
+       does not get to pick an earlier point and have that read as forward
+       progress.
+
+    ``detail`` carries the parsed steps when there are any to carry, so a
+    stored row can be re-read without re-trusting this function's own
+    arithmetic.
+    """
+    count = len(steps) if steps else 0
+    if count < 2:
+        return "unknown", {"steps": count, "reason": "too_few_steps"}
+
+    parsed = [_as_step_int(s) for s in steps]
+    if any(p is None for p in parsed):
+        return "unknown", {
+            "steps": count,
+            "unparseable": sum(1 for p in parsed if p is None),
+            "reason": "unparseable_step",
+        }
+
+    usable: list[int] = [p for p in parsed if p is not None]
+    for i in range(1, len(usable)):
+        if usable[i] < usable[i - 1]:
+            return "flag", {
+                "steps": usable,
+                "reset_index": i,
+                "reset_from": usable[i - 1],
+                "reset_to": usable[i],
+                "reason": "step_decreased",
+            }
+    return "pass", {"steps": usable}
