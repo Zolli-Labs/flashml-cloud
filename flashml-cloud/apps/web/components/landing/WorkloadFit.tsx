@@ -1,6 +1,4 @@
 import { WorkloadRows } from "@/components/landing/WorkloadRows";
-import { WorkloadVelocityRail } from "@/components/landing/WorkloadVelocityRail";
-import { WORKLOADS } from "@/lib/landing/workloads";
 
 export function WorkloadFit() {
   return (
@@ -24,7 +22,6 @@ export function WorkloadFit() {
           </div>
         </div>
 
-        <WorkloadVelocityRail labels={WORKLOADS.map(({ title }) => title)} />
         <WorkloadRows />
       </div>
     </section>

@@ -74,7 +74,9 @@ describe("warm technical landing", () => {
 
     expect(markup).toContain("The machinery behind a reliable market.");
     expect(markup).toContain(
-      "Allocation, execution, and integrity stay separate, so changing capacity still yields one accepted outcome.",
+      "A sandboxed host lane, a parallel runtime, and a checkpoint recovery path — three separate contracts, one accepted outcome.",
     );
+    for (const lane of ["01 Host", "02 Runtime", "03 Recovery"])
+      expect(markup).toContain(lane);
   });
 });

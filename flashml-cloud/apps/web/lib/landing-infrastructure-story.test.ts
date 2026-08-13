@@ -8,7 +8,6 @@ import { CoordinatorMap } from "@/components/landing/coordinator-map/Coordinator
 import { PlatformSupport } from "@/components/landing/PlatformSupport";
 import { SystemJourney } from "@/components/landing/SystemJourney";
 import { WorkloadRows } from "@/components/landing/WorkloadRows";
-import { ARCHITECTURE_SIGNALS } from "@/components/landing/ArchitectureSignal";
 import {
   WORKFLOW_SCENES,
   WorkflowScene,
@@ -1482,6 +1481,9 @@ describe("the supporting landing story", () => {
       "Checkpointable model training",
     ]);
     expect(WORKLOADS).toHaveLength(5);
+    expect(WORKLOADS.map(({ mode }) => mode)).toEqual([
+      "divide", "divide", "divide", "divide", "resume",
+    ]);
     expect(WORKLOADS.every(({ machineContext }) => machineContext.length > 0)).toBe(true);
     expect(markup.match(/data-workload-machines/g) ?? []).toHaveLength(WORKLOADS.length);
     for (const machineContext of [
@@ -1491,14 +1493,6 @@ describe("the supporting landing story", () => {
       "Suitable machines: Mixed personal, lab, and cloud machines.",
       "Suitable machines: Linux machines with supported NVIDIA GPUs.",
     ]) expect(markup).toContain(machineContext);
-  });
-
-  it("limits the architecture trace to lease, checkpoint, and recovery", () => {
-    expect(ARCHITECTURE_SIGNALS.map(({ id, event }) => [id, event])).toEqual([
-      ["lease", "LEASE_CLAIMED"],
-      ["checkpoint", "CHECKPOINT_MANIFEST_COMMITTED"],
-      ["recovery", "TASK_REQUEUED"],
-    ]);
   });
 
   it("keeps visual controls and live results named by accessible semantics", () => {

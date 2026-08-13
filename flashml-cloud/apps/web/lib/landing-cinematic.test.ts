@@ -3,20 +3,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import Home from "@/app/(marketing)/page";
-import { ArchitectureSignal } from "@/components/landing/ArchitectureSignal";
 import { WorkloadRows } from "@/components/landing/WorkloadRows";
-import { WorkloadVelocityRail } from "@/components/landing/WorkloadVelocityRail";
 
 const root = process.cwd();
 const source = (path: string) => readFileSync(`${root}/${path}`, "utf8");
 const renderLanding = () => renderToStaticMarkup(createElement(Home));
 const visibleText = (markup: string) =>
   markup.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
-const renderWorkloadRail = () => renderToStaticMarkup(
-  createElement(WorkloadVelocityRail, { labels: ["Federated training"] }),
-);
 const renderWorkloadRows = () => renderToStaticMarkup(createElement(WorkloadRows));
-const renderArchitectureSignal = () => renderToStaticMarkup(createElement(ArchitectureSignal));
 
 describe("cinematic landing foundation", () => {
   it("pins the approved motion packages", () => {
@@ -122,54 +116,33 @@ describe("cinematic landing foundation", () => {
     expect(platform).toContain("Windows 11");
   });
 
-  it("pairs an ivory workload rail with a gapless graphite architecture", () => {
+  it("classifies workloads by mode and the architecture by real lanes", () => {
     const markup = renderLanding();
     const workloads = markup.match(/<section[^>]*id="workloads"[\s\S]*?<\/section>/)?.[0] ?? "";
     const architecture = markup.match(/<section[^>]*id="architecture"[\s\S]*?<\/section>/)?.[0] ?? "";
 
     expect(workloads).toContain('data-surface="light"');
-    expect(workloads).toContain('data-motion="velocity-rail"');
+    expect(workloads).toContain('data-mode="divide"');
+    expect(workloads).toContain('data-mode="resume"');
     expect(architecture).toContain('data-surface="dark"');
-    expect(architecture).toContain('data-layout="dense-architecture"');
-    for (const value of ["01 Control", "02 Execution", "03 Integrity"])
+    expect(architecture).toContain('data-layout="runtime-lanes"');
+    for (const value of ["01 Host", "02 Runtime", "03 Recovery"])
       expect(architecture).toContain(value);
-    expect(architecture).toContain("lg:col-span-7");
-    expect(architecture).toContain("lg:col-span-5");
-    expect(architecture).toContain("lg:row-span-2");
-    expect(architecture).toContain("grid-flow-dense");
+    expect(architecture).toContain("lg:grid-cols-3");
+    expect(architecture).toContain("--network none · read-only rootfs · cpu/mem caps");
+    expect(architecture).toContain("DDP / FSDP");
   });
 
-  it("uses the readable ivory foreground for decorative workload rail labels", () => {
-    const rail = renderWorkloadRail();
-
-    expect(rail).toContain("text-[var(--muted-foreground)]");
-  });
-
-  it("keeps workload copy visible while decorative rules animate independently", () => {
+  it("keeps workload copy visible while rows reveal independently", () => {
     const rows = renderWorkloadRows();
     const rowSource = source("components/landing/WorkloadRows.tsx");
     const fitSource = source("components/landing/WorkloadFit.tsx");
 
     expect(rows.match(/data-workload-row=/g) ?? []).toHaveLength(5);
     expect(rows.match(/data-workload-machines/g) ?? []).toHaveLength(5);
-    expect(rows.match(/data-workload-rule/g) ?? []).toHaveLength(5);
     expect(rowSource).toContain("whileInView");
-    expect(rowSource).toContain("data-animated");
     expect(rowSource).not.toMatch(/(?:opacity|autoAlpha)\s*:\s*0/);
-    expect(fitSource).toContain("@/lib/landing/workloads");
-    expect(fitSource).not.toMatch(/import\s*\{[^}]*WORKLOADS[^}]*\}\s*from\s*["']@\/components\/landing\/WorkloadRows/);
-  });
-
-  it("draws one restrained three-path architecture signal", () => {
-    const signal = renderArchitectureSignal();
-    const signalSource = source("components/landing/ArchitectureSignal.tsx");
-
-    expect(signal.match(/data-signal-path=/g) ?? []).toHaveLength(3);
-    expect(signal).toContain("LEASE_CLAIMED");
-    expect(signal).toContain("CHECKPOINT_MANIFEST_COMMITTED");
-    expect(signal).toContain("TASK_REQUEUED");
-    expect(signalSource).toContain("useLandingMotion");
-    expect(signalSource).toContain("once: true");
+    expect(fitSource).not.toMatch(/WorkloadVelocityRail/);
   });
 
   it("balances the services headline and reveals the supporting actions", () => {
@@ -184,7 +157,7 @@ describe("cinematic landing foundation", () => {
   it("does not add unsupported performance, scale, provider, or guarantee claims", () => {
     const supportingSources = [
       "components/landing/WorkloadRows.tsx",
-      "components/landing/ArchitectureSignal.tsx",
+      "components/landing/SystemModules.tsx",
       "components/landing/ProfessionalServices.tsx",
     ].map(source).join("\n");
 
@@ -251,7 +224,6 @@ describe("cinematic landing foundation", () => {
       "components/landing/SystemJourney.tsx",
       "components/landing/WorkflowScene.tsx",
       "components/landing/WorkloadRows.tsx",
-      "components/landing/ArchitectureSignal.tsx",
     ].map(source).join("\n");
 
     expect(motionSources).not.toMatch(/\blayout(?:Id)?=/);
@@ -265,8 +237,6 @@ describe("cinematic landing foundation", () => {
     const map = source("components/landing/coordinator-map/CoordinatorMap.tsx");
     const supportingMotion = [
       "components/landing/WorkloadRows.tsx",
-      "components/landing/WorkloadVelocityRail.tsx",
-      "components/landing/ArchitectureSignal.tsx",
     ].map(source).join("\n");
 
     expect(provider).toContain("prefers-reduced-motion: reduce");

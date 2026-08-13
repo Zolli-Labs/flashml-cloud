@@ -329,18 +329,18 @@ describe("proof-led Zolli landing", () => {
     ]) expect(text).toContain(workload);
   });
 
-  it("keeps one semantic workload list while the duplicated velocity labels stay hidden", () => {
+  it("lists every workload once under its mode", () => {
     const workloads = scopedSection(renderLanding(), "workloads");
 
-    expect(workloads).toContain('aria-label="Supported workloads"');
-    expect(workloads).toContain('aria-hidden="true"');
+    expect(workloads).toContain('aria-label="Supported workloads — Divide mode"');
+    expect(workloads).toContain('aria-label="Supported workloads — Resume mode"');
     expect(workloads.match(/<li\b/g) ?? []).toHaveLength(5);
   });
 
-  it("groups the runtime into control, execution, and integrity layers", () => {
+  it("groups the runtime into host, runtime, and recovery lanes", () => {
     const text = visibleText(renderLanding());
-    for (const layer of ["01 Control", "02 Execution", "03 Integrity"])
-      expect(text).toContain(layer);
+    for (const lane of ["01 Host", "02 Runtime", "03 Recovery"])
+      expect(text).toContain(lane);
     for (const moduleName of ["Coordinate", "Enroll", "Execute", "Checkpoint", "Recover", "Verify"])
       expect(text).toContain(moduleName);
   });
