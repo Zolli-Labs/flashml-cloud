@@ -4726,6 +4726,7 @@ def create_cloud_app(
 
         suited, suited_reason = _tradeoff_rented_gate(spec)
         acquirable = quote is not None
+        acquirable_notes: list[str] = []
         if not acquirable:
             acquirable_reason = (
                 "no rate for a whole rented machine-hour is recorded for any "
@@ -4754,6 +4755,16 @@ def create_cloud_app(
             # The rate is real and its provenance is stated instead. Nothing
             # here claims anything about venues that published no rate,
             # because this API has not observed one.
+            # THE CLAIM AND ITS QUALIFICATIONS ARE SEPARATE FIELDS, and that
+            # is a correctness decision rather than a formatting one. Carrying
+            # ninety words in one string leaves a console two options: render
+            # a wall of muted text nobody reads, or parse sentences back out
+            # of prose. Parsing prose is how the honest version quietly stops
+            # being rendered — and every qualification below exists precisely
+            # because its absence made a true sentence mislead.
+            #
+            # Split, each note is a standalone assertable string a test can
+            # pin individually, instead of a substring of a paragraph.
             quoted_acq = _venue_acquisition(quote_venue)
             auto_unpriced = sorted(
                 vid
@@ -4762,30 +4773,35 @@ def create_cloud_app(
                 and _venue_acquisition(vid) == routermod.ACQUISITION_AUTOMATIC
             )
             acquirable_reason = (
-                f"priced at ${usd_per_hour:g}/hr — a published "
-                f"{quote.provider} whole-machine hour ({quote.sku}"
+                f"${usd_per_hour:g}/hr — the cheapest published "
+                f"{quote.provider} whole-machine hour on record here "
+                f"({quote.sku}"
                 + (f", {quote.tier}" if quote.tier else "")
-                + f"), the cheapest {quote.provider} rate on record here; "
-                f"every other published {quote.provider} SKU costs more."
+                + ")."
             )
+            acquirable_notes = [
+                f"Every other published {quote.provider} SKU costs more. "
+                f"Venues that publish no rate here are not in that "
+                f"comparison at all."
+            ]
             if quoted_acq == routermod.ACQUISITION_MANUAL:
-                acquirable_reason += (
-                    f" {quote.provider} capacity is acquired manually: a "
+                acquirable_notes.append(
+                    f"{quote.provider} capacity is acquired manually: a "
                     f"person starts that machine and it enrols itself. This "
                     f"API does not create it."
                 )
             if auto_unpriced:
                 plural = len(auto_unpriced) > 1
-                acquirable_reason += (
-                    f" The venue{'s' if plural else ''} this deployment does "
-                    f"bring up automatically ({', '.join(auto_unpriced)}) "
+                acquirable_notes.append(
+                    f"The venue{'s' if plural else ''} this deployment brings "
+                    f"up automatically ({', '.join(auto_unpriced)}) "
                     f"publish{'' if plural else 'es'} no rate here and "
-                    f"{'are' if plural else 'is'} priced live at acquisition, "
-                    f"so {'they are' if plural else 'it is'} absent from the "
-                    f"comparison above rather than more expensive than it."
+                    f"{'are' if plural else 'is'} priced live at acquisition "
+                    f"— absent from the comparison rather than more expensive "
+                    f"than it."
                 )
-            acquirable_reason += (
-                " This is the cheapest LISTED machine-hour, not the cheapest "
+            acquirable_notes.append(
+                "This is the cheapest LISTED machine-hour, not the cheapest "
                 "one that could run this job: the row is chosen on whether a "
                 "GPU is present at all, so a job needing more GPU memory — or "
                 "more than one GPU per task — may be quoted a machine that "
@@ -4894,6 +4910,11 @@ def create_cloud_app(
                     # rather than "renting is not available to this job".
                     # `reason` above already carries the whole answer.
                     "price_reason": acquirable_reason if suited else None,
+                    # Each note is a standalone qualification of the claim
+                    # above, never a continuation of it: a console may show
+                    # any subset, in any order, behind a disclosure, without
+                    # the remainder becoming false.
+                    "price_notes": acquirable_notes if suited else [],
                     "venue_id": quote_venue,
                     "usd_per_hour": usd_per_hour,
                     "price": (
