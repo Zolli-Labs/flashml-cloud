@@ -120,7 +120,13 @@ export default function MachinesPage() {
                 36px height, 600 weight and brand hover the hand-rolled string
                 did; only horizontal padding differs, by 2px per side, which is
                 the size scale's business and not this page's. */}
-            <Button render={<Link href="/activate" />}>Add a Machine</Button>
+            {/* nativeButton={false}: the render prop swaps the underlying
+                element for Link's <a>, so the primitive must not assume
+                native <button> semantics (it adds role/keyboard handling
+                itself instead). */}
+            <Button render={<Link href="/activate" />} nativeButton={false}>
+              Add a Machine
+            </Button>
           </>
         }
       />
