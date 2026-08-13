@@ -342,6 +342,68 @@ real machine, let it start a task, and **look in `public.attempts` for a row
 naming it.** A row means the ledger can see it. No row means nothing else we
 built matters. Not a code review — read the table.
 
+### D10 — ZC is a spend allowance on the operator's money, not currency. *(owner decision, 2026-08-12)*
+
+**Verified state as of this decision: renting debits nothing.** `capacity/` has
+zero references to credits, wallet, debit or escrow. The escrow path exists and
+is wired (`app.py:6646` → `hold_escrow_on_claim`, `db.py:1687` →
+`settle_accepted_work`) but fires **only when `match_for_claim` finds a
+marketplace match**. A rented machine is minted straight into the user's pool
+and never listed, so there is no match, no hold, and no charge. We pay the
+venue in USD and the user is charged nothing.
+
+**The model, in the owner's words:** there is no Stripe and no cash in or out —
+that is after funding. Today the company is burning its own money and wants to
+bound how much each person can consume. **10 ZC is $10 of computing the
+operator grants.** When it runs out the user requests more and an admin
+approves (that flow shipped in `611e95d`).
+
+**So this is not a market.** No listing, no matching, no paying a host. A
+rental is the operator's machine spending the operator's money against an
+allowance the operator issued. What is needed is a debit, not settlement.
+
+**Three functions already exist for it and none has a caller:**
+`marketplace.can_cover(spendable, zc_per_hour=, seconds=, tasks=)`,
+`hold_zc(zc_per_hour, seconds)`, `charge_zc(zc_per_hour, accepted_seconds, *,
+held_zc)`. They were written to pay hosts, but the arithmetic of an allowance
+is the same shape. This is wiring plus the four rulings below, not new
+machinery.
+
+**D10.1 — Hold at acquire, settle at release.** Charging only at the end caps
+nothing: an account with 1 ZC left could start a rental that burns $50 before
+anyone looks. `can_cover` runs **before** the budget gate; an account that
+cannot cover the estimated run is refused with a stated reason, exactly as
+`BudgetRefused` is. This is the only version in which $10 means $10.
+
+**D10.2 — Balance exhausted mid-rental ⇒ drain, do not cut.** Same mechanism as
+D8: unbind from the pool so nothing new is claimed, let the task in flight
+finish, then release. The user loses their *next* iteration, not the one they
+are in.
+
+**D10.3 — Warm-up is on the operator. Charging starts at the first claimed
+task.** D8 established that boot, the multi-gigabyte image pull, the dataset
+cache and enrolment produce nothing while billing at the full rate. Charging a
+user for that would let a ten-minute job consume an hour of their allowance,
+and $10 would stop meaning anything predictable. The operator is funding this
+to get usage, not to recover cost.
+
+**D10.4 — The D8 idle hold is charged, but capped at what a re-warm would have
+cost.** Holding a machine between iterations is real money, and it is a
+decision the platform makes on the user's behalf. Charging it in full punishes
+them for our optimisation; eating it in full means the allowances handed out do
+not bound the burn. So the user never pays more for holding than
+releasing-and-restarting would have cost them, and the operator carries only
+the difference.
+
+**Keep the two ceilings separate — they are different tools.** The wallet
+bounds what *one user* can cause. `budget.py`'s per-acquisition and rolling
+rate ceilings bound what a *bug* can cause; a retry loop does not care whose
+allowance it is spending. Neither substitutes for the other.
+
+**Note for whoever wires this:** `can_cover` having no caller means nothing
+today refuses work an account cannot pay for, on **any** path — not just
+rentals.
+
 ### D3 — The rented instance is the isolation boundary. Three requirements.
 
 Dropping the container is sound — it is how Modal, Replicate and RunPod
