@@ -41,6 +41,19 @@ import {
  *
  *   npx vitest run --config preview/vitest.preview.config.ts
  */
+/**
+ * A static render never runs `app/layout.tsx`, so neither `next/font` variable
+ * exists and EVERY typeface falls back to the browser default — which means
+ * sans and mono look identical and a typeface bug cannot be seen at all. That
+ * blind spot hid a real defect through two render cycles: `.title` is declared
+ * unlayered, so `class="title font-mono"` renders sans, and the preview could
+ * not show it.
+ *
+ * Stand-ins, not the real faces: the point is that sans and mono are
+ * DISTINGUISHABLE, so a typeface applied to the wrong element is visible here.
+ */
+const FONT_VARS = `:root{--font-instrument-sans:ui-sans-serif,system-ui,-apple-system,sans-serif;--font-geist-mono:ui-monospace,SFMono-Regular,Menlo,monospace}`;
+
 const webRoot = process.cwd();
 const outDir = process.env.PREVIEW_OUT ?? path.join(webRoot, ".preview");
 
@@ -207,7 +220,7 @@ it("writes the console primitives preview", async () => {
   const body = renderToStaticMarkup(<Gallery />);
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Console primitives preview</title><style>${css}</style></head>
+<title>Console primitives preview</title><style>${FONT_VARS}</style><style>${css}</style></head>
 <body>${body}</body></html>`;
 
   mkdirSync(outDir, { recursive: true });
