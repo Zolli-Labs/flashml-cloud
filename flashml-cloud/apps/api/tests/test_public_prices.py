@@ -27,19 +27,39 @@ alongside the curated vendor quotes):
 - **The cache**, since a route the brief made responsible for its own
   DB-protection is only actually protecting the database if the cache being
   pinned really is being served.
+- **A cache HIT opens zero database connections**, not merely zero queries.
+  ``Depends(db_conn)`` resolves a connection before a handler body runs at
+  all, so the fix that matters here is that the route takes ``request:
+  Request`` and only calls ``request.app.state.connect()`` after both the
+  rate limiter and the cache have had their say — pinned below with a
+  connection-counting ``connect`` injected through the same seam
+  ``make_client``/``create_cloud_app`` already expose.
+- **The rate limiter runs first**, the same ``FixedWindowLimiter`` and 429
+  contract ``test_sandbox_sessions_api.py``'s
+  ``test_the_public_route_is_rate_limited`` already pins for the sibling
+  public route.
 
 Fixture wiring follows ``test_prices.py`` for the pure ``prices.landing_rows``
 tests (the ``db`` fixture, real migrated Postgres, isolated test SKUs built
 with ``prices.record_quote`` the same way ``test_latest_quotes_returns_the_
 newest_observation_not_the_first`` does) and ``test_public_job_share.py`` for
-the one test that needs an HTTP client and the no-auth contrast.
+the one test that needs an HTTP client and the no-auth contrast. The
+connection-counting and rate-limit tests build their own client directly
+with ``create_cloud_app`` (rather than through ``make_client``, which does
+not expose a way to inject a counting ``connect`` or to set the rate-limit
+env vars before construction) — the same pattern
+``test_sandbox_sessions_api.py``'s own ``_make_client`` uses.
 """
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import timedelta
 
+import psycopg
 import pytest
+from fastapi.testclient import TestClient
+from psycopg.rows import dict_row
 
 from flashml_cloud_api import app as app_module
 from flashml_cloud_api import prices
@@ -351,3 +371,106 @@ def test_the_cache_serves_the_same_payload_object_until_reset(make_client):
     third = client.get("/v1alpha1/public/prices")
     assert third.status_code == 200
     assert app_module._public_prices_cache["value"] is not cached_value
+
+
+# ---------------------------------------------------------------------------
+# the connection guard: a cache HIT must open ZERO Postgres connections
+# ---------------------------------------------------------------------------
+
+
+def _counting_connect(postgres_dsn, counts):
+    """A ``connect`` factory that opens a real connection to the ephemeral
+    test database, exactly like `db.connect`, but also increments `counts`
+    so a test can assert how many times the route actually reached for
+    one — the property `Depends(db_conn)` broke by resolving a connection
+    before the handler body (cache check included) ever ran."""
+
+    def connect() -> psycopg.Connection:
+        counts["n"] += 1
+        conn = psycopg.connect(postgres_dsn, row_factory=dict_row, connect_timeout=5)
+        conn.autocommit = True
+        return conn
+
+    return connect
+
+
+def _wait_for_startup_baseline(counts: dict) -> int:
+    """The rented-capacity sweep (`app.py`'s `_rented_capacity_loop`) opens
+    one connection unconditionally on the startup edge, in a background
+    task — unrelated to this route and already covered by its own test
+    (`test_agent_proxy.py::test_anonymous_traffic_costs_no_database_
+    connection`). That connection is not a moment `TestClient(app)` hands
+    back, so the baseline is taken by waiting for it rather than racing it;
+    otherwise a baseline snapshotted too early would be indistinguishable
+    from the very regression this test looks for."""
+    deadline = time.monotonic() + 10.0
+    while counts["n"] == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert counts["n"] > 0, (
+        "the rented-capacity startup sweep should have opened one "
+        "connection before any request was made"
+    )
+    return counts["n"]
+
+
+def test_a_cache_hit_opens_zero_database_connections(postgres_dsn, settings, transport):
+    """The regression this route exists to close: the critical finding was
+    that `Depends(db_conn)` opened a connection BEFORE the handler ran, so
+    even a cache hit cost one — the exact resource whose exhaustion took
+    the deployment down (`db.py`'s own connect-per-request warning). A
+    cache-miss request may open exactly one MORE connection past the
+    startup baseline; every request after it, inside the TTL, must open
+    none at all."""
+    counts = {"n": 0}
+    app = app_module.create_cloud_app(
+        settings, connect=_counting_connect(postgres_dsn, counts), transport=transport
+    )
+    with TestClient(app) as client:
+        baseline = _wait_for_startup_baseline(counts)
+
+        first = client.get("/v1alpha1/public/prices")
+        assert first.status_code == 200
+        assert counts["n"] - baseline == 1, (
+            "a cache MISS should open exactly one connection"
+        )
+
+        after_first = counts["n"]
+        second = client.get("/v1alpha1/public/prices")
+        assert second.status_code == 200
+        assert second.json() == first.json()
+        assert counts["n"] == after_first, (
+            "a cache HIT must open ZERO connections"
+        )
+
+
+# ---------------------------------------------------------------------------
+# the rate limiter: checked BEFORE the cache, and BEFORE any connection
+# ---------------------------------------------------------------------------
+
+
+def test_the_public_route_is_rate_limited(postgres_dsn, settings, transport, monkeypatch):
+    """Same contract `test_sandbox_sessions_api.py`'s
+    `test_the_public_route_is_rate_limited` pins for the sibling public
+    route: `public_limiter` refuses past its window with 429. Env vars are
+    set before `create_cloud_app` builds the limiter, since it reads them
+    once at construction time, not per-request."""
+    monkeypatch.setenv("FLASHML_PUBLIC_RATE_LIMIT", "3")
+    monkeypatch.setenv("FLASHML_PUBLIC_RATE_WINDOW_S", "60")
+
+    counts = {"n": 0}
+    app = app_module.create_cloud_app(
+        settings, connect=_counting_connect(postgres_dsn, counts), transport=transport
+    )
+    with TestClient(app) as client:
+        baseline = _wait_for_startup_baseline(counts)
+
+        codes = [
+            client.get("/v1alpha1/public/prices").status_code for _ in range(5)
+        ]
+    assert codes[:3] == [200, 200, 200]
+    assert codes[3:] == [429, 429]
+    # The 4th and 5th calls were refused before touching the database at
+    # all — the rate limiter runs first, ahead of both the cache and any
+    # connection. Only the first (cache-miss) request among the allowed
+    # three opens a connection.
+    assert counts["n"] - baseline == 1

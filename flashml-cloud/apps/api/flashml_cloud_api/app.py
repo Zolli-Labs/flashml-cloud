@@ -1647,9 +1647,11 @@ DEFAULT_PUBLIC_RATE_WINDOW_S = 60.0
 #: ``GET /v1alpha1/public/prices`` is curated, scraped, vendor-catalogue
 #: data — identical for every visitor, nothing keyed on who is asking — so
 #: ONE cached response can serve everyone who hits the landing page inside
-#: this window. THIS cache, not a rate limiter, is what stops a route with
-#: no authentication check from being a Postgres round trip per pageview;
-#: see the route's own docstring for why that split is deliberate.
+#: this window. The cache is what keeps a cache HIT from costing a Postgres
+#: CONNECTION at all; ``public_limiter`` (the same limiter the sibling
+#: public routes use) is the separate, first-checked guard against a caller
+#: hammering the route past the window. See the route's own docstring for
+#: why both exist and in which order they run.
 PUBLIC_PRICES_CACHE_TTL_S = 60.0
 
 #: ``{"value": <payload or None>, "expires": <time.monotonic() deadline>}``.
@@ -9063,7 +9065,7 @@ def create_cloud_app(
     # `public_prices`'s own docstring for the boundary and the cache.
 
     @app.get("/v1alpha1/public/prices", tags=["public"])
-    async def public_prices(db: psycopg.Connection = Depends(db_conn)):
+    async def public_prices(request: Request):
         """The landing page's curated GPU price board. NO AUTHENTICATION.
 
         Public on purpose: the marketing page is the one surface in this
@@ -9075,11 +9077,26 @@ def create_cloud_app(
         prices the authenticated `GET /v1alpha1/prices` reads. No pool, no
         wallet, no ZC ladder, no marketplace ask is fetched here at all.
 
-        THE CACHE IS THE DB-PROTECTION MEASURE, not a rate limiter — the
-        response is identical for every visitor, so a landing page under
-        real traffic costs at most one query per
-        `PUBLIC_PRICES_CACHE_TTL_S` seconds rather than one per pageview.
+        THE CACHE IS THE DB-PROTECTION MEASURE — a cache hit costs at most
+        one CONNECTION per `PUBLIC_PRICES_CACHE_TTL_S` seconds rather than
+        one per pageview, because a connection is opened only on a cache
+        miss, below. `public_limiter` (the same `FixedWindowLimiter` the
+        sibling public routes use) is the FIRST check and runs before either
+        the cache or the database, so an attacker cannot even force a cache
+        lookup, let alone a connection, past its window.
+
+        Deliberately not `Depends(db_conn)`: FastAPI resolves a `Depends`
+        connection BEFORE the handler body runs, which would cost a
+        connection on every request — including a cache hit and a
+        rate-limited 429 — the exact thing `current_machine`'s docstring
+        warns against for the same reason. `db.py:95-113` is what a real
+        deployment paid for opening one connection per request; this route
+        opens one only on a genuine cache miss.
         """
+        client = request.client.host if request.client else "unknown"
+        if not public_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many requests")
+
         cached = _public_prices_cache["value"]
         if (
             cached is not None
@@ -9087,13 +9104,19 @@ def create_cloud_app(
         ):
             return cached
 
-        now = datetime.now(timezone.utc)
-        payload = {
-            "generated_at": now.isoformat(timespec="seconds").replace(
-                "+00:00", "Z"
-            ),
-            "rows": pricesmod.landing_rows(db, now, pricesmod.LANDING_GPUS),
-        }
+        db = request.app.state.connect()
+        try:
+            now = datetime.now(timezone.utc)
+            payload = {
+                "generated_at": now.isoformat(timespec="seconds").replace(
+                    "+00:00", "Z"
+                ),
+                "rows": pricesmod.landing_rows(
+                    db, now, pricesmod.LANDING_GPUS
+                ),
+            }
+        finally:
+            db.close()
         _public_prices_cache["value"] = payload
         _public_prices_cache["expires"] = (
             time.monotonic() + PUBLIC_PRICES_CACHE_TTL_S
