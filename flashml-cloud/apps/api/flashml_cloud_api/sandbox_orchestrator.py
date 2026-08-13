@@ -147,6 +147,7 @@ from .sandbox_bootstrap import (
     bootstrap_worker,
     verify_worker,
 )
+from .observability import Chain, chain_of, log_event, new_correlation_id
 from .sandbox_sessions import Observation
 from .settings import Settings
 
@@ -810,6 +811,7 @@ async def start_session(
     training_job_id: str,
     evaluation_spec: Mapping[str, Any],
     pool_id: str | None = None,
+    correlation_id: str | None = None,
     coordinator_url: str | None = None,
     expected_wait_s: float = DEFAULT_EXPECTED_WAIT_S,
     resume_reserve_s: float = RESUME_RESERVE_S,
@@ -863,6 +865,30 @@ async def start_session(
     hours later, on the one path that runs after a hibernation. It is a job
     specification and must never carry a credential; the column comment says
     so where the next person will read it.
+
+    ``correlation_id`` — **this is the one function in this module allowed to
+    mint one**, and the rule it follows is worth stating precisely because the
+    rule next door is the opposite one.
+
+    Three cases, in order:
+
+    1. **The caller supplied one.** Use it. A route that has already minted at
+       the request is the outermost edge and this session joins its thread.
+    2. **The training job carries one.** Inherit it. ``fetch_job_for_owner``
+       below is already run for authorisation, so the row is in hand — and a
+       session opened against a threaded job is the same piece of work, not a
+       new one.
+    3. **Neither.** Mint. D-1 names a sandbox session as one of the three
+       things a user initiates, so when nothing upstream has a thread, this
+       session *is* the outermost thing and minting here relates nothing that
+       was not already related.
+
+    What is NOT done, in any of the three: the id is never written back onto
+    the training job. A thread that flowed backwards would put every later
+    attempt on that job onto an id minted by an unrelated evaluation.
+
+    ``ss.create_session`` mints nothing at all (D-2). The asymmetry is the
+    design: the edge decides, the writer records.
     """
     pool_id = str(pool_id or settings.fc_sandbox_pool_id or "")
     coordinator_url = coordinator_url or settings.coordinator_url
@@ -890,6 +916,15 @@ async def start_session(
             f"training job {training_job_id} is not available to this account"
         )
 
+    # Supplied, else inherited from the job, else minted. See the docstring:
+    # `new_correlation_id` appears here and nowhere else in this module.
+    inherited = job.get("correlation_id")
+    correlation_id = (
+        correlation_id
+        or (str(inherited) if inherited is not None else None)
+        or new_correlation_id()
+    )
+
     row = await asyncio.to_thread(
         ss.create_session,
         db,
@@ -899,8 +934,20 @@ async def start_session(
         region=settings.fc_sandbox_region,
         template=settings.fc_sandbox_template,
         evaluation_spec=dict(evaluation_spec or {}),
+        correlation_id=correlation_id,
     )
     session_id = str(row["id"])
+    log_event(
+        log, "sandbox.session_opened",
+        chain=Chain(correlation_id=correlation_id, session_id=session_id,
+                    job_id=str(training_job_id)),
+        state=ss.INITIAL_STATE,
+        # `region` and `template` are deployment settings and would pass a
+        # provenance check, but they have no slot here and do not need one:
+        # the ids are what makes the line findable, and everything else about
+        # this session is one query away from them.
+        reason="inherited" if inherited is not None else "minted",
+    )
     ledger = _Ledger(db, session_id)
     await ledger.record(
         "session.opened",
@@ -1226,9 +1273,25 @@ async def on_model_ready(
     call while the first is still working finds the session in RESUMING or
     EVALUATING, adopts the recorded evaluation job id, and waits on the same
     result rather than submitting another.
+
+    **This is the far side of the hibernation, and it is what the correlation
+    id is for.** Everything this function has is a session id and a
+    connection — which is exactly what a redeployed API has, because deep
+    hibernation destroys the instance and the process that opened the session
+    is long gone. The thread survives because it is a column: the row read on
+    the first line below carries the same id the submission started with, and
+    the line logged from it is the join a person would otherwise do by hand
+    across five queries.
     """
     row = await _fetch(db, session_id)
     state = str(row["state"])
+    # Before the settled-state return, so that a call arriving after the
+    # session finished is still a line somebody can find on the thread. `state`
+    # is our own enum and `sandbox_id` is the provider's id for infrastructure
+    # we created; nothing on this line was authored by a submitter.
+    log_event(
+        log, "sandbox.wake_requested", chain=chain_of(row), state=state,
+    )
     if state in ss.SETTLED_STATES:
         return
     if driver is None:

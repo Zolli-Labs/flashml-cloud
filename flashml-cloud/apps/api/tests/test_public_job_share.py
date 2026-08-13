@@ -631,6 +631,12 @@ def test_the_public_view_serves_only_the_share_columns(make_client, db):
     assert withheld == {
         "name", "source", "spec", "owner_id", "pool_id", "share_token",
         "artifact_bytes", "artifact_bytes_recorded_at", "artifacts_mirrored_at",
+        # 0026. Ours, so it passes Rule 7's provenance question — and withheld
+        # on Rule 7's second one: it is the single value that joins this job to
+        # every other piece of work on the same thread, so publishing it to a
+        # link-holder would hand out the correlation this column exists to make
+        # possible internally.
+        "correlation_id",
     }
     assert not (withheld & set(job)), "a withheld column reached the page"
     # `status` is published under the name `state`, and `id` under `job_id`:

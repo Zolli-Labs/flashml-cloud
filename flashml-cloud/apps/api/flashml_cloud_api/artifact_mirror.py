@@ -91,11 +91,12 @@ import asyncio
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
 from flashml_cloud_api.alibaba_oss import DEFAULT_TTL_S, OSSArtifacts, OSSUnavailable
+from flashml_cloud_api.observability import Chain, log_event
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from flashml_cloud_api.settings import Settings
@@ -369,6 +370,24 @@ def classify_key(job_id: str, key: str, task_states: dict[str, str]) -> str:
     return ACCEPTED_TASK if state == ACCEPTED_TASK_STATE else UNACCEPTED_TASK
 
 
+def task_id_in_key(job_id: str, key: str, task_states: dict[str, str]) -> str | None:
+    """The task id a mirrorable key belongs to, or ``None``.
+
+    Exists so a log line about one object can be findable **without logging the
+    object**. Everything in a key past ``jobs/{job_id}/{task_id}/`` is a path
+    the submitted code chose — a filename, a directory layout, sometimes a
+    checkpoint step it named itself — and a log is a publication
+    (``PROGRESS.md`` Rule 7). The first segment is different in kind: it is
+    only returned here when ``task_states`` (the coordinator's own task view)
+    knows it, so what comes back is an id this system assigned and can join on,
+    not a string somebody handed us.
+    """
+    if classify_key(job_id, key, task_states) != ACCEPTED_TASK:
+        return None
+    head, _, _tail = key[len(job_prefix(job_id)):].partition("/")
+    return head or None
+
+
 def select_accepted_keys(
     job_id: str,
     listing: list[dict[str, Any]],
@@ -521,6 +540,7 @@ async def mirror_job(
     *,
     oss: OSSArtifacts | None = None,
     now: datetime | None = None,
+    correlation_id: str | None = None,
 ) -> MirrorResult:
     """Copy one finished job's accepted artifacts to OSS. Idempotent.
 
@@ -538,8 +558,16 @@ async def mirror_job(
     caller whose job is to log it and try again — never to a caller that
     could turn it into a failed job.
 
+    ``correlation_id`` is carried onto this module's log lines and nothing
+    else. Passed in rather than looked up: this function has a coordinator and
+    a bucket and deliberately no database, and giving it one so it could read
+    ``jobs.correlation_id`` for itself would put a Postgres round trip on a
+    path whose whole design is that it is off the commit path. ``None`` means
+    the lines carry the job id alone, which is honest and still findable.
+
     Raises ``MirrorError`` on any failure, having written no manifest.
     """
+    chain = Chain(correlation_id=correlation_id, job_id=job_id)
     if not settings.oss_configured:
         # The whole all-or-nothing gate. Note what has NOT happened above
         # this line: no coordinator call, no OSS import, no listing. An
@@ -580,7 +608,7 @@ async def mirror_job(
     keys = select_accepted_keys(job_id, listing, task_states)
 
     mkey = manifest_key(job_id)
-    existing = await _read_manifest(oss, mkey)
+    existing = await _read_manifest(oss, mkey, chain=chain)
     if existing is not None and manifest_covers(existing, keys):
         return MirrorResult(
             job_id=job_id,
@@ -613,9 +641,20 @@ async def mirror_job(
             # this transfer, and it must not pass unremarked: a run of these
             # means the put path changed shape and `verify_job` is now the
             # only thing standing between a corrupt copy and a manifest.
-            log.warning(
-                json.dumps({"text": "no usable OSS ETag to verify against",
-                            "job_id": job_id, "key": key})
+            # The KEY is not on this line, and that omission is the point.
+            # Past `jobs/{job_id}/{task_id}/` a key is a path the submitted
+            # code chose, and a log is a publication (`PROGRESS.md` Rule 7).
+            # What replaces it is the task id — assigned by the coordinator,
+            # already matched against `task_states` — and the size WE measured
+            # on the bytes WE sent, so the line is still findable and every
+            # value on it is one this codebase assigned.
+            log_event(
+                log, "mirror.etag_unverifiable", level=logging.WARNING,
+                chain=replace(
+                    chain, task_id=task_id_in_key(job_id, key, task_states),
+                ),
+                bytes=len(data),
+                reason="no_usable_etag",
             )
         if stored.size_bytes != len(data):
             raise MirrorError(
@@ -634,10 +673,10 @@ async def mirror_job(
     except Exception as exc:  # noqa: BLE001 - normalised, never swallowed
         raise MirrorError(f"could not write the mirror manifest for {job_id}") from exc
 
-    log.info(
-        json.dumps({"text": "artifacts mirrored to OSS", "job_id": job_id,
-                    "objects": len(objects),
-                    "bytes": sum(o.size_bytes for o in objects)})
+    log_event(
+        log, "mirror.completed", chain=chain,
+        objects=len(objects),
+        bytes=sum(o.size_bytes for o in objects),
     )
     return MirrorResult(
         job_id=job_id,
@@ -654,6 +693,7 @@ async def mirror_jobs(
     settings: "Settings",
     *,
     oss: OSSArtifacts | None = None,
+    correlation_id: str | None = None,
 ) -> list[MirrorResult]:
     """Mirror several coordinator jobs — a federated run's rounds.
 
@@ -669,10 +709,19 @@ async def mirror_jobs(
     failed. Contrast ``delete_job_artifacts``, which must record nothing on a
     partial failure — deleting has no per-target record to resume from, so it
     has to be wrong in the safe direction instead.
+
+    ``correlation_id`` is the PARENT run's, and it is right that every round
+    shares it: the rounds are one piece of work under a parent id the
+    coordinator has never heard of, which is precisely the situation a
+    correlation id exists to make readable. The per-round coordinator job id is
+    on each line as ``job_id``, so the rounds stay distinguishable within the
+    thread.
     """
     results: list[MirrorResult] = []
     for job_id in job_ids:
-        results.append(await mirror_job(job_id, source, settings, oss=oss))
+        results.append(await mirror_job(
+            job_id, source, settings, oss=oss, correlation_id=correlation_id,
+        ))
     return results
 
 
@@ -721,22 +770,31 @@ async def unmirror_job(
         ) from exc
 
 
-async def _read_manifest(oss: OSSArtifacts, key: str) -> dict[str, Any] | None:
+async def _read_manifest(
+    oss: OSSArtifacts, key: str, *, chain: Chain | None = None,
+) -> dict[str, Any] | None:
     """The current manifest, or None if there isn't a trustworthy one.
 
     ``head`` first, because ``alibaba_oss.head`` is the one call that
     distinguishes absent (None) from broken (raises). Going straight to
     ``get_bytes`` would turn a transport failure into "no manifest" and
     re-copy every object on every poll while OSS was having a bad minute.
+
+    ``chain`` is what the log line below is keyed on. The manifest key is
+    ``jobs/{job_id}/_mirror/manifest.json`` — every segment of it ours, so it
+    would pass a provenance check — but it is also entirely derivable from the
+    job id, so logging it would be one more string on the line and no more
+    information on it. Every caller holds the job id; none of them needs to
+    hand over a path.
     """
     if await asyncio.to_thread(oss.head, key) is None:
         return None
     data = await asyncio.to_thread(oss.get_bytes, key)
     payload = parse_manifest(data)
     if payload is None:
-        log.warning(
-            json.dumps({"text": "unreadable mirror manifest; re-mirroring",
-                        "key": key})
+        log_event(
+            log, "mirror.manifest_unreadable", level=logging.WARNING,
+            chain=chain, reason="unparseable_manifest", bytes=len(data),
         )
     return payload
 
@@ -769,7 +827,9 @@ async def verify_job(job_id: str, oss: OSSArtifacts) -> VerificationReport:
     A missing manifest is a problem, not an exception: "this job was never
     mirrored" is a finding a report should be able to carry.
     """
-    payload = await _read_manifest(oss, manifest_key(job_id))
+    payload = await _read_manifest(
+        oss, manifest_key(job_id), chain=Chain(job_id=job_id),
+    )
     if payload is None:
         return VerificationReport(job_id=job_id, problems=("no readable manifest",))
 
@@ -815,7 +875,9 @@ async def read_manifest_objects(
     statement about OSS rather than about this job, kept distinguishable for
     the same reason ``presign_mirrored_artifact`` keeps it.
     """
-    payload = await _read_manifest(oss, manifest_key(job_id))
+    payload = await _read_manifest(
+        oss, manifest_key(job_id), chain=Chain(job_id=job_id),
+    )
     if payload is None:
         return None
     return manifest_objects(payload)
@@ -840,7 +902,9 @@ async def presign_job_artifacts(
     precisely so that carrying one across a lifecycle boundary fails loudly
     instead of intermittently.
     """
-    payload = await _read_manifest(oss, manifest_key(job_id))
+    payload = await _read_manifest(
+        oss, manifest_key(job_id), chain=Chain(job_id=job_id),
+    )
     if payload is None:
         raise MirrorError(f"job {job_id} has no complete mirror to sign for")
     return {
@@ -892,7 +956,9 @@ async def presign_mirrored_artifact(
     attribute cannot fix that: OSS is a third origin, so the browser ignores
     it. Naming the file is therefore the header's job or nobody's.
     """
-    payload = await _read_manifest(oss, manifest_key(job_id))
+    payload = await _read_manifest(
+        oss, manifest_key(job_id), chain=Chain(job_id=job_id),
+    )
     if payload is None:
         return None
     if not any(obj.key == key for obj in manifest_objects(payload)):

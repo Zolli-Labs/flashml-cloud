@@ -721,6 +721,107 @@ async def test_an_object_in_the_bucket_but_not_the_manifest_is_not_signed():
     assert await presign_mirrored_artifact(JOB, stray, oss) is None
 
 
+# -- what the log lines may say ----------------------------------------------
+#
+# This module's two log sites were `json.dumps({"text": ...})` written by hand.
+# They now go through `observability.log_event`, which takes the ids explicitly
+# and refuses anything else — and the migration was not cosmetic: one of them
+# was logging an OSS **key**, and everything in a key past
+# `jobs/{job_id}/{task_id}/` is a path the task's own code chose. A log is a
+# publication (`PROGRESS.md` Rule 7), so the key came out and the task id —
+# which the coordinator assigned and `select_accepted_keys` has already matched
+# against `task_states` — went in.
+
+
+def _log_lines(caplog):
+    import json
+
+    return [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.name == "flashml_cloud_api.artifact_mirror"
+        and r.getMessage().startswith("{")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_completion_line_is_json_carrying_the_job_and_our_own_counts(
+    caplog,
+):
+    import logging
+
+    source, oss = a_job(), FakeOSS()
+    with caplog.at_level(logging.INFO, logger="flashml_cloud_api.artifact_mirror"):
+        await mirror_job(JOB, source, FakeSettings(), oss=oss,
+                         correlation_id="7f1a4a26-0d1f-4a1e-9a8e-1b2c3d4e5f60")
+
+    done = [line for line in _log_lines(caplog) if line["event"] == "mirror.completed"]
+    assert done == [{
+        "event": "mirror.completed",
+        "job_id": JOB,
+        "correlation_id": "7f1a4a26-0d1f-4a1e-9a8e-1b2c3d4e5f60",
+        "objects": len(ACCEPTED_KEYS),
+        "bytes": sum(len(source.blobs[k]) for k in ACCEPTED_KEYS),
+    }]
+
+
+@pytest.mark.asyncio
+async def test_an_unverifiable_etag_is_logged_without_the_key_the_task_named(
+    caplog,
+):
+    """The regression this rewrite exists to prevent.
+
+    `.../shard-000/logs/stdout.txt` is a filename the submitted code chose. The
+    line that reports an unusable ETag must still be findable — so it carries
+    the job id, the task id, and the size WE measured on the bytes WE sent —
+    and it must not carry the path.
+    """
+    import logging
+
+    source, oss = a_job(), FakeOSS()
+    oss.etag_override = "not-a-digest"
+    with caplog.at_level(
+        logging.WARNING, logger="flashml_cloud_api.artifact_mirror"
+    ):
+        await mirror_job(JOB, source, FakeSettings(), oss=oss)
+
+    lines = [line for line in _log_lines(caplog)
+             if line["event"] == "mirror.etag_unverifiable"]
+    assert len(lines) == len(ACCEPTED_KEYS)
+    for line in lines:
+        assert line["job_id"] == JOB
+        assert isinstance(line["bytes"], int)
+        # Present for a volunteer's upload; ABSENT for control-plane output,
+        # which belongs to no task — `jobs/{job}/round-000/weights.json` is the
+        # aggregated model and no lease could ever have scoped it. Absent is
+        # the honest answer there, and inventing a task id to fill the slot is
+        # the same mistake as minting a correlation id on a miss.
+        assert line.get("task_id") in (None, "shard-000")
+    assert sum("task_id" in line for line in lines) == 3
+    # Asserted on the serialized bytes, not on the absence of a `key` field:
+    # a refactor that reintroduced the path under `object`, `name` or `text`
+    # would pass the field-name version of this check.
+    serialized = "".join(r.getMessage() for r in caplog.records)
+    for key in ACCEPTED_KEYS:
+        assert key not in serialized
+    assert "stdout.txt" not in serialized
+    assert "logs/" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_no_log_line_in_this_module_is_hand_rolled_json():
+    """`log_event` is the only way a line here carries ids, so a second
+    `json.dumps({...})` in this module is a line nothing checks."""
+    import pathlib
+
+    import flashml_cloud_api.artifact_mirror as mirror
+
+    source = pathlib.Path(mirror.__file__).read_text()
+    assert 'log.info(\n        json.dumps' not in source
+    assert "json.dumps({\"text\"" not in source
+    assert 'json.dumps({"text"' not in source
+
+
 # -- the real bucket ----------------------------------------------------------
 
 

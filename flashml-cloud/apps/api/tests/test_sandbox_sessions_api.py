@@ -789,7 +789,13 @@ def test_the_public_view_serves_only_the_share_columns(client, db):
 
     withheld = set(ss.SESSION_COLUMNS) - set(ss.SESSION_SHARE_COLUMNS)
     assert withheld == {"owner_id", "pool_id", "machine_id",
-                        "external_sandbox_id", "evaluation_spec", "share_token"}
+                        "external_sandbox_id", "evaluation_spec", "share_token",
+                        # 0026. Our value, not a submitter's, so it passes the
+                        # provenance half of Rule 7 — and it is withheld on the
+                        # second half: it is the one column that joins this
+                        # session to its owner's other work, which is exactly
+                        # what a page anybody with a link can open must not do.
+                        "correlation_id"}
     assert not (withheld & set(session)), "a withheld column reached the page"
     # `id` is kept in SQL only so the route can read the events; it is rendered
     # as a suffix, and there is deliberately no key called `id`.

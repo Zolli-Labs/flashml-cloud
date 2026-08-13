@@ -60,6 +60,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from flashml_cloud_api import marketplace as marketplacemod
+from flashml_cloud_api.observability import require_correlation_id
 from flashml_cloud_api.router.estimator import hardware_class
 from flashml_cloud_api.settings import Settings
 
@@ -1179,6 +1180,7 @@ def insert_job(
     spec: dict[str, Any] | None,
     status: str,
     pool_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Record a job as owned by ``owner_id``.
 
@@ -1194,12 +1196,24 @@ def insert_job(
     today (that route refuses a pool spec outright). Only the from-repo
     route ever passes one, and only after ``fetch_pool_for_member`` has
     already confirmed the caller belongs to it.
+
+    ``correlation_id`` is the thread this submission starts, and **a job
+    submission is one of the three edges where minting is allowed** (see
+    ``observability``). It is minted by the ROUTE and passed in; this function
+    mints nothing. ``None`` is stored as ``NULL`` and stays ``NULL`` for ever,
+    which is the honest answer for every job submitted before this column
+    existed and for every route that has not yet been wired to mint. A
+    non-``None`` value that is not a uuid raises rather than being quietly
+    dropped — a hostname arriving here is a caller bug, not an absence, and
+    ``uuid`` in the schema would refuse it anyway.
     """
     with db.cursor() as cur:
         cur.execute(
             """
-            insert into public.jobs (id, owner_id, name, source, spec, status, pool_id)
-            values (%s, %s, %s, %s, %s, %s, %s)
+            insert into public.jobs
+                (id, owner_id, name, source, spec, status, pool_id,
+                 correlation_id)
+            values (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 job_id,
@@ -1209,6 +1223,7 @@ def insert_job(
                 Json(spec) if spec is not None else None,
                 status,
                 pool_id,
+                require_correlation_id(correlation_id),
             ),
         )
 
@@ -1510,6 +1525,7 @@ def record_attempt(
     job_id: str,
     task_id: str,
     deadline: Any = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Remember that ``machine_id`` claimed ``lease_id`` for a task.
 
@@ -1525,14 +1541,51 @@ def record_attempt(
     (see ``reconcile_expired_attempts``). Optional and defaulted so a caller
     that has no deadline to give records the attempt anyway — the mapping
     matters more than the metric.
+
+    ``correlation_id`` is **inherited, never minted**, and this is the hop
+    that puts ``task_id`` and ``lease_id`` on the same thread as the job they
+    belong to. When the caller supplies nothing, the INSERT reads the id out
+    of the job this attempt is an attempt *of*, in the same statement — one
+    round trip, and atomically with the row it belongs to.
+
+    Two lookups, because a coordinator job id reaches this table two ways:
+
+    1. ``public.jobs`` directly, for an ordinary submission.
+    2. ``public.job_rounds.coordinator_job_id`` → that round's parent run, for
+       a federated round. This second one is not a nicety: a federated run is
+       N coordinator jobs under one parent, ``attempts.job_id`` holds the
+       ROUND's id, and that id is not a row in ``public.jobs`` — so without it
+       every attempt in the product's main path would be off the chain.
+
+    A miss on both is ``NULL``, and that is correct rather than a failure:
+    ``attempts.job_id`` is text with no foreign key precisely because it may
+    name a job this database has never heard of, and inventing an id for one
+    would manufacture a thread out of a lookup that found nothing.
+
+    Inheriting is not minting. The value can only ever be copied from the row
+    this attempt is literally an attempt of, so it cannot relate two unrelated
+    pieces of work — the two ends are the same piece of work by definition.
     """
     with db.cursor() as cur:
         cur.execute(
             "insert into public.attempts"
-            "            (lease_id, machine_id, job_id, task_id, lease_deadline)"
-            "     values (%s, %s, %s, %s, %s)"
+            "            (lease_id, machine_id, job_id, task_id, lease_deadline,"
+            "             correlation_id)"
+            "     select %s, %s, %s, %s, %s,"
+            "            coalesce("
+            "                %s::uuid,"
+            "                (select j.correlation_id from public.jobs j"
+            "                  where j.id = %s),"
+            "                (select p.correlation_id from public.job_rounds r"
+            "                   join public.jobs p on p.id = r.job_id"
+            "                  where r.coordinator_job_id = %s"
+            "                  limit 1)"
+            "            )"
             " on conflict (lease_id) do nothing",
-            (lease_id, machine_id, job_id, task_id, _lease_deadline(deadline)),
+            (
+                lease_id, machine_id, job_id, task_id, _lease_deadline(deadline),
+                require_correlation_id(correlation_id), job_id, job_id,
+            ),
         )
 
 

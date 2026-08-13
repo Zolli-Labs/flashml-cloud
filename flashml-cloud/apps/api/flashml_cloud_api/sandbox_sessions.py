@@ -72,6 +72,8 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
+from flashml_cloud_api.observability import require_correlation_id
+
 # ---------------------------------------------------------------------------
 # Policy. Pure functions and constants: no database, no I/O, no clock.
 # ---------------------------------------------------------------------------
@@ -496,16 +498,23 @@ SESSION_COLUMNS: tuple[str, ...] = (
     "terminated_at",
     "error_code",
     "error_message",
+    #: The thread this session belongs to, or NULL (migration 0026). Last in
+    #: the tuple because it is the newest, and the order here is the order the
+    #: owner view returns.
+    "correlation_id",
 )
 
-#: What the PUBLIC share view may read. Five columns are missing and each one
+#: What the PUBLIC share view may read. SIX columns are missing and each one
 #: is missing for its own reason: ``owner_id`` and ``pool_id`` identify people
 #: and teams, ``machine_id`` and ``external_sandbox_id`` name live
 #: infrastructure to somebody holding only a link, ``evaluation_spec`` names
 #: the datasets, repositories and thresholds somebody was measuring, and
 #: ``share_token`` is the capability itself — a page that echoes its own
 #: bearer token hands it to every proxy, referrer header and screenshot in
-#: the chain.
+#: the chain, and ``correlation_id`` is an internal trace id a link-holder has
+#: no use for and every reason not to be handed: it is the one value that
+#: joins this session to a submitter's other work, which is exactly what a
+#: public page must not do.
 #:
 #: ``id`` stays because the route needs it to read the session's events; the
 #: route renders a suffix, never the whole value.
@@ -554,6 +563,7 @@ def create_session(
     external_sandbox_id: str | None = None,
     evaluation_spec: Mapping[str, Any] | None = None,
     share_token: str | None = None,
+    correlation_id: str | None = None,
     observation: Observation | None = None,
 ) -> dict[str, Any]:
     """Open a session at :data:`INITIAL_STATE` and record its first event.
@@ -584,6 +594,17 @@ def create_session(
     stays nullable so one can be withdrawn later by setting it to NULL — a
     revocation that needs no migration.
 
+    ``correlation_id`` is written exactly as given and **is never minted here**
+    — note the contrast with ``share_token`` one paragraph up, which is the
+    only defaulting this function does and is defaulted precisely because a
+    session with no evidence page is useless. A correlation id is the
+    opposite: ``None`` means "this session is on no known thread", which is a
+    fact, and replacing it with a fresh id would manufacture one (D-2). The
+    decision of whether a session is itself an edge that may mint belongs one
+    level up, in :func:`sandbox_orchestrator.start_session`, where the training
+    job is in hand and can be asked first. A value that is present but is not a
+    uuid raises rather than being dropped.
+
     The row and its first event are written in ONE transaction. A session
     whose ledger begins at its second event would show a lifecycle that
     appears to start already running.
@@ -595,9 +616,9 @@ def create_session(
                 insert into public.sandbox_sessions
                     (owner_id, pool_id, machine_id, training_job_id, provider,
                      region, template, external_sandbox_id, state,
-                     evaluation_spec, share_token)
+                     evaluation_spec, share_token, correlation_id)
                 values (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s,
-                        %s, %s)
+                        %s, %s, %s::uuid)
                 returning {_SESSION_SELECT}
                 """,
                 (
@@ -614,6 +635,7 @@ def create_session(
                     if evaluation_spec is not None
                     else None,
                     share_token if share_token is not None else new_share_token(),
+                    require_correlation_id(correlation_id),
                 ),
             )
             row = cur.fetchone()

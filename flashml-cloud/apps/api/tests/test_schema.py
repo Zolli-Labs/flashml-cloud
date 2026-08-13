@@ -213,6 +213,10 @@ def test_attempts_table_exists_with_rls(db):
     assert cols == {
         "accepted_at": "timestamp with time zone",
         "claimed_at": "timestamp with time zone",
+        # 0026: the thread this lease belongs to, or null. Inherited from the
+        # job in `record_attempt`'s own INSERT — never minted here, and null
+        # when the coordinator job id names no row this database holds.
+        "correlation_id": "uuid",
         "job_id": "text",
         "lease_deadline": "timestamp with time zone",
         "lease_id": "text",
