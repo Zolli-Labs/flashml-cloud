@@ -226,6 +226,30 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-13 — Landing page rework: 7-section restructure, public price board, timer-looped hero (flashml-cloud, branch agent/landing-market-board)
+What/why: Landing restructured from 12 sections down to 7. New unauthenticated
+`GET /v1alpha1/public/prices` serves curated GPU quotes plus a `Decimal`-computed
+trend (60s server-side cache), so `PriceBoard` — an async server component
+fetched server-side — can show a stranger today's market before sign-in,
+returning `null` (quiet state) on any failure rather than throwing. The hero's
+coordinator-map story is unpinned from scroll and now auto-advances on a timer
+loop. `SectionReveal` simplified to a plain fade-up.
+How verified: API suite 3087 passed, 2 skipped, 3 deselected, 1 xfailed
+  (`.venv/bin/python -m pytest -q`). Web suite 65 files / 1146 tests passed
+  (`npm test`). `npx tsc --noEmit` clean. `npm run lint` 0 errors, 2 warnings
+  (unused `lineClassName`/`bottomLineClassName` props left on `SectionReveal`
+  by the fade-up simplification). `npm run build` succeeded with
+  `NEXT_PUBLIC_CLOUD_API` pointed at an unused port (no server started) —
+  `/` prerendered static (revalidate 5m) and the emitted
+  `.next/server/app/index.html` contains PriceBoard's "No market observations
+  yet." quiet-state line, confirming an unreachable API never fails the build.
+Gotchas: port 8000 (the default `cloudApiBase()` fallback) was already held by
+  an unrelated checkout's dev server during this run, returning 404 for the new
+  endpoint — harmless for verification (still `!res.ok` → `null`) but not a
+  true connection-refused case, so the build was re-pointed at an unused port
+  instead to test the real unreachable-API path cleanly.
+Next: review and merge `agent/landing-market-board` into develop.
+
 ### 2026-08-13 — Cross-venue recovery latency + cost tool: wake economics for venues that cannot hibernate (flashml-cloud, competition D-9/C-6.5)
 What/why: FC sandboxes had measured hibernate/wake numbers; every other venue
 had none. `scripts/competition/recovery_latency.py` derives the non-hibernating

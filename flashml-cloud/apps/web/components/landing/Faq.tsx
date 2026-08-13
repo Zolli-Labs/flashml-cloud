@@ -32,6 +32,11 @@ const FAQS = [
       "Divisible or checkpointable work fits. Tightly synchronized multi-machine training is not the current target.",
   },
   {
+    question: "What kind of training doesn't fit?",
+    answer:
+      "Zolli is best for work that can be divided or resumed. It is not currently designed for tightly synchronized training where every GPU must communicate continuously over a very fast network.",
+  },
+  {
     question: "What happens if a machine disappears?",
     answer:
       "Supported work can be reallocated and resumed from recorded progress on another compatible machine.",

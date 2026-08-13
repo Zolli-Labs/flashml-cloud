@@ -15,12 +15,27 @@ const STEPS = [
   },
 ] as const;
 
-export function SimpleJourney() {
+// The two facts worth keeping once the three-lane architecture walkthrough
+// (host / runtime / recovery) is cut: what the sandbox actually allows, and
+// what "parallel" actually means. Recovery's own lane is dropped here — the
+// recovery proof section right below this one already carries that beat.
+const MODULE_FACTS = [
+  {
+    label: "Host",
+    body: "Every machine answers to flashnode. Shared machines run only allowlisted Docker images, sandboxed from the host.",
+  },
+  {
+    label: "Runtime",
+    body: "Independent tasks lease across machines. Inside one machine, multi-GPU DDP and FSDP run as PyTorch intends.",
+  },
+] as const;
+
+export function HowItWorks() {
   return (
     <section
       id="how-it-works"
       data-surface="dark"
-      className="scroll-mt-20 border-b border-white/10 py-20 text-[var(--landing-ivory)] md:py-28"
+      className="landing-surface-dark scroll-mt-20 border-b border-white/10 py-20 text-[var(--landing-ivory)] md:py-28"
     >
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
         <SectionReveal className="pb-10 md:pb-14">
@@ -31,8 +46,9 @@ export function SimpleJourney() {
             </h2>
           </div>
         </SectionReveal>
-        <SectionReveal lineClassName="h-px w-full bg-white/18">
-          <ol className="grid pt-10 md:grid-cols-3 md:pt-14">
+
+        <SectionReveal>
+          <ol className="grid border-t border-white/18 pt-10 md:grid-cols-3 md:pt-14">
             {STEPS.map((step, index) => (
               <li
                 key={step.title}
@@ -45,6 +61,21 @@ export function SimpleJourney() {
               </li>
             ))}
           </ol>
+
+          <div className="mt-10 grid gap-8 border-t border-white/12 pt-8 sm:grid-cols-2 md:mt-14 md:pt-10">
+            {MODULE_FACTS.map((fact, index) => (
+              <div
+                key={fact.label}
+                data-module-fact={fact.label}
+                className={index > 0 ? "sm:border-l sm:border-white/12 sm:pl-8" : undefined}
+              >
+                <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-[var(--landing-orange)]">
+                  {fact.label}
+                </p>
+                <p className="mt-3 max-w-[48ch] text-[15px] leading-relaxed text-white/62">{fact.body}</p>
+              </div>
+            ))}
+          </div>
         </SectionReveal>
       </div>
     </section>

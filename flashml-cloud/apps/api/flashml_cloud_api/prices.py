@@ -61,7 +61,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 import psycopg
@@ -162,6 +162,45 @@ _SECONDS_PER_HOUR = Decimal(3600)
 #: does not, because splitting one publisher into two providers would make
 #: "has Alibaba been priced at all?" a question with no way to ask it.
 PRICED_PROVIDERS = ("runpod", "alibaba-fc")
+
+#: The landing page's curated GPU board: (display label, exact SKU string),
+#: in the order the page renders them. Curated because the marketing page
+#: is not the full comparison view — it needs a short, recognisable list a
+#: visitor can scan before ever signing in.
+#:
+#: Every SKU is copied VERBATIM from migration 0019's seed. That is the
+#: venue's own identifier (see 0019's decision 3 on `sku`), and a
+#: paraphrased or "tidied" string here would simply stop matching the day
+#: somebody typo-fixed it — the exact opposite of the re-verifiability that
+#: field exists for.
+#:
+#: `A100 80GB` names the SXM4 SKU rather than the PCIe one 0019 also seeds,
+#: so it reads as one lineage with `A100 40GB` (also SXM4) instead of mixing
+#: form factors the visitor never asked to compare.
+#:
+#: RunPod-only today: it is the one provider 0019 quotes in plain USD per
+#: GPU-hour, which is the only shape this board renders. Nothing here stops
+#: a second provider's SKU from being added later — `landing_rows` matches
+#: on `sku` alone, not on provider.
+LANDING_GPUS: tuple[tuple[str, str], ...] = (
+    ("H100 80GB", "NVIDIA H100 80GB HBM3"),
+    ("A100 80GB", "NVIDIA A100-SXM4-80GB"),
+    ("A100 40GB", "NVIDIA A100-SXM4-40GB"),
+    ("RTX 5090", "NVIDIA GeForce RTX 5090"),
+    ("RTX 4090", "NVIDIA GeForce RTX 4090"),
+    ("RTX 3090", "NVIDIA GeForce RTX 3090"),
+    ("L40S", "NVIDIA L40S"),
+)
+
+#: Tier preference for the landing board, in this order and no other.
+#: `community` first, because it is the price most visitors can actually
+#: get; `secure` only when a SKU has no `community` row at all — 0019's
+#: `NVIDIA A100-SXM4-40GB` is exactly that case, since RunPod's own
+#: "secure" figure for it is a not-offered sentinel and was never seeded
+#: (see 0019 decision 2). A third tier would need this tuple extended
+#: deliberately, not an `order by tier` that happens to sort the way two
+#: tiers currently do.
+_LANDING_TIER_PREFERENCE: tuple[str, ...] = ("community", "secure")
 
 
 class CurrencyMismatch(ValueError):
@@ -811,6 +850,160 @@ def quote_history(
              key.unit, limit),
         )
         return [_quote(row) for row in cur.fetchall()]
+
+
+def landing_rows(
+    db: psycopg.Connection,
+    now: datetime,
+    curated: Sequence[tuple[str, str]] = LANDING_GPUS,
+) -> list[dict[str, Any]]:
+    """The public landing board: one row per curated GPU that has a price.
+
+    Read-only over the SAME append-only table the authenticated comparison
+    view reads (:func:`latest_quotes` / :func:`quote_history`), filtered to
+    a short curated list and reshaped for a visitor who has not signed in.
+    This is the whole boundary that makes ``GET /v1alpha1/public/prices``
+    (``app.py``) safe to leave unauthenticated: it can only ever return
+    curated, already-public vendor catalogue quotes — never a pool, a
+    wallet, or a ZC ask, because those are not read here at all, not merely
+    filtered out afterwards.
+
+    For each ``(display_label, sku)`` pair, IN ``curated``'s OWN ORDER: the
+    newest ``community`` quote, or the newest ``secure`` quote if there is
+    no community one, or the row is OMITTED — never zeroed, never a
+    placeholder. Same reasoning as :func:`unpriced`, one level down: a
+    curated GPU with nothing behind it must not render a number. ``trend``
+    compares that quote against the newest STRICTLY OLDER observation
+    sharing ``(provider, sku, tier, unit, currency)``; see
+    :func:`_landing_trend`.
+    """
+    rows: list[dict[str, Any]] = []
+    for display_label, sku in curated:
+        chosen = _landing_quote(db, sku)
+        if chosen is None:
+            continue
+        rows.append(_landing_row(display_label, chosen, now, db))
+    return rows
+
+
+def _landing_quote(db: psycopg.Connection, sku: str) -> Quote | None:
+    """The newest ``community`` quote for ``sku``, or else the newest
+    ``secure`` one.
+
+    Two queries, not one ``order by tier``: sorting ``community`` ahead of
+    ``secure`` textually would be an accident of the alphabet rather than a
+    stated preference, and it would break silently and wrongly the day a
+    third tier (say, ``pro``) is seeded for the same SKU.
+    """
+    for tier in _LANDING_TIER_PREFERENCE:
+        with db.cursor() as cur:
+            cur.execute(
+                f"""
+                select {_COLUMNS}
+                  from public.price_quotes
+                 where sku = %s and tier = %s
+                 order by captured_at desc, id desc
+                 limit 1
+                """,
+                (sku, tier),
+            )
+            row = cur.fetchone()
+        if row is not None:
+            return _quote(row)
+    return None
+
+
+def _landing_row(
+    display_label: str, quote: Quote, now: datetime, db: psycopg.Connection
+) -> dict[str, Any]:
+    """One curated GPU as ``GET /v1alpha1/public/prices`` renders it.
+
+    ``amount`` is the vendor's own digits as a string — :func:`render`'s
+    reasoning applies unchanged here. ``age_seconds`` is the raw float
+    (``timedelta.total_seconds()``), not :func:`render`'s rounded ``int``:
+    the landing contract carries a decimal age, and there is no reason to
+    throw the fraction away a second time.
+    """
+    age = quote_age(quote, now)
+    return {
+        "gpu": display_label,
+        "sku": quote.sku,
+        "provider": quote.provider,
+        "tier": quote.tier,
+        "amount": format(quote.amount.normalize(), "f"),
+        "currency": quote.currency,
+        "unit": quote.unit,
+        "captured_at": _iso(quote.captured_at),
+        "age_seconds": age.total_seconds(),
+        "stale": is_stale(quote, now),
+        "trend": _landing_trend(db, quote),
+    }
+
+
+def _landing_trend(db: psycopg.Connection, quote: Quote) -> dict[str, Any]:
+    """How ``quote`` compares with the observation right before it.
+
+    THE KEY IS FIVE FIELDS, NOT SIX — ``(provider, sku, tier, unit,
+    currency)``, with ``region`` deliberately left out. The landing board
+    shows one number per curated GPU, not a region-scoped one, so "did this
+    move" means moved across the venue's whole quoted history for that SKU
+    and tier, not the sliver of it captured under one region label. (Every
+    SKU in :data:`LANDING_GPUS` is ``region = 'global'`` today, so this is
+    dormant now and load-bearing the day that stops being true.)
+
+    A quote sharing the key at the SAME ``captured_at`` is not "previous" —
+    it is the same observation, or a second source reporting the same
+    instant — so the comparison is strictly ``<``. No earlier row at all
+    means this GPU has been priced exactly once: ``direction: "new"``, and
+    nothing else, per the contract.
+
+    ``pct`` is ``Decimal`` arithmetic throughout, one decimal place,
+    ``ROUND_HALF_UP``, and explicitly signed for ``up``/``down`` — ``+5.6``
+    as much as ``-5.6``, so the number alone says which way the price moved
+    without reading ``direction``. Equal amounts is ``flat`` and
+    short-circuits before any division: both because ``pct`` is defined as
+    exactly ``"0.0"`` for that case, and because a zero previous amount
+    (never seen among the landing SKUs, all real GPU-hour prices) would
+    divide by itself only in the one case where the answer is already known.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            f"""
+            select {_COLUMNS}
+              from public.price_quotes
+             where provider = %s and sku = %s
+               and coalesce(tier, '') = coalesce(%s, '')
+               and currency = %s and unit = %s
+               and captured_at < %s
+             order by captured_at desc, id desc
+             limit 1
+            """,
+            (quote.provider, quote.sku, quote.tier, quote.currency,
+             quote.unit, quote.captured_at),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return {"direction": "new"}
+
+    previous = _quote(row)
+    previous_fields = {
+        "previous_amount": format(previous.amount.normalize(), "f"),
+        "previous_captured_at": _iso(previous.captured_at),
+    }
+
+    if quote.amount == previous.amount:
+        return {"direction": "flat", "pct": "0.0", **previous_fields}
+
+    diff = quote.amount - previous.amount
+    pct = (diff / previous.amount * Decimal(100)).quantize(
+        Decimal("0.1"), rounding=ROUND_HALF_UP
+    )
+    return {
+        "direction": "up" if diff > 0 else "down",
+        "pct": f"+{pct}" if pct > 0 else str(pct),
+        **previous_fields,
+    }
 
 
 # ---------------------------------------------------------------------------
