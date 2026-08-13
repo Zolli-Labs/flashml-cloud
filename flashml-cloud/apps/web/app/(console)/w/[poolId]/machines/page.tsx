@@ -7,11 +7,13 @@ import { PoolFleetTable } from "@/components/workspace/PoolFleetTable";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { YourMachines } from "@/components/workspace/YourMachines";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
+import { StatTile } from "@/components/ui/stat-tile";
 import {
   isEmptyList,
   resolvePanelState,
   type PanelRead,
 } from "@/lib/console/panel-state";
+import { poolFleetCounts } from "@/lib/machine-scope";
 import type { PoolMachine } from "@/lib/cloud-api";
 
 // `WorkspaceGate` (in the layout) already handles loading / not-found /
@@ -28,10 +30,28 @@ export default function WorkspaceMachinesPage() {
   // that carries all four states itself.
   const read: PanelRead<PoolMachine[]> = { status: "read", data: machines };
   const panel = resolvePanelState(read, isEmptyList);
+  const fleet = poolFleetCounts(machines);
 
   return (
     <PageShell width="wide">
       <WorkspaceHeader />
+
+      {/* The tab's own numbers — before this, every figure a viewer saw
+          here came from the shared WorkspaceHeader above, and the Machines
+          tab itself showed none of its own (density audit §3, gap 4). All
+          four are `poolFleetCounts` of the same `machines` array the table
+          below renders, so they cannot disagree with it. */}
+      <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile label="Total" value={fleet.total} size="lg" />
+        <StatTile
+          label="Online"
+          value={fleet.online}
+          total={fleet.total}
+          size="lg"
+        />
+        <StatTile label="Pending" value={fleet.pending} size="lg" />
+        <StatTile label="Revoked" value={fleet.revoked} size="lg" />
+      </div>
 
       <section className="mt-8">
         <h2 className="text-sm font-semibold">Serving this Workspace</h2>

@@ -16,3 +16,31 @@ export function isMachineOnline(machine: {
 }): boolean {
   return machine.status !== "revoked" && isOnline(machine.last_seen_at);
 }
+
+/** The fleet-size breakdown `w/[poolId]/machines` shows nowhere of its own —
+ * every figure a viewer sees on that tab comes from the shared
+ * `WorkspaceHeader` (density audit §3, gap 4). `total` is the array's own
+ * length, so the four figures can never disagree with each other or with
+ * what the table below renders. `online` reuses `isMachineOnline` rather
+ * than re-deriving it, for the same reason that function itself exists: one
+ * definition, so a header count and a table's dots cannot drift apart. */
+export interface PoolFleetCounts {
+  total: number;
+  online: number;
+  pending: number;
+  revoked: number;
+}
+
+export function poolFleetCounts(
+  machines: readonly { status: string; last_seen_at: string | null }[]
+): PoolFleetCounts {
+  let online = 0;
+  let pending = 0;
+  let revoked = 0;
+  for (const machine of machines) {
+    if (isMachineOnline(machine)) online++;
+    if (machine.status === "pending") pending++;
+    if (machine.status === "revoked") revoked++;
+  }
+  return { total: machines.length, online, pending, revoked };
+}
