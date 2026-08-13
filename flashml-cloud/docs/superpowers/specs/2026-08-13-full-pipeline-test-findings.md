@@ -209,3 +209,25 @@ lands first.**
 3. Console self-DDoS: ten polled endpoints × 5 s × CORS preflights. Roadmap
    already owns the real answer (SSE, Stage 6); until then a shared slower
    poll timer.
+
+### 6.1 Post-fix re-test (job 292eb5c67fc9) — and the FC python-3.13 wheel gap
+
+After the pooler fix: 30/30 concurrent requests where 15 was the death
+line, sustained; all three venues claimed tasks simultaneously. 5/6 tasks
+COMPLETED (pod + Mac). The job still ended FAILED because of a new finding:
+
+**The FC sandbox image ships Python 3.13.13, and the curated sklearn
+manifest pins numpy==1.26.4, whose wheels stop at cp312.** Every env build
+on FC falls into a source build and dies (visible now thanks to the C2 log
+bracketing — the fix that surfaces this class loudly). The scheduler then
+handed task-005 back to the same broken node four times with no cooldown or
+node exclusion (audit C15, observed live) until TASK_EXHAUSTED — one
+incompatible machine burned a healthy task's whole budget while two healthy
+machines sat eligible. FC workers killed and the machine left in the pool
+idle; remaining leases requeued and completed within a minute.
+
+Fixes filed: (a) curated manifests need pins with wheels for every
+interpreter the fleet actually runs, or the agent must refuse to claim work
+whose env cannot resolve on its interpreter (cheap preflight: check wheel
+availability before claiming); (b) C15's cooldown/exclusion, already in the
+audit's §5 set.
