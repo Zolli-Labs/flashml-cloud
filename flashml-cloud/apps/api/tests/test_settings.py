@@ -249,6 +249,30 @@ def test_the_secret_is_not_in_the_settings_repr(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Qwen (DashScope) model provider — the key is the whole gate
+# ---------------------------------------------------------------------------
+
+
+def test_an_unconfigured_deployment_needs_no_model_key():
+    """`qwen_configured` is gated on the key alone — `qwen_model`,
+    `qwen_base_url` and `qwen_region` all carry usable defaults, so a
+    deployment that never set `DASHSCOPE_API_KEY` must read as unconfigured
+    with no other field needing to be touched, and the (absent) key must
+    still never surface in a repr."""
+    s = Settings(
+        supabase_url="https://example.supabase.co",
+        supabase_service_key="",
+        coordinator_url="http://coordinator",
+        coordinator_operator_token="op",
+        require_auth=True,
+        qwen_api_key="",
+    )
+
+    assert s.qwen_configured is False
+    assert "sk-" not in repr(s)
+
+
+# ---------------------------------------------------------------------------
 # CoordinatorClient — the resulting request URL, not just the string
 # ---------------------------------------------------------------------------
 

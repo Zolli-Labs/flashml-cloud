@@ -87,6 +87,26 @@ dependencies = [
     # likely thing here to break on an unattended upgrade.
     "e2b==2.31.0",
     "e2b-code-interpreter==2.8.1",
+    # DashScope, Alibaba's model-serving API — `model_provider.py` drives
+    # Qwen through it (`QwenModelProvider`, `settings.qwen_*`).
+    #
+    # Here for exactly the reason `oss2` and the `e2b` pair are: the import
+    # is lazy (`model_provider.py` imports `Generation` inside `_client`)
+    # and every path is gated on `settings.qwen_configured`, so an
+    # unconfigured deploy neither imports it nor behaves differently. But a
+    # CONFIGURED deploy missing the wheel would raise "dashscope is not
+    # installed" at the first completion request — after the caller already
+    # believed a model was available.
+    #
+    # EXACT version, not a range, matching the convention above: this is the
+    # current release as of the pin date (2026-08-12) rather than a
+    # validated-compatible pair like e2b/e2b-code-interpreter, since Qwen has
+    # not yet been called against a live account from this repo — see
+    # `model_provider.py`'s module docstring for what has and has not been
+    # verified. Bump deliberately, not via a range, so an unattended
+    # `Generation.call` response-shape change cannot silently reach
+    # `_reply_from_response`.
+    "dashscope==1.26.7",
 ]
 
 [project.optional-dependencies]

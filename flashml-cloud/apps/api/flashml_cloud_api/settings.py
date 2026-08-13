@@ -420,6 +420,34 @@ class Settings:
     #: before arming it.
     rented_capacity_destroy: bool = False
 
+    # --- Qwen (DashScope) model provider ---------------------------------
+    #
+    # The agent's own LLM, behind `model_provider.QwenModelProvider`.
+    # Optional for the same reason `fc_sandbox_*` is: a deploy without it
+    # must still boot and serve, and the caller-side loop (AG-2) is written
+    # and tested entirely against `model_provider`'s in-module test double
+    # before any key exists.
+    #
+    # ALL-OR-NOTHING ON ONE FIELD, not four: unlike `fc_sandbox_*`,
+    # `qwen_model`, `qwen_base_url` and `qwen_region` all carry usable
+    # defaults, so the key alone is what decides whether this deployment can
+    # call out. See `qwen_configured`.
+    qwen_api_key: str = dc_field(default="", repr=False)
+    #: DashScope model id. "qwen-plus" is the general-purpose default;
+    #: swapping it needs no other field to change.
+    qwen_model: str = "qwen-plus"
+    #: `https://dashscope.aliyuncs.com/api/v1` (mainland) or
+    #: `https://dashscope-intl.aliyuncs.com/api/v1` (international).
+    #: Left empty here and DERIVED from `qwen_region` in `from_env` — the
+    #: same shape as `fc_sandbox_api_url`/`fc_sandbox_domain` deriving from
+    #: `fc_sandbox_region`, so a deploy cannot end up with a mainland key
+    #: pointed at the international endpoint by leaving this blank.
+    qwen_base_url: str = ""
+    #: `"cn-beijing"` (mainland, the default) or `"international"`. Selects
+    #: which of the two endpoints above `qwen_base_url` derives to when
+    #: unset.
+    qwen_region: str = "cn-beijing"
+
     @property
     def fc_sandbox_configured(self) -> bool:
         """All four present. All-or-nothing, like the GitHub App.
@@ -499,6 +527,20 @@ class Settings:
             and self.github_app_slug
             and self.github_app_private_key
         )
+
+    @property
+    def qwen_configured(self) -> bool:
+        """Whether this deployment can call Qwen at all.
+
+        All-or-nothing, but on a SINGLE field rather than the four
+        `fc_sandbox_configured` needs: `qwen_model`, `qwen_base_url` and
+        `qwen_region` all carry usable defaults, so the key is the only
+        thing that decides. Unconfigured is not an error —
+        `model_provider.QwenModelProvider.from_settings` raises
+        `ModelUnavailable` and every caller falls back to the in-module test
+        double in a deploy that has not been handed a key yet.
+        """
+        return bool(self.qwen_api_key)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -615,6 +657,22 @@ class Settings:
         )
         rented_usd_window_hours = _float_env("RENTED_USD_WINDOW_HOURS", 24.0)
 
+        # Qwen (DashScope). `qwen_base_url` derives from `qwen_region` when
+        # unset — the same shape as the sandbox's api_url/domain deriving
+        # from its region above — so a deploy cannot end up with a mainland
+        # key pointed at the international endpoint by leaving it blank.
+        qwen_region = (os.environ.get("QWEN_REGION") or "cn-beijing").strip()
+        qwen_api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
+        qwen_model = os.environ.get("QWEN_MODEL", "").strip() or "qwen-plus"
+        qwen_base_url = (
+            os.environ.get("QWEN_BASE_URL", "").strip()
+            or (
+                "https://dashscope-intl.aliyuncs.com/api/v1"
+                if qwen_region == "international"
+                else "https://dashscope.aliyuncs.com/api/v1"
+            )
+        )
+
         # Opt IN, not opt out — the opposite polarity to `FLASHML_REQUIRE_AUTH`
         # above and parsed the same way. Anything that is not an affirmative
         # word leaves the sweep reporting rather than destroying, including a
@@ -667,6 +725,10 @@ class Settings:
             rented_usd_window_max=rented_usd_window_max,
             rented_usd_window_hours=rented_usd_window_hours,
             rented_capacity_destroy=rented_capacity_destroy,
+            qwen_api_key=qwen_api_key,
+            qwen_model=qwen_model,
+            qwen_base_url=qwen_base_url,
+            qwen_region=qwen_region,
         )
 
         if require_auth:
@@ -762,6 +824,26 @@ class Settings:
                     "ECS_SECURITY_GROUP_ID and ECS_VSWITCH_ID must all be "
                     "set. No GPU is rented and no rented GPU is destroyed "
                     "until they are."
+                )
+
+            # Fourth time, a different shape: `qwen_configured` is gated on
+            # the key ALONE, and model/base_url/region all carry usable
+            # defaults — so there is no "some but not all" combination of
+            # those three to detect. What is worth a warning instead: an
+            # operator who set one of them, believing that turns Qwen on,
+            # without ever setting the key that actually gates it. Silence
+            # there reads as "I configured Qwen" while every call still goes
+            # to the fake.
+            qwen_overrides = (
+                bool(os.environ.get("QWEN_MODEL", "").strip()),
+                bool(os.environ.get("QWEN_BASE_URL", "").strip()),
+                bool(os.environ.get("QWEN_REGION", "").strip()),
+            )
+            if any(qwen_overrides) and not qwen_api_key:
+                logging.getLogger("flashml-cloud-api").warning(
+                    "Qwen is half-configured: QWEN_MODEL, QWEN_BASE_URL or "
+                    "QWEN_REGION is set but DASHSCOPE_API_KEY is not. No "
+                    "model calls are made until the key is set."
                 )
 
         return settings
