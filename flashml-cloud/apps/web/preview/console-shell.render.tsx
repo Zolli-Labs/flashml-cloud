@@ -174,6 +174,6 @@ it("writes the console shell preview", async () => {
   mkdirSync(outDir, { recursive: true });
   const out = path.join(outDir, "console-shell.html");
   writeFileSync(out, html, "utf8");
-  // eslint-disable-next-line no-console
+   
   console.log(`preview written: ${out}`);
 }, 60_000);

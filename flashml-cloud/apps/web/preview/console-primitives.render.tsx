@@ -104,9 +104,13 @@ const BUTTON_VARIANTS = [
 /**
  * The primary-CTA string copy-pasted verbatim into 8 console files, reproduced
  * here EXACTLY so it can be compared side by side with the `Button` primitive
- * those files could have used. The point of the harness is to show that these
- * two do not currently look the same, which is why adoption is a visual change
- * and not a pure refactor.
+ * those files could have used.
+ *
+ * It used to prove they differed. It now proves they do not: the primitive was
+ * moved to THIS treatment rather than the eight files being moved to the
+ * primitive's, so adopting `<Button>` is a refactor instead of a redesign. Keep
+ * this literal in sync with the eight call sites — the moment it drifts, this
+ * panel stops being evidence and starts being decoration.
  */
 const HAND_ROLLED_PRIMARY =
   "interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110";
@@ -137,7 +141,7 @@ function Gallery() {
 
       <Section
         title="Button — the hand-rolled copy"
-        note="The exact class string duplicated across 8 console files. Compare weight, height and padding against the primitive above: adopting Button is a visual change, not a no-op."
+        note="The exact class string duplicated across 8 console files. It should now be indistinguishable from the primitive above — the primitive was moved to THIS treatment, so adopting Button is a refactor rather than a redesign. Measured: height 36px, weight 600, 14px, rgb(243,107,50) all match; only horizontal padding differs, 12px vs 14px."
       >
         <button className={HAND_ROLLED_PRIMARY}>hand-rolled primary</button>
         <button className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2">
@@ -226,6 +230,6 @@ it("writes the console primitives preview", async () => {
   mkdirSync(outDir, { recursive: true });
   const out = path.join(outDir, "console-primitives.html");
   writeFileSync(out, html, "utf8");
-  // eslint-disable-next-line no-console
+   
   console.log(`preview written: ${out}`);
 }, 60_000);

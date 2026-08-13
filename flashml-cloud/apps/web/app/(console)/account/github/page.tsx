@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowClockwise, GithubLogo, Warning } from "@phosphor-icons/react";
+import { GithubLogo } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -17,6 +17,10 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
+import { StatePanel } from "@/components/shell/StatePanel";
+import { resolvePanel } from "@/lib/console/panel-state";
 import {
   NotAuthenticated,
   disconnectGitHubInstallation,
@@ -25,10 +29,19 @@ import {
   type GitHubInstallation,
 } from "@/lib/cloud-api";
 
+/** What one read of this page's route returns. `configured` rides along with
+ * the list because the two answer different questions and the page needs
+ * both: `configured === false` means this DEPLOYMENT has no GitHub App, which
+ * is neither an empty result nor a failed read — the request succeeded and
+ * the answer is "this feature is not installed here". */
+interface GitHubAccess {
+  installations: GitHubInstallation[];
+  configured: boolean;
+}
+
 export default function GitHubAccessPage() {
   const router = useRouter();
-  const [installations, setInstallations] = useState<GitHubInstallation[]>([]);
-  const [configured, setConfigured] = useState(false);
+  const [access, setAccess] = useState<GitHubAccess | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -36,8 +49,10 @@ export default function GitHubAccessPage() {
   const load = useCallback(() => {
     listGitHubInstallations()
       .then((result) => {
-        setInstallations(result.installations);
-        setConfigured(result.configured);
+        setAccess({
+          installations: result.installations,
+          configured: result.configured,
+        });
         setState("ready");
         setError(null);
       })
@@ -84,59 +99,54 @@ export default function GitHubAccessPage() {
     }
   }
 
-  if (state === "loading") {
-    return <p className="text-sm text-muted-foreground">Loading…</p>;
-  }
-
-  if (state === "error") {
-    return (
-      <div className="space-y-3">
-        <p className="flex items-center gap-2 text-sm text-destructive">
-          <Warning size={16} weight="bold" />
-          {error}
-        </p>
-        <Button variant="outline" size="sm" onClick={load}>
-          <ArrowClockwise size={14} /> Try again
-        </Button>
-      </div>
-    );
-  }
+  // `configured === false` is deliberately NOT empty: the read succeeded and
+  // the answer is about the deployment, not about this account's list. Only a
+  // configured deployment with nothing connected is genuinely empty.
+  const panel = resolvePanel<GitHubAccess>(
+    { loading: state === "loading", error, data: access },
+    (d) => d.configured && d.installations.length === 0
+  );
 
   return (
-    <div className="space-y-6">
-      <header className="space-y-1">
-        <h1 className="text-xl font-semibold">GitHub</h1>
-        <p className="text-sm text-muted-foreground">
-          Connect a GitHub account or organisation so FlashML can read its
-          private repositories when you submit a job. Read-only, and only the
-          repositories you pick.
-        </p>
-      </header>
+    <PageShell width="reading">
+      {/* Outside the panel, so the page keeps its name while it is loading and
+          after a failed read. Both of those used to REPLACE the whole page,
+          heading included — a screen with no title and one red line on it. */}
+      <PageHeader
+        title="GitHub"
+        description="Connect a GitHub account or organisation so FlashML can read its private repositories when you submit a job. Read-only, and only the repositories you pick."
+      />
 
-      {!configured ? (
-        // Deliberately not a disabled Connect button: this deployment has no
-        // GitHub App at all, so there is nothing to enable and nothing the
-        // person can do about it. Saying so is more useful than a control
-        // that will never work.
-        <p className="rounded-lg border border-border bg-surface p-4 text-sm text-muted-foreground">
-          This deployment has no GitHub App configured, so private
-          repositories are unavailable. Public repositories work as normal.
-        </p>
-      ) : (
-        <>
-          {installations.length === 0 ? (
-            <div className="space-y-3 rounded-lg border border-border bg-surface p-4">
-              <p className="text-sm text-muted-foreground">
-                Nothing connected yet. Public repositories already work — this
-                is only needed for private ones.
-              </p>
-              <Button onClick={connect} disabled={connecting}>
-                <GithubLogo size={16} weight="fill" />
-                {connecting ? "Opening GitHub…" : "Connect GitHub"}
-              </Button>
-            </div>
+      <StatePanel
+        state={panel}
+        className="mt-6"
+        loadingRows={1}
+        label="your GitHub connections"
+        empty={{
+          title: "Nothing connected yet",
+          description:
+            "Public repositories already work — this is only needed for private ones.",
+          action: (
+            <Button onClick={connect} disabled={connecting}>
+              <GithubLogo size={16} weight="fill" />
+              {connecting ? "Opening GitHub…" : "Connect GitHub"}
+            </Button>
+          ),
+        }}
+        unreadable={{ retry: load }}
+      >
+        {({ configured, installations }) =>
+          !configured ? (
+            // Deliberately not a disabled Connect button: this deployment has
+            // no GitHub App at all, so there is nothing to enable and nothing
+            // the person can do about it. Saying so is more useful than a
+            // control that will never work.
+            <p className="mt-6 rounded-lg border border-border bg-surface p-4 text-sm text-muted-foreground">
+              This deployment has no GitHub App configured, so private
+              repositories are unavailable. Public repositories work as normal.
+            </p>
           ) : (
-            <div className="space-y-3">
+            <div className="mt-6 space-y-3">
               <ul className="space-y-2">
                 {installations.map((installation) => (
                   <li
@@ -204,9 +214,9 @@ export default function GitHubAccessPage() {
                 Connect another account
               </Button>
             </div>
-          )}
-        </>
-      )}
-    </div>
+          )
+        }
+      </StatePanel>
+    </PageShell>
   );
 }

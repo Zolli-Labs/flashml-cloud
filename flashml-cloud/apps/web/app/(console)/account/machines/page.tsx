@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowClockwise, Warning } from "@phosphor-icons/react";
+import { ArrowClockwise } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -17,6 +17,11 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
+import { StatePanel } from "@/components/shell/StatePanel";
+import { isEmptyList, resolvePanel } from "@/lib/console/panel-state";
 import { EnrolInstructions } from "@/components/machines/EnrolInstructions";
 import { isOnline, relativeTime } from "@/lib/machine-status";
 import {
@@ -86,100 +91,107 @@ export default function MachinesPage() {
     );
   }
 
-  const active = machines.filter((m) => m.status !== "revoked");
-  const online = active.filter((m) => isOnline(m.last_seen_at)).length;
+  // Same ordering the hand-rolled switch below used — error, then loading,
+  // then the rows — with the one difference that no arrangement of these can
+  // now reach the empty state from a failed read.
+  const panel = resolvePanel(
+    { loading: state === "loading", error, data: machines },
+    isEmptyList
+  );
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="title">My Machines</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">
-            Machines you own. Tick one into a Workspace to let your workspace members
-            place jobs on it.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={load}
-            aria-label="Refresh"
-            className="rounded-md p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
-          >
-            <ArrowClockwise
-              size={15}
-              className={state === "loading" ? "animate-spin" : ""}
-            />
-          </button>
-          <Link
-            href="/activate"
-            className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110"
-          >
-            Add a Machine
-          </Link>
-        </div>
-      </div>
-
-      {active.length > 0 && (
-        <div className="mt-7 flex items-baseline gap-6">
-          <div>
-            <div className="metric-lg">{online}</div>
-            <div className="label-caps mt-1">Online now</div>
-          </div>
-          <div>
-            <div className="metric-lg text-muted-foreground">
-              {active.length}
-            </div>
-            <div className="label-caps mt-1">Enrolled</div>
-          </div>
-        </div>
-      )}
-
-      <div className="mt-6">
-        {state === "loading" && machines.length === 0 ? (
-          <div className="space-y-px">
-            <div className="skeleton h-14" />
-            <div className="skeleton h-14" />
-          </div>
-        ) : state === "error" ? (
-          <div className="flex flex-col items-center gap-3 py-12 text-center">
-            <Warning className="h-5 w-5 text-destructive" weight="fill" />
-            <p className="text-sm text-muted-foreground">{error}</p>
-            <button
-              type="button"
+    <PageShell width="wide">
+      <PageHeader
+        title="My Machines"
+        description="Machines you own. Tick one into a Workspace to let your workspace members place jobs on it."
+        actions={
+          <>
+            <Button
+              variant="ghost"
+              size="icon-sm"
               onClick={load}
-              className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2"
+              aria-label="Refresh"
             >
-              Try again
-            </button>
-          </div>
-        ) : machines.length === 0 ? (
-          <Empty />
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[620px] text-left">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Machine", "Platform", "Last seen", ""].map((h, i) => (
-                    <th
-                      key={h || i}
-                      className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {machines.map((m) => (
-                  <MachineRow key={m.id} machine={m} onRevoke={handleRevoke} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
+              <ArrowClockwise
+                className={state === "loading" ? "animate-spin" : ""}
+              />
+            </Button>
+            {/* No sizing override. The `default` variant now carries the same
+                36px height, 600 weight and brand hover the hand-rolled string
+                did; only horizontal padding differs, by 2px per side, which is
+                the size scale's business and not this page's. */}
+            <Button render={<Link href="/activate" />}>Add a Machine</Button>
+          </>
+        }
+      />
+
+      <StatePanel
+        state={panel}
+        className="mt-6"
+        label="your Machines"
+        empty={{
+          title: "No machines yet",
+          description:
+            "Run these commands on the machine you want to connect. It can be this one.",
+          action: <EnrolInstructions base={cloudApiBase()} />,
+        }}
+        unreadable={{ retry: load }}
+      >
+        {(rows) => {
+          // Both counts moved inside `present`. They used to render above the
+          // state switch, so a failed poll left "2 Online now" standing over a
+          // panel that had just said it could not read anything — stale
+          // numbers presented as current.
+          const activeRows = rows.filter((m) => m.status !== "revoked");
+          const online = activeRows.filter((m) =>
+            isOnline(m.last_seen_at)
+          ).length;
+          return (
+            <>
+              {activeRows.length > 0 && (
+                <div className="mb-6 flex items-baseline gap-6">
+                  <div>
+                    <div className="metric-lg">{online}</div>
+                    <div className="label-caps mt-1">Online now</div>
+                  </div>
+                  <div>
+                    <div className="metric-lg text-muted-foreground">
+                      {activeRows.length}
+                    </div>
+                    <div className="label-caps mt-1">Enrolled</div>
+                  </div>
+                </div>
+              )}
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[620px] text-left">
+                  <thead>
+                    <tr className="border-b border-border">
+                      {["Machine", "Platform", "Last seen", ""].map((h, i) => (
+                        <th
+                          key={h || i}
+                          className={`label-caps px-3 py-2 font-medium ${i === 3 ? "text-right" : ""}`}
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {rows.map((m) => (
+                      <MachineRow
+                        key={m.id}
+                        machine={m}
+                        onRevoke={handleRevoke}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          );
+        }}
+      </StatePanel>
+    </PageShell>
   );
 }
 
@@ -275,12 +287,13 @@ function MachineRow({
           <AlertDialog>
             <AlertDialogTrigger
               render={
-                <button
-                  type="button"
-                  className="rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                 >
                   Revoke
-                </button>
+                </Button>
               }
             />
             <AlertDialogContent>
@@ -308,19 +321,5 @@ function MachineRow({
         )}
       </td>
     </tr>
-  );
-}
-
-function Empty() {
-  return (
-    <div className="flex flex-col items-center gap-5 py-14 text-center">
-      <div>
-        <h2 className="text-base font-semibold">No machines yet</h2>
-        <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted-foreground">
-          Run these commands on the machine you want to connect. It can be this one.
-        </p>
-      </div>
-      <EnrolInstructions base={cloudApiBase()} />
-    </div>
   );
 }
