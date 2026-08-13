@@ -432,6 +432,114 @@ contrast needs a distance assertion, not an existence assertion.* `--border`
 against `--surface` is the next one to check, and `--skeleton` against
 `--surface-2` (a skeleton inside a card) after that.
 
+### 7g. The sweep's defect list — panels that stated facts they had not read
+
+Recorded before the code was replaced, because **a claim about what the console
+*used to* do wrong is unfalsifiable afterwards.** Once a panel is rewritten
+nobody can go back and check whether it really did collapse a failed read into
+an answer. Each item below was established by reading the original branch, not
+inferred from the rewrite.
+
+**`app/(console)/account/page.tsx` — six panels, all the same root cause.** The
+page rendered its sections whether the profile had loaded, failed, or never been
+read:
+
+1. **`GitHub: not linked` on a failed read.** The worst one. `profile?.github_login ? … : "not linked"` — a user whose `GET /me` failed was told their GitHub link was *gone*. A factual claim about their account, manufactured from no data.
+2. **`You signed up before we asked for this` on a failed read** — `isDetailsEmpty(null)` returns `true` (correctly, for its own purpose), so a failed read selected the grandfathered-tester copy.
+3. **An editable, apparently-blank display name on a failed read.** Typing and saving would `PATCH` over a value nobody had ever seen.
+4. **Storage: unreadable rendered as loading, permanently.** The `catch` swallowed the error without setting data *or* error, and the only other branch was an ellipsis. It never resolved.
+5. **Contributed: identical shape, identical permanent ellipsis.**
+6. **`Free up space`: unreadable rendered as absence** — a failed job read rendered exactly what "nothing to clear" renders, which is nothing.
+
+**`app/(console)/account/github/page.tsx`** — loading and error replaced the
+*entire page*, heading included, leaving a screen with no title and one red line.
+
+**`account/cli` and `account/machines`** — live counts ("3 Active", "2 Online
+now") rendered *outside* the state switch, so a failed poll left them standing
+above a panel that had just said it could not read anything.
+
+**The negative finding, which matters as much.** The two local `Empty()`
+functions in `cli` and `machines` — the duplication this sweep set out to
+remove — **were not the bug.** Both genuinely handled all four states, and a
+faithful port was the correct port. Every real collapse was in
+`account/page.tsx`, which had no `Empty()` at all.
+
+So *the duplication and the defect were not in the same place.* Had the sweep
+been run as "replace the duplicated empty states", it would have touched two
+correct files and left all six broken ones alone. The instruction that found
+these was **audit which states each panel actually handles**, not *find the
+copy-paste* — worth keeping for the next sweep.
+
+### 7h. The documented verification gate cannot be run as written
+
+`console-ui-plan.md` §5 and the handoff prompt both give this gate:
+
+```bash
+npm test && npx tsc --noEmit && npm run lint && npm run build
+```
+
+…and both note that `npm run build` needs `flashml-cloud/.env.dev` sourced,
+because `next.config.ts` hard-fails without `NEXT_PUBLIC_CLOUD_API`.
+
+**Sourcing that env makes `npm test` fail.** `middleware.test.ts` deliberately
+asserts the signed-out redirect contract *when Supabase configuration is
+absent* — with `NEXT_PUBLIC_SUPABASE_URL` and `..._ANON_KEY` exported, the
+middleware takes its configured path and the test goes red. Verified both ways
+in this worktree: env sourced → `1 failed | 1029 passed`; env unset →
+`middleware.test.ts` **36 passed / 36**.
+
+So the two halves of the gate need opposite environments and cannot share one
+shell. Run it as:
+
+```bash
+npx vitest run && npx tsc --noEmit && npm run lint          # NO env
+( set -a; . ../../../.env.dev; set +a; npm run build )      # env, subshell only
+```
+
+This matters beyond tidiness: a session that sources the env once and runs the
+whole gate sees a red middleware test and will reasonably suspect it broke the
+**P0 G-1 auth gate** — the highest-stakes file in the repo — when it changed
+nothing. The opposite mistake is worse: seeing that failure, assuming it is
+"just the env", and missing a real regression in exactly that file.
+
+### 7i. Two more instances of the same bug class, found the same way
+
+**`font-display` is a dead class.** `activate/page.tsx` had two success-screen
+headings that differed only in that one carried `font-display`. There is no
+`--font-display` token and Tailwind v4 has no default for it. Compiled-bundle
+count: `.font-display` → **0 rules**, `.font-mono` → 2. The two headings had
+been rendering identically all along; the "inconsistency" was invisible because
+the class did nothing.
+
+**The `Tabs` primitive would have been invisible.** Its default `TabsList`
+paints `bg-muted` `#f0eee8` with the active tab on `bg-background` `#f1efe9` —
+**one value per channel on this cream page**, exactly the `Skeleton` failure
+again, in a different primitive. Adopted unmodified, the admin queue's tab strip
+would have had no visible selected state. The page's own `bg-surface` `#fbfaf7`
+was kept instead.
+
+That is now **three** shadcn primitives whose stock neutrals collapse against
+this cream ground: `Skeleton`, `Badge variant="secondary"`, and `TabsList`. The
+common cause is that these primitives assume a white or near-white page, and
+Zolli's is `#f1efe9`. **Any further primitive adopted from that family needs a
+contrast check against `--cream` before it ships**, which is the practical form
+of §7f's "distance assertion, not existence assertion".
+
+### 7j. Open question for the owner: `/docs` and `/how-it-works` widths
+
+`lib/console/page-width.ts` files both as `reading` (`max-w-3xl`), justified by
+"contains no table and no grid". **Both do** — each has a `lg:grid` with a 180px
+contents rail, which leaves the prose column at 768 − 48 − 180 − 48 = **492px**.
+
+`/how-it-works` is the clearer miss by the table's own criterion (the width
+should fit "the widest thing the page has to lay out"): its widest object is a
+760-unit `Ownership` diagram, whose 12px labels render at ~10.6px at `wide` and
+**~7.1px** at `reading`.
+
+Both shipped at `wide` — the width they already had — so nothing moved, and the
+disagreement is now visible in `data-console-width` rather than silent. **The
+rule, not the pages, is what needs a decision.**
+
 ## 8. Decision log
 
 Appended as decisions are made. Newest last.
