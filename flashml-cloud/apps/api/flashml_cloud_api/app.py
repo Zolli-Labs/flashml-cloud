@@ -89,6 +89,7 @@ from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api import job_share as jobsharemod
 from flashml_cloud_api import metrics as metricsmod
 from flashml_cloud_api import marketplace as marketplacemod
+from flashml_cloud_api import observability
 from flashml_cloud_api import repo as repomod
 from flashml_cloud_api import placement as placementmod
 from flashml_cloud_api import prices as pricesmod
@@ -4121,6 +4122,12 @@ def create_cloud_app(
             source=None,
             spec=spec,
             status=str(job.get("state") or "PENDING"),
+            # Minted HERE, at the one place a job first exists. Every later
+            # row inherits it in SQL rather than being handed a fresh one —
+            # a second mint downstream would make two halves of one piece of
+            # work look unrelated, which is the failure this column exists
+            # to prevent.
+            correlation_id=observability.new_correlation_id(),
         )
         return _passthrough(r)
 
@@ -5478,6 +5485,11 @@ def create_cloud_app(
                 spec=spec,
                 status="PENDING",
                 pool_id=pool,
+                # The federated path is the one that most needs this: a run
+                # is N round jobs the coordinator sees as unrelated, so
+                # without a shared id there is nothing tying round 7 back to
+                # the submission a person made.
+                correlation_id=observability.new_correlation_id(),
             )
             start_federated_job(
                 fedavgmod.FederatedRun(
@@ -5539,6 +5551,7 @@ def create_cloud_app(
             spec=spec,
             status=str(job.get("state") or "PENDING"),
             pool_id=pool,
+            correlation_id=observability.new_correlation_id(),
         )
         return Response(
             content=json.dumps({**job, "findings": rendered}),
