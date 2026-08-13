@@ -5,6 +5,7 @@ import { ArrowRight, Lightning } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { PageShell } from "@/components/shell/PageShell";
 import { StatePanel } from "@/components/shell/StatePanel";
+import { StatTile } from "@/components/ui/stat-tile";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import {
@@ -52,13 +53,23 @@ export default function WorkspaceOverviewPage() {
           number is animated only when it was measured, and these are
           already exact. */}
       <div className="mt-6 grid gap-3 sm:grid-cols-3">
-        <Stat
+        <StatTile
           label="Machines online"
           value={online.length}
           total={machines.length}
+          size="lg"
         />
-        <Stat label="Jobs running" value={active.length} total={jobs.length} />
-        <Stat label="Jobs finished" value={jobs.length - active.length} />
+        <StatTile
+          label="Jobs running"
+          value={active.length}
+          total={jobs.length}
+          size="lg"
+        />
+        <StatTile
+          label="Jobs finished"
+          value={jobs.length - active.length}
+          size="lg"
+        />
       </div>
 
       <section className="mt-8">
@@ -139,27 +150,5 @@ export default function WorkspaceOverviewPage() {
         </div>
       </section>
     </PageShell>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  total,
-}: {
-  label: string;
-  value: number;
-  total?: number;
-}) {
-  return (
-    <div className="panel px-4 py-3.5">
-      <div className="metric-value text-2xl">
-        {value}
-        {total !== undefined && total !== value && (
-          <span className="text-base text-muted-foreground">/{total}</span>
-        )}
-      </div>
-      <div className="label-caps mt-1">{label}</div>
-    </div>
   );
 }

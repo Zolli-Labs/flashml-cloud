@@ -8,6 +8,7 @@ import {
   Minus,
   Prohibit,
 } from "@phosphor-icons/react";
+import { StatTile } from "@/components/ui/stat-tile";
 import {
   NOT_OBSERVED,
   basisLabel,
@@ -95,15 +96,32 @@ export function TradeoffCard({
 
       <div className="mt-4 border-t border-border pt-4">
         <dl className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
-          {panel.tasks != null && <Stat label="Tasks" value={panel.tasks} />}
+          {panel.tasks != null && (
+            <StatTile variant="bare" size="sm" label="Tasks" value={panel.tasks} />
+          )}
           {panel.owned && (
             <>
-              <Stat label="Your machines" value={panel.owned.machines} />
-              <Stat label="Your slots" value={panel.owned.slots} />
+              <StatTile
+                variant="bare"
+                size="sm"
+                label="Your machines"
+                value={panel.owned.machines}
+              />
+              <StatTile
+                variant="bare"
+                size="sm"
+                label="Your slots"
+                value={panel.owned.slots}
+              />
             </>
           )}
           {panel.renting && (
-            <Stat label="Rented, swept" value={panel.renting.slots} />
+            <StatTile
+              variant="bare"
+              size="sm"
+              label="Rented, swept"
+              value={panel.renting.slots}
+            />
           )}
         </dl>
         <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted-foreground">
@@ -447,15 +465,6 @@ function Notes({ notes }: { notes: string[] }) {
         </li>
       ))}
     </ul>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <dt className="label-caps">{label}</dt>
-      <dd className="metric-value mt-0.5 text-lg">{value}</dd>
-    </div>
   );
 }
 

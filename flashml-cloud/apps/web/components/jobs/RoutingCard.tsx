@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowsClockwise, CheckCircle, CloudSlash, Prohibit } from "@phosphor-icons/react";
+import { StatTile } from "@/components/ui/stat-tile";
 import {
   NOT_OBSERVED,
   NO_DEADLINE_NOTE,
@@ -244,10 +245,30 @@ export function RoutingCard({
         <div className="mt-4 border-t border-border pt-4">
           <p className="label-caps">Fleet reachable from this account</p>
           <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
-            <Stat label="Eligible" value={panel.fleet.eligible} />
-            <Stat label="Refused by a gate" value={panel.fleet.excluded} />
-            <Stat label="Wrong venue" value={panel.fleet.venueExcluded} />
-            <Stat label="Not yet measurable" value={panel.fleet.unplannable} />
+            <StatTile
+              variant="bare"
+              size="sm"
+              label="Eligible"
+              value={panel.fleet.eligible}
+            />
+            <StatTile
+              variant="bare"
+              size="sm"
+              label="Refused by a gate"
+              value={panel.fleet.excluded}
+            />
+            <StatTile
+              variant="bare"
+              size="sm"
+              label="Wrong venue"
+              value={panel.fleet.venueExcluded}
+            />
+            <StatTile
+              variant="bare"
+              size="sm"
+              label="Not yet measurable"
+              value={panel.fleet.unplannable}
+            />
           </dl>
         </div>
       )}
@@ -302,15 +323,6 @@ function Notes({ notes }: { notes: string[] }) {
         </li>
       ))}
     </ul>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <dt className="label-caps">{label}</dt>
-      <dd className="metric-value mt-0.5 text-lg">{value}</dd>
-    </div>
   );
 }
 

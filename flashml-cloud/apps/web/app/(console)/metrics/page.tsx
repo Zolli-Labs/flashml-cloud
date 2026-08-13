@@ -6,6 +6,7 @@ import { Info } from "@phosphor-icons/react";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { PageShell } from "@/components/shell/PageShell";
 import { StatePanel } from "@/components/shell/StatePanel";
+import { StatTile } from "@/components/ui/stat-tile";
 import { resolvePanel } from "@/lib/console/panel-state";
 import {
   NotAuthenticated,
@@ -14,7 +15,6 @@ import {
 } from "@/lib/cloud-api";
 import {
   summariseMetrics,
-  type CountStat,
   type MetricsSummary,
   type ReliabilityStat,
 } from "@/lib/platform-metrics";
@@ -173,7 +173,12 @@ export default function MetricsPage() {
               </h2>
               <div className="mt-2 grid gap-3 sm:grid-cols-4">
                 {summaryData.jobCounts.map((c) => (
-                  <CountTile key={c.label} stat={c} />
+                  <StatTile
+                    key={c.label}
+                    label={c.label}
+                    value={c.value}
+                    size="lg"
+                  />
                 ))}
               </div>
             </section>
@@ -182,13 +187,17 @@ export default function MetricsPage() {
               <h2 className="label-caps">Tasks</h2>
               <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {summaryData.taskCounts.map((c) => (
-                  <CountTile key={c.label} stat={c} />
+                  <StatTile
+                    key={c.label}
+                    label={c.label}
+                    value={c.value}
+                    size="lg"
+                  />
                 ))}
-                <CountTile
-                  stat={{
-                    label: "Machines contributing",
-                    value: summaryData.machinesContributing,
-                  }}
+                <StatTile
+                  label="Machines contributing"
+                  value={summaryData.machinesContributing}
+                  size="lg"
                 />
               </div>
             </section>
@@ -248,15 +257,6 @@ function WindowPicker({
           {days}d
         </button>
       ))}
-    </div>
-  );
-}
-
-function CountTile({ stat }: { stat: CountStat }) {
-  return (
-    <div className="rounded-lg border border-border bg-surface px-4 py-3.5">
-      <div className="metric-value text-2xl">{stat.value}</div>
-      <div className="label-caps mt-1">{stat.label}</div>
     </div>
   );
 }

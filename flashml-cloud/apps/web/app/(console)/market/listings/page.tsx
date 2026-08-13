@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { ListingsPanel } from "@/components/market/ListingsPanel";
+import { StatTile } from "@/components/ui/stat-tile";
 import {
   ApiError,
   NotAuthenticated,
@@ -127,12 +128,21 @@ export default function ListingsPage() {
             real rows only, absent (not zeroed) for an empty book. */}
         {state === "present" && data && data.asks.length > 0 && (
           <div className="flex gap-6 pb-1">
-            <HeaderStat value={data.asks.length} label="Open asks" />
-            <HeaderStat
+            <StatTile
+              variant="header"
+              value={data.asks.length}
+              label="Open asks"
+            />
+            <StatTile
+              variant="header"
               value={books.length}
               label={books.length === 1 ? "Class" : "Classes"}
             />
-            <HeaderStat value={data.mine.length} label="Your listings" />
+            <StatTile
+              variant="header"
+              value={data.mine.length}
+              label="Your listings"
+            />
           </div>
         )}
       </div>
@@ -150,16 +160,6 @@ export default function ListingsPage() {
           error={error}
         />
       </div>
-    </div>
-  );
-}
-
-/** A right-aligned header figure: a real count, mono, with a caps label. */
-function HeaderStat({ value, label }: { value: number; label: string }) {
-  return (
-    <div className="text-right">
-      <div className="metric-value text-xl">{value}</div>
-      <div className="label-caps mt-0.5">{label}</div>
     </div>
   );
 }
