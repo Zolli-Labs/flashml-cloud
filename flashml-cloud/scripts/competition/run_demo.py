@@ -149,6 +149,16 @@ class Api:
         self._token = token
         self._timeout = timeout_s
 
+    #: GETs retry on transport weather; nothing else does. The first live run
+    #: (2026-08-13, dev) died on a raw socket TimeoutError while POLLING a
+    #: training job — the API was busy relaying the job's own checkpoints and
+    #: one status read took >60s. A poll is safe to repeat by definition;
+    #: crashing the whole demo on one slow read is how an unattended run
+    #: fails at minute 11 of 12. POSTs stay single-shot: from-repo would
+    #: double-submit, and the idempotent ones (model-ready) don't need it.
+    #: The ladder matches app.py's forward_idempotent, the repo's precedent.
+    _RETRY_DELAYS_S = (2.0, 5.0, 12.0)
+
     def request(self, method: str, path: str, body: Any = None,
                 *, allow: tuple[int, ...] = ()) -> tuple[int, Any]:
         """`(status, parsed body)`. Raises `DemoError` for anything not 2xx
@@ -162,22 +172,35 @@ class Api:
         request = urllib.request.Request(
             f"{self.base}{path}", data=data, method=method, headers=headers
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                return response.status, _parse(response.read())
-        except urllib.error.HTTPError as exc:
-            payload = _parse(exc.read())
-            if exc.code in allow:
-                return exc.code, payload
-            detail = payload.get("detail") if isinstance(payload, dict) else payload
-            raise DemoError(
-                f"{method} {path} answered {exc.code}: {detail}"
-            ) from None
-        except urllib.error.URLError as exc:
-            raise DemoError(
-                f"{method} {path} could not reach {self.base} ({exc.reason}) — "
-                f"is the API running, and is --api-base right?"
-            ) from None
+        retries = list(self._RETRY_DELAYS_S) if method == "GET" else []
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                    return response.status, _parse(response.read())
+            except urllib.error.HTTPError as exc:
+                payload = _parse(exc.read())
+                if exc.code in allow:
+                    return exc.code, payload
+                detail = payload.get("detail") if isinstance(payload, dict) else payload
+                raise DemoError(
+                    f"{method} {path} answered {exc.code}: {detail}"
+                ) from None
+            # TimeoutError alongside URLError, deliberately: a read that
+            # times out mid-response escapes urllib's own wrapping and
+            # arrives as the bare OS-level TimeoutError — the exact
+            # traceback the first live run produced.
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if retries:
+                    delay = retries.pop(0)
+                    print(f"  … {method} {path} hit transport weather "
+                          f"({type(exc).__name__}); retrying in {delay:g}s")
+                    time.sleep(delay)
+                    continue
+                reason = getattr(exc, "reason", exc)
+                raise DemoError(
+                    f"{method} {path} could not reach {self.base} ({reason}) — "
+                    f"is the API running, and is --api-base right?"
+                ) from None
 
     def get(self, path: str, **kw) -> Any:
         return self.request("GET", path, **kw)[1]
