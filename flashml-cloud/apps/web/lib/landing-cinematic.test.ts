@@ -85,6 +85,7 @@ describe("cinematic landing foundation", () => {
     expect(hero).toMatch(/data-map-readout="(?:running|lost|resumed|accepted)"/);
     expect(hero).toContain("Computing power,");
     expect(hero).toContain("without the lock-in.");
+    expect(hero).toContain("One open network connecting people who need compute with machines ready to work.");
     expect(hero).toContain('data-market-role="demand"');
     expect(hero).toContain('data-market-role="supply"');
     expect(hero).toContain('href="/workspaces"');

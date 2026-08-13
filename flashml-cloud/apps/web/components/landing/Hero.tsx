@@ -88,17 +88,17 @@ export function Hero() {
           air is there whether or not the padding is, and every pixel spent on it
           is a pixel the map's own frame loses off the bottom of the screen. */}
       <div className="mx-auto w-full max-w-[1440px] px-5 pb-10 sm:px-6 xl:px-12 xl:pb-6">
-        <div className="grid min-w-0 items-center gap-10 py-8 xl:grid-cols-[minmax(28rem,.9fr)_minmax(0,1.1fr)] xl:gap-10 xl:py-4 2xl:gap-14">
+        <div className="grid min-w-0 items-center gap-10 py-8 xl:grid-cols-[minmax(30rem,1fr)_minmax(0,1fr)] xl:gap-10 xl:py-4 2xl:gap-14">
           <div className="min-w-0">
             <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
               The open compute network
             </p>
-            <h1 className="mt-5 max-w-[78rem] text-[clamp(2.75rem,5.6vw,5.7rem)] font-semibold leading-[0.93] tracking-[-0.058em]">
+            <h1 className="mt-5 max-w-[78rem] text-[clamp(2.5rem,4.9vw,5rem)] font-semibold leading-[0.93] tracking-[-0.058em]">
               <span className="block lg:whitespace-nowrap">Computing power,</span>
               <span className="block text-muted-foreground lg:whitespace-nowrap">without the lock-in.</span>
             </h1>
             <p className="mt-7 max-w-[58ch] text-[15px] leading-[1.62] tracking-[-0.006em] text-muted-foreground sm:mt-8">
-              Zolli is building a network that connects people who need compute with machines ready to work—across personal hardware, community hosts, and cloud providers.
+              One open network connecting people who need compute with machines ready to work.
             </p>
             <div className="mt-7 max-w-[58ch] sm:mt-8">
               <HeroMarketSwitch />
