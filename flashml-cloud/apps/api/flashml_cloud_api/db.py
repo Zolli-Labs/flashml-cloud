@@ -90,7 +90,31 @@ def connect(settings: Settings) -> psycopg.Connection:
         raise RuntimeError(
             "DATABASE_URL is not configured; cannot open a Postgres connection."
         )
-    conn = psycopg.connect(settings.database_url, row_factory=dict_row)
+    # prepare_threshold=None: never create server-side prepared statements.
+    #
+    # This function opens a NEW connection per request, and on 2026-08-13
+    # that pattern plus a live fleet (three workers heartbeating and
+    # relaying checkpoints, a console polling ten endpoints) exhausted the
+    # Supabase SESSION pooler's hard 15-client cap — requests hung, /healthz
+    # (which deliberately touches the DB) blew Render's 5s budget, and the
+    # instance restart-looped, 502-ing every worker into lease loss.
+    #
+    # The capacity answer is the TRANSACTION pooler (:6543), which
+    # multiplexes hundreds of clients — but render.yaml's old comment
+    # rightly warned that psycopg's default prepared statements (created
+    # after prepare_threshold=5 executions of a query) break intermittently
+    # there: the next transaction can land on a server connection that has
+    # never seen the statement. Disabling them is the one-line change that
+    # makes :6543 safe, costs nothing measurable on queries this small, and
+    # is inert on :5432 — so it is safe to ship BEFORE the URL moves.
+    #
+    # Still a capacity patch, not the design: the real fix is a bounded
+    # connection pool at the `create_app(connect=...)` seam (register
+    # 2026-08-13, §API design follow-ups). When that lands, this stays —
+    # pooled connections through a transaction pooler want it too.
+    conn = psycopg.connect(
+        settings.database_url, row_factory=dict_row, prepare_threshold=None
+    )
     conn.autocommit = True
     return conn
 

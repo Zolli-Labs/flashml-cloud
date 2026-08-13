@@ -169,3 +169,43 @@ pip install "git+https://github.com/Zolli-Labs/flashml.git@fix/trusted-tier-exec
 Before tagging: run the `e2e/` suite `LOCAL=1`, and remember the release
 gotchas already on record — a red release run still publishes, and
 docs-deploy always fails on tags.
+
+## 6. The 14:00Z dev outage — connection exhaustion (root-caused live)
+
+**What the operator saw:** the console erroring "internal error — see server
+logs" / "Failed to fetch" on every job page; Render mailing instance-failure
+notices every ~3 minutes; the pod logging Render's entire 502 HTML page as an
+error string; a healthy task's results discarded on lease loss.
+
+**The chain:** `db.connect()` opens a NEW psycopg connection per request →
+Supabase SESSION pooler hard-caps at 15 clients → three workers (heartbeats +
+checkpoint relay) + the console (ten endpoints × 5 s, each doubled by a CORS
+preflight) + observer scripts exceeded 15 → `EMAXCONNSESSION`, requests hung
+→ `/healthz` (deliberately DB-touching) blew Render's 5 s budget → instance
+restart loop → 502 storm → checkpoint uploads failed (`IncompleteRead`/502),
+lease expired mid-run, enforcing mode correctly 403'd the late uploads →
+`lease lost during run — discarding result` → the re-claim burned an attempt
+on a 502 code-artifact download. **Audit findings C5/C6/C12/C14/4.1 observed
+live in one incident.** Not Render rate limiting; Render was correctly
+restarting an instance that could not reach its database.
+
+**Amplifier (flashnode, new finding):** the checkpoint relay retries every
+unshipped file ~once per second with no backoff — a thundering herd that
+re-flattens the API the moment it recovers. Fix: exponential backoff with
+jitter in the relay. Goes into 0.4.1 with C1/C2.
+
+**Mitigation (shipped):** `prepare_threshold=None` in `db.connect()` (safe
+on both ports), then DATABASE_URL moved to the TRANSACTION pooler `:6543`
+(dev; verified from outside: 25 concurrent connections vs. the 15 cap).
+render.yaml's old "avoid :6543" comment is reversed with the reasoning, at
+both DATABASE_URL sites. **Prod (`flashml-api`) still runs :5432 — flip it
+(same one-digit edit) before any fleet touches prod, unless the pool below
+lands first.**
+
+**Design follow-ups (P0 before real users):**
+1. Bounded connection pool at the `create_app(connect=...)` seam — one
+   place, injected already; gives backpressure instead of theatrical death.
+2. Checkpoint-relay backoff (above).
+3. Console self-DDoS: ten polled endpoints × 5 s × CORS preflights. Roadmap
+   already owns the real answer (SSE, Stage 6); until then a shared slower
+   poll timer.

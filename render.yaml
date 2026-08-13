@@ -195,8 +195,23 @@ services:
       # "Direct connection": direct is IPv6-only on current projects and
       # Render's outbound network may not route it, which surfaces as a
       # connection failure well after a deploy that otherwise looks healthy.
-      # Avoid the TRANSACTION pooler (:6543) — psycopg uses prepared
-      # statements by default and transaction mode breaks them intermittently.
+      # USE THE TRANSACTION POOLER (:6543), not the session pooler (:5432).
+      # This reverses the previous comment's advice, deliberately, after the
+      # 2026-08-13 dev outage: the session pooler hard-caps at 15 clients,
+      # the API opens a connection per request, and the first night with a
+      # real fleet (three workers + a polling console) exhausted the cap —
+      # requests hung, /healthz blew Render's 5s budget, and the instance
+      # restart-looped, 502-ing every worker into lease loss.
+      #
+      # The prepared-statement breakage that comment rightly feared is
+      # closed in code: db.connect() passes prepare_threshold=None (safe on
+      # both ports, shipped BEFORE any URL moved). Do not flip this port
+      # without that line present in the running build.
+      #
+      # A port is still a capacity patch. If the bounded connection pool
+      # (2026-08-13 findings, API-design follow-ups) is not landed before
+      # prod carries a fleet, this port IS the load-bearing mitigation —
+      # treat it as required, not optional.
       # Percent-encode any special character in the password (`@` -> %40,
       # `#` -> %23, `/` -> %2F, `:` -> %3A) or the URI parses wrong.
       - key: DATABASE_URL
@@ -579,7 +594,10 @@ services:
         sync: false
       # sync: false => Render prompts once and never stores it in git.
       # Get it from Supabase -> flashml-dev -> Settings -> Database ->
-      # Connection string (SESSION pooler, :5432, user postgres.<ref>).
+      # Connection string — TRANSACTION pooler, :6543, user postgres.<ref>.
+      # Not :5432: its 15-client session cap is what took dev down on
+      # 2026-08-13 (see the prod DATABASE_URL comment above for the full
+      # story and the prepare_threshold=None guard this depends on).
       - key: DATABASE_URL
         sync: false
       # Where a machine is told to go to approve its device code. Unset
