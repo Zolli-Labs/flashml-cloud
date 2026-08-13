@@ -778,6 +778,20 @@ GATEWAY_STATUSES = frozenset({502, 503, 504})
 # gateway shape defeats the transport retry the agent already has.
 AGENT_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
 
+# `GET /v1alpha1/jobs/{job_id}/wait` (AG-5): a bounded long-poll so a caller
+# stops spin-polling `.../events` every couple of seconds. Module constants,
+# not defaults closed over at app-creation time, so a test can
+# `monkeypatch.setattr(appmod, "WAIT_POLL_INTERVAL_S", 0.0)` and see a
+# multi-poll wait resolve in milliseconds instead of the real interval.
+WAIT_POLL_INTERVAL_S = 1.0
+WAIT_DEFAULT_TIMEOUT_S = 25
+# The hard ceiling, regardless of what the caller asks for. A long-poll has
+# to return inside whatever the deployment's own reverse proxy allows for one
+# request, and 60s is comfortably under every such limit this product runs
+# behind. `timeout_s` above this is clamped, not rejected — a caller asking
+# for longer still gets a real (if shorter) wait rather than a 400.
+WAIT_TIMEOUT_CAP_S = 60
+
 
 class CoordinatorClient:
     """The only holder of the operator credential.
@@ -6250,6 +6264,155 @@ def create_cloud_app(
         if not isinstance(events, list):
             return _passthrough(r)
         return events[max(since, 0):]
+
+    @app.get("/v1alpha1/jobs/{job_id}/wait", tags=["browser"])
+    async def wait_for_job_state(
+        request: Request,
+        job_id: str,
+        for_state: str | None = None,
+        timeout_s: int = WAIT_DEFAULT_TIMEOUT_S,
+        user_id: str = Depends(current_user),
+    ):
+        """Bounded long-poll: block up to ``timeout_s`` (capped at
+        ``WAIT_TIMEOUT_CAP_S``) for ``job_id`` to reach ``for_state`` — or,
+        if ``for_state`` is omitted, to reach ANY terminal state — instead of
+        making a caller spin-poll ``.../events`` every couple of seconds.
+
+        AG-5. Deliberately **not** declared with ``db: Connection =
+        Depends(db_conn)`` the way every sibling job route above is: that
+        dependency's connection lives for the whole request, and this
+        request's whole point is to sleep inside itself for up to a minute.
+        Holding a pooled Postgres connection for a minute per waiting
+        browser tab is exactly the thing a long-poll route must not do — "a
+        long-poll that pins a connection for 25s exhausts the pool under
+        load" is the reason this route exists at all instead of `.../events`
+        growing a `wait=true` flag. So the visibility check below opens its
+        own connection with ``request.app.state.connect()`` and closes it
+        immediately, the same manual open/close ``current_user`` itself
+        uses for the same reason — and the polling loop after it never
+        touches the database again: a job's live state comes from the
+        coordinator (see ``get_job_route`` above), not from this table.
+
+        Visibility is checked exactly once, up front, the same
+        ``fetch_job_for_viewer`` gate the sibling read routes use — 404 for
+        a job that exists and the caller cannot see, indistinguishable from
+        one that does not exist at all. Re-checking it on every poll would
+        be a second connection held across the loop for a fact that cannot
+        change during the wait (a job's owner and pool never move).
+
+        A federated job (``fedavgmod.is_federated_job_id``) has no single
+        coordinator job to forward to — ``get_job_route`` answers it
+        entirely from the local row instead, one job per round. Forwarding
+        its id to the coordinator here would ask about something the
+        coordinator has never heard of and 404 forever, which this route
+        must not mistake for "job vanished mid-wait": it is caught by the
+        ordinary blip handling below and ends the wait immediately with the
+        state last known locally, ``reached=False, timed_out=False`` — a
+        graceful "cannot watch this one," never a hang and never a 500.
+
+        Returns 200 always. Reaching the state and timing out are both
+        successful answers, the same "200-with-findings" shape `/preflight`
+        uses: ``{"job_id", "state", "reached", "timed_out", "waited_s"}``,
+        plus a ``"note"`` when the wait ended early on a coordinator blip.
+        ``reached`` and ``timed_out`` are never both true; a coordinator
+        blip mid-wait ends the loop with BOTH false, which is the one case
+        distinguishing three outcomes from the two the field names suggest.
+        """
+        # Clamp before doing anything else — including before the
+        # visibility check — so a caller asking for longer than the cap
+        # never even starts a connection it wasn't going to be allowed to
+        # hold open anyway.
+        timeout_s = max(0, min(timeout_s, WAIT_TIMEOUT_CAP_S))
+
+        db = request.app.state.connect()
+        try:
+            row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        finally:
+            db.close()
+        if row is None:
+            # Not found and not yours look identical — see get_job_route.
+            raise HTTPException(status_code=404, detail="unknown job")
+        # Validated once, outside the loop: a malformed segment is a 400,
+        # not a "coordinator blip" the loop below should swallow, and the
+        # segment cannot change from one poll to the next.
+        job_seg = _seg(job_id)
+
+        def _condition_met(state: str | None) -> bool:
+            if state is None:
+                return False
+            if for_state is not None:
+                return state == for_state
+            return is_terminal_state(state)
+
+        async def _poll() -> tuple[str | None, bool]:
+            """One look at the job's current state. ``(state, ok)`` —
+            ``ok`` is False for anything that is not a usable answer from
+            the coordinator: a non-2xx (404 because the job is federated —
+            it has no single coordinator job, see the docstring above — or
+            because a free-tier coordinator restart forgot it, 5xx, ...), an
+            unparseable body, or the coordinator being unreachable at all
+            (``coordinator.forward`` turns that into an ``HTTPException``,
+            which every other route lets propagate as a 502 and this one
+            deliberately does not — a transient blip must end the wait
+            gracefully, not crash it).
+            """
+            try:
+                r = await coordinator.forward("GET", f"/v1alpha1/jobs/{job_seg}")
+            except HTTPException:
+                return None, False
+            if r.status_code >= 300:
+                return None, False
+            try:
+                body = r.json()
+            except ValueError:
+                return None, False
+            if not isinstance(body, dict):
+                return None, False
+            return body.get("state"), True
+
+        start = time.monotonic()
+        deadline = start + timeout_s
+        last_state: str | None = row.get("status")
+
+        while True:
+            state, ok = await _poll()
+            if ok:
+                last_state = state
+                if _condition_met(state):
+                    return {
+                        "job_id": job_id,
+                        "state": state,
+                        "reached": True,
+                        "timed_out": False,
+                        "waited_s": round(time.monotonic() - start, 3),
+                    }
+            else:
+                # A non-2xx, an unparseable body, or an unreachable
+                # coordinator — including every poll of a federated job id,
+                # which the coordinator has never heard of. End the wait
+                # now rather than spend the rest of the budget retrying a
+                # hop that already answered (or never will, for a federated
+                # id — see the docstring above).
+                return {
+                    "job_id": job_id,
+                    "state": last_state,
+                    "reached": False,
+                    "timed_out": False,
+                    "waited_s": round(time.monotonic() - start, 3),
+                    "note": "coordinator did not return a usable state for "
+                            "this job; reporting the last state observed",
+                }
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "job_id": job_id,
+                    "state": last_state,
+                    "reached": False,
+                    "timed_out": True,
+                    "waited_s": round(time.monotonic() - start, 3),
+                }
+            await asyncio.sleep(min(WAIT_POLL_INTERVAL_S, remaining))
 
     @app.get("/v1alpha1/jobs/{job_id}/tasks", tags=["browser"])
     async def get_job_tasks(
