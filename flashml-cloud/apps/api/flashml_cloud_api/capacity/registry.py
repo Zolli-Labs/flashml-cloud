@@ -1,4 +1,4 @@
-"""Which venues this deployment can actually talk to. Today: none.
+"""Which venues this deployment can actually talk to. Today: ECS, if configured.
 
 ``reconcile.reconcile_rented`` takes ``providers: dict[str, ResourceProvider]``
 keyed by ``rented_capacity.venue_id``, and something has to build it. This is
@@ -6,11 +6,16 @@ that seam, and it is deliberately the only one: a second place that maps
 venues to adapters is a second answer to "can we destroy this machine?", and
 the two would disagree on the day it mattered.
 
-**IT IS EMPTY, AND THAT IS THE HONEST ANSWER, NOT A STUB.** ``FakeProvider``
-is the only implementation of the protocol in this repository; the real
-adapter is Task 7 of the on-demand-capacity plan and is blocked on an owner
-decision about which venue to integrate. So there is nothing to map, and
-nothing here invents one.
+**IT IS STILL EMPTY UNLESS ALIBABA ECS IS CONFIGURED, AND THAT IS THE HONEST
+ANSWER, NOT A STUB.** ``capacity/ecs.py`` landed on 2026-08-12 and is mapped
+below — gated, all-or-nothing, on ``settings.ecs_configured``, because a
+provider that cannot authenticate answers "I could not destroy it" for ever
+and a provider built from half a configuration is worse than none. No
+credential for it exists in this repository, so an unconfigured deployment
+gets ``{}`` and behaves exactly as it did before that commit.
+
+Everything below about an empty registry therefore still describes the
+default deployment, and is not history.
 
 WHY NOT WIRE ``FakeProvider`` IN "FOR NOW"
 ------------------------------------------
@@ -44,7 +49,9 @@ Construct it here, key it by the ``venue_id`` its rows carry, and gate it on
 its own credentials being present -- all-or-nothing, the way
 ``settings.fc_sandbox_configured`` and ``settings.github_app_configured``
 already do it, because a half-configured venue adapter that cannot
-authenticate is one that answers "I could not destroy it" for ever.
+authenticate is one that answers "I could not destroy it" for ever. That is
+what the ECS block below does, and it is the shape a second venue should
+copy.
 
 And the rule that has to survive that commit: the machine it rents must enrol
 against **this API's** public URL (``settings.public_api_url``, falling back to
@@ -53,6 +60,10 @@ coordinator's. ``CapacityRequest.enrolment_url`` carries the full argument.
 Reach for the coordinator and the rented host heartbeats past this API,
 ``machines.last_seen_at`` stays null for ever, and ``boot_grace_s`` destroys it
 sixty minutes into a healthy job, silently, on every rental.
+
+**Nothing here builds that URL, deliberately.** It belongs to whoever
+constructs the ``CapacityRequest``; a default invented in this module would be
+a second answer to the question D9 exists to keep to one.
 """
 from __future__ import annotations
 
@@ -69,9 +80,37 @@ log = logging.getLogger(__name__)
 def providers_for(settings: Any) -> dict[str, ResourceProvider]:
     """Venue id -> the adapter that can destroy machines at it.
 
-    ``settings`` is taken now, unused now: every adapter that lands will be
-    gated on credentials that live there, and a signature that has to change
-    to accept them is one more thing to get right in the commit that finally
-    spends real money.
+    One entry today, and only when its credentials are all present. A venue
+    that cannot be reached must be ABSENT from this mapping rather than
+    present and failing: the sweep looks each row's venue up here, finds
+    nothing, logs, and leaves the row visible -- while a provider that is
+    present and broken produces a release outcome, which is an answer about
+    money nobody has evidence for.
+
+    Never raises. An adapter that will not construct is logged and skipped:
+    this runs at app startup, and a deployment refusing to boot over a venue
+    it was merely *offered* would take down submission, jobs and the console
+    for a feature that is opt-in.
     """
-    return {}
+    providers: dict[str, ResourceProvider] = {}
+
+    if getattr(settings, "ecs_configured", False):
+        # Imported here, not at module scope: an unconfigured deployment
+        # should not pay for `router` and `sandbox_bootstrap` being pulled in
+        # through a module it will not use, and an ImportError in the adapter
+        # must not be able to take the whole registry with it.
+        from flashml_cloud_api.capacity import ecs as ecsmod
+
+        try:
+            providers[ecsmod.VENUE_ID] = ecsmod.EcsGpuProvider.from_settings(
+                settings
+            )
+        except Exception:  # noqa: BLE001 - logged; the sweep stays honest
+            log.error(
+                "capacity registry: Alibaba ECS is configured but its adapter "
+                "would not construct; no ECS rental can be created OR "
+                "destroyed by this process",
+                exc_info=True,
+            )
+
+    return providers

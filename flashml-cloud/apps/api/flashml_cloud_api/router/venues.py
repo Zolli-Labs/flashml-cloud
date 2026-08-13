@@ -22,7 +22,9 @@ account ``5055584162230015`` on 2026-08-11 (``.evidence/alibaba-*``, and the
 integration spec's §1 table), Alibaba's published FC GPU instance and billing
 model, and two absences verified by reading this repo: there is no
 ``ResourceProvider`` for RunPod anywhere in it, and nothing in it creates an
-FC GPU function. An unsourced preference would be a slogan, and a slogan is
+FC GPU function. ``ecs-gpu`` joined on 2026-08-12, and its number is a live
+``DescribePrice`` against that same account rather than a rate card anybody
+remembered. An unsourced preference would be a slogan, and a slogan is
 what this layer is meant to replace.
 
 **``acquisition`` is load-bearing.** ``automatic`` means this API can bring
@@ -50,6 +52,7 @@ __all__ = [
     "CURRENCY_USD",
     "CURRENCY_ZC",
     "VENUES",
+    "VENUE_ECS_GPU",
     "VENUE_FC_GPU",
     "VENUE_FC_SANDBOX",
     "VENUE_OWNED",
@@ -66,6 +69,7 @@ VENUE_OWNED = "owned"
 VENUE_RUNPOD = "runpod"
 VENUE_FC_SANDBOX = "fc-sandbox"
 VENUE_FC_GPU = "fc-gpu"
+VENUE_ECS_GPU = "ecs-gpu"
 
 CURRENCY_ZC = "ZC"
 CURRENCY_USD = "USD"
@@ -213,10 +217,40 @@ _FC_GPU = Venue(
     ),
 )
 
+_ECS_GPU = Venue(
+    id=VENUE_ECS_GPU,
+    display="Alibaba ECS GPU",
+    currency=CURRENCY_USD,
+    has_gpu=True,
+    # Not a venue-level fact, for RunPod's reason turned inside out: the
+    # instance type is deployment configuration (`settings.ecs_instance_type`,
+    # default `ecs.gn6i-c4g1.xlarge` = 1x T4 16 GB), and the family ladder runs
+    # far past it. The ceiling is whatever this deployment is pointed at, and
+    # the per-machine placement gate already checks the card it gets.
+    max_vram_gb=None,
+    hibernates=False,
+    acquisition=ACQUISITION_AUTOMATIC,
+    notes=(
+        "A real VM with a real GPU, created and destroyed by this API: "
+        "`capacity/ecs.py` runs one pay-as-you-go instance per job through "
+        "RunInstances and destroys it with DeleteInstance (Force=true) — "
+        "destroyed, never stopped, because a stopped instance keeps its disk "
+        "and keeps billing. The default ecs.gn6i-c4g1.xlarge (1x Tesla T4, "
+        "16 GB) measured $1.279/hr pay-as-you-go in ap-southeast-1 via "
+        "DescribePrice on 2026-08-12 — 4-8x RunPod for comparable hardware, "
+        "and chosen anyway because demonstrating Alibaba compute is the "
+        "point. The instance metadata endpoint is disabled at creation and "
+        "no RAM role is attached, so unsandboxed task code has no path to "
+        "cloud credentials. NOT YET PROVEN ON HARDWARE: nothing has booted "
+        "flashnode on an Alibaba GPU image, and an unconfigured deployment "
+        "(no ECS credentials) can create nothing here."
+    ),
+)
+
 #: Declaration order, which is also the product's default preference: what you
-#: already have, then the cheap place to wait, then rented hardware, then the
-#: venue that does not exist yet.
-VENUES: tuple[Venue, ...] = (_OWNED, _FC_SANDBOX, _RUNPOD, _FC_GPU)
+#: already have, then the cheap place to wait, then rented hardware — cheaper
+#: first — and last the venue that does not exist yet.
+VENUES: tuple[Venue, ...] = (_OWNED, _FC_SANDBOX, _RUNPOD, _ECS_GPU, _FC_GPU)
 
 _BY_ID = {item.id: item for item in VENUES}
 
@@ -301,6 +335,16 @@ _FITS: dict[WorkloadKind, tuple[tuple[str, bool, str], ...]] = {
             "than the natural home. A human starts the pod.",
         ),
         (
+            VENUE_ECS_GPU,
+            True,
+            "independent trials fan out across rented instances the same way "
+            "they fan out across owned ones, and this is the one GPU venue "
+            "this API can create capacity at without a human. It is also the "
+            "expensive way to buy speed for latency-tolerant work: $1.279/hr "
+            "for a 16 GB T4 (DescribePrice, ap-southeast-1, 2026-08-12), "
+            "billed for the whole rental including the boot and the install.",
+        ),
+        (
             VENUE_FC_GPU,
             True,
             "bursty independent GPU trials are what per-GB-VRAM-second "
@@ -327,6 +371,17 @@ _FITS: dict[WorkloadKind, tuple[tuple[str, bool, str], ...]] = {
             "long job needs and what a volunteer fleet cannot promise. Priced "
             "per hour in USD, and with no ResourceProvider in this repo a "
             "human has to start it.",
+        ),
+        (
+            VENUE_ECS_GPU,
+            True,
+            "the same card-for-the-whole-run argument as RunPod, and the only "
+            "one of the two this API can actually obtain: one instance is "
+            "created per job and destroyed when the rental ends. $1.279/hr "
+            "for a 16 GB T4 measured on 2026-08-12, so a long run is where "
+            "that rate hurts most — and interruption risk is a rented "
+            "machine's own, not a volunteer's, which is what a checkpointed "
+            "job is buying here.",
         ),
         (
             VENUE_FC_GPU,
@@ -373,6 +428,15 @@ _FITS: dict[WorkloadKind, tuple[tuple[str, bool, str], ...]] = {
             "wants, and the reason FC's idle rate is the interesting number.",
         ),
         (
+            VENUE_ECS_GPU,
+            True,
+            "a real card with no cold start once it is up, and it does not "
+            "hibernate: an ECS instance bills its full $1.279/hr (16 GB T4, "
+            "measured 2026-08-12) between batches exactly as it does during "
+            "them. Right for a continuous batch, and the most expensive "
+            "possible way to wait for a bursty one.",
+        ),
+        (
             VENUE_FC_SANDBOX,
             False,
             "CPU-only (gpuConfig: null, 2 vCPU / 2 GB RAM). A forward pass "
@@ -409,6 +473,14 @@ _FITS: dict[WorkloadKind, tuple[tuple[str, bool, str], ...]] = {
             "argument for the planner and not a fit refusal.",
         ),
         (
+            VENUE_ECS_GPU,
+            True,
+            "capable, and the worst deal on this table for wait-heavy "
+            "scoring: $1.279/hr (16 GB T4, measured 2026-08-12) for a card "
+            "that a CPU-bound evaluation never touches, with no hibernation "
+            "to make the waiting cheap. A price argument, not a fit refusal.",
+        ),
+        (
             VENUE_FC_GPU,
             True,
             "a GPU function can score too, and would be paying GB-VRAM-"
@@ -432,6 +504,15 @@ _FITS: dict[WorkloadKind, tuple[tuple[str, bool, str], ...]] = {
             "a rented pod is a real GPU for a round's local training, but it "
             "holds none of the submitter's private data — capacity for the "
             "training, not a participant in the privacy argument.",
+        ),
+        (
+            VENUE_ECS_GPU,
+            True,
+            "same reading as RunPod and the same limit: an instance we rent "
+            "into the submitter's own pool is capacity for a round's local "
+            "training and never a holder of anyone's private data, since "
+            "local_inputs are bind-mounted by the host that owns them and "
+            "are never uploaded. $1.279/hr, 16 GB T4, measured 2026-08-12.",
         ),
         (
             VENUE_FC_GPU,
@@ -470,6 +551,14 @@ _FITS: dict[WorkloadKind, tuple[tuple[str, bool, str], ...]] = {
             True,
             "capable of anything a pod can run; a human starts it, and it "
             "bills by the hour.",
+        ),
+        (
+            VENUE_ECS_GPU,
+            True,
+            "capable of anything a VM can run, and this API can start it "
+            "without a human. Nothing in the spec says what this computes, "
+            "so the $1.279/hr rate (16 GB T4, 2026-08-12) and the placement "
+            "gates decide alone.",
         ),
         (
             VENUE_FC_GPU,

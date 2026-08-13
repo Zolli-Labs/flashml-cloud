@@ -58,6 +58,27 @@ class CapacityRequest:
     #: by the gate, deliberately: a venue that will not quote is a venue
     #: whose spend cannot be bounded.
     quoted_usd_per_hour: float | None = None
+    #: The identity the machine must come up wearing, minted by
+    #: ``acquire.acquire_for_job`` BEFORE the venue is asked for anything and
+    #: attached to the request it passes on. Both are ``None`` on a request
+    #: built by anything else, and an adapter that needs them must refuse
+    #: rather than invent them.
+    #:
+    #: **Only a pull-style venue needs these, and it needs them absolutely.**
+    #: A push-style venue (the FC sandbox) has an exec channel and writes the
+    #: credential after the machine exists, so ``bootstrap_worker`` takes it
+    #: as an argument and nothing has to travel here. ECS has no such channel:
+    #: the credential goes into ``UserData`` at ``RunInstances`` or the host
+    #: never learns who it is, and there is no second chance to tell it. That
+    #: is why the token is minted first and why it is on the request rather
+    #: than coming back with the machine.
+    node_id: str | None = None
+    #: The machine token itself. ``repr=False`` is not decoration: this
+    #: object ends up in exception chains and debug logs, and a dataclass's
+    #: generated ``__repr__`` is the shortest path from "the token exists in
+    #: one process's memory" to a live credential in a log aggregator —
+    #: exactly the reasoning ``MintedMachineCredential`` already carries.
+    machine_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

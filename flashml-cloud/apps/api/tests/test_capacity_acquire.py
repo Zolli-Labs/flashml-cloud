@@ -24,7 +24,7 @@ feature.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dc_field, replace
 
 import pytest
 
@@ -78,8 +78,13 @@ class _Venue(FakeProvider):
     #: A live connection. When set, the row is settled mid-`acquire`, the way
     #: a reconciler sweeping in another task would.
     sweeps_with: object = None
+    #: Every request the venue was actually handed. A pull-style adapter can
+    #: only seed an identity it was given, so what the venue was TOLD is a
+    #: different question from what the caller meant to tell it.
+    seen: list = dc_field(default_factory=list)
 
     async def acquire(self, *, request: CapacityRequest):
+        self.seen.append(request)
         got = await super().acquire(request=request)
         if self.sweeps_with is not None:
             with self.sweeps_with.cursor() as cur:
@@ -309,6 +314,51 @@ async def test_a_successful_acquisition_lands_active_with_a_handle(
     assert dbmod.machine_ids_bound_to_pool(db, str(a_pool)) == [
         str(row["machine_id"])
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_minted_identity_reaches_the_venue(db, an_owner, a_pool):
+    """**A pull-style venue can only seed an identity it was handed.**
+
+    ECS has no exec channel: the credential goes into `UserData` at
+    `RunInstances` or the host never learns who it is and can never enrol —
+    and an instance that exists and never enrols is an orphan that bills.
+    So the token minted in step 3 has to be on the request step 4 passes, and
+    it has to be THIS rental's token rather than a lookalike.
+
+    The enrolment URL is asserted here too, in the same breath, because it is
+    the other half of the same sentence: the identity is only usable against
+    the API that minted it.
+    """
+    venue = _Venue()
+    rid = await acquire_for_job(
+        db, venue, _Settings(), request=_request(an_owner, a_pool),
+    )
+    row = _row(db, rid)
+    (handed,) = venue.seen
+
+    with db.cursor() as cur:
+        cur.execute(
+            "select node_id, token_hash, token_prefix from public.machines"
+            " where id = %s",
+            (str(row["machine_id"]),),
+        )
+        machine = cur.fetchone()
+
+    assert handed.node_id == machine["node_id"]
+    # Not merely "a token": the live credential for the row this acquisition
+    # just wrote. A provider seeding any other value produces a host that
+    # boots, fails to authenticate, and bills until the sweep finds it.
+    assert si.hash_machine_token(handed.machine_token) == machine["token_hash"]
+    assert handed.machine_token.startswith(machine["token_prefix"])
+    # D9: the address the host is told to enrol at is this API's, carried
+    # through untouched.
+    assert handed.enrolment_url == "http://api.example"
+
+    # And the caller's own object never gained a token. `acquire_for_job`
+    # replaces a frozen request rather than mutating one, so a caller holding
+    # a `CapacityRequest` is not holding a credential it did not ask for.
+    assert _request(an_owner, a_pool).machine_token is None
 
 
 @pytest.mark.asyncio

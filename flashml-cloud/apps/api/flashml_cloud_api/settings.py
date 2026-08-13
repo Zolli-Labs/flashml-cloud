@@ -288,6 +288,66 @@ class Settings:
     oss_access_key_id: str = ""
     oss_access_key_secret: str = dc_field(default="", repr=False)
 
+    # --- Alibaba ECS GPU (rented capacity) ------------------------------
+    #
+    # The first venue this API can rent from by itself. Optional, and
+    # all-or-nothing, for the same reason `fc_sandbox_*` is: an unconfigured
+    # deploy must boot and behave exactly as it did before, and a
+    # half-configured one must read as OFF rather than as a venue adapter
+    # that cannot authenticate. See `ecs_configured` below and
+    # `capacity/registry.py`, which builds NO provider unless it is true —
+    # a provider that cannot call the venue answers "I could not destroy it"
+    # for ever, and one that answers anything else about a machine it cannot
+    # see would be worse.
+    #
+    # **These are cloud credentials that can create and delete machines that
+    # bill.** They are not the `fc_sandbox_*` key (a sandbox API key) and not
+    # the `oss_*` pair (bucket access): a RAM user scoped to
+    # `ecs:RunInstances`, `ecs:DeleteInstance`, `ecs:DescribeInstances` and
+    # `ecs:DescribePrice` in ONE region is what belongs here. Nothing in this
+    # repo has ever held one.
+    #
+    # THE INSTANCE TYPE IS THE PRICE. `ecs.gn6i-c4g1.xlarge` (1x Tesla T4,
+    # 16 GB) measured **$1.279/hr** pay-as-you-go in `ap-southeast-1` via
+    # `DescribePrice` on 2026-08-12. The default per-acquisition ceiling
+    # below is $2.00/hr, so a larger card is one edit away from being refused
+    # by the budget gate rather than silently bought — which is the intended
+    # direction, not an accident.
+    ecs_access_key_id: str = ""
+    ecs_access_key_secret: str = dc_field(default="", repr=False)
+    #: Region, and it is where every other id below must also live: a
+    #: vSwitch, a security group and an image are all region-scoped, and a
+    #: mismatched set fails at `RunInstances` with a parameter error rather
+    #: than anywhere useful.
+    ecs_region: str = "ap-southeast-1"
+    #: Optional. Unset, ECS picks a zone that can serve the instance type,
+    #: which is usually what you want; set it when the vSwitch is pinned to
+    #: one zone (it always is, in practice — a vSwitch belongs to a zone).
+    ecs_zone_id: str = ""
+    #: The GPU image. NOTHING HAS EVER BOOTED `flashnode` ON AN ALIBABA GPU
+    #: IMAGE, so which image ships working NVIDIA drivers is an open question
+    #: this repo cannot answer from documentation — hence no default. See
+    #: `capacity/ecs.py`'s "what is not verified".
+    ecs_image_id: str = ""
+    ecs_instance_type: str = "ecs.gn6i-c4g1.xlarge"
+    ecs_security_group_id: str = ""
+    ecs_vswitch_id: str = ""
+    #: System disk, GiB. The agent installs into a venv and caches datasets
+    #: here, so 40 GB is a floor rather than a target.
+    ecs_system_disk_gb: int = 100
+    #: Public egress bandwidth cap, Mbit/s. **Not a tuning knob: at 0 the
+    #: instance gets no public IP at all**, cannot reach this API, and can
+    #: therefore never enrol — the rental would bill for a machine that is
+    #: invisible to us until the reconciler destroys it.
+    ecs_internet_mbps: int = 10
+    #: Where the rented host fetches its bootstrap script from, over HTTP.
+    #: Optional: unset, the user-data carries the whole sequence inline.
+    #: Setting it means a fix can be pushed to hosts that have not booted yet
+    #: without redeploying this API — the property the RunPod recipe was
+    #: built around. It must be reachable from the instance and must not
+    #: require a credential to read.
+    ecs_bootstrap_url: str = ""
+
     # --- Rented capacity budget gate ------------------------------------
     #
     # The check that stands between a bug in automatic GPU renting and the
@@ -373,6 +433,32 @@ class Settings:
             and self.fc_sandbox_api_url
             and self.fc_sandbox_domain
             and self.fc_sandbox_pool_id
+        )
+
+    @property
+    def ecs_configured(self) -> bool:
+        """All six present. All-or-nothing, like the sandbox and the App.
+
+        **Unconfigured must yield NO provider, never a stand-in.**
+        `capacity/registry.py` says why at length: a provider that answers
+        `destroyed=True` about a real billing machine is the failure the whole
+        module exists to prevent, and a half-configured one that cannot
+        authenticate answers "I could not destroy it" for ever. Off is the
+        safe direction to round to, and an unconfigured deployment's rented
+        rows simply stay visible to the sweep.
+
+        `ecs_region` is deliberately not in the list: it has a default, so it
+        is always truthy and testing it would only make the check look more
+        thorough than it is. `ecs_zone_id` and `ecs_bootstrap_url` are
+        genuinely optional — see their comments.
+        """
+        return bool(
+            self.ecs_access_key_id
+            and self.ecs_access_key_secret
+            and self.ecs_image_id
+            and self.ecs_instance_type
+            and self.ecs_security_group_id
+            and self.ecs_vswitch_id
         )
 
     @property
@@ -491,6 +577,28 @@ class Settings:
         oss_access_key_id = os.environ.get("OSS_ACCESS_KEY_ID", "").strip()
         oss_access_key_secret = os.environ.get("OSS_ACCESS_KEY_SECRET", "").strip()
 
+        # Alibaba ECS GPU. Read the same way as the sandbox block above, and
+        # gated all-or-nothing by `ecs_configured` rather than by any single
+        # variable: the failure this avoids is a deployment that believes it
+        # can rent, creates nothing, and reports nothing about why.
+        ecs_access_key_id = os.environ.get("ECS_ACCESS_KEY_ID", "").strip()
+        ecs_access_key_secret = os.environ.get("ECS_ACCESS_KEY_SECRET", "").strip()
+        ecs_region = (os.environ.get("ECS_REGION") or "ap-southeast-1").strip()
+        ecs_zone_id = os.environ.get("ECS_ZONE_ID", "").strip()
+        ecs_image_id = os.environ.get("ECS_IMAGE_ID", "").strip()
+        ecs_instance_type = (
+            os.environ.get("ECS_INSTANCE_TYPE", "").strip()
+            or "ecs.gn6i-c4g1.xlarge"
+        )
+        ecs_security_group_id = os.environ.get("ECS_SECURITY_GROUP_ID", "").strip()
+        ecs_vswitch_id = os.environ.get("ECS_VSWITCH_ID", "").strip()
+        ecs_system_disk_gb = _int_env("ECS_SYSTEM_DISK_GB", 100)
+        # `_int_env`, so an explicit 0 falls back to 10 rather than producing
+        # an instance with no public IP that can never enrol. That is the one
+        # case where honouring the typed value would be actively harmful.
+        ecs_internet_mbps = _int_env("ECS_INTERNET_MBPS", 10)
+        ecs_bootstrap_url = os.environ.get("ECS_BOOTSTRAP_URL", "").strip()
+
         # Rented capacity budget gate. `allow_zero=True` on the two CEILINGS,
         # because `0` there is the emergency stop and has to survive as `0`.
         #
@@ -544,6 +652,17 @@ class Settings:
             oss_region=oss_region,
             oss_access_key_id=oss_access_key_id,
             oss_access_key_secret=oss_access_key_secret,
+            ecs_access_key_id=ecs_access_key_id,
+            ecs_access_key_secret=ecs_access_key_secret,
+            ecs_region=ecs_region,
+            ecs_zone_id=ecs_zone_id,
+            ecs_image_id=ecs_image_id,
+            ecs_instance_type=ecs_instance_type,
+            ecs_security_group_id=ecs_security_group_id,
+            ecs_vswitch_id=ecs_vswitch_id,
+            ecs_system_disk_gb=ecs_system_disk_gb,
+            ecs_internet_mbps=ecs_internet_mbps,
+            ecs_bootstrap_url=ecs_bootstrap_url,
             rented_usd_per_acquisition_max=rented_usd_per_acquisition_max,
             rented_usd_window_max=rented_usd_window_max,
             rented_usd_window_hours=rented_usd_window_hours,
@@ -621,6 +740,28 @@ class Settings:
                     "The GitHub App is half-configured: GITHUB_APP_ID, "
                     "GITHUB_APP_SLUG and GITHUB_APP_PRIVATE_KEY must all be "
                     "set. Private-repo submission stays off until they are."
+                )
+
+            # Third time, same shape, and the one where silence costs money in
+            # the other direction: a partly-set venue reads as OFF, so nothing
+            # can be rented AND nothing can be destroyed — the sweep has no
+            # adapter to ask. Whoever set four of the six believes renting is
+            # armed.
+            ecs_values = (
+                ecs_access_key_id,
+                ecs_access_key_secret,
+                ecs_image_id,
+                ecs_instance_type,
+                ecs_security_group_id,
+                ecs_vswitch_id,
+            )
+            if any(ecs_values) and not all(ecs_values):
+                logging.getLogger("flashml-cloud-api").warning(
+                    "Alibaba ECS is half-configured: ECS_ACCESS_KEY_ID, "
+                    "ECS_ACCESS_KEY_SECRET, ECS_IMAGE_ID, ECS_INSTANCE_TYPE, "
+                    "ECS_SECURITY_GROUP_ID and ECS_VSWITCH_ID must all be "
+                    "set. No GPU is rented and no rented GPU is destroyed "
+                    "until they are."
                 )
 
         return settings

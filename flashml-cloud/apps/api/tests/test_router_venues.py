@@ -85,11 +85,12 @@ def _machine(
 
 
 class TestVenueData:
-    def test_the_four_venues_are_the_four_venues(self):
+    def test_the_five_venues_are_the_five_venues(self):
         assert {item.id for item in V.VENUES} == {
             V.VENUE_OWNED,
             V.VENUE_RUNPOD,
             V.VENUE_FC_SANDBOX,
+            V.VENUE_ECS_GPU,
             V.VENUE_FC_GPU,
         }
 
@@ -129,10 +130,38 @@ class TestVenueData:
         assert runpod.acquisition == V.ACQUISITION_MANUAL
         assert "ResourceProvider" in runpod.notes
 
+    def test_ecs_is_the_one_gpu_venue_this_api_can_create(self):
+        """The gap §1.5 of the on-demand-capacity design names — "no venue
+        with a GPU is automatic" — closed by exactly one venue, and by the
+        one the owner chose rather than the cheaper one."""
+        ecs = V.venue(V.VENUE_ECS_GPU)
+        assert ecs.acquisition == V.ACQUISITION_AUTOMATIC
+        assert ecs.has_gpu is True
+        assert ecs.currency == V.CURRENCY_USD
+        # It does not hibernate, and claiming otherwise would make it look
+        # like a cheap place to wait. Only the FC sandbox is that.
+        assert ecs.hibernates is False
+        assert V.venue(V.VENUE_RUNPOD).acquisition == V.ACQUISITION_MANUAL
+
+    def test_the_ecs_note_cites_the_measured_price_and_the_teardown_rule(self):
+        """Both facts are load-bearing and both are easy to lose. The price
+        is what makes this venue a deliberate trade rather than an oversight
+        ($1.279/hr against RunPod's $0.16-0.34); "destroyed, never stopped"
+        is D3.2, and a stopped instance keeps billing for its disk."""
+        notes = V.venue(V.VENUE_ECS_GPU).notes
+        assert "$1.279/hr" in notes
+        assert "DescribePrice" in notes
+        assert "destroyed, never stopped" in notes.lower()
+        # And it does not overclaim: no live-fire evidence exists.
+        assert "NOT YET PROVEN ON HARDWARE" in notes
+
     def test_vram_none_and_vram_zero_mean_different_things(self):
         # Not a venue-level fact: the fleet spans the whole class ladder.
         assert V.venue(V.VENUE_OWNED).max_vram_gb is None
         assert V.venue(V.VENUE_RUNPOD).max_vram_gb is None
+        # Nor here: the instance type is deployment configuration, so the
+        # ceiling is whatever this deployment is pointed at.
+        assert V.venue(V.VENUE_ECS_GPU).max_vram_gb is None
         # A claim: this venue has no GPU.
         assert V.venue(V.VENUE_FC_SANDBOX).max_vram_gb == 0.0
 

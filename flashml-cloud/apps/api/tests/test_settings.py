@@ -158,6 +158,97 @@ def test_missing_coordinator_url_still_fails_loudly_when_auth_is_required(
 
 
 # ---------------------------------------------------------------------------
+# Alibaba ECS — the venue that spends real money
+# ---------------------------------------------------------------------------
+
+ECS_ENV = {
+    "ECS_ACCESS_KEY_ID": "LTAI-not-a-real-key",
+    "ECS_ACCESS_KEY_SECRET": "not-a-real-secret",
+    "ECS_IMAGE_ID": "m-gpu-image",
+    "ECS_SECURITY_GROUP_ID": "sg-1",
+    "ECS_VSWITCH_ID": "vsw-1",
+}
+
+
+def _set_ecs_env(monkeypatch: pytest.MonkeyPatch, **over: str) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("COORDINATOR_URL", "flashml-coordinator:10000")
+    for key, value in {**ECS_ENV, **over}.items():
+        if value:
+            monkeypatch.setenv(key, value)
+        else:
+            monkeypatch.delenv(key, raising=False)
+
+
+def test_an_unconfigured_deployment_can_rent_nothing(monkeypatch):
+    """The default, and it must stay the default: no credentials, no
+    provider, and `capacity/registry.providers_for` returns `{}`. This is
+    the whole safety story for every deploy that is not renting."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("COORDINATOR_URL", "flashml-coordinator:10000")
+    for key in ECS_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+    assert Settings.from_env().ecs_configured is False
+
+
+def test_the_ecs_block_is_read_from_the_environment(monkeypatch):
+    """A typo in one of these names is invisible: the deployment simply
+    cannot rent, and says so only in a startup warning."""
+    _set_ecs_env(monkeypatch)
+    monkeypatch.setenv("ECS_REGION", "ap-southeast-1")
+    monkeypatch.setenv("ECS_ZONE_ID", "ap-southeast-1a")
+    monkeypatch.setenv("ECS_INSTANCE_TYPE", "ecs.gn6i-c4g1.xlarge")
+    monkeypatch.setenv("ECS_SYSTEM_DISK_GB", "200")
+    monkeypatch.setenv("ECS_BOOTSTRAP_URL", "https://cdn.example/bootstrap.sh")
+
+    settings = Settings.from_env()
+
+    assert settings.ecs_configured is True
+    assert settings.ecs_region == "ap-southeast-1"
+    assert settings.ecs_zone_id == "ap-southeast-1a"
+    assert settings.ecs_instance_type == "ecs.gn6i-c4g1.xlarge"
+    assert settings.ecs_system_disk_gb == 200
+    assert settings.ecs_bootstrap_url == "https://cdn.example/bootstrap.sh"
+    # The measured default, so a deployment that names no instance type gets
+    # the one whose $1.279/hr price the design was argued against.
+    monkeypatch.delenv("ECS_INSTANCE_TYPE")
+    assert Settings.from_env().ecs_instance_type == "ecs.gn6i-c4g1.xlarge"
+
+
+def test_a_half_configured_venue_reads_as_off(monkeypatch):
+    """All-or-nothing, like the sandbox and the GitHub App. A provider that
+    cannot authenticate answers "I could not destroy it" for ever, which is
+    worse than having no adapter at all."""
+    _set_ecs_env(monkeypatch, ECS_VSWITCH_ID="")
+
+    assert Settings.from_env().ecs_configured is False
+
+
+def test_zero_egress_bandwidth_falls_back_rather_than_being_honoured(
+    monkeypatch,
+):
+    """Unlike the spend ceilings, where an explicit `0` is the emergency
+    stop, `0` here is never what an operator wants: an instance with no
+    public IP cannot reach this API, can never enrol, and bills until the
+    reconciler destroys it."""
+    _set_ecs_env(monkeypatch)
+    monkeypatch.setenv("ECS_INTERNET_MBPS", "0")
+
+    assert Settings.from_env().ecs_internet_mbps == 10
+
+
+def test_the_secret_is_not_in_the_settings_repr(monkeypatch):
+    """These credentials create and delete machines that bill. `Settings`
+    lands in logs and tracebacks."""
+    _set_ecs_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert "not-a-real-secret" not in repr(settings)
+
+
+# ---------------------------------------------------------------------------
 # CoordinatorClient — the resulting request URL, not just the string
 # ---------------------------------------------------------------------------
 

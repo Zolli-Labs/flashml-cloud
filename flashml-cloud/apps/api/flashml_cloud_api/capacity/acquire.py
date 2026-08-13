@@ -13,6 +13,12 @@ The order is the design, not an implementation detail:
    :func:`sandbox_identity.assert_pool_isolated` is an evaluation-session
    invariant and applying it here forbade the thing this function exists to do.
    See "the lease, and what it replaced" below.
+
+   That identity **travels on to the provider**, on the request's ``node_id``
+   and ``machine_token``. A pull-style venue has no exec channel: the
+   credential is in the machine's first boot or the host never learns who it
+   is and can never enrol. Minting before the venue is asked for anything is
+   therefore ordering, not tidiness.
 4. **Re-gate the answered rate**, then acquire -- and record the handle in
    the same update that moves REQUESTED -> ACTIVE.
 
@@ -119,6 +125,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any
 
 import psycopg
@@ -437,8 +444,22 @@ async def acquire_for_job(
         )
 
         # 4. Acquire. Everything from here on may have created a machine.
+        #
+        # The minted identity travels WITH the request. A pull-style venue —
+        # ECS user-data, a RunPod start command — has no exec channel, so the
+        # token has to be in the machine's very first boot or the host never
+        # learns who it is and can never enrol. `replace` rather than
+        # mutation, because `CapacityRequest` is frozen and the row above was
+        # opened from the caller's own copy; the caller's object is never
+        # given a token it did not ask for.
         venue_asked = True
-        acquired = await provider.acquire(request=request)
+        acquired = await provider.acquire(
+            request=replace(
+                request,
+                node_id=credential.node_id,
+                machine_token=credential.raw_token,
+            )
+        )
         handle = acquired.provider_handle
 
         # 5. Re-gate, because the number that was approved is the QUOTE and
