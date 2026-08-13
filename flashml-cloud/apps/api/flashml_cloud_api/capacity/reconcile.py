@@ -141,6 +141,16 @@ about "the job we rented it for" bounds what the machine may be running now.
 The test is therefore computed once, as ``work_in_flight``, and read by both
 cost branches.
 
+**Then it turned out there was a THIRD reader, a module away, that had never
+consulted it at all.** ``settle.rentals_for_jobs`` selects rentals purely by
+``job_id`` for the prompt half of teardown, so a page load observing job A
+finishing destroyed a machine mid-task on job B — the same defect on the one
+path this guard did not cover. Since 2026-08-12 the expression lives at module
+scope as :data:`WORK_IN_FLIGHT_SQL` and is spliced into both queries, because
+"the same test, written twice" is exactly the arrangement that produced both
+failures. Anything that can destroy a machine reads that constant or it is
+wrong.
+
 **It now governs ``QUIET`` and ``NEVER_SEEN`` as well, and that is a reversal.**
 It used to be argued the other way: a machine silent for ``quiet_after_s`` is
 not doing the work its unresolved attempt describes, that attempt is the
@@ -226,9 +236,18 @@ to ``app.py``'s loop, not to this predicate, and it is not done yet.
 **What IDLE still cannot survive**, stated plainly because it is the residual
 risk of this whole module: ``db.record_attempt`` is best effort on the claim
 path. A machine whose claims stop being recorded while it goes on working
-looks idle from here. That failure needs the database to be unreachable from
-the claim path while it is reachable from this sweep, and it is the reason the
-sweep ships log-only by default (see :func:`reconcile_rented`).
+looks idle from here — with no attempt row, every work-in-flight guard above
+is not weakened but INERT, and IDLE takes the machine at ``boot_grace_s``.
+``db.note_attempt_deadline`` is the same shape on the heartbeat path and fails
+worse: renewals that stop being recorded leave the deadline STALE rather than
+null, so ``DEFAULT_UNKNOWN_DEADLINE_MAX_S`` does not apply, ``work_in_flight``
+drops as soon as the frozen deadline plus ``EXPIRY_GRACE_SECONDS`` passes, and
+a genuinely long task is exposed. Both failures need the database to be
+unreachable from a claim or heartbeat path while it is reachable from this
+sweep, and together they are the reason the sweep ships log-only by default
+(see :func:`reconcile_rented`). They are stated in ``db.py``'s module docstring
+too — that is where somebody changing a heartbeat path will be looking, and
+these guards are the reason those two writes are no longer only local.
 
 TEARDOWN IS TWO THINGS, AND ``cleanup_session`` IS THE MODEL
 ------------------------------------------------------------
@@ -365,12 +384,14 @@ __all__ = [
     "DEFAULT_QUIET_AFTER_S",
     "DEFAULT_UNKNOWN_DEADLINE_MAX_S",
     "TERMINAL_JOB_STATES",
+    "WORK_IN_FLIGHT_SQL",
     "finished_rentals_with_live_credentials",
     "orphaned_leases",
     "reconcile_rented",
     "release_capacity",
     "teardown_plan",
     "unreleased_rows",
+    "work_in_flight_params",
 ]
 
 log = logging.getLogger(__name__)
@@ -518,6 +539,84 @@ DEFAULT_UNKNOWN_DEADLINE_MAX_S = 6 * 60 * 60.0
 #: of guessing is a machine destroyed under a running job.
 TERMINAL_JOB_STATES = tuple(s.value for s in JobState if s.terminal)
 
+# WORK IN FLIGHT: THE ONE COPY
+# -----------------------------
+# Does this rental's machine hold a lease that could still be live? It is the
+# only thing standing between an armed teardown and a customer's running task,
+# and it is needed by every query that can destroy a machine: the sweep's four
+# guarded branches in :func:`unreleased_rows`, and the settle hook's predicate
+# in ``settle.rentals_for_jobs``.
+#
+# **It is ONE constant because the second copy is how the guard goes missing.**
+# The test was written inside ``IDLE`` alone for a revision, and
+# ``JOB_FINISHED`` -- the branch right next to it, in the same case
+# expression, in this same file -- shipped without it and destroyed machines
+# holding a live lease for another job, mid-task. The settle hook then
+# repeated the mistake at a larger distance: a whole module away, selecting
+# rentals by ``job_id`` and asking nothing about the machine, so a page load
+# that observed job A finishing destroyed a machine mid-task on job B in the
+# same pool. Two hand-synced copies of a predicate whose whole purpose is to be
+# consulted everywhere is not a design, it is a countdown.
+#
+# TWO CONTRACTS THE SPLICING SITE MUST HONOUR, and both fail loudly:
+#
+# * the outer query must alias ``public.rented_capacity`` as ``rc``. A missing
+#   alias is a Postgres error on the first execution, not a silently false
+#   predicate -- which is the failure direction to insist on, since a silently
+#   false one would read as "nothing in flight" and destroy the machine;
+# * it must be executed with NAMED parameters, including everything
+#   :func:`work_in_flight_params` returns. A missing key raises before the
+#   statement is sent.
+#
+# A rental with no ``machine_id`` bound matches no attempt row, so this is
+# ``false`` for it -- which is what leaves ABANDONED and the handleless
+# REQUESTED rows exactly as sweepable as they were.
+#
+# A recorded deadline is the coordinator's own instant and is trusted until
+# ``lease_grace`` past it. A NULL deadline is NOT a deadline of infinity: it is
+# a lease whose end we never learned, trusted from ``claimed_at`` for
+# ``unknown_deadline`` and no longer, or the rental becomes unsweepable for
+# ever -- see :data:`DEFAULT_UNKNOWN_DEADLINE_MAX_S`.
+WORK_IN_FLIGHT_SQL = """exists (
+                       select 1 from public.attempts a
+                        where a.machine_id = rc.machine_id
+                          and a.resolved_at is null
+                          and case when a.lease_deadline is not null
+                                   then a.lease_deadline > now()
+                                        - make_interval(
+                                            secs => %(lease_grace)s)
+                                   else a.claimed_at > now()
+                                        - make_interval(
+                                            secs => %(unknown_deadline)s)
+                              end
+                     )"""
+
+
+def work_in_flight_params() -> dict[str, float]:
+    """The two windows :data:`WORK_IN_FLIGHT_SQL` reads. Never a parameter.
+
+    A fresh dict per call, so no caller can edit another's windows by
+    mutating a shared literal.
+
+    **Neither number is a policy this module gets to choose, and neither is
+    exposed as a function argument anywhere.**
+
+    ``lease_grace`` is how long after a lease deadline the coordinator's own
+    rule says the attempt is dead, and ``db.reconcile_expired_attempts``
+    already argues the number. Two copies of that judgement would let a sweep
+    call an attempt live that the ledger has already resolved as expired, or
+    the reverse.
+
+    ``unknown_deadline`` is not a window an operator tunes per sweep either:
+    it is how long this module is willing to call an unmeasurable attempt
+    live. One number, argued once, at the constant.
+    """
+    return {
+        "lease_grace": float(dbmod.EXPIRY_GRACE_SECONDS),
+        "unknown_deadline": float(DEFAULT_UNKNOWN_DEADLINE_MAX_S),
+    }
+
+
 #: Written on a row the sweep could not act on because it names no machine.
 NO_HANDLE = "RECONCILE_NO_HANDLE"
 #: Written on a row whose machine the venue would not confirm destroying.
@@ -559,6 +658,11 @@ def unreleased_rows(
     and for why guarding the liveness branches became correct only once
     ``work_in_flight`` itself stopped meaning "for ever".
 
+    The expression is :data:`WORK_IN_FLIGHT_SQL`, spliced in from module scope
+    and shared verbatim with ``settle.rentals_for_jobs`` — the other query in
+    this system that can destroy a machine. It is not "computed once" only
+    within this statement; it exists once in the process.
+
     It returns the reason as ``sweep_reason`` rather than a bare boolean, and
     that is not decoration: it is the whole content of a log-only deployment's
     report (:func:`teardown_plan`), and computing it in the same expression
@@ -575,7 +679,12 @@ def unreleased_rows(
     """
     with db.cursor() as cur:
         cur.execute(
-            """
+            # An f-string for ONE reason: `WORK_IN_FLIGHT_SQL` is spliced in
+            # below, so this query and `settle.rentals_for_jobs` read the same
+            # expression rather than two copies somebody has to keep in step.
+            # Nothing else here is interpolated -- every value is a named
+            # parameter, and the fragment carries its own placeholders.
+            f"""
             with rental as (
               select rc.id, rc.venue_id, rc.state, rc.provider_handle,
                      rc.machine_id, rc.job_id,
@@ -583,33 +692,21 @@ def unreleased_rows(
                      m.status as machine_status, m.last_seen_at,
                      coalesce(rc.acquired_at, rc.created_at) as billing_since,
                      -- WORK IN FLIGHT. Computed once here rather than inside a
-                     -- branch, because it now governs FOUR of the six and
-                     -- writing it per-branch is how one of them loses it: it
-                     -- lived in IDLE alone for a revision, and JOB_FINISHED
-                     -- destroyed machines holding a live lease for another job
-                     -- in that pool. QUIET and NEVER_SEEN read it too as of
-                     -- 2026-08-12 -- the branch comments below say why that
-                     -- reversed. See the module docstring.
+                     -- branch, because it governs FOUR of the six and writing
+                     -- it per-branch is how one of them loses it: it lived in
+                     -- IDLE alone for a revision, and JOB_FINISHED destroyed
+                     -- machines holding a live lease for another job in that
+                     -- pool. QUIET and NEVER_SEEN read it too as of
+                     -- 2026-08-12; the branch comments below say why that
+                     -- reversed.
                      --
-                     -- A recorded deadline is the coordinator's own instant
-                     -- and is trusted until `lease_grace` past it. A NULL
-                     -- deadline is not a deadline of infinity: it is a lease
-                     -- whose end we never learned, trusted from `claimed_at`
-                     -- for `unknown_deadline` and no longer, or the rental
-                     -- becomes unsweepable for ever.
-                     exists (
-                       select 1 from public.attempts a
-                        where a.machine_id = rc.machine_id
-                          and a.resolved_at is null
-                          and case when a.lease_deadline is not null
-                                   then a.lease_deadline > now()
-                                        - make_interval(
-                                            secs => %(lease_grace)s)
-                                   else a.claimed_at > now()
-                                        - make_interval(
-                                            secs => %(unknown_deadline)s)
-                              end
-                     ) as work_in_flight,
+                     -- The EXPRESSION itself is `WORK_IN_FLIGHT_SQL`, spliced
+                     -- in from module scope, because `settle.rentals_for_jobs`
+                     -- needs the identical test and the copy it did not have
+                     -- was a second machine-killer. What it means, and why a
+                     -- null deadline is bounded rather than eternal, is argued
+                     -- at that constant. See also the module docstring.
+                     {WORK_IN_FLIGHT_SQL} as work_in_flight,
                      -- Has this machine ever been handed anything at all?
                      exists (
                        select 1 from public.attempts a
@@ -837,18 +934,12 @@ def unreleased_rows(
             # precision`, which is why every window here is expressed in
             # seconds exactly as in `budget.window_spend_usd`.
             #
-            # `lease_grace` is deliberately NOT a parameter of this function.
-            # It is not a policy this module gets to choose: it is how long
-            # after a lease deadline the coordinator's own rule says the
-            # attempt is dead, and `db.reconcile_expired_attempts` already
-            # argues the number. Two copies of that judgement would let a
-            # sweep call an attempt live that the ledger has already resolved
-            # as expired, or the reverse.
-            #
-            # `unknown_deadline` is not a parameter either, but for the
-            # opposite reason: it is not a window an operator tunes per sweep,
-            # it is how long this module is willing to call an unmeasurable
-            # attempt live. One number, argued once, at the constant.
+            # `work_in_flight_params()` supplies the two the spliced fragment
+            # reads (`lease_grace`, `unknown_deadline`). Neither is a parameter
+            # of this function, and that function's docstring says why. Coming
+            # from the same place as the SQL is the point: a splice whose
+            # windows were assembled here would be a copy again, in the one
+            # part nobody would think to check.
             #
             # `idle_live` is the same kind of number as `unknown_deadline` and
             # is fixed for the same reason: it is how long this module will
@@ -862,9 +953,8 @@ def unreleased_rows(
                 "boot": float(boot_grace_s),
                 "idle": float(idle_after_s),
                 "idle_live": float(DEFAULT_LIVE_JOB_IDLE_AFTER_S),
-                "lease_grace": float(dbmod.EXPIRY_GRACE_SECONDS),
-                "unknown_deadline": float(DEFAULT_UNKNOWN_DEADLINE_MAX_S),
                 "terminal": list(TERMINAL_JOB_STATES),
+                **work_in_flight_params(),
             },
         )
         return [dict(r) for r in cur.fetchall()]

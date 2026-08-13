@@ -16,6 +16,9 @@ green:
   that is really billing, and the sweep would close those rows for ever;
 - a rental is released when the API observes its job finish, from the two
   routes where that observation actually happens;
+- a rental whose MACHINE is mid-task is not released by any of them, however
+  finished the job on its row is — the sweep's guard, on the path the sweep's
+  own tests cannot reach;
 - both the settle hook and the sweep ship **log-only**, and one flag arms
   both — a deployment armed on one path and disarmed on the other is not a
   safer half;
@@ -45,7 +48,10 @@ from flashml_cloud_api.app import create_cloud_app
 from flashml_cloud_api.capacity import settle as settlemod
 from flashml_cloud_api.capacity.provider import FakeProvider, ReleaseOutcome
 from flashml_cloud_api.capacity.registry import providers_for
-from flashml_cloud_api.capacity.settle import settle_finished_jobs
+from flashml_cloud_api.capacity.settle import (
+    rentals_for_jobs,
+    settle_finished_jobs,
+)
 from flashml_cloud_api.settings import Settings
 
 JWT_SECRET = "test-jwt-secret-long-enough-for-hs256-abcdef"
@@ -246,20 +252,86 @@ def _submit(client, token: str) -> str:
     return r.json()["job_id"]
 
 
-def _rent(db, *, owner_id, pool_id, job_id, handle, venue_id=VENUE):
-    """A rental against a job, as ``acquire_for_job`` would leave it."""
+def _rent(
+    db, *, owner_id, pool_id, job_id, handle, venue_id=VENUE, machine_id=None
+):
+    """A rental against a job, as ``acquire_for_job`` would leave it.
+
+    ``machine_id`` is what ``acquire._move_to_active`` writes once the host has
+    registered. Most tests here leave it null — the hook never looked at it —
+    and the ones that do not are the ones about a machine that is working.
+    """
     with db.cursor() as cur:
         cur.execute(
             """
             insert into public.rented_capacity
                 (venue_id, state, owner_id, pool_id, job_id, provider_handle,
-                 usd_per_hour, acquired_at)
-            values (%s, 'ACTIVE', %s, %s, %s, %s, 0.5, now())
+                 machine_id, usd_per_hour, acquired_at)
+            values (%s, 'ACTIVE', %s, %s, %s, %s, %s, 0.5, now())
             returning id
             """,
-            (venue_id, str(owner_id), str(pool_id), job_id, handle),
+            (venue_id, str(owner_id), str(pool_id), job_id, handle,
+             machine_id),
         )
         return str(cur.fetchone()["id"])
+
+
+def _rented_machine(db, owner_id, pool_id):
+    """A rented host, enrolled and heartbeating, IN THE SUBMITTER'S OWN POOL.
+
+    The pool binding is the whole shape of the defect below and not scenery: a
+    rented machine joins the pool the job was submitted from, which makes it an
+    eligible claimant for that pool's OTHER jobs. Nothing about "the job we
+    rented it for" bounds what it is running now — the runtime is pull-based
+    and never tells this API which lease it handed to whom.
+    """
+    machine_id = str(
+        dbmod.insert_machine(
+            db, owner_id=str(owner_id), node_id=f"rented-{uuid.uuid4()}",
+            name="a rented host", platform="linux",
+        )
+    )
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool_id))
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.machines set status = 'active', "
+            "last_seen_at = now() where id = %s",
+            (machine_id,),
+        )
+    return machine_id
+
+
+def _attempt(db, machine_id, *, job_id, claimed_s, resolved, deadline_s):
+    """One row in the attempt ledger — a lease this machine took.
+
+    ``claimed_s`` and ``deadline_s`` are seconds ago; a NEGATIVE
+    ``deadline_s`` is a lease that has not run out yet, which is the only
+    shape that counts as work in flight once ``resolved`` is false.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            insert into public.attempts
+                (lease_id, machine_id, job_id, task_id, claimed_at,
+                 resolved_at, outcome, lease_deadline)
+            values (%s, %s, %s, 't1',
+                    now() - make_interval(secs => %s),
+                    case when %s then now() else null end,
+                    case when %s then 'accepted' else null end,
+                    now() - make_interval(secs => %s))
+            """,
+            (f"lease-{uuid.uuid4().hex[:12]}", machine_id, job_id,
+             float(claimed_s), resolved, resolved, float(deadline_s)),
+        )
+
+
+def _resolve_every_attempt(db, machine_id):
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.attempts set resolved_at = now(), "
+            "outcome = 'accepted' where machine_id = %s",
+            (machine_id,),
+        )
 
 
 def _state(db, rid):
@@ -390,6 +462,96 @@ def test_a_running_jobs_rental_is_never_touched(db, an_owner, a_pool, venue):
     ))
     assert _state(db, rid)["state"] == "ACTIVE"
     assert venue.live_handles() == [handle]
+
+
+def test_a_finished_job_never_settles_a_machine_working_on_another(
+    db, an_owner, a_pool, venue
+):
+    """**The reproduction. The last known way an armed teardown could destroy
+    a machine that is doing a customer's work.**
+
+    Job A is over. Job B is mid-task on the same rented machine, in the same
+    pool, with ten minutes left on its lease. ``rentals_for_jobs`` selected on
+    ``job_id`` alone and ``release_capacity`` asks nothing about liveness by
+    design, so a console page load observing A finish destroyed the machine
+    under B — silently, irreversibly, and with the evidence arriving
+    afterwards.
+
+    This is the same scenario ``test_capacity_reconcile.py::test_a_finished_
+    job_never_sweeps_a_machine_holding_a_live_lease`` pins for the sweep. The
+    guard existed, was tested, and was simply never consulted here; there is
+    now one expression (``reconcile.WORK_IN_FLIGHT_SQL``) and both queries
+    splice it, which is the only shape in which it cannot go missing from one
+    of them for a third time.
+
+    Declining costs LATENCY, not correctness — the second half of this test is
+    that the rental settles as soon as the machine's work actually ends.
+    """
+    machine_id = _rented_machine(db, an_owner, a_pool)
+    handle = venue.rent()
+    rid = _rent(db, owner_id=an_owner, pool_id=a_pool, job_id="job-a-over",
+                handle=handle, machine_id=machine_id)
+    _attempt(db, machine_id, job_id="job-b-still-going", claimed_s=300.0,
+             resolved=False, deadline_s=-600.0)
+
+    # The predicate itself: the row is not even offered to the teardown.
+    assert rentals_for_jobs(db, ["job-a-over"]) == []
+
+    assert asyncio.run(settle_finished_jobs(
+        db, {VENUE: venue}, job_ids=["job-a-over"], dry_run=False,
+    )) == []
+    assert venue.release_calls == [], (
+        "the hook asked the venue to destroy a machine that was mid-task on "
+        "another job in the same pool"
+    )
+    assert venue.live_handles() == [handle]
+    assert _state(db, rid)["state"] == "ACTIVE"
+
+    # ...and nothing is lost by declining. The moment job B's lease resolves,
+    # the same hook settles the rental — as does the sweep, with nobody
+    # watching, which is why declining here is only ever a delay.
+    _resolve_every_attempt(db, machine_id)
+    assert asyncio.run(settle_finished_jobs(
+        db, {VENUE: venue}, job_ids=["job-a-over"], dry_run=False,
+    )) == [rid]
+    assert venue.live_handles() == []
+    assert _state(db, rid)["state"] == "RELEASED"
+
+
+def test_the_guard_does_not_turn_the_prompt_half_into_a_no_op(
+    db, an_owner, a_pool, venue
+):
+    """**The hook exists for promptness, and a guard that never fires is a
+    regression dressed as caution.**
+
+    A rental this hook declines is not lost — the sweep gets it — but every
+    decline is minutes of a GPU's hourly rate that this module was added to
+    stop. So the guard has to be about work that could still be LIVE, not about
+    the attempt ledger having anything in it at all.
+
+    The machine here has a history: one lease it finished, and one it never
+    resolved whose deadline ran out an hour ago — well past
+    ``db.EXPIRY_GRACE_SECONDS``, which is the coordinator's own rule for when
+    an attempt is dead and the same figure ``reconcile_expired_attempts`` uses.
+    Neither is work in flight, and the machine goes back at once.
+    """
+    machine_id = _rented_machine(db, an_owner, a_pool)
+    handle = venue.rent()
+    rid = _rent(db, owner_id=an_owner, pool_id=a_pool, handle=handle,
+                job_id="job-really-over", machine_id=machine_id)
+    _attempt(db, machine_id, job_id="job-really-over", claimed_s=1800.0,
+             resolved=True, deadline_s=1500.0)
+    _attempt(db, machine_id, job_id="job-that-died", claimed_s=7200.0,
+             resolved=False, deadline_s=3600.0)
+
+    assert [str(r["id"]) for r in rentals_for_jobs(db, ["job-really-over"])] \
+        == [rid]
+    assert asyncio.run(settle_finished_jobs(
+        db, {VENUE: venue}, job_ids=["job-really-over"], dry_run=False,
+    )) == [rid]
+    assert venue.release_calls == [handle]
+    assert venue.live_handles() == []
+    assert _state(db, rid)["state"] == "RELEASED"
 
 
 def test_a_broken_settle_never_reaches_the_caller(

@@ -61,26 +61,41 @@ daemon thread with its own connection and no event loop, and the sweep covers
 its rentals within ``idle_after_s`` anyway. If federated runs ever rent
 capacity in volume, that is where the second hook goes.)
 
-THIS PATH HAS NO WORK-IN-FLIGHT GUARD, AND THAT IS A KNOWN HAZARD
-------------------------------------------------------------------
-**Not a decision this file is entitled to keep making quietly, so it is
-written down.** ``reconcile.unreleased_rows``' ``JOB_FINISHED`` branch refuses
-to sweep a rental whose machine holds a lease that could still be live, because
-a rented machine sits in the submitter's own pool and the runtime is pull-based
--- "the job we rented it for is over" says nothing about what the machine is
-running now. That guard was added after a reproduction; see
+THE JOB BEING OVER SAYS NOTHING ABOUT WHAT THE MACHINE IS DOING
+----------------------------------------------------------------
+``reconcile.unreleased_rows``' ``JOB_FINISHED`` branch refuses to sweep a
+rental whose machine holds a lease that could still be live, because a rented
+machine sits in the submitter's own pool and the runtime is pull-based -- "the
+job we rented it for is over" says nothing about what the machine is running
+now. That guard was added after a reproduction; see
 ``test_capacity_reconcile.py::test_a_finished_job_never_sweeps_a_machine_
 holding_a_live_lease``.
 
-This module asks nothing of the kind. Armed, a page load that observes job A
-finishing destroys the machine rented for A **while it is mid-task on job B**
-in the same pool. The docstring below argues that a caller who has just watched
-a job finish knows something no heartbeat can tell us, and that is true of the
-JOB -- it is not true of the MACHINE. Closing it means the same
-``public.attempts`` test the sweep uses, in ``rentals_for_jobs``' predicate;
-until then, this is the reason an armed deployment can still lose a running
-task, and the sweep's own guards do not cover it because this path never
-consults them.
+**This module asked nothing of the kind until 2026-08-12, and that was the
+last known way an armed teardown could destroy a working machine.**
+``rentals_for_jobs`` selected on ``job_id`` alone and ``release_capacity`` asks
+about liveness by design, so a page load observing job A finishing destroyed
+the machine rented for A **while it was mid-task on job B** in the same pool --
+the exact scenario the sweep was fixed for, on the one path the fix did not
+reach. The docstring below argues that a caller who has just watched a job
+finish knows something no heartbeat can tell us, and that is true of the JOB.
+It was never true of the MACHINE.
+
+``rentals_for_jobs`` now carries the same ``public.attempts`` test, and carries
+it as literally the same text: ``reconcile.WORK_IN_FLIGHT_SQL``, spliced into
+both queries. It is not copied, and copying it would be the defect rather than
+a shortcut -- one hand-synced copy going stale in one branch is how the guard
+went missing from ``JOB_FINISHED``, and a second copy a module away is how it
+went missing from here.
+
+**What the guard costs is latency, not correctness**, and that asymmetry is the
+whole reason it is affordable on the prompt path. A rental this hook declines
+to settle is not lost: the sweep's ``JOB_FINISHED`` branch picks it up on a
+later pass, once the machine's work has actually ended, with no page open and
+no observer -- see ``reconcile``'s docstring on why that guard expires on its
+own rather than exempting anything for ever. So the cost of declining is a few
+more minutes of one machine's hourly rate; the cost of not declining is a
+customer's running task, silently, and the evidence arrives afterwards.
 
 EVERY CALL IS IDEMPOTENT AND EVERY CALL IS BEST EFFORT
 ------------------------------------------------------
@@ -100,7 +115,11 @@ from collections.abc import Iterable
 import psycopg
 
 from flashml_cloud_api.capacity.provider import ResourceProvider
-from flashml_cloud_api.capacity.reconcile import release_capacity
+from flashml_cloud_api.capacity.reconcile import (
+    WORK_IN_FLIGHT_SQL,
+    release_capacity,
+    work_in_flight_params,
+)
 
 __all__ = ["rentals_for_jobs", "settle_finished_jobs"]
 
@@ -123,20 +142,36 @@ def rentals_for_jobs(
     may still have created something at the venue. ``release_capacity`` knows
     what to do with a handleless row -- leave it sweepable -- and that decision
     belongs in one place, not two.
+
+    **A rental whose machine holds work in flight is not returned**, and this
+    predicate is the only thing between an armed hook and a running task. The
+    job named on the ROW being over says nothing about what the MACHINE is
+    doing: it sits in the submitter's own pool, the runtime is pull-based, and
+    it may be mid-task on a different job in that pool right now. See the
+    module docstring for the failure this closed and for why declining costs
+    latency rather than correctness.
+
+    The test is ``reconcile.WORK_IN_FLIGHT_SQL`` itself, not a copy of it. Its
+    contract is why the ``rc`` alias below is not cosmetic and why the
+    parameters are named rather than positional.
     """
     ids = [str(j) for j in job_ids if j]
     if not ids:
         return []
     with db.cursor() as cur:
         cur.execute(
-            """
-            select id, venue_id, job_id, state, provider_handle
-              from public.rented_capacity
-             where state in ('REQUESTED', 'ACTIVE')
-               and job_id = any(%s)
-             order by coalesce(acquired_at, created_at)
+            # An f-string for ONE reason -- the shared fragment below. Every
+            # value is still a named parameter; nothing from a caller is
+            # interpolated into this statement.
+            f"""
+            select rc.id, rc.venue_id, rc.job_id, rc.state, rc.provider_handle
+              from public.rented_capacity rc
+             where rc.state in ('REQUESTED', 'ACTIVE')
+               and rc.job_id = any(%(job_ids)s)
+               and not {WORK_IN_FLIGHT_SQL}
+             order by coalesce(rc.acquired_at, rc.created_at)
             """,
-            (ids,),
+            {"job_ids": ids, **work_in_flight_params()},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -151,10 +186,16 @@ async def settle_finished_jobs(
     """Release every rental held for these finished jobs. Never raises.
 
     Call it only with jobs already known to be terminal: this asks nothing
-    about liveness, exactly as ``release_capacity`` documents. A caller who has
-    just watched a job finish knows something no heartbeat can tell us, and a
-    ``flashnode`` that goes on heartbeating after its work is done is precisely
-    why the heartbeat cannot be asked.
+    about the JOB's liveness, exactly as ``release_capacity`` documents. A
+    caller who has just watched a job finish knows something no heartbeat can
+    tell us, and a ``flashnode`` that goes on heartbeating after its work is
+    done is precisely why the heartbeat cannot be asked.
+
+    It does ask one thing about the MACHINE, and only one: whether it holds a
+    lease that could still be live. That is a different question from liveness
+    — it reads the attempt ledger, not a heartbeat column — and it is the
+    difference between settling a rental and destroying a machine mid-task on
+    another job in the same pool. ``rentals_for_jobs`` carries it.
 
     ``dry_run`` defaults to **True** here, the opposite of
     ``reconcile_rented``'s default and on purpose: that function is called by

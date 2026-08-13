@@ -11,6 +11,40 @@ connection opened by ``connect()``. Connections are opened in autocommit
 mode so every statement (or, where noted, every atomically-scoped ``UPDATE
 ... RETURNING``) takes effect immediately and callers never need to
 remember a ``commit()``.
+
+TWO BEST-EFFORT WRITES ON THE CLAIM AND HEARTBEAT PATHS NOW HOLD UP TEARDOWN
+----------------------------------------------------------------------------
+**Read this before changing anything on the claim or heartbeat path.** Almost
+everything logged from this module is an accounting hop that was allowed to
+fail, and that remained a purely local judgement until rented capacity shipped.
+It is not local any more: ``capacity/reconcile.py`` and ``capacity/settle.py``
+decide whether to DESTROY a rented machine by asking ``public.attempts``
+whether it holds a lease that could still be live
+(``reconcile.WORK_IN_FLIGHT_SQL``). Every guard in that area — the sweep's four
+guarded branches and the settle hook's predicate — is exactly as good as the
+two writes below. Neither raises today, both are called inside a ``try`` that
+swallows, and that is deliberate for the request they sit in. What is stated
+here is what it costs elsewhere:
+
+* :func:`record_attempt` is best effort on the CLAIM path. It is what puts a
+  row in ``public.attempts`` at all, so with no row every work-in-flight guard
+  in the capacity module is INERT for that machine — not weakened, absent —
+  and ``reconcile``'s ``IDLE`` branch takes the machine at ``boot_grace_s`` on
+  the strength of an empty ledger. A machine whose claims stop being recorded
+  while it goes on working looks idle to every query that could destroy it.
+* :func:`note_attempt_deadline` is best effort on the HEARTBEAT path. Losing
+  it does not null the deadline, it FREEZES it at whatever the claim recorded,
+  which is the worse of the two failures: a stale deadline is a measurable one,
+  so the six-hour unknown-deadline cap (``DEFAULT_UNKNOWN_DEADLINE_MAX_S``)
+  never applies, the recorded instant plus ``EXPIRY_GRACE_SECONDS`` passes
+  while the task is still running, ``work_in_flight`` drops to false, and a
+  genuinely long task is exposed to an armed teardown. Renewals stopping being
+  recorded is indistinguishable, from the sweep, from the lease having ended.
+
+Making either of them raise is not the fix — a machine's task must never fail
+because of a column it does not know exists. The fix, if one is ever needed, is
+on the capacity side: make the sweep ask the coordinator for lease state rather
+than infer it from a ledger this module writes on a best-effort basis.
 """
 from __future__ import annotations
 
