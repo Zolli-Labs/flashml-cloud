@@ -226,6 +226,73 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-13 — Cross-venue recovery latency + cost tool: wake economics for venues that cannot hibernate (flashml-cloud, competition D-9/C-6.5)
+What/why: FC sandboxes had measured hibernate/wake numbers; every other venue
+had none. `scripts/competition/recovery_latency.py` derives the non-hibernating
+analogue from the job event ledger — detection_s (last renewal → LEASE_EXPIRED),
+reclaim_s (LEASE_EXPIRED → next LEASE_CLAIMED, the fleet's "wake"),
+resume_to_progress_s, recomputed_s — and prices per venue: cost-of-wait is 0.00
+for venues that leave the fleet (with the explanation), hibernated-rate × wait
+for FC (rates read from the newest alibaba-hibernation-modes-*.json, not
+restated), None + named reason for unpriced venues. `run_local_recovery.sh`
+now dumps the job's events and invokes the tool with --kill-at, so the local
+kill rehearsal writes `.evidence/recovery-latency-<stamp>.{json,md}` instead of
+printing elapsed seconds to stdout only.
+How verified: test_recovery_latency.py 48 passed; test_cost_worksheet.py 9
+  still green; nothing opens a socket. Synthetic single-death stream priced
+  RunPod at $0.00 wait / $0.0057 recovery vs fc-sandbox $0.000042 wait /
+  $0.00095 recovery.
+Gotchas: CHECKPOINT_MANIFEST_COMMITTED is emitted under "<job_id>::<task_id>"
+  scope (service/checkpoints._scope) so it never appears in the job feed —
+  resume_to_progress_s resolves against TASK_COMMIT_ACCEPTED and says so. The
+  HTTP Event model carries no `seq`; ordering honors seq when present, else
+  timestamp. The events dump in run_local_recovery.sh runs after the verdict,
+  not beside the LEASE_EXPIRED check, because reclaim hasn't happened yet at
+  that instant. Commit 37c6c08.
+Next: run `e2e/competition/run_local_recovery.sh --quick` once to produce the
+  first real cross-venue evidence artifact; then fetch mode against a dev job.
+
+### 2026-08-13 — Elasticity probe (C-6.1): bounded concurrency ladder with honest failure taxonomy (flashml-cloud, competition)
+What/why: C-6.1 had a written argument and zero measurement — no concurrency
+script existed. `scripts/competition/elasticity_probe.py` runs a bounded
+creation ladder (default 1,2,4,8), measures per-create latency p50/p95 and
+creates/sec per rung, classifies failures with documented precedence
+(throttle ≠ quota ≠ unknown — a 429 is the finding, not noise), stops
+ascending past a failure threshold, and names the cap honestly ("the top of
+the ladder, not a measured ceiling" when nothing broke). Every sandbox killed
+in per-rung `finally` plus a metadata-tag-scoped final sweep that catches
+creates that timed out client-side but succeeded server-side; unconfirmed
+cleanup forces exit 2. The 150-concurrent account cap is carried as
+kind:"quoted", never as measured.
+How verified: test_elasticity_probe.py 37 passed (api venv pytest, matching
+  test_isolation_probe.py); async half exercised against a stub SDK — rung 8
+  returned a synthetic 429, stop-ascending fired, cap = 4, exit 0. NOT yet run
+  against the real endpoint (owner-coordinated; --dry-run first; ~$0.04 upper
+  bound for the default ladder).
+Gotchas: reads E2B_API_KEY only (matching isolation_probe.py), not the
+  per-region variant alibaba_fc_sandbox_smoke.py uses. Landed inside commit
+  2b9c02d rather than its own commit — see the staged-index note in the
+  workspace CLAUDE.md.
+Next: owner runs --dry-run then the live ladder in ap-southeast-1.
+
+### 2026-08-13 — Package the debugging story (C-6.6) and move competition statuses to landed evidence (flashml-cloud, docs)
+What/why: The rubric awards one real Trace/logs/metrics debugging story; the
+material existed across two specs but nothing judge-facing. New
+`specs/2026-08-13-debugging-story-evidence.md` narrates the FC stall (lease
+renewing every ~23s, console saying healthy) through the five surfaces
+actually consulted, separates the two root causes (silent Aliyun-mirror pip
+build + heartbeat≠progress; cp312 wheel cliff on FC's Python 3.13), reports
+fix state by branch, and ends with a 5-line judge checklist. Status cells in
+2026-08-11-competition-requirements.md moved for G-1, D-4, D-9, C-6.2, C-6.4,
+C-6.5, C-6.6.
+How verified: every status verified against the cited artifact before writing.
+  Two corrections to received claims: D-4's MCP trace tool is NOT shipped
+  (09eecc0's own message defers it) — only the trace route is; and G-1's
+  blocker is not migrations (0022/0023 confirmed applied on BOTH Supabase
+  projects by direct query) but that the share page sits on develop, unmerged
+  to main. Commit 2b9c02d.
+Next: merge develop → main to put the share URL live (G-1 is otherwise done).
+
 ### 2026-08-12 — D6: rentals get their own minting path, and their identity is a lease (flashml-cloud/apps/api)
 What/why: Renting into the submitter's own workspace was refused, because
 `capacity/acquire.py` reused `provision_sandbox_machine` and inherited its

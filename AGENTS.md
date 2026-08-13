@@ -66,6 +66,15 @@ Several agents and sessions work in this one checkout at the same time.
 sweeping commit on 2026-08-12 pulled in half of another session's slice and
 left HEAD internally broken.
 
+**Explicit-path `git add` is not enough — the staged index is also
+repo-wide.** On 2026-08-13 two sessions each ran a correct explicit-path
+`git add`; the adds interleaved, and whichever `git commit` ran first swept
+BOTH sessions' staged files into one commit (`2b9c02d` — content intact,
+message and attribution wrong; the second session's commit then failed with
+"no changes added"). Pass the pathspec to the commit itself —
+`git commit -m "..." -- <path> <path>` — which commits exactly those paths
+regardless of what else is sitting in the shared index.
+
 **And never run a REPOSITORY-SCOPED command here:** `git stash`,
 `git checkout <ref>`, `git reset`, `git clean`, `git restore`, `git rebase`.
 On 2026-08-12 a subagent ran `git stash push` in this checkout while trying
