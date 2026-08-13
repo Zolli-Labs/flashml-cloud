@@ -11,10 +11,12 @@ vi.mock("@/lib/supabase", () => ({
 }));
 
 import {
+  amountLabel,
   capturedAbsoluteLabel,
   capturedLabel,
   fetchLandingPrices,
   trendGlyph,
+  trendLabelText,
   trendToneClass,
   type PriceBoardRow,
 } from "./market-board";
@@ -62,6 +64,45 @@ describe("trendToneClass", () => {
   it("flat and new are neutral, not colored either direction", () => {
     expect(trendToneClass("flat")).toBe("text-muted-foreground");
     expect(trendToneClass("new")).toBe("text-muted-foreground");
+  });
+});
+
+describe("amountLabel", () => {
+  it("pads single-digit integers with '.00'", () => {
+    expect(amountLabel("1")).toBe("1.00");
+    expect(amountLabel("42")).toBe("42.00");
+  });
+
+  it("pads single-digit fractions with a trailing zero", () => {
+    expect(amountLabel("0.5")).toBe("0.50");
+    expect(amountLabel("1.3")).toBe("1.30");
+  });
+
+  it("leaves amounts with two or more fraction digits unchanged", () => {
+    expect(amountLabel("0.34")).toBe("0.34");
+    expect(amountLabel("1.234")).toBe("1.234");
+    expect(amountLabel("10.999")).toBe("10.999");
+  });
+
+  it("passes through non-decimal strings unchanged", () => {
+    expect(amountLabel("not-a-number")).toBe("not-a-number");
+    expect(amountLabel("")).toBe("");
+    expect(amountLabel("1.2.3")).toBe("1.2.3");
+  });
+});
+
+describe("trendLabelText", () => {
+  it("returns the percent value with a % suffix for up and down", () => {
+    expect(trendLabelText({ direction: "up", pct: "5.6" })).toBe("5.6%");
+    expect(trendLabelText({ direction: "down", pct: "-5.6" })).toBe("-5.6%");
+  });
+
+  it("returns 'stable' (no percent) for flat trends", () => {
+    expect(trendLabelText({ direction: "flat", pct: "0.0" })).toBe("stable");
+  });
+
+  it("returns 'NEW' for new trends", () => {
+    expect(trendLabelText({ direction: "new" })).toBe("NEW");
   });
 });
 

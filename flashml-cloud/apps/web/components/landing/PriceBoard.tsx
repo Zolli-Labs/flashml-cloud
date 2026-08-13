@@ -1,9 +1,11 @@
 import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 import {
+  amountLabel,
   capturedAbsoluteLabel,
   capturedLabel,
   fetchLandingPrices,
   trendGlyph,
+  trendLabelText,
   trendToneClass,
   type PriceBoardRow,
 } from "@/lib/landing/market-board";
@@ -123,7 +125,7 @@ function PriceRow({ row }: { row: PriceBoardRow }) {
     <tr data-price-row={row.gpu} className="border-b border-border last:border-b-0">
       <td className="whitespace-nowrap px-3 py-4 pl-0 text-[15px] font-medium">{row.gpu}</td>
       <td className="whitespace-nowrap px-3 py-4 font-mono tabular-nums">
-        {row.currency} {row.amount}
+        {row.currency} {amountLabel(row.amount)}
         <span className="ml-1 text-sm text-muted-foreground">/ gpu-hr</span>
       </td>
       <td className={`whitespace-nowrap px-3 py-4 font-mono text-sm tabular-nums ${tone}`}>
@@ -136,7 +138,7 @@ function PriceRow({ row }: { row: PriceBoardRow }) {
         ) : (
           <>
             {trendGlyph(row.trend.direction)}
-            <span className="ml-1">{row.trend.pct}%</span>
+            <span className="ml-1">{trendLabelText(row.trend)}</span>
           </>
         )}
       </td>

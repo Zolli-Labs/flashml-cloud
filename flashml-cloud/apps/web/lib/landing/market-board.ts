@@ -84,6 +84,19 @@ export function trendGlyph(direction: TrendDirection): string {
   return TREND_GLYPH[direction];
 }
 
+/** Presentation-only padding: a plain decimal with fewer than two fraction
+ * digits gains trailing zeros ("1" -> "1.00", "0.5" -> "0.50"). Never rounds,
+ * never strips — any string that is not a plain decimal, or already has two
+ * or more fraction digits, passes through untouched. The API's amount string
+ * stays the source of truth; this only dresses it for the price column. */
+export function amountLabel(amount: string): string {
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(amount);
+  if (!m) return amount;
+  const frac = m[2] ?? "";
+  if (frac.length >= 2) return amount;
+  return `${m[1]}.${frac.padEnd(2, "0")}`;
+}
+
 const TREND_TONE: Record<TrendDirection, string> = {
   // Inverted from how a stock ticker would color it, on purpose: this board
   // serves a buyer deciding where to place a job, not a shareholder in the
@@ -99,6 +112,18 @@ const TREND_TONE: Record<TrendDirection, string> = {
  * "down" is healthy and "up" is a warning. */
 export function trendToneClass(direction: TrendDirection): string {
   return TREND_TONE[direction];
+}
+
+/** The text label for a trend: the percent change for up/down (with "%"),
+ * "stable" for flat trends, or "NEW" for new observations. */
+export function trendLabelText(trend: PriceTrend): string {
+  if (trend.direction === "new") {
+    return "NEW";
+  }
+  if (trend.direction === "flat") {
+    return "stable";
+  }
+  return `${trend.pct}%`;
 }
 
 /** The provenance cell's relative half: "observed <ageLabel>", or
