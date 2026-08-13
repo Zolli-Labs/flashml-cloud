@@ -792,6 +792,35 @@ async def verify_job(job_id: str, oss: OSSArtifacts) -> VerificationReport:
     )
 
 
+async def read_manifest_objects(
+    job_id: str, oss: OSSArtifacts
+) -> tuple[MirroredObject, ...] | None:
+    """One job's mirrored inventory as the manifest records it, or None.
+
+    **The listing, without signing anything.** ``presign_job_artifacts``
+    below answers the same question and then mints a URL per object, which is
+    a signature per file for a caller that only wants to know what exists —
+    on a run with a few hundred outputs that is a few hundred signatures
+    thrown away. A browser LISTING a job needs exactly this and nothing more;
+    it signs one URL later, when somebody clicks one.
+
+    None means *no trustworthy manifest*, which is the same verdict
+    ``_read_manifest`` reaches for an absent one and for an unreadable one —
+    deliberately not distinguished here, because every caller's answer is the
+    same: fall back to whatever the coordinator says. It is NOT an empty
+    tuple: an empty tuple would be a claim that the mirror holds nothing,
+    and ``mirror_job`` never writes a manifest that could say that.
+
+    Raises ``OSSUnavailable`` when the bucket cannot be read at all — a
+    statement about OSS rather than about this job, kept distinguishable for
+    the same reason ``presign_mirrored_artifact`` keeps it.
+    """
+    payload = await _read_manifest(oss, manifest_key(job_id))
+    if payload is None:
+        return None
+    return manifest_objects(payload)
+
+
 async def presign_job_artifacts(
     job_id: str,
     oss: OSSArtifacts,

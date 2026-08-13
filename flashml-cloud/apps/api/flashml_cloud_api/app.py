@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import math
@@ -68,6 +69,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from psycopg.rows import dict_row
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.formparsers import MultiPartException
 
 from flashruntime.protocol.v1alpha1 import (
     JobSpec,
@@ -106,6 +109,9 @@ from flashml_cloud_api.artifact_mirror import (
     job_prefix,
     mirror_job,
     presign_mirrored_artifact,
+    # Aliased at the import so the call site reads as a fact about the
+    # mirror rather than as one more `read_*` among this module's many.
+    read_manifest_objects as mirror_objects_for,
     unmirror_job,
 )
 from flashml_cloud_api.auth import (
@@ -138,13 +144,20 @@ from flashml_cloud_api.emails import derive_email_facts
 from flashml_cloud_api.flashml_yaml import (
     SPLIT_SHARD,
     ConfigError,
+    FlashmlConfig,
     parse_flashml_yaml,
 )
-from flashml_cloud_api.images import UnknownImage, resolve_image
+from flashml_cloud_api.images import CuratedImage, UnknownImage, resolve_image
 from .github_app import GitHubApp, GitHubAppError
 from .mail_templates import admitted_email, declined_email
 from .mailer import Mailer
-from flashml_cloud_api.preflight import preflight, safe_text
+from flashml_cloud_api.preflight import (
+    ERROR,
+    WARNING,
+    Finding,
+    preflight,
+    safe_text,
+)
 from flashml_cloud_api.settings import Settings
 from flashml_cloud_api.store import NodeStore
 
@@ -369,6 +382,160 @@ def _read_config_text(repo_root: Path) -> str:
         status_code=400,
         detail="repo has no flashml.yaml at its root — add one to describe the job",
     )
+
+
+def _parse_and_preflight_tree(
+    repo_root: Path,
+) -> tuple[FlashmlConfig, CuratedImage, list[Finding]]:
+    """An extracted working tree → its config, its image, and every static
+    objection to running it.
+
+    Shared by ``from-repo`` and ``from-upload`` so the two cannot diverge:
+    where the bytes came from is the only difference between those routes,
+    and it stops mattering the moment a tree is on disk. A second copy of
+    this sequence is how "the upload path accepts a config the repo path
+    refuses" becomes possible, and nobody would notice until a user hit it.
+
+    Blocking end to end — a file read, a YAML parse and an AST walk — so
+    every caller runs it in a worker thread. Raises ``HTTPException`` (400)
+    for the two config-level refusals, which is what both callers want: they
+    are creating a job, and no job was created.
+    """
+    config_text = _read_config_text(repo_root)
+    try:
+        config = parse_flashml_yaml(config_text)
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
+
+    try:
+        image = resolve_image(config.image)
+    except UnknownImage as exc:
+        raise HTTPException(status_code=400, detail=safe_text(exc, 300)) from None
+
+    return config, image, preflight(config, repo_root, image)
+
+
+# ---------------------------------------------------------------------------
+# preflight without a repo: the same authority, over supplied bytes
+# ---------------------------------------------------------------------------
+
+
+def _contained_write_path(root: Path, relative: str) -> Path | None:
+    """Where ``relative`` may be written under ``root``, or None to refuse.
+
+    ``preflight._resolve_entrypoint`` already refuses to *read* outside the
+    workload root, and this is the same rule applied one step earlier, on the
+    *write*. Two checks rather than one because they guard two different
+    things: that one keeps preflight from analysing ``/etc/passwd``, this one
+    keeps ``POST /preflight`` from creating a file at an attacker-chosen path
+    under whatever the API process can write. A caller who names
+    ``../../../etc/passwd`` gets no file, and therefore an
+    ``entrypoint-missing`` finding — which is the honest answer, since the
+    sandbox that runs the job would refuse that entrypoint too.
+    """
+    if not relative or "\x00" in relative:
+        return None
+    root = root.resolve()
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _preflight_supplied_workload(
+    config_text: str,
+    entrypoint_text: str | None,
+    entrypoint_path: str | None,
+) -> tuple[list[Finding], FlashmlConfig | None]:
+    """Every static objection to a workload supplied as *text*, plus the
+    parsed config — the ``POST /v1alpha1/preflight`` body of work, off the
+    event loop.
+
+    **Deliberately the same three calls, in the same order, as
+    ``from-repo``**: ``parse_flashml_yaml`` → ``resolve_image`` →
+    ``preflight``. Not a re-implementation of any of them. A second copy of
+    these rules would drift, and drift here has a specific shape: a CLI that
+    blesses a config the API then refuses, or worse, one that refuses a
+    config the API would have taken. There is one authority and this reaches
+    for it.
+
+    The three differences from ``from-repo``, all forced by there being no
+    repo:
+
+    * a parse failure and an unknown image are **findings**, not exceptions.
+      The caller asked for a verdict; "your config does not parse" is one.
+    * ``preflight()`` resolves the entrypoint from disk, so the supplied
+      bytes are materialised into a throwaway directory at the path the
+      config names. Nothing else is written and the directory is removed on
+      the way out, including on failure.
+    * with no entrypoint supplied, ``preflight()`` is not called at all. It
+      would answer ``entrypoint-missing``, which would be true of the empty
+      directory and false about the caller — they did not claim to have sent
+      a file. A warning says which half of the check ran instead.
+
+    Returns ``(findings, config)``; ``config`` is None exactly when the YAML
+    did not parse.
+    """
+    if len(config_text.encode("utf-8", errors="ignore")) > MAX_CONFIG_BYTES:
+        # A verdict about the workload, not a malformed request: this is the
+        # same ceiling `_read_config_text` puts on a repo's flashml.yaml, so
+        # a config too large to preflight here is one from-repo would refuse
+        # to read there. The two limits must not disagree.
+        return [
+            Finding(
+                ERROR,
+                "config-too-large",
+                f"the config is larger than {MAX_CONFIG_BYTES} bytes",
+            )
+        ], None
+
+    try:
+        config = parse_flashml_yaml(config_text)
+    except ConfigError as exc:
+        # The *whole* answer. Nothing below is reported alongside it — see
+        # the route docstring: an entrypoint complaint underneath a YAML
+        # syntax error sends the reader to fix the wrong file.
+        return [Finding(ERROR, "config-invalid", safe_text(exc, 500))], None
+
+    try:
+        image = resolve_image(config.image)
+    except UnknownImage as exc:
+        # Also terminal, and for a concrete reason rather than symmetry:
+        # every import check in `preflight` is asked against the image's
+        # package manifest, so without an image the answer would be a wall
+        # of "this package is not in the image" findings about an image that
+        # does not exist.
+        return [Finding(ERROR, "image-unknown", safe_text(exc, 300))], config
+
+    if entrypoint_text is None:
+        return [
+            Finding(
+                WARNING,
+                "entrypoint-not-supplied",
+                f"no entrypoint file was supplied, so only the config was "
+                f"checked — the checks that read "
+                f"{safe_text(config.entrypoint, 200)!r} (network use, missing "
+                f"packages, writes outside /work/out, metrics) did not run",
+            )
+        ], config
+
+    with tempfile.TemporaryDirectory(prefix="flashml-preflight-") as tmpdir:
+        root = Path(tmpdir) / "workload"
+        root.mkdir()
+        # The config's own entrypoint is the default, because that is the
+        # path `preflight` will go looking for: a caller who sends bytes
+        # without saying where they live means "this is the file my config
+        # names". An explicit `entrypoint_path` that disagrees with the
+        # config is not corrected here — it is materialised as given, and
+        # `preflight` then reports the entrypoint the config named as
+        # missing, which is exactly what a repo in that state would do.
+        target = _contained_write_path(root, entrypoint_path or config.entrypoint)
+        if target is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(entrypoint_text.encode("utf-8"))
+        return preflight(config, root, image), config
 
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +1214,94 @@ async def _mirrored_artifact_url(
         return None
 
 
+async def _mirrored_artifact_listing(
+    job_id: str, settings: Settings
+) -> list[dict[str, Any]] | None:
+    """What the mirror holds for this job, in the shape the listing route
+    answers — or None if the manifest cannot be read.
+
+    THE BUG THIS EXISTS FOR. The artifacts card used to build its file list
+    from the coordinator alone while ``storage`` came from our own row, so a
+    FINISHED job the coordinator had forgotten (its disk recycled, its
+    database rebuilt, the job simply aged out) answered ``files: 0,
+    storage: "oss"`` while the bucket held every object. That is the exact
+    combination a reader cannot recover from: it names the place the bytes
+    are and then says there are none. And it hits finished jobs — the ones
+    people come back weeks later to look at, which is what a mirror is FOR.
+
+    The manifest is a better inventory than the coordinator's listing for
+    everything it covers: it is a certified-complete record of what was
+    accepted, written once and never mutated, whereas the coordinator's disk
+    is a cache. So when a job is mirrored this is the source, and the
+    coordinator is merged in on top of it for the keys the mirror
+    deliberately does not hold (see ``_merged_artifacts``).
+
+    None, and not an empty list, when there is no readable manifest —
+    ``read_manifest_objects``' own distinction, kept because the caller's two
+    behaviours differ: no manifest means answer exactly as before, an empty
+    manifest would mean the mirror is genuinely empty. Every failure is
+    logged and swallowed for the same reason ``_mirrored_artifact_url``
+    swallows its own: the coordinator still holds every byte, so a bucket
+    having a bad minute must cost a less complete listing, not a broken one.
+    """
+    if not settings.oss_configured:
+        return None
+    try:
+        oss = OSSArtifacts.from_settings(settings)
+        objects = await mirror_objects_for(job_id, oss)
+    except (OSSUnavailable, MirrorError) as exc:
+        log.warning(
+            json.dumps({"text": "could not read the mirror manifest; listing "
+                                "from the coordinator alone",
+                        "job_id": job_id, "error": str(exc)})
+        )
+        return None
+    except Exception:  # noqa: BLE001 - a listing must never fail on the mirror
+        log.warning(
+            json.dumps({"text": "could not read the mirror manifest; listing "
+                                "from the coordinator alone",
+                        "job_id": job_id, "error": "unexpected"})
+        )
+        return None
+    if objects is None:
+        return None
+    # Through `_relative_artifacts`, not a second normalisation: the manifest
+    # records absolute coordinator keys, which is the same key space the
+    # coordinator's listing uses, so one function strips the prefix, drops
+    # anything foreign to this job and sorts — for both sources, identically.
+    # Two spellings of that rule is how the mirrored half of a listing ends
+    # up shaped differently from the live half.
+    return _relative_artifacts(
+        job_id, [{"key": o.key, "size_bytes": o.size_bytes} for o in objects]
+    )
+
+
+def _merged_artifacts(
+    mirrored: list[dict[str, Any]] | None,
+    live: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """One inventory from the two that exist, manifest first.
+
+    THE PER-KEY FALLBACK DOCTRINE IS WHY THIS IS A UNION AND NOT A CHOICE.
+    Only ACCEPTED work is mirrored (repo hard rule 4), so a FAILED shard's
+    ``stderr.txt`` legitimately exists, is legitimately readable, and
+    legitimately has no copy in OSS — under a job whose listing says
+    ``storage: "oss"``. Answering from the manifest alone would hide exactly
+    the file somebody opens after a failure; answering from the coordinator
+    alone is the bug above. Both, then: everything the mirror certifies, plus
+    everything the coordinator still has that the mirror was never allowed to
+    take.
+
+    The manifest wins on a key both describe. They should agree — the
+    manifest's ``size_bytes`` is a count of the bytes actually copied — and
+    where they do not, the certified record is the one that was verified.
+    """
+    merged = {entry["key"]: entry for entry in (mirrored or [])}
+    for entry in live or []:
+        merged.setdefault(entry["key"], entry)
+    return sorted(merged.values(), key=lambda e: e["key"])
+
+
 def _passthrough(
     r: httpx.Response, *, headers: dict[str, str] | None = None
 ) -> Response:
@@ -1205,6 +1460,30 @@ def _opt_str(value: Any, limit: int = 256) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return value[:limit]
+
+
+#: What a multipart form field may say for true and for false.
+#:
+#: A form field is always a string, so there is no type to lean on and the
+#: mapping has to be written down. Nothing outside this map is accepted —
+#: notably not "on", which an HTML checkbox sends, and not the empty string:
+#: guessing that an unrecognised value meant one of the two is how a caller
+#: who typed `allow_fallback=ture` gets the opposite of what they asked for,
+#: silently, on a field that decides whether their code may run on a machine
+#: they are paying for.
+_FORM_BOOLS = {
+    "true": True, "1": True, "yes": True,
+    "false": False, "0": False, "no": False,
+}
+
+
+def _form_bool(value: str, *, field: str) -> bool:
+    parsed = _FORM_BOOLS.get(value.strip().lower())
+    if parsed is None:
+        raise HTTPException(
+            status_code=400, detail=f"{field} must be true or false"
+        )
+    return parsed
 
 
 def _seg(value: str) -> str:
@@ -4710,6 +4989,112 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown installation")
         return Response(status_code=204)
 
+    @app.post("/v1alpha1/preflight", tags=["browser"])
+    async def preflight_workload(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Validate a config and an entrypoint WITHOUT pushing anything.
+
+        The edge this closes: until now the only way to learn that line 3 of
+        a ``flashml.yaml`` is wrong was edit → commit → push → submit → read
+        findings. Four irreversible steps per guess, and for an agent
+        iterating on a config that is the entire cost of being wrong.
+
+        **IT CREATES NOTHING.** No job row, no artifact, no coordinator call,
+        no storage write, no fetch of anything the caller named. The only
+        bytes it writes are the supplied entrypoint, into a temporary
+        directory removed before the response is built. That property is what
+        makes an endpoint this cheap to call safe to expose at all: if it
+        ever stops holding, a validation route becomes a way to make this
+        deployment do work on request.
+
+        **IT IS THE SAME AUTHORITY AS ``from-repo``**, not a copy of it —
+        ``parse_flashml_yaml`` → ``resolve_image`` → ``preflight``, in that
+        order, through ``_preflight_supplied_workload``. Two implementations
+        of these rules would drift, and drift here means a public CLI
+        blessing configs the API refuses.
+
+        **STATUS DOCTRINE, and it deliberately differs from ``from-repo``.**
+        A verdict about a *workload* is 200 with ``ok: false`` and a findings
+        array. Only a malformed *request* is a 4xx: no ``config`` or a
+        non-string one is 400, no caller is 401, an unadmitted caller is 403,
+        a pool the caller cannot see is 404. ``from-repo`` answers 400 with
+        the same findings and that is correct there — the caller asked to
+        create a job and none was created, so the request failed. Here the
+        caller asked for a verdict and got one, so the request succeeded. A
+        linter that HTTP-errors when your code is wrong is hostile to the
+        loop it exists to serve: every client would have to special-case a
+        status that means success-with-bad-news, and the first one to forget
+        would report "preflight is down" for a typo in a YAML file.
+
+        ``ok`` is ``not any(level == "error")``, which is the same predicate
+        ``from-repo`` refuses on — so ``ok: true`` here means that submit
+        would not be refused *for preflight reasons*. It is not a promise the
+        submit succeeds: datasets are resolved, the fleet is measured and the
+        spec is compiled at submit time, and none of those are asked here
+        because none of them can be answered without doing something.
+        """
+        raw = await request.body()
+        if len(raw) > MAX_JSON_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="request body too large")
+        payload = await _json_object(request)
+
+        config_text = payload.get("config")
+        if not isinstance(config_text, str):
+            # The one genuinely malformed-request case. Absent or the wrong
+            # type: there is nothing to have a verdict *about*, so there is
+            # no verdict to return with a 200.
+            raise HTTPException(
+                status_code=400,
+                detail="config is required and must be the text of a flashml.yaml",
+            )
+
+        entrypoint_text = payload.get("entrypoint")
+        entrypoint_path = payload.get("entrypoint_path")
+        for field, value in (
+            ("entrypoint", entrypoint_text), ("entrypoint_path", entrypoint_path),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(
+                    status_code=400, detail=f"{field} must be a string or null"
+                )
+
+        # Same 404 doctrine as `from-repo`, and checked here for the same
+        # reason it is checked there: whether the caller may name this pool
+        # is a fact about the CALLER, not a verdict about the workload, so it
+        # is not a finding. Nothing else is done with it — no gate in
+        # `preflight` reads a pool — but accepting the field and ignoring it
+        # would let a caller preflight against a workspace they cannot use
+        # and be told everything is fine.
+        pool = _opt_str(payload.get("pool"))
+        if pool is not None:
+            try:
+                pool_row = dbmod.fetch_pool_for_member(db, pool, user_id)
+            except psycopg.errors.InvalidTextRepresentation:
+                pool_row = None  # not even a uuid; same answer as "not found"
+            if pool_row is None:
+                raise HTTPException(status_code=404, detail="unknown pool")
+
+        # Off the event loop, exactly as `from-repo` runs `preflight`: this
+        # parses YAML, writes a file and walks an AST, all of it blocking,
+        # and none of it should stall every other request in the process.
+        findings, config = await run_in_threadpool(
+            _preflight_supplied_workload, config_text, entrypoint_text, entrypoint_path
+        )
+        rendered = [f.as_dict() for f in findings]
+        return {
+            "ok": not any(f.level == ERROR for f in findings),
+            "findings": rendered,
+            # The parsed config back, not just a verdict: a caller that can
+            # say "this expands to 20 epochs on python-slim" before
+            # submitting is doing something better than validating. `None`
+            # when the YAML did not parse — there is no normalized shape of a
+            # config that has none, and an empty object would read as one.
+            "config": None if config is None else dataclasses.asdict(config),
+        }
+
     @app.post("/v1alpha1/jobs/from-repo", status_code=201, tags=["browser"])
     async def submit_job_from_repo(
         request: Request,
@@ -4784,23 +5169,46 @@ def create_cloud_app(
                     status_code=400, detail=safe_text(exc, 300)
                 ) from None
 
-            config_text = _read_config_text(repo_root)
-            try:
-                config = parse_flashml_yaml(config_text)
-            except ConfigError as exc:
-                raise HTTPException(
-                    status_code=400, detail=safe_text(exc, 500)
-                ) from None
+            config, image, findings = await run_in_threadpool(
+                _parse_and_preflight_tree, repo_root
+            )
 
-            try:
-                image = resolve_image(config.image)
-            except UnknownImage as exc:
-                raise HTTPException(
-                    status_code=400, detail=safe_text(exc, 300)
-                ) from None
+        return await _stage_compile_and_submit(
+            request, db, user_id,
+            config=config, image=image, findings=findings,
+            tar_bytes=tar_bytes, pool=pool,
+            source={"type": "github", "owner": owner, "repo": name, "ref": ref},
+        )
 
-            findings = await run_in_threadpool(preflight, config, repo_root, image)
+    async def _stage_compile_and_submit(
+        request: Request,
+        db: psycopg.Connection,
+        user_id: str,
+        *,
+        config: FlashmlConfig,
+        image: CuratedImage,
+        findings: list[Finding],
+        tar_bytes: bytes,
+        pool: str | None,
+        source: dict[str, Any],
+    ) -> Response:
+        """Everything a submitted working tree gets after it has been parsed:
+        the preflight refusal, dataset resolution and admission, the compile,
+        the artifact staging, the coordinator submit and the ``jobs`` row.
 
+        Shared verbatim by ``from-repo`` and ``from-upload``. The two routes
+        differ only in how the bytes arrived and in the ``source`` descriptor
+        recorded against the job — everything from here on is identical, and
+        it stays identical by being one function rather than two that agree
+        today. ``source`` is the caller's half of that record; this function
+        adds ``code_artifact``, the federated fields, and ``pool``.
+
+        The ORDER is the guarantee, and it is the same one ``from-repo``'s
+        docstring states: preflight, then datasets, then compile, and only
+        then a single byte leaves this process. Every refusal above the
+        upload leaves no artifact, no coordinator request and no ``jobs``
+        row.
+        """
         rendered = [f.as_dict() for f in findings]
         if any(f.level == "error" for f in findings):
             # Refused here, before a single byte leaves this process. No
@@ -4939,10 +5347,7 @@ def create_cloud_app(
             # can never end up with a round the driver does not know it owns.
             job_id = fedavgmod.new_federated_job_id()
             federated_source: dict[str, Any] = {
-                "type": "github",
-                "owner": owner,
-                "repo": name,
-                "ref": ref,
+                **source,
                 "code_artifact": code_uri,
                 # Only a federated row carries these. An independent
                 # row's `source` is byte-identical to what it has always
@@ -5015,13 +5420,7 @@ def create_cloud_app(
             log.error(json.dumps({"text": "job accepted with no job_id in response"}))
             raise HTTPException(status_code=502, detail="coordinator returned no job id")
 
-        independent_source: dict[str, Any] = {
-            "type": "github",
-            "owner": owner,
-            "repo": name,
-            "ref": ref,
-            "code_artifact": code_uri,
-        }
+        independent_source: dict[str, Any] = {**source, "code_artifact": code_uri}
         if pool is not None:
             independent_source["pool"] = pool
         dbmod.insert_job(
@@ -5040,6 +5439,176 @@ def create_cloud_app(
             content=json.dumps({**job, "findings": rendered}),
             status_code=201,
             media_type="application/json",
+        )
+
+    @app.post("/v1alpha1/jobs/from-upload", status_code=201, tags=["browser"])
+    async def submit_job_from_upload(
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Submit a working tree as a gzipped tarball — the only way private
+        code runs on this product.
+
+        WHY THIS EXISTS. ``from-repo`` reads a repository, and a *private*
+        repository needs the GitHub App, which was deferred. Until it lands,
+        a user whose code is not public has no path at all: not a slower one,
+        not a manual one — none. This is that path, and it is deliberately
+        the dullest possible version of it. The bytes are the same shape the
+        GitHub tarball fetch produces, so everything downstream is
+        unchanged.
+
+        NOTHING NEW IS TRUSTED. The tarball is untrusted input in exactly the
+        way a fetched repo's is — member paths, symlink targets and declared
+        sizes are all chosen by whoever built it — so it goes through the
+        same ``repo.extract_safely``: path-traversal and absolute-path
+        members refused, symlink targets confined, hard links refused, member
+        count capped, and total extracted bytes checked *during* extraction
+        rather than after. Writing a second extractor for "our own users'"
+        uploads is how one of the two ends up missing a check; there is one.
+
+        THE ARCHIVE MUST WRAP ITS CONTENTS IN ONE TOP-LEVEL DIRECTORY, which
+        is what GitHub produces and what ``tar -czf ws.tar.gz myproject/``
+        produces. ``tar -czf ws.tar.gz .`` from inside the directory does
+        not, and is refused with that sentence. The requirement is not
+        cosmetic: the executor strips exactly one wrapping directory when it
+        unpacks the staged artifact (``unpack_inputs`` — see
+        ``compile.py``), so a flat archive would leave every path one level
+        off and every job would fail with "file not found".
+
+        THREE SIZE CEILINGS, EACH A DIFFERENT QUESTION. The declared
+        Content-Length is checked against this deployment's artifact upload
+        limit before a byte is read, because that is the only check that can
+        happen before we have already paid. ``MAX_REPO_TARBALL_BYTES`` then
+        bounds the tarball itself — the same ceiling ``_fetch_and_extract``
+        applies to a fetched repo, so the two paths agree on how large a
+        workload may be — and ``MAX_REPO_EXTRACTED_BYTES`` bounds what it
+        unpacks to, which no compressed size can bound on its own.
+
+        WHAT IT SHARES WITH ``from-repo``, AND WHAT IT DOES NOT. Everything
+        after extraction: ``_parse_and_preflight_tree`` then
+        ``_stage_compile_and_submit``, both literally the same functions, so
+        preflight, dataset admission, the compile, the staging and the
+        ``jobs`` row cannot drift between the two. The only differences are
+        where the bytes came from and the ``source`` recorded on the row.
+
+        A KNOWN RESIDUAL, stated rather than hidden: ``compile.py`` stamps
+        every command job's metadata with ``flashml.dev/source:
+        github-repo``, including this one. Nothing reads that label — it is
+        not a placement input and no route or console screen consumes it —
+        so it is left alone here rather than changing a shared compiler for a
+        string, but it is wrong and it is worth someone's attention.
+        """
+        # The declared length, refused before the body is read — the artifact
+        # proxy's rule, applied to the one other route that accepts a large
+        # body. Content-Length is the client's claim, so it is not the
+        # enforcement; it is what keeps an honest oversized upload from
+        # costing a full transfer to reject.
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > max_upload_bytes:
+            raise HTTPException(status_code=413, detail="request body too large")
+
+        try:
+            async with request.form() as form:
+                workspace = form.get("workspace")
+                if not isinstance(workspace, StarletteUploadFile):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="expected a multipart/form-data body with the "
+                               "workspace tarball in a 'workspace' file field",
+                    )
+                # `UploadFile.size` is counted as the part is spooled, so
+                # this is the REAL length rather than the declared one, and
+                # it is known before the bytes are pulled into memory.
+                if (workspace.size or 0) > MAX_REPO_TARBALL_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"the workspace tarball is over the "
+                               f"{MAX_REPO_TARBALL_BYTES} byte limit",
+                    )
+                tar_bytes = await workspace.read()
+                filename = safe_text(workspace.filename or "workspace.tar.gz", 200)
+
+                # Read inside the form context: these are ordinary text
+                # fields, capped by Starlette's own per-part limit, and the
+                # form's spooled files are released when the block exits.
+                pool = _opt_str(form.get("pool"))
+                allow_fallback = _opt_str(form.get("allow_fallback"))
+        except MultiPartException as exc:
+            # A malformed envelope, not a malformed workload. Sanitised: the
+            # message can quote a part name the caller chose.
+            raise HTTPException(
+                status_code=400, detail=safe_text(exc, 200)
+            ) from None
+
+        # Same check, same 404, same reason as `from-repo`: a pool the caller
+        # does not belong to (or that does not exist — indistinguishable on
+        # purpose) is refused before any work is done on the tarball, and the
+        # id is rebound to the database's canonical spelling because the
+        # scheduler's gate compares exact strings.
+        if pool is not None:
+            try:
+                pool_row = dbmod.fetch_pool_for_member(db, pool, user_id)
+            except psycopg.errors.InvalidTextRepresentation:
+                pool_row = None
+            if pool_row is None:
+                raise HTTPException(status_code=404, detail="unknown pool")
+            pool = str(pool_row["id"])
+
+        # `allow_fallback` is NOT a knob and this route will not pretend it
+        # is one. `compile.py` sets `isolation.allowFallback` to `pool is not
+        # None` and `CommandRecipe` refuses the waiver without a pool, so the
+        # coupling is enforced on both sides of the wire: allowFallback iff
+        # pool. A caller may therefore only confirm or contradict it. A
+        # contradiction is answered rather than ignored, because both
+        # directions of silence are a real loss — a caller who asked for
+        # rented fallback with no pool would get a job that can never use it,
+        # and one who asked to stay off rented machines inside a pool would
+        # get the opposite of what they asked for.
+        if allow_fallback is not None:
+            asked = _form_bool(allow_fallback, field="allow_fallback")
+            if asked != (pool is not None):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "allow_fallback follows the pool and cannot be set "
+                        "independently: a job scoped to a pool may fall back to "
+                        "rented capacity, and a job with no pool may not. Send "
+                        f"allow_fallback={str(pool is not None).lower()} for this "
+                        "submission, or omit it."
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory(prefix="flashml-upload-") as tmpdir:
+            dest = Path(tmpdir) / "src"
+            try:
+                # Blocking tar work, off the event loop — the same reason
+                # `from-repo` threads `_fetch_and_extract`.
+                repo_root = await run_in_threadpool(
+                    repomod.extract_safely,
+                    tar_bytes,
+                    dest,
+                    MAX_REPO_EXTRACTED_BYTES,
+                )
+            except repomod.RepoError as exc:
+                # Quotes a tar member's name, which the uploader chose.
+                raise HTTPException(
+                    status_code=400, detail=safe_text(exc, 300)
+                ) from None
+
+            config, image, findings = await run_in_threadpool(
+                _parse_and_preflight_tree, repo_root
+            )
+
+        return await _stage_compile_and_submit(
+            request, db, user_id,
+            config=config, image=image, findings=findings,
+            tar_bytes=tar_bytes, pool=pool,
+            # No owner/repo/ref: there is no repository, and inventing one
+            # would make a job look reproducible from a ref that does not
+            # exist. The filename is the only provenance an upload has, and
+            # it is the submitter's own string — recorded as such.
+            source={"type": "upload", "filename": filename},
         )
 
     @app.get("/v1alpha1/jobs", tags=["browser"])
@@ -5730,12 +6299,25 @@ def create_cloud_app(
         sitting on the coordinator's disk the whole time. The bytes were never
         missing; there was no route that would say they were there.
 
-        THE ANSWER COMES FROM THE COORDINATOR, WHICH IS THE ONLY THING THAT
-        KNOWS. Not from ``jobs``, which stores a footprint total and no keys,
-        and not from the OSS manifest, which describes the *accepted* subset
-        and does not exist at all on a deployment with no OSS. One listing, and
-        every key and size in the answer came out of it — see
-        ``_relative_artifacts`` for what is dropped and what is kept.
+        THE ANSWER COMES FROM BOTH PLACES THAT KNOW, AND THAT IS A FIX. Not
+        from ``jobs``, which stores a footprint total and no keys. This route
+        used to read the coordinator's listing ALONE while ``storage`` and
+        ``mirrored_at`` came from our own row, and the pair that produces is
+        the reason this paragraph changed: a finished job the coordinator has
+        forgotten answered ``files: 0, storage: "oss"`` with the bucket
+        holding every object it ever wrote. The listing named the place the
+        bytes were and said there were none, on precisely the jobs a mirror
+        exists to serve — the finished ones somebody comes back to.
+
+        So when ``mirrored_at`` is set, ``_mirror/manifest.json`` is the
+        source, and the coordinator's listing is merged on top of it rather
+        than replaced by it. Both are needed and neither is sufficient: the
+        manifest is a certified, immutable record of the ACCEPTED subset, and
+        the coordinator is the only thing that knows about the rest — a
+        FAILED shard's ``stderr.txt`` is never mirrored (hard rule 4) and
+        must still be listed under a job whose ``storage`` says ``"oss"``.
+        See ``_merged_artifacts``. Both halves go through
+        ``_relative_artifacts``, which is what is dropped and what is kept.
 
         ``storage`` AND ``mirrored_at`` DESCRIBE WHERE THE NEXT DOWNLOAD COMES
         FROM, which is a different question from what exists. ``"oss"`` is
@@ -5782,22 +6364,39 @@ def create_cloud_app(
         if fedavgmod.is_federated_job_id(job_id):
             return answer
 
+        # The manifest first, and only when the row says there is one — an
+        # unmirrored job (and every job on a deployment with no OSS) does not
+        # pay a bucket round trip to be told so.
+        mirrored_entries = (
+            await _mirrored_artifact_listing(job_id, settings)
+            if mirrored_at is not None
+            else None
+        )
+
         r = await coordinator.forward(
             "GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts"
         )
-        if r.status_code >= 300:
-            # The coordinator's own answer, unedited. An empty list here would
-            # render as "this job produced nothing", which is the one thing a
-            # failed listing does not establish — and the console cannot tell
-            # the difference from a body it did not receive.
+        live_entries: list[dict[str, Any]] | None = None
+        if r.status_code < 300:
+            try:
+                listing = r.json()
+            except ValueError:
+                listing = None
+            if isinstance(listing, list):
+                live_entries = _relative_artifacts(job_id, listing)
+
+        if live_entries is None and mirrored_entries is None:
+            # Unchanged, and it is the right answer whenever nothing else is
+            # known: the coordinator's own reply, unedited. An empty list
+            # here would render as "this job produced nothing", which is the
+            # one thing a failed listing does not establish — and the console
+            # cannot tell that apart from a body it did not receive. With a
+            # manifest in hand the situation is different: we have positive
+            # evidence of what exists, so the failed listing costs the
+            # unmirrored keys rather than the whole answer.
             return _passthrough(r)
-        try:
-            listing = r.json()
-        except ValueError:
-            return _passthrough(r)
-        if not isinstance(listing, list):
-            return _passthrough(r)
-        answer["artifacts"] = _relative_artifacts(job_id, listing)
+
+        answer["artifacts"] = _merged_artifacts(mirrored_entries, live_entries)
         return answer
 
     @app.get("/v1alpha1/jobs/{job_id}/artifact-url/{key:path}", tags=["browser"])

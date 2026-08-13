@@ -43,6 +43,14 @@ dependencies = [
     # depends on.
     "flashruntime==0.6.0",
     "fastapi>=0.111",
+    # Starlette's multipart parser, and the ONLY reason it is here:
+    # `POST /v1alpha1/jobs/from-upload` takes a working tree as a file part.
+    # Starlette does not vendor a parser — `request.form()` asserts on this
+    # package's absence — so without it that route answers 500 for every
+    # correct request, which is the single private-code path this product
+    # has. Not an extra: an install that skipped it would look healthy at
+    # startup and fail only at the first upload.
+    "python-multipart>=0.0.9",
     "uvicorn>=0.30",
     "httpx>=0.27",
     # [crypto] pulls in `cryptography`, which PyJWT needs for ES256 — the
