@@ -18,7 +18,7 @@ export function ClosingCta() {
               Zolli Cloud
             </p>
             <h2 className="mt-4 max-w-[800px] text-[clamp(3rem,6vw,5.25rem)] font-semibold leading-[0.96] tracking-[-0.055em]">
-              Join the open compute network.
+              Join the open <span className="text-muted-foreground">compute network.</span>
             </h2>
           </div>
 

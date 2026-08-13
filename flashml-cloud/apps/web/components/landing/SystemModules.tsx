@@ -44,10 +44,11 @@ export function SystemModules() {
             Technical depth
           </p>
           <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-            The machinery behind a reliable compute market.
+            The machinery behind <span className="text-muted-foreground">a reliable market.</span>
           </h2>
           <p className="mt-6 max-w-[58ch] text-lg leading-[1.55] text-muted-foreground">
-            For technical evaluators, Zolli separates allocation, execution, and integrity so changing capacity can still produce one accepted outcome.
+            Allocation, execution, and integrity stay separate, so changing
+            capacity still yields one accepted outcome.
           </p>
         </div>
 

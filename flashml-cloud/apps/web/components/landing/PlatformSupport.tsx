@@ -22,7 +22,7 @@ export function PlatformSupport() {
             </h2>
           </div>
           <p className="max-w-[58ch] self-end text-base leading-relaxed text-muted-foreground">
-            See what is proven today, what is in preview, and where the network is expanding.
+            What is proven today, what is in preview, and where the network expands.
           </p>
         </div>
 

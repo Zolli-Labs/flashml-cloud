@@ -19,7 +19,7 @@ export function WorkloadFit() {
               Can your work run on <span className="text-muted-foreground">Zolli?</span>
             </h2>
             <p className="mt-5 max-w-[58ch] text-base leading-relaxed text-muted-foreground">
-              Zolli works best when a job can be divided into separate pieces or can save its progress while running.
+              Zolli fits work that can be divided or resumed.
             </p>
           </div>
         </div>

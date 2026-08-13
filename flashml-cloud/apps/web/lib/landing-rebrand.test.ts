@@ -17,7 +17,7 @@ describe("warm technical landing", () => {
 
     expect(markup).toContain("Computing power, without the lock-in.");
     expect(markup).toContain(
-      "Zolli is building a network that connects people who need compute with machines ready to work",
+      "One open network connecting people who need compute with machines ready to work.",
     );
   });
 
@@ -72,9 +72,9 @@ describe("warm technical landing", () => {
   it("keeps the technical story tied to one accepted outcome", () => {
     const markup = visibleText(renderLanding());
 
-    expect(markup).toContain("The machinery behind a reliable compute market.");
+    expect(markup).toContain("The machinery behind a reliable market.");
     expect(markup).toContain(
-      "Zolli separates allocation, execution, and integrity so changing capacity can still produce one accepted outcome.",
+      "Allocation, execution, and integrity stay separate, so changing capacity still yields one accepted outcome.",
     );
   });
 });

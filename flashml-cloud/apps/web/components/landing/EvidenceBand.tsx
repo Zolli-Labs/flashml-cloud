@@ -22,11 +22,11 @@ export function EvidenceBand() {
               Product evidence
             </p>
             <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              A growing network, <span className="text-muted-foreground">proven with real work.</span>
+              Proven with <span className="text-muted-foreground">real work.</span>
             </h2>
           </div>
           <p className="max-w-[55ch] self-end text-base leading-relaxed text-muted-foreground">
-            These figures document real runs and outcomes; they are not claims about the network&apos;s scale.
+            Figures from documented runs, not scale claims.
           </p>
         </div>
 

@@ -149,6 +149,9 @@ describe("proof-led Zolli landing", () => {
     );
 
     expect(network).toContain('data-surface="light"');
+    // The market story reveals on scroll like every other original section.
+    expect(network.match(/data-motion="section-reveal"/g) ?? []).toHaveLength(3);
+    expect(journey).toContain('data-motion="section-reveal"');
     for (const copy of [
       "Compute is everywhere. Access is not.",
       "From isolated machines to an open compute network.",
@@ -344,7 +347,7 @@ describe("proof-led Zolli landing", () => {
 
   it("connects the recovery ledger to the documented recovery outcome", () => {
     const text = visibleText(renderLanding());
-    expect(text).toContain("Affordable capacity matters only if the work finishes.");
+    expect(text).toContain("Machines disappear. Progress doesn't.");
     expect(text).toContain("RTX 4090 machine destroyed");
     expect(text).toContain("Resumed on an RTX 3090");
     expect(text).toContain("58 epochs preserved");

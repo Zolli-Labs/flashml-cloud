@@ -36,11 +36,11 @@ export function RecoveryDemo() {
             Recovery proof
           </p>
           <h2 className="mt-5 max-w-2xl text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-            Affordable capacity matters only if the work finishes.
+            Machines disappear. <span className="text-muted-foreground">Progress doesn&apos;t.</span>
           </h2>
           <p className="mt-6 max-w-[54ch] leading-relaxed text-muted-foreground">
-            Lower-cost distributed machines may disappear. Zolli records progress
-            so another compatible machine can continue supported work.
+            When capacity vanishes, Zolli resumes supported work from recorded
+            progress on another compatible machine.
           </p>
           <RecoveryStack items={RECOVERY_PROOF} />
           <div className="mt-8 grid grid-cols-[auto_1fr] gap-x-4">
