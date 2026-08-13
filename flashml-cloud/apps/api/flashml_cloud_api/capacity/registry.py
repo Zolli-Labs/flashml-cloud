@@ -63,7 +63,7 @@ sixty minutes into a healthy job, silently, on every rental.
 
 **Nothing here builds that URL, deliberately.** It belongs to whoever
 constructs the ``CapacityRequest``; a default invented in this module would be
-a second answer to the question D9 exists to keep to one.
+a second answer to the question OC-9 exists to keep to one.
 """
 from __future__ import annotations
 

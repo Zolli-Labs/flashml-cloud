@@ -71,7 +71,7 @@ closed, where the only question left is why it failed.
 
 The credential is revoked on every failure path, independently of the release
 (``cleanup_session``'s rule, that neither failure may hide the other). It is
-not tidiness, and since D6 it is not self-correcting either: a rental's
+not tidiness, and since OC-6 it is not self-correcting either: a rental's
 identity is a LEASE, true only while we hold the hardware, so a failed
 acquisition that leaves a live token bound to the submitter's pool has left a
 working credential for a machine we do not have. It used to be caught by
@@ -97,14 +97,14 @@ reading. This is the same trade ``reconcile.py`` makes for a handleless row:
 a permanently stuck row is a cheap, visible defect; a silently closed one is an
 invoice.
 
-THE LEASE, AND WHAT IT REPLACED (D6, 2026-08-12)
+THE LEASE, AND WHAT IT REPLACED (OC-6, 2026-08-12)
 ------------------------------------------------
 This module used to reuse ``provision_sandbox_machine`` and inherit its final
 ``assert_pool_isolated``. That assertion is one level below this module and
 this module never called it, but the effect reached here anyway: renting into a
 pool that already held a machine was refused, which is exactly the case this
 feature is for -- the submitter's workspace already holds their laptop -- and
-it made ``gpu_count > 1`` unreachable as well. D6 settled it with a sibling
+it made ``gpu_count > 1`` unreachable as well. OC-6 settled it with a sibling
 minting path, ``provision_rented_machine``, which asserts nothing about the
 pool. ``provision_sandbox_machine`` and its invariant are untouched: they
 protect an evaluation sandbox holding a session credential, where a second
@@ -352,7 +352,7 @@ async def _abandon(
     # 3. Kill the identity, independently of the release: neither failure may
     #    hide the other, and the lease has to end either way. It used to be
     #    self-correcting -- a leftover binding made the next acquisition into
-    #    this pool fail an isolation assertion -- and since D6 it is not. A
+    #    this pool fail an isolation assertion -- and since OC-6 it is not. A
     #    credential left alive here is a working token, bound to a user's
     #    workspace, for a machine that exists nowhere but in this row.
     #    `reconcile.finished_rentals_with_live_credentials` is what comes back
@@ -420,7 +420,7 @@ async def acquire_for_job(
         # 3. Identity, in the submitter's own pool, alongside whatever they
         #    already have there. `provision_rented_machine`, not
         #    `provision_sandbox_machine`: the second asserts pool isolation and
-        #    would refuse this outright (D6).
+        #    would refuse this outright (OC-6).
         #
         # It mints `lifecycle = 'leased'` -- a lease, not a deed, and
         # deliberately not 'ephemeral'. 'ephemeral' would hand this machine to

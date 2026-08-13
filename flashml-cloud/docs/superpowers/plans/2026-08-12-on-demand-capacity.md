@@ -14,8 +14,8 @@
 
 - **Runner is `--runner trusted`, never `--runner argv`.** Rented hosts are containers and cannot run Docker (`trusted_runner.py` opening paragraph).
 - **Never set `FLASHNODE_SANDBOX_CAPABLE=true` on a rented host.** It would make the node accept public work it cannot isolate — a lie to the placement gate at `flashruntime/scheduler/__init__.py:620`.
-- **Never rewrite `placement.pool` on a submitted job.** A job with no pool is public; renting cannot help it and the planner must say so. See spec D2.
-- **One job per instance, never reused across submitters. Destroy, never stop.** Spec D3.
+- **Never rewrite `placement.pool` on a submitted job.** A job with no pool is public; renting cannot help it and the planner must say so. See spec OC-2.
+- **One job per instance, never reused across submitters. Destroy, never stop.** Spec OC-3.
 - **No flashruntime change.** Nothing in this plan may require a PyPI release or a four-site pin bump.
 - **Do not touch wallet, `credit_requests`, ZC grants, or `Cost` reduction.** Another agent owns those (spec §4.1). If a task appears to need them, stop and report.
 - **1 ZC = $1 USD** where a comparison is unavoidable (spec §4.1), but prefer showing both units.
@@ -46,7 +46,7 @@ Record the answer with a citation. "Probably" is not an answer; if it cannot be 
 
 - [ ] **Step 2: Answer whether the instance metadata endpoint can be blocked**
 
-Spec D3 requirement 3. For each candidate venue (FC GPU, Alibaba ECS GPU, RunPod), determine whether task code running unsandboxed can reach the cloud metadata service, and whether it can be blocked or the instance given a zero-permission role. **A venue where it cannot is disqualified.**
+Spec OC-3 requirement 3. For each candidate venue (FC GPU, Alibaba ECS GPU, RunPod), determine whether task code running unsandboxed can reach the cloud metadata service, and whether it can be blocked or the instance given a zero-permission role. **A venue where it cannot is disqualified.**
 
 - [ ] **Step 3: Answer which venue can be created and destroyed through an already-authenticated API**
 
@@ -316,7 +316,7 @@ class CapacityRequest:
     owner_id: str
     #: The pool the job was submitted against. Never invented, never
     #: defaulted -- a job with no pool is public and cannot use rented
-    #: capacity at all (spec D2).
+    #: capacity at all (spec OC-2).
     pool_id: str
     job_id: str
     gpu_count: int
@@ -1157,7 +1157,7 @@ git commit -m "feat(capacity): teardown guaranteed by a sweep, not by the reques
 - [ ] `release` is idempotent and treats an already-gone handle as success.
 - [ ] `observe` reads the **venue**, never our own rows.
 - [ ] The agent is launched with `--runner trusted`. Assert the launch command contains it and does **not** contain `FLASHNODE_SANDBOX_CAPABLE`.
-- [ ] The instance metadata endpoint is blocked, or the instance carries a zero-permission role (spec D3.3). Assert whatever mechanism Task 1 found.
+- [ ] The instance metadata endpoint is blocked, or the instance carries a zero-permission role (spec OC-3.3). Assert whatever mechanism Task 1 found.
 - [ ] All venue API calls are behind an injected client so the suite runs with no network and no credentials — follow `tests/test_alibaba_sandbox.py`'s fake-gateway pattern.
 - [ ] **No live acquisition in the test suite.** A real rental is a manual verification step, run once, recorded in the findings doc.
 
@@ -1386,7 +1386,7 @@ def test_frontier_requires_the_viewer_to_own_the_job(client, other_users_job):
 
 
 def test_a_public_job_is_told_renting_cannot_help_it(client, public_job):
-    """Spec D2: never silently add a pool. Say why instead."""
+    """Spec OC-2: never silently add a pool. Say why instead."""
     r = client.get(f"/v1alpha1/jobs/{public_job}/frontier")
     assert r.status_code == 200
     body = r.json()

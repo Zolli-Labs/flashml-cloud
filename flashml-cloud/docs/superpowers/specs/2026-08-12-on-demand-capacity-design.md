@@ -11,13 +11,13 @@ survives:
 
 | Where | Now false |
 |---|---|
-| §6 out-of-scope | "Relaxing `assert_pool_isolated`. Not required" — **it is required, and the owner has now overruled this line.** See D6 below. |
-| D6 | "rentals are minted `lifecycle = 'persistent'`" — **D6 is now BUILT (2026-08-12).** `sandbox_identity.provision_rented_machine` is the sibling path, `assert_pool_isolated` and `provision_sandbox_machine` are unchanged, and rentals are minted `lifecycle = 'leased'` (migration 0023) — outside every heartbeat sweep, ended by `capacity/reconcile.py` and its credential retry. Note what the change also removed: a leaked rental credential used to announce itself by making the next rental into that pool fail the isolation assertion. It is silent now, and `finished_rentals_with_live_credentials` is the only thing that comes back for it. |
+| §6 out-of-scope | "Relaxing `assert_pool_isolated`. Not required" — **it is required, and the owner has now overruled this line.** See OC-6 below. |
+| OC-6 | "rentals are minted `lifecycle = 'persistent'`" — **OC-6 is now BUILT (2026-08-12).** `sandbox_identity.provision_rented_machine` is the sibling path, `assert_pool_isolated` and `provision_sandbox_machine` are unchanged, and rentals are minted `lifecycle = 'leased'` (migration 0023) — outside every heartbeat sweep, ended by `capacity/reconcile.py` and its credential retry. Note what the change also removed: a leaked rental credential used to announce itself by making the next rental into that pool fail the isolation assertion. It is silent now, and `finished_rentals_with_live_credentials` is the only thing that comes back for it. |
 | §2.2 | "Ephemeral machine identity … already revoke and unbind rentals" — **declined during implementation, correctly.** That sweep measures from `coalesce(last_seen_at, created_at)` with a 15-minute default, and a rented host has no `last_seen_at` until it has booted and pulled a multi-gigabyte image; it would revoke machines that are still starting. |
 | §2.1 | `CapacityRequest` "carries … a deadline" — **no such field was built.** That dropped field is close to the cost backstop the wiring is now blocked on. |
 | §2.3 | "job settles → `provider.release()` [best effort]" — **no settle path exists.** `release_capacity` has zero callers. |
 | §5.2 | "Alibaba ECS GPU … the likely first provider" — **reversed** by the committed venue findings: FC GPU is disqualified outright, RunPod is recommended first, ECS is the runner-up and 4–8× the price. |
-| D5 | "revoked, **expired**, or orphaned" — "expired" was deliberately replaced by heartbeat-derived windows, because age alone destroys running jobs. |
+| OC-5 | "revoked, **expired**, or orphaned" — "expired" was deliberately replaced by heartbeat-derived windows, because age alone destroys running jobs. |
 | §4.4 | "the operator-side spend ceiling … remains an owner decision" — a **default shipped anyway**. Both ceilings are *rates*, not totals. |
 
 **The largest open risk is not in this document at all:** nothing bounds total
@@ -113,7 +113,7 @@ three A10s and finish in 38 minutes" and nothing in this repo can create one.
 
 ## 2. Layer 1 — automated renting
 
-### D1 — On demand. No persistent fleet.
+### OC-1 — On demand. No persistent fleet.
 
 Capacity is created when a job needs it and destroyed when the job is done.
 
@@ -122,7 +122,7 @@ pod *"bills whether or not it is claimed"*, and paying for availability nobody
 asked for is cost without matching revenue. On-demand also answers "which GPU
 does the user want?" without guessing — the job states its requirement.
 
-### D2 — `--runner trusted`, bound to the submitter's own pool.
+### OC-2 — `--runner trusted`, bound to the submitter's own pool.
 
 **Not Docker.** An earlier draft of this spec required `--runner argv` so
 rented hosts could advertise `sandbox_capable` and take public jobs. That is
@@ -173,7 +173,7 @@ in the public repo, and is correctly out of reach before Friday.
 machine. Renting *for a user* works; renting *into a public pool* does not.
 That is the upgrade the upstream change buys, later.
 
-### D6 — A rental gets its own identity path, and that identity is a lease, not a deed. *(owner decision, 2026-08-12)*
+### OC-6 — A rental gets its own identity path, and that identity is a lease, not a deed. *(owner decision, 2026-08-12)*
 
 **The problem.** `provision_sandbox_machine` asserts pool isolation *inside
 itself* (`sandbox_identity.py:266`), so minting an identity for a rented GPU
@@ -218,7 +218,7 @@ a multi-gigabyte image, so it would revoke machines that are still starting.
 The lease property must come from the rental lifecycle, not from a heartbeat
 timer.
 
-### D7 — Serverless is a second execution model, deliberately deferred. *(owner decision, 2026-08-12)*
+### OC-7 — Serverless is a second execution model, deliberately deferred. *(owner decision, 2026-08-12)*
 
 FC GPU is disqualified because FlashML's runtime is **pull-based** — machines
 claim work, the coordinator never assigns it — while FC is **push-based** and
@@ -245,7 +245,7 @@ that keeps task code away from cloud credentials. A new node type also touches
 `flashruntime.protocol`, which is a public-repo release plus a four-site pin
 bump.
 
-### D8 — A rental belongs to the work, not to one job. Drain, never cut. *(owner decision, 2026-08-12)*
+### OC-8 — A rental belongs to the work, not to one job. Drain, never cut. *(owner decision, 2026-08-12)*
 
 **The code today implements the opposite rule and must change.** `JOB_FINISHED`
 and `settle.rentals_for_jobs` both release a rental when *its* job ends, even
@@ -297,7 +297,7 @@ overnight runs overnight. The wallet is the honest bound: an account holds
 10 ZC = $10 and cannot spend past it. **Confirm renting actually debits the
 wallet.** If it does not, that ceiling is imaginary and this rule is unbounded.
 
-### D9 — Every guard is a ledger read. Work that bypasses this API is invisible. *(owner decision, 2026-08-12)*
+### OC-9 — Every guard is a ledger read. Work that bypasses this API is invisible. *(owner decision, 2026-08-12)*
 
 **This is a constraint on the architecture, not a note about a URL.**
 
@@ -342,7 +342,7 @@ real machine, let it start a task, and **look in `public.attempts` for a row
 naming it.** A row means the ledger can see it. No row means nothing else we
 built matters. Not a code review — read the table.
 
-### D10 — ZC is a spend allowance on the operator's money, not currency. *(owner decision, 2026-08-12)*
+### OC-10 — ZC is a spend allowance on the operator's money, not currency. *(owner decision, 2026-08-12)*
 
 **Verified state as of this decision: renting debits nothing.** `capacity/` has
 zero references to credits, wallet, debit or escrow. The escrow path exists and
@@ -369,25 +369,25 @@ held_zc)`. They were written to pay hosts, but the arithmetic of an allowance
 is the same shape. This is wiring plus the four rulings below, not new
 machinery.
 
-**D10.1 — Hold at acquire, settle at release.** Charging only at the end caps
+**OC-10.1 — Hold at acquire, settle at release.** Charging only at the end caps
 nothing: an account with 1 ZC left could start a rental that burns $50 before
 anyone looks. `can_cover` runs **before** the budget gate; an account that
 cannot cover the estimated run is refused with a stated reason, exactly as
 `BudgetRefused` is. This is the only version in which $10 means $10.
 
-**D10.2 — Balance exhausted mid-rental ⇒ drain, do not cut.** Same mechanism as
-D8: unbind from the pool so nothing new is claimed, let the task in flight
+**OC-10.2 — Balance exhausted mid-rental ⇒ drain, do not cut.** Same mechanism as
+OC-8: unbind from the pool so nothing new is claimed, let the task in flight
 finish, then release. The user loses their *next* iteration, not the one they
 are in.
 
-**D10.3 — Warm-up is on the operator. Charging starts at the first claimed
-task.** D8 established that boot, the multi-gigabyte image pull, the dataset
+**OC-10.3 — Warm-up is on the operator. Charging starts at the first claimed
+task.** OC-8 established that boot, the multi-gigabyte image pull, the dataset
 cache and enrolment produce nothing while billing at the full rate. Charging a
 user for that would let a ten-minute job consume an hour of their allowance,
 and $10 would stop meaning anything predictable. The operator is funding this
 to get usage, not to recover cost.
 
-**D10.4 — The D8 idle hold is charged, but capped at what a re-warm would have
+**OC-10.4 — The OC-8 idle hold is charged, but capped at what a re-warm would have
 cost.** Holding a machine between iterations is real money, and it is a
 decision the platform makes on the user's behalf. Charging it in full punishes
 them for our optimisation; eating it in full means the allowances handed out do
@@ -404,7 +404,7 @@ allowance it is spending. Neither substitutes for the other.
 today refuses work an account cannot pay for, on **any** path — not just
 rentals.
 
-### D3 — The rented instance is the isolation boundary. Three requirements.
+### OC-3 — The rented instance is the isolation boundary. Three requirements.
 
 Dropping the container is sound — it is how Modal, Replicate and RunPod
 serverless work — but only if the instance itself carries the boundary:
@@ -422,7 +422,7 @@ never protecting against anyway. Skip it and a submitted job can read the RAM
 role and reach the whole Alibaba account. This is the security section of
 this design; the container question was never it.
 
-### D4 — The budget gate refuses. It never queues.
+### OC-4 — The budget gate refuses. It never queues.
 
 Checked **before** every `acquire`. Exceeding it fails the acquisition with a
 stated reason rather than parking the job, because a queue that drains when
@@ -435,7 +435,7 @@ standing operational ceiling on rented spend is **$10 total**, against which
 the entire 2026-08-12 cross-venue experiment cost $0.89. The window figure is
 an owner decision and must be set before this ships.
 
-### D5 — The reconciler owns teardown.
+### OC-5 — The reconciler owns teardown.
 
 Release is attempted when a job settles, but correctness does not depend on
 that call succeeding. A sweep independently destroys infrastructure whose
@@ -508,7 +508,7 @@ the submit request:
 
 ```
 tasks unclaimable → pick acquirable venue for the job's resources
-       → BUDGET GATE (D4) ─────────── refuse here, with a reason
+       → BUDGET GATE (OC-4) ─────────── refuse here, with a reason
        → provider.acquire()
             create instance
             mint credential (lifecycle='ephemeral', bound to submitter's pool)
@@ -666,7 +666,7 @@ first.
 ### 4.4 Still open — the operator-side spend ceiling
 
 §4.1 gives a natural per-user bound: a wallet holds 10 ZC, so one user cannot
-cause more than $10 of renting. That is **not** the ceiling D4 asks for. The
+cause more than $10 of renting. That is **not** the ceiling OC-4 asks for. The
 aggregate across all users, and the cap on a runaway acquisition loop that
 never charges anyone, are still unset and remain an owner decision.
 
@@ -683,13 +683,13 @@ never charges anyone, are still unset and remain an owner decision.
    cannot, **Alibaba ECS GPU** — a real VM, already named as Stage 5 — is the
    likely first provider, and it is not in the venue registry at all.
 3. Whether the metadata endpoint can be blocked on each candidate venue
-   (D3.3). A venue where it cannot is not usable for this design.
+   (OC-3.3). A venue where it cannot is not usable for this design.
 
 ## 6. Out of scope
 
-- The persistent fleet. Rejected in D1.
+- The persistent fleet. Rejected in OC-1.
 - Public (non-pool) jobs on rented capacity. Needs the upstream coordinator
-  change; see D2.
+  change; see OC-2.
 - Relaxing `assert_pool_isolated`. Not required — this design does not route
   work through isolation-pool sessions.
 - FC Agent Sandbox as a GPU venue. It is CPU-only, `gpuConfig: null`.
