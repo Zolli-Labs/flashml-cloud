@@ -69,3 +69,69 @@ A sandbox is roughly $0.08/hour active. Two regions × ~2 minutes is a fraction
 of a cent. Every sandbox is killed in `finally`; if the script is interrupted,
 check the FC console for survivors — the voucher expires 2026-08-15 and a
 forgotten sandbox bills by the second.
+
+## `hibernation_modes_probe.py` — C-6.5 and C-6.4
+
+The requirement's own words: *both modes, for two genuinely different waits,
+measured wake latency for each, cost quantified against the right baseline*
+(C-6.5) and *marker nonce hash, background process identity, and a warm
+artifact/dependency cache all intact across the hibernation boundary* (C-6.4).
+
+The three scripts above measure ONE hibernation mode over ONE wait and check
+the marker and the pid. This one runs a 2 × 2 — `{pause(keep_memory=True),
+pause(keep_memory=False)}` × `{a long wait, a short inter-shard gap}` — in four
+separate sandboxes, and verifies **seven** independent continuity properties
+across every boundary:
+
+| check | what it rules out |
+|---|---|
+| marker sha256 | a fresh sandbox from the same template |
+| `[ -d /proc/$PID ]` | a dead worker (never `ps -p` — this template has no procps, so `ps` exits 127 and the idiom reports every process as gone) |
+| `/proc/$PID/stat` field 22 | a restarted process that reused the pid |
+| `boot_id` | a cold boot with the disk intact |
+| a secret held **only in the daemon's RAM**, revealed on SIGUSR1 | the filesystem alone explaining the result |
+| the heartbeat counter advancing | a process that came back present but not working |
+| a sha256 manifest over the warm cache tree | a cache that is present but changed |
+
+Plus the cache is *used* after every wake — an import from it and a shard
+computation that reads its artifact — because a cache that cannot be used is
+not warm.
+
+```bash
+python hibernation_modes_probe.py                    # ~25 min, the evidence run
+python hibernation_modes_probe.py --long-wait 20 --short-wait 5 \
+    --long-repeats 1 --short-repeats 1               # ~3 min, shape check
+python hibernation_modes_probe.py --auto-pause-idle-s 600   # + platform auto-pause
+```
+
+**What it will not do is claim two modes it could not select.** `pause(keep_memory)`
+is the only hibernation selector in `e2b==2.31.0`, nothing on `get_info()`
+reports which hibernation SKU a pause billed as, and Alibaba's own taxonomy
+(doc 3045181) separates light from deep by *resume latency* — millisecond-level
+versus "approximately the 1 s level". So the script measures the latency and
+lets it decide: a sub-100 ms resume reports `MEASURED`, a ~1 s resume reports
+`NOT REACHED` for light hibernation and says plainly that no comparison between
+the modes was run. `mode_finding.what_would_settle_it` names what would.
+
+Cost is computed from the measured hibernated seconds and the published rates
+(doc 3045213) against a **named** baseline — Baseline A, holding the sandbox
+active across the same wait — with Baseline B (destroy and rebuild) volunteered
+beside it, priced from this run's own measured create+prepare time and its
+crossover point.
+
+`test_hibernation_modes_probe.py` covers the arithmetic and the honesty rules
+offline — it creates no sandbox:
+
+```bash
+../../apps/api/.venv/bin/python -m pytest test_hibernation_modes_probe.py -q
+```
+
+### Cleanup
+
+Every sandbox id is printed the instant it is created **and** appended to
+`../../.evidence/alibaba-hibernation-modes-<stamp>.sandboxes` before anything
+else happens to that sandbox. A `kill -9` of the script therefore still leaves a
+human with a list and a console. Each cell kills its own sandbox in a `finally`,
+the run then sweeps by id — only ids it created, never a blanket sweep that
+would reach into a probe running beside it — and the last thing it prints is
+what is still alive.
