@@ -140,6 +140,25 @@ class _StubCoordinator:
             return 200, b'{"accepted": true}'
         if path.endswith("/heartbeat"):
             return 200, b"{}"
+        if path.endswith("/checkpoints/latest"):
+            # 404 is "no checkpoint yet", not an error: `client.checkpoint_latest`
+            # turns it into None and the task starts from scratch, which is what
+            # every test in this file wants — they assert on the argv path handed
+            # to the runner, not on resume.
+            #
+            # This arm exists because the relay became UNCONDITIONAL: both
+            # compilers now emit `parameters["checkpoint"] = {}` for every job,
+            # so the agent asks for a checkpoint before it runs anything. This
+            # fake predates that and answered nothing, so all five tests here
+            # have been failing since — caught only when the suite was finally
+            # run across three sessions' worth of commits.
+            #
+            # The WRITE paths (`/checkpoints/parts`, `/checkpoints/commit`) are
+            # deliberately left to the fail-closed branch below. `_RecordingRunner`
+            # writes no `ckpt/step-*.json`, so the relay has nothing to upload;
+            # if that ever changes, this fake should refuse loudly rather than
+            # quietly accept a write nobody meant to make.
+            return 404, b'{"detail": "no checkpoint"}'
         raise AssertionError(f"unexpected request {method} {path}")
 
 

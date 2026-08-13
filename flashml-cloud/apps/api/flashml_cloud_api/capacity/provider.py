@@ -34,7 +34,7 @@ class CapacityRequest:
     owner_id: str
     #: The pool the job was submitted against. Never invented, never
     #: defaulted -- a job with no pool is public and cannot use rented
-    #: capacity at all (spec D2).
+    #: capacity at all (spec OC-2).
     pool_id: str
     job_id: str
     gpu_count: int

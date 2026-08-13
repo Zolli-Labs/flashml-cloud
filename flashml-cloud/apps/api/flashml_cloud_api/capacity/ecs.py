@@ -23,16 +23,16 @@ flight (findings, Step 1). And it has a per-job create/destroy pair,
 ``RunInstances``/``DeleteInstance``, which is the shape ``acquire``/
 ``release`` assume.
 
-WHAT D3 REQUIRES OF THE INSTANCE, AND WHERE EACH ONE IS
+WHAT OC-3 REQUIRES OF THE INSTANCE, AND WHERE EACH ONE IS
 -------------------------------------------------------
 The rented instance IS the isolation boundary — there is no container inside
 it, because a rented host is normally itself a container and ``--runner
-argv`` needs a Docker daemon it does not have (D2).
+argv`` needs a Docker daemon it does not have (OC-2).
 
 1. *One job per instance, never reused across submitters.* One
    ``RunInstances`` per ``acquire``, ``Amount=1``, and the identity it boots
    with belongs to one rental. Nothing here ever hands an instance back to a
-   pool of instances, because there is no such pool (D1).
+   pool of instances, because there is no such pool (OC-1).
 2. *Destroyed, not stopped.* :meth:`EcsGpuProvider.release` calls
    ``DeleteInstance`` with ``Force=true`` and this module never calls
    ``StopInstance`` at all. A stopped instance keeps its disk and keeps
@@ -54,7 +54,7 @@ argv`` needs a Docker daemon it does not have (D2).
    through that same metadata endpoint. Disabling it is what stops a job's
    own code reading the credential we booted the host with.
 
-D9, WHICH IS THE ONE THAT SILENTLY DESTROYS FLEETS
+OC-9, WHICH IS THE ONE THAT SILENTLY DESTROYS FLEETS
 --------------------------------------------------
 The host enrols against ``request.enrolment_url`` — THIS API's public URL —
 and never against ``settings.coordinator_url``. The field is named
@@ -564,9 +564,9 @@ def user_data_script(
     several load-bearing facts are actually written down:
 
     * ``enrolment_url`` and nothing else is used as the coordinator the agent
-      is pointed at (D9). This function has no access to
+      is pointed at (OC-9). This function has no access to
       ``settings.coordinator_url`` and that is structural, not stylistic.
-    * ``--runner trusted`` (D2). ``--runner argv`` needs a Docker daemon; a
+    * ``--runner trusted`` (OC-2). ``--runner argv`` needs a Docker daemon; a
       rented host is normally a container and this one has no daemon
       installed either.
     * **``FLASHNODE_SANDBOX_CAPABLE`` is never written, in any form.**
@@ -656,7 +656,7 @@ fi
 
 # `exec` so the agent is pid 1 of this unit rather than a child of a shell
 # that has already exited. `--runner trusted` because a rented host has no
-# Docker daemon (D2), and this API is the coordinator it enrols against (D9).
+# Docker daemon (OC-2), and this API is the coordinator it enrols against (OC-9).
 exec env {env} {AGENT_VENV}/bin/flashnode work \\
   --runner {RUNNER} \\
   --coordinator {_sh(url)} \\
@@ -789,7 +789,7 @@ class EcsGpuProvider:
         Every name here was read off the live ``Ecs::2014-05-26::RunInstances``
         definition. The three that are load-bearing rather than routine:
 
-        * ``HttpEndpoint=disabled`` — the metadata endpoint is off (D3.3),
+        * ``HttpEndpoint=disabled`` — the metadata endpoint is off (OC-3.3),
           which also puts the token in this very ``UserData`` out of reach of
           the job's own code.
         * **no ``RamRoleName``** — the parameter is optional and is not sent,
@@ -872,7 +872,7 @@ class EcsGpuProvider:
         if not str(request.enrolment_url or "").strip():
             raise EcsUnconfigured(
                 "no enrolment URL: a host with nowhere to enrol bills for "
-                "work this API can never see (D9)"
+                "work this API can never see (OC-9)"
             )
 
         params = self.run_params(request)
@@ -1048,7 +1048,7 @@ class EcsGpuProvider:
     async def release(self, *, handle: str) -> ReleaseOutcome:
         """Destroy the instance. Idempotent, and it never raises.
 
-        ``DeleteInstance`` with ``Force=true``: **destroy, never stop** (D3.2).
+        ``DeleteInstance`` with ``Force=true``: **destroy, never stop** (OC-3.2).
         A stopped instance keeps its disk and keeps billing for it, so a
         ``RELEASED`` row in front of one is precisely the invoice this module
         exists to prevent. ``StopInstance`` is not called anywhere in this

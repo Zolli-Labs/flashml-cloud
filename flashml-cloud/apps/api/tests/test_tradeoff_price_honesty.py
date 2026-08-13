@@ -56,14 +56,66 @@ def _priced_body(db, client) -> dict:
     return tradeoff(client, owner, job)
 
 
-def test_the_price_sentence_makes_no_completeness_claim(db, client):
-    reason = (_priced_body(db, client)["renting"].get("price_reason") or "").lower()
+def _all_price_text(renting: dict) -> str:
+    """Claim and every qualification, lowered — the whole rendered surface."""
+    return " ".join(
+        [renting.get("price_reason") or "", *(renting.get("price_notes") or [])]
+    ).lower()
+
+
+def test_the_price_surface_makes_no_completeness_claim(db, client):
+    text = _all_price_text(_priced_body(db, client)["renting"])
     for forbidden in COMPLETENESS_CLAIMS:
-        assert forbidden not in reason, (
-            f"price_reason claims completeness ({forbidden!r}). It may only "
-            f"range over rates this API has actually observed — and the venue "
-            f"this deployment rents from publishes none of them."
+        assert forbidden not in text, (
+            f"the price surface claims completeness ({forbidden!r}). It may "
+            f"only range over rates this API has actually observed — and the "
+            f"venue this deployment rents from publishes none of them."
         )
+
+
+def test_the_claim_is_one_sentence_and_the_qualifications_are_separate(db, client):
+    """Ninety words in one string leaves a console two options: a wall of
+    muted text nobody reads, or parsing sentences back out of prose. The
+    second is how the honest version quietly stops being rendered.
+
+    Split, each note is independently renderable and independently
+    assertable — which is why the three tests below can exist at all.
+    """
+    renting = _priced_body(db, client)["renting"]
+    reason = renting.get("price_reason") or ""
+    notes = renting.get("price_notes")
+
+    assert isinstance(notes, list) and notes, "qualifications must be a list"
+    assert reason.count(".") <= 2, (
+        "price_reason should carry the claim alone; qualifications belong in "
+        "price_notes where each survives as its own assertable string."
+    )
+    for note in notes:
+        assert isinstance(note, str) and note.strip()
+
+
+#: Words that make a sentence depend on the one before it. Checked instead of
+#: capitalisation, which was the first thing tried here and is a bad proxy: a
+#: note legitimately opens with a lowercase proper noun ("runpod capacity is
+#: acquired manually…"), so a capital-letter rule fails a standalone sentence
+#: and would have been "fixed" by capitalising a vendor's name.
+CONTINUATION_OPENERS = (
+    "and ", "so ", "but ", "which ", "that is ", "also ", "then ", "however ",
+    "it is ", "they are ", "this means ",
+)
+
+
+def test_every_qualification_is_standalone(db, client):
+    """A console may show any subset, in any order, behind a disclosure. A
+    note that only makes sense after the one before it breaks that."""
+    for note in _priced_body(db, client)["renting"].get("price_notes") or []:
+        opener = note.strip().lower()
+        for continuation in CONTINUATION_OPENERS:
+            assert not opener.startswith(continuation), (
+                f"note opens with {continuation!r}, so it reads as a "
+                f"continuation of the previous one rather than a standalone "
+                f"qualification: {note!r}"
+            )
 
 
 def test_a_price_comparison_names_whose_skus_it_compares(db, client):
@@ -71,7 +123,7 @@ def test_a_price_comparison_names_whose_skus_it_compares(db, client):
     "another SKU costs more" is neither. The difference is the scope, so the
     scope has to be present."""
     renting = _priced_body(db, client)["renting"]
-    reason = renting.get("price_reason")
+    reason = _all_price_text(renting)
     if not reason:
         return
     provider = (renting.get("price") or {}).get("provider")
@@ -91,7 +143,7 @@ def test_the_quote_is_labelled_cheapest_listed_not_cheapest_viable(db, client):
     machine that could not finish it is a money error in the user's disfavour;
     it is stated rather than left to be discovered.
     """
-    reason = (_priced_body(db, client)["renting"].get("price_reason") or "").lower()
+    reason = _all_price_text(_priced_body(db, client)["renting"])
     if not reason:
         return
     assert "listed" in reason, (
@@ -105,12 +157,13 @@ def test_a_manually_acquired_venue_says_a_person_starts_that_machine(db, client)
     and a rate somebody else's pod happens to publish. A reader shown the
     number without it reasonably assumes we can buy at it."""
     renting = _priced_body(db, client)["renting"]
-    reason = renting.get("price_reason") or ""
+    text = _all_price_text(renting)
     provider = ((renting.get("price") or {}).get("provider") or "").lower()
-    if reason and provider == "runpod":
-        assert "person" in reason.lower(), (
-            "RunPod is acquisition: manual — the sentence must say a person "
-            "starts that machine, or the rate reads as one we can acquire at."
+    if text and provider == "runpod":
+        assert "person" in text, (
+            "RunPod is acquisition: manual — the price surface must say a "
+            "person starts that machine, or the rate reads as one we can "
+            "acquire at."
         )
 
 

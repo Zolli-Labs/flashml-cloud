@@ -519,6 +519,39 @@ describe("summariseTradeoff — a public job that cannot rent", () => {
   });
 });
 
+describe("summariseTradeoff — the price claim's qualifications (price_notes)", () => {
+  // `5f7fb50` split the API's one ~90-word `price_reason` string into the
+  // claim alone plus a `price_notes: list[str]`, each entry a standalone
+  // qualification. This module's job is just to carry the list through
+  // without joining, dropping or reordering it.
+  const NOTES = [
+    "this compares only runpod SKUs that publish a rate here.",
+    "runpod capacity is acquired manually: a person starts that machine.",
+    "the automatically-acquired venues are absent from this comparison, not more expensive than it.",
+  ];
+
+  it("carries every note through, verbatim and in order", () => {
+    const panel = summariseTradeoff(
+      read({ renting: renting({ price_notes: NOTES }) })
+    );
+    expect(panel.renting!.priceNotes).toEqual(NOTES);
+  });
+
+  it("reports an empty list when the route sent none, never undefined", () => {
+    const panel = summariseTradeoff(read({ renting: renting({}) }));
+    expect(panel.renting!.priceNotes).toEqual([]);
+  });
+
+  it("reports an empty list when the route sent null — an older response", () => {
+    const panel = summariseTradeoff(
+      read({
+        renting: renting({ price_notes: null as unknown as string[] }),
+      })
+    );
+    expect(panel.renting!.priceNotes).toEqual([]);
+  });
+});
+
 describe("summariseTradeoff — nothing observed", () => {
   const panel = summariseTradeoff(read({ points: fiveTaskCurve().map((p) => ({
     ...p,
@@ -861,5 +894,156 @@ describe("TradeoffCard — the rendered page", () => {
     const needle = "a fleet size where renting stops helping.";
     const occurrences = cut.split(needle).length - 1;
     expect(occurrences).toBe(1);
+  });
+});
+
+describe("TradeoffCard — the price claim's qualifications on the page", () => {
+  it("shows each price note as its own line, not joined into one paragraph", () => {
+    const notes = [
+      "this compares only runpod SKUs that publish a rate here.",
+      "runpod capacity is acquired manually: a person starts that machine.",
+    ];
+    const markup = render(
+      summariseTradeoff(
+        read({
+          renting: renting({
+            price_reason: "$0.16/hr — the cheapest published runpod rate.",
+            price_notes: notes,
+          }),
+        })
+      )
+    );
+    expect(markup).toContain('data-testid="price-notes"');
+    for (const note of notes) {
+      expect(markup).toContain(note);
+    }
+    // Not concatenated: the claim and the notes are separately present, and
+    // the claim sentence itself is untouched by the split.
+    expect(markup).toContain("$0.16/hr — the cheapest published runpod rate.");
+  });
+
+  it("renders cleanly with no stray notes markup when the route sent none", () => {
+    const markup = render(
+      summariseTradeoff(
+        read({
+          renting: renting({
+            price_reason: "$0.16/hr — the cheapest published runpod rate.",
+            price_notes: [],
+          }),
+        })
+      )
+    );
+    expect(markup).toContain("$0.16/hr — the cheapest published runpod rate.");
+    expect(markup).not.toContain('data-testid="price-notes"');
+  });
+
+  it("renders cleanly when price_notes is entirely absent — an older response", () => {
+    const markup = render(
+      summariseTradeoff(
+        read({
+          renting: renting({
+            price_reason: "$0.16/hr — the cheapest published runpod rate.",
+            price_notes: undefined,
+          }),
+        })
+      )
+    );
+    expect(markup).toContain("$0.16/hr — the cheapest published runpod rate.");
+    expect(markup).not.toContain('data-testid="price-notes"');
+  });
+
+  it("withholds notes exactly when it withholds the claim — on a job that cannot rent", () => {
+    const markup = render(
+      summariseTradeoff(
+        read({
+          renting: renting({
+            suited: false,
+            reason: "renting cannot make this job faster at any price.",
+            price_reason: "priced at $0.16/hr from RunPod.",
+            price_notes: ["a note that must not leak onto an unsuited job."],
+          }),
+        })
+      )
+    );
+    expect(markup).not.toContain("priced at $0.16/hr from RunPod.");
+    expect(markup).not.toContain('data-testid="price-notes"');
+    expect(markup).not.toContain("a note that must not leak onto an unsuited job.");
+  });
+});
+
+describe("TradeoffCard — a long curve collapses", () => {
+  // `truncatedSweep()` (40 tasks, 1 owned slot, 16 rented steps swept) is a
+  // real 17-row curve with a genuine wobble: helps dips flat, recovers,
+  // dips again. Worked out by hand against `groupTradeoffRows`'s rules:
+  //   slots 1        baseline                    — anchor (first row)
+  //   slots 2        helps                       — anchor (differs from baseline)
+  //   slots 3..7     helps                       — collapses (5 rows, no boundary)
+  //   slots 8        helps                       — anchor (last helps before the dip)
+  //   slots 9        no_marginal_gain            — anchor (first flat after helps)
+  //   slots 10       helps                       — anchor (recovers, then dips again)
+  //   slots 11       no_marginal_gain            — anchor (first flat of 2nd dip)
+  //   slots 12..13   no_marginal_gain            — a run of exactly TWO: stays plain
+  //   slots 14       helps                       — anchor
+  //   slots 15       no_marginal_gain            — anchor
+  //   slots 16       no_marginal_gain            — a run of exactly ONE: stays plain
+  //   slots 17       no_marginal_gain            — anchor (last row)
+  // One collapsed group (slots 3..7), thirteen display items for seventeen
+  // rows, and every transition pair on the page.
+  const markup = render(
+    summariseTradeoff(
+      read({
+        tasks: 40,
+        task_seconds: 90,
+        renting: renting({ slots: 16, slots_reason: SIZE_LIMIT_REASON }),
+        points: truncatedSweep(),
+      })
+    )
+  );
+
+  it("collapses the long same-verdict run into exactly one control", () => {
+    const occurrences = markup.split('data-testid="collapsed-tradeoff-rows"').length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it("hides a row in the middle of the collapsed run from the initial markup", () => {
+    // Fleet size 4 sits inside the collapsed 3..7 run and is not a boundary.
+    expect(markup).not.toContain("4 · +3 rented");
+  });
+
+  it("keeps the helps -> no_marginal_gain transition on the page — the pair the panel exists to show", () => {
+    // Fleet size 8 is the last `helps` row before the dip, fleet size 9 is
+    // the first `no_marginal_gain` row after it.
+    expect(markup).toContain("8 · +7 rented");
+    expect(markup).toContain("9 · +8 rented");
+  });
+
+  it("keeps the first and last row of the curve on the page", () => {
+    expect(markup).toContain("1 yours"); // baseline, fleet size 1
+    expect(markup).toContain("17 · +16 rented"); // the curve's last row
+  });
+
+  it("does not collapse a run of exactly two or exactly one row", () => {
+    // Fleet sizes 12, 13 (a run of two) and 16 (a run of one) are all short
+    // of the three-row minimum and must render plainly.
+    expect(markup).toContain("12 · +11 rented");
+    expect(markup).toContain("13 · +12 rented");
+    expect(markup).toContain("16 · +15 rented");
+  });
+
+  it("says how many rows the control hides, from the rows themselves", () => {
+    expect(markup).toContain("5 more");
+  });
+});
+
+describe("TradeoffCard — a short curve is untouched", () => {
+  it("never renders a collapsed-rows control when no run reaches three", () => {
+    const markup = render(
+      summariseTradeoff(read({ task_seconds: 60, points: fiveTaskCurve() }))
+    );
+    expect(markup).not.toContain('data-testid="collapsed-tradeoff-rows"');
+    // Every fleet size is on the page.
+    for (const slots of [1, 2, 3, 4, 5, 6]) {
+      expect(markup).toContain(`${slots}`);
+    }
   });
 });

@@ -27,6 +27,15 @@ Next: the single most useful next action. Parking lot: ideas deliberately
 Rules:
 1. **Evidence or it didn't happen.** "All tests pass" must carry numbers
    (`flashruntime 109, flashnode 28, e2e 3`).
+   **Name every suite you ran — and a green suite is a claim about a SCOPE,
+   so name what it cannot see.** "2664 passed" means the API's own tests: it
+   says nothing about the public agent still agreeing with this API, nothing
+   about the console rendering, nothing about anything actually running.
+   On 2026-08-12 four sessions quoted that number at each other for a day
+   while `e2e/` — the *only* suite checking that the public agent and this
+   API agree — had been red for ~50 commits and nobody had run it. Every
+   baseline quoted was true, and about the wrong population. A number with an
+   unstated scope reads as coverage it does not have.
 2. **Update the stage checklist** below in the same edit when a stage's
    status changes ([ ] / [~] / [x] with a one-line justification).
 3. **Docs move with code** — if you changed a public surface, say which
@@ -62,6 +71,24 @@ Rules:
    control-plane facts alone: "the host was destroyed, a different GPU in
    another country claimed the lease ~30 s later, the job finished" needs
    no caveat, because every fact in it is one this codebase assigned.
+
+   **A rule you have to remember is not a rule.** This one was authored, then
+   quoted, and then broken by its own author in the same conversation — a
+   machine's display *name* turned out to be the `hostname` the host supplied
+   at enrolment (`enrolment.py:164`, `app.py:3261`), and it went onto a
+   publish list for a no-login page by someone with the rule in front of them.
+   So a provenance claim needs a **check that runs**, and the check asserts on
+   **serialized output, not on field names** — otherwise a refactor that
+   reintroduces the value under a different key passes.
+
+   **And provenance is only the first of two questions when publishing to
+   anyone outside this system.** *Who assigned this value?* and *does this
+   re-identify a person?* are different, and a field can pass the first while
+   failing the second: a machine's **region** is ours, straight from
+   `router/venues.py` — and for a volunteer's home rig in a small population a
+   country is close to a unique identifier, which no pseudonym repairs. Ask
+   both. The publish-side rule and its column list live in
+   `2026-08-12-agent-surface-decisions.md` (AS-16.1).
 
 ---
 

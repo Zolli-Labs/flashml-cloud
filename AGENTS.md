@@ -58,6 +58,56 @@ runtime work at all: merge → release to PyPI → bump all four.
 and is not release evidence. See
 `flashml-cloud/docs/superpowers/specs/2026-08-01-foundation-design.md` §3.3.
 
+## Git in a shared checkout — repo-scoped commands are the hazard
+
+Several agents and sessions work in this one checkout at the same time.
+
+**Commit with explicit paths. Never `git add -A`, never `git commit -a`.** A
+sweeping commit on 2026-08-12 pulled in half of another session's slice and
+left HEAD internally broken.
+
+**And never run a REPOSITORY-SCOPED command here:** `git stash`,
+`git checkout <ref>`, `git reset`, `git clean`, `git restore`, `git rebase`.
+On 2026-08-12 a subagent ran `git stash push` in this checkout while trying
+to establish whether a `tsc` error was pre-existing. For a few seconds it
+reverted three sessions' uncommitted work. Recovered with nothing lost — by
+luck, not by design.
+
+That agent had a file allowlist and obeyed it. **A file allowlist cannot
+constrain `git stash`, because `git stash` does not take files.** Isolation
+at the file level is not isolation at the repository level, and only the
+second survives an agent reaching for a repo-wide command. State both when
+you dispatch one.
+
+**Name the read-only tool when you brief an agent.** A subagent reaches for
+`stash` while trying to answer a legitimate question; give it the safe answer
+before it improvises the unsafe one:
+
+| Question | Safe answer |
+|---|---|
+| "Was this error pre-existing?" | `git show <ref>:<path>` — never stash to find out |
+| "What did this look like before my change?" | `git show HEAD:<path>` |
+| "Is this diff mine?" | `git log -1 --format=%s -- <path>`, or ask the other session |
+| "What did MY branch change?" | `git diff develop...HEAD` — **three dots.** See below |
+| "Is my work intact after an incident?" | **Run the suite.** Presence is not integrity — a green typecheck and a passing suite over the exact files is evidence a file listing cannot give |
+
+**Two dots versus three is the nastiest of these, because the wrong answer is
+specific, plausible, and accuses someone.** On 2026-08-12 a session checked its
+own branch with `git diff develop..HEAD` and was told it had **838 deletions of
+`test_public_job_share.py`** — the test guarding the G-1 no-login route. It had
+deleted nothing, and had never touched `apps/api` at all. `develop` had simply
+moved 15 commits past its merge-base, and **two-dot renders "develop has
+something I don't" identically to "I deleted it."**
+
+Three-dot diffs against the merge-base and answers the question you meant —
+*what did my commits change?* Two-dot answers *how do these two tips differ?*,
+which on a branch cut hours ago from a repo three sessions are committing to is
+mostly other people's work, reported as your deletions.
+
+**Work in a worktree when your task is broad** (`.worktrees/` is gitignored).
+That removes the whole class — but only if your agents are also told which
+checkout they may run git in.
+
 ## Dependency direction
 
 `flashml-cloud` imports `flashruntime`'s versioned protocol package. Nothing

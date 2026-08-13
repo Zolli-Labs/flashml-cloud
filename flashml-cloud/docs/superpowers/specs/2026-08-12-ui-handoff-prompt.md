@@ -73,13 +73,24 @@ npm test && npx tsc --noEmit && npm run lint && npm run build
 
 If you touch `app.py`: `cd flashml-cloud/apps/api && .venv/bin/python -m pytest -q`
 
-**Baselines to beat, never regress — measured 2026-08-12 21:53:** web **866
-passed / 52 files** · api **2633 passed, 2 skipped, 3 deselected, 1 xfailed**.
+**Baselines to beat, never regress** — measured 2026-08-12 ~22:00, web by
+`zolli-labs-e5` in a clean worktree and api by this session: web **866 passed
+/ 52 files** · api **2633 passed, 2 skipped, 3 deselected, 1 xfailed**.
 
-**Measure these yourself before you rely on them, and stamp the time.** They
-previously read 767/46 and 2177 here — stale by ~100 web and ~450 api tests.
-Several sessions commit to this repo concurrently and the numbers move within
-the hour. A baseline you did not measure is a rumour.
+**MEASURE THEM YOURSELF BEFORE YOU START, INCLUDING THESE.** The numbers this
+line replaced — web 767/46 and api 2177 — were stale by ~100 and ~450 tests
+respectively, and a baseline that is too low is worse than none: it certifies
+a regression as an improvement. Three sessions committed to `develop` on
+2026-08-12 alone. Any figure written here is a snapshot, not a fact about now.
+
+**The gate is two commands, not one.** `npm run build` needs `.env.dev`
+sourced, and sourcing it makes `middleware.test.ts` fail — that test asserts
+the signed-out contract when Supabase config is *absent*, so an ambient
+`NEXT_PUBLIC_SUPABASE_URL` defeats it. Run `vitest` / `tsc` / `lint` with no
+env, and the build in its own subshell. Run as written, you get a red
+middleware test and will reasonably suspect you broke **G-1** when you changed
+nothing — and the inverse mistake, waving a real middleware regression through
+as "just the env", is worse.
 
 ## Environment
 

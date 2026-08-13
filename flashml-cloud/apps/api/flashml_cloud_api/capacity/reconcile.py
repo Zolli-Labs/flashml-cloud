@@ -281,7 +281,7 @@ still leave a legible row behind and must still give the pool back; one row's
 failure must not end the sweep for the rows after it; and a failure to
 *record* must never be mistaken for a failure to *destroy*.
 
-**The credential half is not tidiness, and since D6 (2026-08-12) it is the
+**The credential half is not tidiness, and since OC-6 (2026-08-12) it is the
 only thing there is.** A rented machine's identity is a LEASE, not a deed: true
 while we hold the hardware and false the moment we give it back. It is minted
 ``lifecycle = 'leased'`` (migration 0023), which says exactly that and is
@@ -294,7 +294,7 @@ Left alive after release it is a valid machine token, bound to a user's
 workspace, for hardware a third party has since rented. That used to be
 self-correcting by accident: the leftover binding made
 ``provision_sandbox_machine``'s closing ``assert_pool_isolated`` refuse the
-NEXT rental into that pool, so renting once poisoned the pool loudly. D6
+NEXT rental into that pool, so renting once poisoned the pool loudly. OC-6
 replaced that path with ``provision_rented_machine``, which asserts nothing —
 renting into a pool that already holds the submitter's laptop is the entire
 point of the feature. So the next rental now succeeds and the stale credential
@@ -1105,7 +1105,7 @@ def finished_rentals_with_live_credentials(
     without it, one failed revoke leaves a working machine token bound to a
     user's workspace, for hardware somebody else has since rented, for ever.
 
-    Until D6 a leftover binding was also caught by accident, because it made
+    Until OC-6 a leftover binding was also caught by accident, because it made
     the next rental into that pool fail an isolation assertion. That path is
     gone — renting into a pool that already holds a machine is now the point —
     so the accident is gone with it and nothing else is watching.
@@ -1592,7 +1592,7 @@ async def release_capacity(
     #    rental does, not when the venue gets around to confirming it: a
     #    machine that outlived its destroy must not keep a working token, and
     #    the pool has to be given back either way. Nothing else will notice if
-    #    it is not -- see this module's docstring on what D6 removed.
+    #    it is not -- see this module's docstring on what OC-6 removed.
     await _revoke_credential(db, row)
 
     if not destroyed:
@@ -1651,7 +1651,7 @@ async def reconcile_rented(
     **THE CREDENTIAL SWEEP RUNS EITHER WAY**, and it is the one exception.
     There is no irreversible act to hold back and no report to read first, and
     meanwhile the revoke is the ONLY thing in this system that ends a lease --
-    since D6 removed the isolation assertion that used to make a leftover
+    since OC-6 removed the isolation assertion that used to make a leftover
     binding fail loudly, a stale lease is silent -- so leaving it behind this
     gate meant the shipped default disabled the mechanism entirely on the
     deployment least likely to be watched. The gate is about destroying
