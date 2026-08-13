@@ -15,12 +15,15 @@ unsandboxed volunteer machine.
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
 
 import pytest
 
 from flashruntime.protocol.v1alpha1 import JobSpec
 
 from flashml_cloud_api.compile import (
+    CURATED_IMAGE_PYTHON,
     CompileError,
     _resources,
     compile_federated_round,
@@ -28,7 +31,7 @@ from flashml_cloud_api.compile import (
     sanitize_job_name,
 )
 from flashml_cloud_api.flashml_yaml import parse_flashml_yaml
-from flashml_cloud_api.images import CuratedImage, resolve_image
+from flashml_cloud_api.images import CURATED, CuratedImage, resolve_image
 
 CODE_URI = "artifact://uploads/deadbeef/code.tar.gz"
 
@@ -928,6 +931,200 @@ def test_federated_rounds_also_emit_extra_dependencies():
         **ONE_SLOT,
     )
     assert _params(spec)["extra_dependencies"] == ["transformers==4.44.0"]
+
+
+# ---------------------------------------------------------------------------
+# python — the interpreter the job's pins were resolved against
+#
+# 2026-08-13, live (findings §6.1): the Alibaba FC sandbox ships Python
+# 3.13.13; the curated sklearn manifest pins `numpy==1.26.4`, whose wheels
+# stop at cp312. Every trusted-tier env build on that node fell into a source
+# compile and died, and the scheduler re-fed the same task to the same node
+# four times until TASK_EXHAUSTED. A pod on Ubuntu 20.04's Python 3.8 hit the
+# inverse. `dependencies` guarantees identical PACKAGES and says nothing about
+# the INTERPRETER they were pinned against.
+#
+# Precedence: the submitter's `python:` > the curated-image table > absent.
+# Emitted only alongside `dependencies` (no install list, no advice to give),
+# and never guessed. See `compile.PYTHON_PARAM`.
+# ---------------------------------------------------------------------------
+
+SKLEARN = resolve_image("sklearn")
+
+#: `_config` writes each string value into the YAML verbatim, so a version
+#: has to arrive already quoted — which is also the real authoring rule: an
+#: unquoted `python: 3.10` is a YAML float and means 3.1. Pinned in
+#: tests/test_flashml_yaml.py.
+QUOTED_312 = '"3.12"'
+
+
+def test_a_curated_image_job_declares_the_interpreter_its_pins_assume():
+    """The sklearn image is the one §6.1 caught: its manifest pins numpy
+    1.26.4, and that pin is only reproducible on the interpreter it was
+    resolved against."""
+    spec = compile_to_jobspec(_config(image="sklearn"), SKLEARN, CODE_URI, "demo")
+    params = _params(spec)
+    assert params["python"] == "3.11"
+    assert re.fullmatch(r"3\.\d+", params["python"])
+
+
+def test_the_cuda_image_declares_a_different_interpreter_than_the_others():
+    """Not a copy-paste row: `images/pytorch-cuda/Dockerfile` builds on
+    `nvidia/cuda:12.4.1-runtime-ubuntu22.04` and apt-installs python3, and
+    says in as many words that "Ubuntu 22.04 carries python 3.10, not the
+    3.11.9 the other curated images use". Assuming the four agree is the
+    mistake this table exists to prevent."""
+    assert _params(compile_to_jobspec(_config(), CUDA, CODE_URI, "demo"))["python"] == "3.10"
+    assert _params(compile_to_jobspec(_config(), PYTORCH, CODE_URI, "demo"))["python"] == "3.11"
+
+
+@pytest.mark.parametrize("alias", sorted(CURATED))
+def test_every_curated_image_has_an_interpreter_recorded_for_it(alias):
+    """The tripwire for the mirror table. `CURATED_IMAGE_PYTHON` is a
+    hand-maintained copy of the public repo's Dockerfile `FROM` lines
+    (TODO(flashruntime): export python in the manifest), so adding a curated
+    image without recording its interpreter must break a test rather than
+    silently ship a job that says nothing about its Python.
+
+    If an image's interpreter genuinely cannot be established, leave it out of
+    the table AND out of this test deliberately — absent stays absent, and
+    guessing is the one thing that must not happen."""
+    image = CURATED[alias]
+    assert image.reference in CURATED_IMAGE_PYTHON
+    assert re.fullmatch(r"3\.\d+", CURATED_IMAGE_PYTHON[image.reference])
+
+
+def test_the_interpreter_table_carries_no_row_for_an_image_that_is_gone():
+    """The other direction, and the one a coverage check alone would miss: a
+    row keyed on an alias or a tag this API no longer resolves is dead weight
+    that reads as a maintained fact. The table is derived from `CURATED`, so
+    the two sets must be identical."""
+    assert set(CURATED_IMAGE_PYTHON) == {image.reference for image in CURATED.values()}
+
+
+def test_a_job_that_resolves_no_dependencies_declares_no_interpreter():
+    """python-slim with no extras resolves an empty install list, so there is
+    no environment build to advise. Absent, not None and not "": the key is
+    metadata about `dependencies`, and it does not exist without it."""
+    params = _params(compile_to_jobspec(_config(image="python-slim"), SLIM, CODE_URI, "demo"))
+    assert "dependencies" not in params
+    assert "python" not in params
+
+
+def test_a_custom_image_with_extras_and_no_declaration_declares_no_interpreter():
+    """Never guessed. Nothing here knows what interpreter a stranger's image
+    ships, and inventing one would provision the wrong Python with total
+    confidence — the exact failure §6.1 records, self-inflicted."""
+    params = _params(compile_to_jobspec(
+        _config(dependencies=["numpy==1.26.4"]), _custom_image(), CODE_URI, "demo"
+    ))
+    assert params["dependencies"] == ["numpy==1.26.4"]
+    assert "python" not in params
+
+
+def test_a_declared_python_makes_a_custom_image_provisionable():
+    """The user-driven path, and the reason the key is not a fleet-wide
+    hardcode: a submitter who names their own image can still say what its
+    wheels were built for."""
+    params = _params(compile_to_jobspec(
+        _config(dependencies=["numpy==1.26.4"], python=QUOTED_312),
+        _custom_image(), CODE_URI, "demo",
+    ))
+    assert params["python"] == "3.12"
+
+
+def test_a_declared_python_wins_over_the_curated_default():
+    """The table resolves the submitter's IMAGE choice; it does not overrule
+    the submitter. A default that cannot be overruled is a constraint."""
+    params = _params(compile_to_jobspec(
+        _config(image="sklearn", python=QUOTED_312), SKLEARN, CODE_URI, "demo"
+    ))
+    assert CURATED_IMAGE_PYTHON[SKLEARN.reference] == "3.11"
+    assert params["python"] == "3.12"
+
+
+def test_a_declaration_on_a_job_with_no_dependencies_is_still_not_emitted():
+    """Precedence does not defeat the emission rule: a declared interpreter
+    is advice about an install list, and python-slim with no extras has
+    none."""
+    params = _params(compile_to_jobspec(
+        _config(image="python-slim", python=QUOTED_312), SLIM, CODE_URI, "demo"
+    ))
+    assert "dependencies" not in params
+    assert "python" not in params
+
+
+@pytest.mark.parametrize("bad", ["3", "3.11.4", "pypy3.11", "4.0", "", 311, 3.11])
+def test_the_compiler_re_checks_the_declaration_it_is_handed(bad):
+    """`parse_flashml_yaml` already refused these, and this checks again —
+    the judgement `_entrypoint_path` records. A `FlashmlConfig` is an
+    ordinary dataclass any caller can build, and this is the module that
+    decides what reaches a host's interpreter provisioning."""
+    config = replace(_config(dependencies=["numpy==1.26.4"]), python=bad)
+    with pytest.raises(CompileError, match="python"):
+        compile_to_jobspec(config, PYTORCH, CODE_URI, "demo")
+
+
+def test_a_malformed_declaration_is_refused_even_when_nothing_would_be_emitted():
+    """Validated before the emission decision, not inside it: a value this
+    module would never send must still never be silently accepted."""
+    config = replace(_config(image="python-slim"), python="3.11.4")
+    with pytest.raises(CompileError, match="python"):
+        compile_to_jobspec(config, SLIM, CODE_URI, "demo")
+
+
+def test_the_interpreter_rides_with_dependencies_through_the_jobspec_round_trip():
+    """Not ceremony — `gpuPerTask` is dropped silently by this exact
+    round-trip on some pins (see the resources section above), so "the
+    compiler set it" and "the coordinator is told" are two different claims.
+    This asserts the key sits in the same parameters dict `dependencies`
+    does, on the far side of pydantic."""
+    spec = compile_to_jobspec(_config(image="sklearn"), SKLEARN, CODE_URI, "demo")
+    reparsed = json.loads(JobSpec.model_validate(spec).model_dump_json())
+    params = reparsed["spec"]["workload"]["parameters"]
+    assert params["python"] == "3.11"
+    assert "numpy==1.26.4" in params["dependencies"]
+
+
+def test_federated_rounds_also_declare_the_interpreter():
+    """A federated round is an ordinary command job (see
+    `compile_federated_round`'s docstring), and its tasks build the same
+    environment on the same fleet."""
+    config = parse_flashml_yaml(
+        "version: 2\nname: fed\nimage: sklearn\nentrypoint: train.py\n"
+        "mode: federated\nepochs: 2\n"
+    )
+    spec = compile_federated_round(
+        config, SKLEARN, CODE_URI, "fed", round_index=0, weights_uri=None,
+        **ONE_SLOT,
+    )
+    assert _params(spec)["python"] == "3.11"
+
+
+def test_the_pinned_recipe_stops_the_interpreter_at_the_jobspec():
+    """KNOWN GAP, asserted rather than assumed — the one difference from
+    `checkpoint`.
+
+    `CommandRecipe.expand` builds each task payload from a fixed key list and
+    this key is not on it in flashruntime 0.6.0, so the value reaches the
+    JobSpec (test above) and stops there. Same shape as `local_inputs`'s gap:
+    the submitter's half of the contract is complete and correct, and the
+    hosts are simply not told yet. Closing it is a one-line forward in the
+    PUBLIC repo and must land with the flashnode side that reads the key,
+    then a release and a four-site pin bump.
+
+    WHEN THE PIN MOVES, THIS TEST FAILS ON PURPOSE. That is the signal the
+    gap closed: flip the second assertion to `== "3.11"` and delete this
+    paragraph."""
+    from flashruntime.recipes.command import CommandRecipe
+
+    spec = compile_to_jobspec(_config(image="sklearn"), SKLEARN, CODE_URI, "demo")
+    tasks = CommandRecipe().expand("job-123", JobSpec.model_validate(spec))
+    payload = tasks[0].payload
+    # The sibling key IS forwarded, so this is a gap in the forwarding list
+    # and not a spec the recipe rejected.
+    assert "numpy==1.26.4" in payload["dependencies"]
+    assert "python" not in payload
 
 
 def test_allow_partial_reaches_the_retry_policy():

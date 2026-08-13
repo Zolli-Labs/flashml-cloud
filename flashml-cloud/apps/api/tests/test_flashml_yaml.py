@@ -476,6 +476,51 @@ def test_dependencies_must_be_a_list_of_strings():
 
 
 # ---------------------------------------------------------------------------
+# python — the interpreter those pins were resolved against
+#
+# The same class of key as `dependencies` above and the same doctrine: the
+# image manifest is the base, the yaml refines it. Absent is the default and
+# the common case (a curated image implies its own interpreter — see
+# `compile.CURATED_IMAGE_PYTHON`); writing it is how a custom image becomes
+# provisionable at all, and how a submitter overrules the default.
+#
+# Live evidence for why the key exists at all: on 2026-08-13 the Alibaba FC
+# sandbox ran Python 3.13.13 against `numpy==1.26.4`, whose wheels stop at
+# cp312. Every env build there fell into a source compile and one node burned
+# a healthy task to TASK_EXHAUSTED.
+# ---------------------------------------------------------------------------
+
+
+def test_python_defaults_to_absent():
+    assert parse_flashml_yaml(MINIMAL).python is None
+
+
+def test_python_parses_to_a_major_minor_string():
+    config = parse_flashml_yaml(MINIMAL + '\npython: "3.11"\n')
+    assert config.python == "3.11"
+
+
+def test_an_unquoted_python_is_refused_because_yaml_reads_it_as_a_number():
+    """The silent one, and the reason a non-string is refused rather than
+    coerced: YAML reads a bare `3.10` as the float 3.1, so coercing would
+    hand a job that asked for 3.10 an interpreter that has been end-of-life
+    since 2020."""
+    with pytest.raises(ConfigError, match="python"):
+        parse_flashml_yaml(MINIMAL + "\npython: 3.10\n")
+
+
+@pytest.mark.parametrize("bad", ['"3"', '"3.11.4"', '"pypy3.11"', '"python3.11"',
+                                 '"4.0"', "311", '"3.x"', '""'])
+def test_python_refuses_anything_that_is_not_cpython_major_minor(bad):
+    """Major.minor is the granularity a wheel tag has (`cp312`) and the
+    granularity `uv python install` resolves. A patch level promises a
+    precision nothing distinguishes; another implementation names something
+    these pins were never resolved against."""
+    with pytest.raises(ConfigError, match="python"):
+        parse_flashml_yaml(MINIMAL + f"\npython: {bad}\n")
+
+
+# ---------------------------------------------------------------------------
 # datasets — a public origin the HOST fetches, never us
 # ---------------------------------------------------------------------------
 

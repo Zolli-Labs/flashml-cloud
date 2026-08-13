@@ -49,11 +49,12 @@ from flashruntime.protocol.v1alpha1 import JobSpec
 from flashml_cloud_api.datasets import Manifest
 from flashml_cloud_api.elastic import dataset_chunks
 from flashml_cloud_api.flashml_yaml import (
+    PYTHON_VERSION_RE,
     SPLIT_REPLICA,
     SPLIT_SHARD,
     FlashmlConfig,
 )
-from flashml_cloud_api.images import CuratedImage
+from flashml_cloud_api.images import CURATED, CuratedImage
 
 #: Where the executor stages declared inputs, and where a task's collected
 #: output must land. Both are the flashnode executor's contract, not a
@@ -112,6 +113,116 @@ DEPENDENCIES_PARAM = "dependencies"
 #: because the base (`torch==2.3.1` and friends) would read as a requirement
 #: the host cannot satisfy. See ``_dependencies``.
 EXTRA_DEPENDENCIES_PARAM = "extra_dependencies"
+
+#: The workload parameter naming the CPython the job's dependency lines were
+#: pinned against, as ``"major.minor"`` — ``parameters["python"] = "3.11"``.
+#:
+#: WHY IT EXISTS, from a live failure on 2026-08-13 (findings §6.1): the
+#: Alibaba FC sandbox ships Python **3.13.13**, and the curated sklearn
+#: manifest pins ``numpy==1.26.4``, whose wheels stop at **cp312**. Every
+#: trusted-tier env build on that node fell into a source compile and died,
+#: and the scheduler handed the same task back to the same node four times
+#: until TASK_EXHAUSTED — one incompatible machine burning a healthy task's
+#: whole budget while two healthy machines sat eligible. A pod on Ubuntu
+#: 20.04's Python 3.8 hit the inverse ("numpy==1.26.4 depends on
+#: Python>=3.9", §1.1). ``DEPENDENCIES_PARAM`` guarantees identical
+#: *packages* and says nothing about the *interpreter* they were resolved
+#: for, which is the whole gap: a pin is only reproducible against the
+#: Python it was pinned against.
+#:
+#: PRECEDENCE, highest first:
+#:   1. the submitter's ``python:`` in flashml.yaml (``config.python``) —
+#:      always wins, including over a curated image's own entry. The
+#:      interpreter is part of the environment the submitter is declaring,
+#:      the same way ``dependencies:`` extras are, and a fleet-wide default
+#:      that cannot be overruled is not a default, it is a constraint.
+#:   2. ``CURATED_IMAGE_PYTHON`` below, keyed by the image the submitter
+#:      chose — a default that resolves *their* choice, not a fleet-wide
+#:      hardcode.
+#:   3. absent. Never guessed: for a non-curated image with no declaration
+#:      nothing here knows what interpreter its wheels want, and inventing
+#:      one would provision the wrong Python with total confidence.
+#:
+#: EMITTED ONLY ALONGSIDE ``DEPENDENCIES_PARAM``. The key advises an
+#: environment BUILD; a job that resolved no dependency lines has no build
+#: to advise, so it gains nothing (absent stays absent — the judgement
+#: ``_local_inputs``, ``_dependencies`` and ``_dataset_slices`` each record).
+#:
+#: ADVISORY, NOT A PLACEMENT INPUT. A container host runs the image's own
+#: interpreter and ignores this entirely — that is what "container host"
+#: means. It is for the hosts that build a venv instead: flashnode reads it
+#: and provisions that interpreter with uv. No placement gate keys on it, so
+#: it cannot route a job anywhere it does not already go.
+#:
+#: Payload-dict key only, deliberately — **no flashruntime protocol change**,
+#: exactly like ``CHECKPOINT_PARAM`` (2026-08-12, "fault tolerance was never
+#: on": cloud-only, no PyPI release, no four-site pin bump).
+#:
+#: **Known gap, verified against the pinned runtime (0.6.0) rather than
+#: assumed**, and the one difference from ``checkpoint``: ``CommandRecipe.
+#: expand`` builds each task payload from a fixed key list and forwards
+#: ``checkpoint`` but not this one, so the value stops at the JobSpec and
+#: does not yet reach ``task.payload``. It survives the JobSpec round-trip
+#: (asserted in tests) — it is the recipe's one-line forward that is
+#: missing, in the public repo, and it must land with the flashnode side
+#: that reads it. Until it does, the submitter's half of the contract is
+#: complete and correct and the hosts simply are not told. This is the same
+#: shape as ``_local_inputs``'s known gap, recorded rather than papered over.
+PYTHON_PARAM = "python"
+
+#: Curated image alias → the CPython ``major.minor`` its base image ships.
+#:
+#: **THIS TABLE MIRRORS THE DOCKERFILES' ``FROM`` LINES**, which live in the
+#: PUBLIC ``Zolli-Labs/flashml`` repo under ``images/<alias>/Dockerfile``.
+#: The cloud cannot import it: ``flashruntime.images.manifest_for`` ships the
+#: requirement lines as package data but nothing about the interpreter, so
+#: this is a hand-maintained copy of a fact that has an owner elsewhere —
+#: precisely the arrangement this workspace distrusts.
+#: ``TODO(flashruntime): export python in the manifest`` (a ``# python: 3.11``
+#: header line in ``images/<alias>/requirements.txt``, read by
+#: ``manifest_for``, would delete this table outright).
+#:
+#: Each entry, and the evidence for it (read 2026-08-13 from the sibling
+#: public checkout at image tag ``2026.08.2``, the tag ``images.IMAGE_TAG``
+#: resolves):
+#:   * ``python-slim``  — ``FROM docker.io/library/python:3.11.9-slim``
+#:   * ``sklearn``      — ``FROM docker.io/library/python:3.11.9-slim``
+#:   * ``pytorch-cpu``  — ``FROM docker.io/library/python:3.11.9-slim``
+#:   * ``pytorch-cuda`` — ``FROM docker.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04``
+#:     plus ``apt-get install python3``. **3.10, not 3.11**, and its
+#:     Dockerfile says so in as many words: "Ubuntu 22.04 carries python
+#:     3.10, not the 3.11.9 the other curated images use. That difference is
+#:     real and deliberate". Getting this row wrong by assuming the images
+#:     agree is the mistake this list exists to prevent.
+#:
+#: An image whose interpreter cannot be established is simply LEFT OUT — the
+#: emission rule above then makes it absent, which is today's behaviour.
+#:
+#: A WRONG entry fails LOUDLY and on the agent, not silently: the host
+#: provisions the interpreter named here and the pinned wheels then do not
+#: match it — the same source-build failure §6.1 records, now with a visible
+#: cause. It cannot mis-route a job (nothing places on it) and it cannot
+#: corrupt a result.
+_CURATED_IMAGE_PYTHON_BY_ALIAS: dict[str, str] = {
+    "python-slim": "3.11",
+    "sklearn": "3.11",
+    "pytorch-cpu": "3.11",
+    "pytorch-cuda": "3.10",
+}
+
+#: The same table keyed by the FULL pinned reference, which is what
+#: ``_dependencies`` has in hand and what ``manifest_for`` keys on — so the
+#: interpreter and the requirement lines are known for exactly the same set
+#: of references, and go quiet together. Derived from ``CURATED`` rather than
+#: written out, because writing the references literally would put
+#: ``images.IMAGE_TAG`` in a second place, and a curated-image tag already
+#: lives in three (see ``images.IMAGE_TAG``). A reference this API does not
+#: currently resolve — a custom image, or an older tag — is simply not a key.
+CURATED_IMAGE_PYTHON: dict[str, str] = {
+    _image.reference: _CURATED_IMAGE_PYTHON_BY_ALIAS[_alias]
+    for _alias, _image in CURATED.items()
+    if _alias in _CURATED_IMAGE_PYTHON_BY_ALIAS
+}
 
 #: The workload parameter carrying each task's share of every declared
 #: dataset: one list per task, each a list of
@@ -301,6 +412,34 @@ def _local_inputs(config: FlashmlConfig, parameters: dict[str, Any]) -> None:
         parameters[LOCAL_INPUTS_PARAM] = list(config.local_inputs)
 
 
+def _declared_python(config: FlashmlConfig) -> str | None:
+    """The submitter's own ``python:``, re-validated, or ``None``.
+
+    ``parse_flashml_yaml`` has already refused a bad shape with the same
+    ``PYTHON_VERSION_RE``, and this checks it again anyway — the judgement
+    ``_entrypoint_path`` records a few lines above, for the same reason. A
+    ``FlashmlConfig`` is an ordinary dataclass that any caller can construct
+    directly, and this is the module that decides what reaches a host's
+    interpreter provisioning; it must not be the place an unvalidated string
+    gets there because some other path was trusted to have looked.
+
+    ONE regex, imported rather than restated, so the two checks cannot drift
+    into two different answers about the same file.
+    """
+    declared = config.python
+    if declared is None:
+        return None
+    if not isinstance(declared, str) or not PYTHON_VERSION_RE.match(declared):
+        raise CompileError(
+            f"python {declared!r} is not a CPython major.minor version — "
+            f'write it as a quoted "3.11". A patch level ("3.11.9") promises '
+            f"a precision no wheel tag distinguishes, and another "
+            f'implementation ("pypy3.11") is not what these pins were '
+            f"resolved against"
+        )
+    return declared
+
+
 def _dependencies(
     config: FlashmlConfig, image: CuratedImage, parameters: dict[str, Any]
 ) -> None:
@@ -333,7 +472,18 @@ def _dependencies(
     either key would either refuse python-slim jobs (see the ``is None``
     check below) or, for ``extra_dependencies`` specifically, wrongly lock
     ordinary curated-image jobs with no extras out of container hosts.
+
+    A THIRD key, ``PYTHON_PARAM``, rides with ``DEPENDENCIES_PARAM`` and only
+    with it: the interpreter those lines were pinned against. Resolved here
+    rather than anywhere else because a requirement pin and the Python it
+    resolves under are one fact — see ``PYTHON_PARAM`` for the live evidence
+    and the precedence order.
     """
+    # Unconditional, and BEFORE the emission decision: a malformed
+    # declaration is refused whether or not this job would have carried the
+    # key, so a value this module would never emit can still never be
+    # silently accepted.
+    declared_python = _declared_python(config)
     base = manifest_for(image.reference)
     extras = list(config.dependencies)
     # `is None`, NEVER truthiness. `manifest_for` returns `[]` for a CURATED
@@ -354,6 +504,14 @@ def _dependencies(
     # stay byte-identical rather than gain a payload key nothing reads.
     if resolved:
         parameters[DEPENDENCIES_PARAM] = resolved
+        # Inside this branch on purpose: the interpreter is advice about
+        # BUILDING the list above, so a job with no list to build gets no
+        # advice. `or` and not a fallback chain of `.get`s because a valid
+        # declaration is always a non-empty string — see PYTHON_PARAM for
+        # the precedence and why the submitter's own word wins.
+        python = declared_python or CURATED_IMAGE_PYTHON.get(image.reference)
+        if python is not None:
+            parameters[PYTHON_PARAM] = python
     # The extras ALONE — never `resolved`, or a container host with the
     # base already baked in would be refused for a requirement it already
     # satisfies. Absent when empty, same rule as above: a curated image with

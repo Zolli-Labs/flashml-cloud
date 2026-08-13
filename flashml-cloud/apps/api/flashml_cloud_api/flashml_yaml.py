@@ -111,8 +111,25 @@ REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "epochs", "sync_every",
                  "local_inputs", "partition", "validators", "reduce",
-                 "allow_partial", "dependencies", "datasets"}
+                 "allow_partial", "dependencies", "datasets", "python"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
+
+#: The shape a ``python:`` declaration may take: CPython ``major.minor``.
+#:
+#: Major.minor and nothing longer, because that is the granularity a wheel
+#: tag has — ``cp312`` — and the granularity ``uv python install`` resolves.
+#: A patch level (``3.11.9``) would promise a precision no host can honour
+#: and no wheel distinguishes; an implementation prefix (``pypy3.11``) names
+#: an interpreter the curated manifests were never resolved against.
+#:
+#: ``3.`` and not ``\d+\.`` deliberately: there is no Python 4, and a job
+#: that asks for one is a typo the fleet cannot satisfy, not a forward
+#: declaration worth accepting quietly.
+#:
+#: Imported by ``flashml_cloud_api.compile`` rather than restated there, so
+#: the file's own check and the compiler's independent re-check (see
+#: ``compile._declared_python``) can never drift into two answers.
+PYTHON_VERSION_RE = re.compile(r"^3\.\d+$")
 
 #: Today's behaviour, and the default: one round of independent tasks (a
 #: sweep, or a single task). Nothing about an ``independent`` config changes
@@ -243,6 +260,24 @@ class FlashmlConfig:
     #: compiler, not here (see ``_validate_datasets``). Empty is the default
     #: and the overwhelmingly common case.
     datasets: list[dict] = field(default_factory=list)
+    #: The CPython ``major.minor`` this job's dependencies were pinned
+    #: against — ``"3.11"`` — or ``None``, which is the default and the
+    #: overwhelmingly common case.
+    #:
+    #: The same class of key as ``dependencies`` above, and the same
+    #: doctrine: the image manifest is the base and the yaml refines it. A
+    #: curated image already implies an interpreter (the compiler's
+    #: ``CURATED_IMAGE_PYTHON`` table), so writing this is only necessary for
+    #: a custom image — or to overrule the default, which a submitter is
+    #: always allowed to do. The compiler resolves the precedence; see
+    #: ``flashml_cloud_api.compile.PYTHON_PARAM``.
+    #:
+    #: It is ADVISORY, not a placement filter. A container host runs the
+    #: image's own interpreter and ignores this entirely; it exists for the
+    #: hosts that build a venv instead of running a container, which is
+    #: where an interpreter mismatch turns a pinned wheel into a source
+    #: build (see PYTHON_PARAM for the live evidence).
+    python: str | None = None
 
     @property
     def is_federated(self) -> bool:
@@ -340,6 +375,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     allow_partial = _validate_bool(raw.get("allow_partial"), "allow_partial")
     dependencies = _validate_dependencies(raw.get("dependencies", []))
     datasets = _validate_datasets(raw.get("datasets"))
+    python = _validate_python(raw.get("python"))
     mode, epochs, sync_every = _validate_mode(raw, version)
 
     return FlashmlConfig(
@@ -361,6 +397,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         allow_partial=allow_partial,
         dependencies=dependencies,
         datasets=datasets,
+        python=python,
     )
 
 
@@ -627,6 +664,33 @@ def _validate_dependencies(value: object) -> list[str]:
             f"flashml.yaml 'dependencies' must be a list of strings, got {value!r}"
         )
     return list(value)
+
+
+def _validate_python(value: object) -> str | None:
+    """``python: "3.11"`` → ``"3.11"``; absent → ``None``.
+
+    **Quoting is load-bearing and the message says so**, because the failure
+    is silent otherwise: YAML reads an unquoted ``python: 3.11`` as a FLOAT,
+    and ``python: 3.10`` as the float ``3.1`` — a job asking for 3.10 would
+    otherwise be handed an interpreter that has been end-of-life since 2020.
+    So a non-string is refused here rather than coerced, and the refusal
+    shows the quoted form.
+
+    One shape, ``PYTHON_VERSION_RE``, checked here and re-checked
+    independently by the compiler — see ``compile._declared_python`` for why
+    a second check on the same string is not ceremony.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not PYTHON_VERSION_RE.match(value):
+        raise ConfigError(
+            f"flashml.yaml 'python' must be a CPython major.minor version "
+            f'written as a QUOTED string — e.g. python: "3.11" — got '
+            f"{value!r}. Not a patch level (\"3.11.9\"), not another "
+            f'implementation ("pypy3.11"), and not unquoted: YAML reads a '
+            f"bare 3.10 as the number 3.1"
+        )
+    return value
 
 
 def _validate_local_inputs(value: object) -> list[str]:
