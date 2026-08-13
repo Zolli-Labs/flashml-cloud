@@ -174,6 +174,32 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-12 — Restore the landing's original visual system (flashml-cloud, web landing Part II)
+What/why: Design-quality pass over the vision-led landing after user feedback
+that Part I broke the original style: the H1 clipped under the map panel,
+three light sections sat in a row, the new sections had no scroll motion, and
+headlines/bodies grew verbose. Part II fixed the hero type scale and column
+ratio, restored the strict dark/light/sand alternation (EvidenceBand moved to
+sand; SystemModules/ProfessionalServices/SystemJourney reordered because the
+two dark-only components cannot be re-skinned), wrapped MarketStory and
+SimpleJourney in the existing SectionReveal, and rewrote headlines to the
+short two-tone pattern with one-sentence bodies.
+How verified: `npm test` — 826 tests passed; `npx tsc --noEmit --incremental
+  false`, `npm run lint`, canonical-environment `npx next typegen`, and
+  `npm run build` all exited 0. Frozen-SVG diff against develop printed
+  nothing; `git diff --check` clean. Headless Chrome (1440x900, reduced
+  motion) verified the hero: both H1 lines sit inside the copy column with
+  clear air before the map panel, and the market switch stacks both roles.
+Gotchas: Direct loads of `/#<anchor>` (e.g. `/#evidence`) trip the app error
+  boundary in headless Chrome — reproduced identically on the develop server,
+  so it is a pre-existing deep-link crash, not a Part II regression; it also
+  blocks headless section screenshots, so mid-page visuals are verified via
+  SSR markup tests (surface rhythm, reveal markers, copy) instead of pixels.
+  Tall headless viewports are unusable for full-page shots because the hero
+  track is `220svh` and stretches with the viewport.
+Next: Fix the pre-existing anchor deep-link crash (separate slice), then give
+  the page a real-browser scroll-through before release.
+
 ### 2026-08-12 — Verify the vision-led Zolli landing (flashml-cloud, web verification)
 What/why: Verified the completed vision-led landing slices: the coordinator-map
 SVG/source boundary remains unchanged, the landing distinguishes current early
