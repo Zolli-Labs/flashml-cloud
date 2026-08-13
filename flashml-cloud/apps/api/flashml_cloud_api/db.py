@@ -119,6 +119,92 @@ def connect(settings: Settings) -> psycopg.Connection:
     return conn
 
 
+#: How long :func:`close_when_idle` waits for a connection to go idle before
+#: giving up and abandoning it. Generous on purpose: the job is to outlast a
+#: normal query, not to bound one. Every caller is either shutting down or has
+#: already answered its request, so nobody is waiting on this.
+CLOSE_WHEN_IDLE_TIMEOUT_S = 30.0
+
+
+def close_when_idle(
+    conn: psycopg.Connection, *, timeout_s: float = CLOSE_WHEN_IDLE_TIMEOUT_S
+) -> bool:
+    """Close a connection this process owns, but never while another thread
+    is inside it. Returns whether it was closed.
+
+    THE PAIR TO ``connect`` FOR ANY CONNECTION HELD ACROSS AN ``await``.
+    A connection that lives inside one request, or inside one thread, needs
+    nothing from this — call ``conn.close()`` and be done. This exists for the
+    other shape: the background loops and fire-and-forget tasks in ``app.py``
+    that open a connection, hand it to ``asyncio.to_thread``/
+    ``run_in_threadpool`` for the blocking work, and close it in a ``finally``.
+
+    **``asyncio.to_thread`` cannot be cancelled.** Cancelling the task that
+    awaits one unwinds the *coroutine* immediately while the worker thread
+    carries on running the query — a ``concurrent.futures`` work item that has
+    already started cannot be withdrawn. So the ``finally`` that closes the
+    connection runs, on a different thread, with a query still in flight on
+    the very object it is closing.
+
+    ``psycopg.Connection.close()`` is the one mutator psycopg does NOT take
+    ``conn.lock`` for (``connection.py``: ``Cursor.execute``, ``commit``,
+    ``rollback`` and every setter do; ``close`` does not). It calls
+    ``pgconn.finish()`` — ``PQfinish``, which frees the PGconn. The benign
+    outcome is the executing thread getting ``OperationalError: connection
+    socket closed``. The other outcome is that it had already read the pointer
+    and is inside libpq when the free lands: a use-after-free, and a SIGSEGV
+    that takes the whole process with it.
+
+    That is not hypothetical. It segfaulted the API suite on CI twice on
+    2026-08-13, at a different point each run (once mid-suite in
+    ``psycopg/_cursor_base.py:_select_current_result``, once in
+    ``test_agent_proxy.py``'s ``client`` fixture as ``TestClient.__exit__``
+    ran the lifespan's ``task.cancel()``), and never on macOS — the classic
+    shape of a data race read as a flake. Instrumenting
+    ``Cursor.execute``/``Connection.close`` across the suite recorded 57
+    close-during-execute events, every one of them a background loop's
+    ``finally`` closing a connection under ``capacity/reconcile.py``'s
+    ``asyncio.to_thread`` queries.
+
+    So: take the lock ``Cursor.execute`` holds for the whole round trip, and
+    close behind it. The close waits out the query it cannot cancel.
+
+    Failing to get the lock LEAKS the connection rather than closing it, and
+    that is the right trade in both directions. A connection abandoned open
+    costs one server-side session until the process exits; psycopg's
+    ``__del__`` only warns, it does not close, so an abandoned one cannot
+    re-enter this race behind our back. Closing it anyway would be choosing a
+    possible segfault over a certain leak.
+    """
+    # Not underscore-prefixed, and psycopg's own methods are its only other
+    # users — but it is not documented API either, so a version that drops it
+    # must not silently restore the race. ``test_db_connect_seam.py`` pins the
+    # behaviour (close waits for an in-flight execute) rather than the
+    # attribute, so psycopg moving it fails a test instead of a deploy.
+    lock = getattr(conn, "lock", None)
+    if lock is None:
+        log.error(
+            "psycopg.Connection has no `lock`: closing a background "
+            "connection without waiting for in-flight work. See "
+            "db.close_when_idle — this is the segfault that fix removed."
+        )
+        conn.close()
+        return True
+
+    if not lock.acquire(timeout=timeout_s):
+        log.error(
+            "a background connection was still busy after %ss; abandoning it "
+            "open rather than closing it under the thread using it",
+            timeout_s,
+        )
+        return False
+    try:
+        conn.close()
+    finally:
+        lock.release()
+    return True
+
+
 @dataclass(frozen=True)
 class Machine:
     """A row from ``public.machines``, as returned to callers that have

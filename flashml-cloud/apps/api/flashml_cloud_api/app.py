@@ -3422,12 +3422,17 @@ def create_cloud_app(
         request-scoped one from ``db_conn`` is closed the moment the response
         is sent, and a sweep holding it would be reading a closed socket the
         first time the timer fired between requests.
+
+        ``db.close_when_idle``, not ``conn.close`` — read that function before
+        changing this line. ``orchmod.reconcile`` does its blocking work in
+        ``asyncio.to_thread``, which cancellation cannot withdraw, so a bare
+        close here frees the PGconn under a thread still inside it.
         """
         conn = await run_in_threadpool(app.state.connect)
         try:
             return await orchmod.reconcile(conn, sandbox(), settings)
         finally:
-            await run_in_threadpool(conn.close)
+            await run_in_threadpool(dbmod.close_when_idle, conn)
 
     async def _reconcile_loop() -> None:
         """Sweep at startup and then on a timer, for ever.
@@ -3496,7 +3501,10 @@ def create_cloud_app(
                 log.warning("ephemeral machine sweep failed", exc_info=True)
             finally:
                 if conn is not None:
-                    await run_in_threadpool(conn.close)
+                    # `db.close_when_idle`, not `conn.close`: this `finally`
+                    # runs on cancellation too, and the `to_thread` above is
+                    # still executing when it does. See that function.
+                    await run_in_threadpool(dbmod.close_when_idle, conn)
             if ephemeral_reconcile_s <= 0:
                 return
             await asyncio.sleep(ephemeral_reconcile_s)
@@ -3559,7 +3567,16 @@ def create_cloud_app(
                 log.warning("rented capacity sweep failed", exc_info=True)
             finally:
                 if conn is not None:
-                    await run_in_threadpool(conn.close)
+                    # `db.close_when_idle`, not `conn.close`. THIS IS THE LINE
+                    # THAT SEGFAULTED CI on 2026-08-13: every `client` fixture
+                    # teardown cancels this task, the startup sweep is usually
+                    # still mid-query when it does (the first pass runs on the
+                    # startup edge and the interval is 300s, so cancellation
+                    # lands inside the sweep or not at all), and
+                    # `reconcile_rented`'s three `asyncio.to_thread` queries
+                    # keep running after the coroutine unwinds. See
+                    # `db.close_when_idle`.
+                    await run_in_threadpool(dbmod.close_when_idle, conn)
             if rented_reconcile_s <= 0:
                 return
             await asyncio.sleep(rented_reconcile_s)
@@ -3881,7 +3898,12 @@ def create_cloud_app(
         try:
             await run_in_threadpool(lambda: conn.execute("SELECT 1").fetchone())
         finally:
-            await run_in_threadpool(conn.close)
+            # `db.close_when_idle`, not `conn.close`: a client that gives up
+            # on its health check cancels this handler, and the SELECT is on
+            # another thread that the cancellation does not reach. See that
+            # function — a health check must not be able to segfault the
+            # process it is reporting on.
+            await run_in_threadpool(dbmod.close_when_idle, conn)
         return {"status": "ok", "database": "ok"}
 
     def request_scoped_connect() -> psycopg.Connection:
@@ -8805,7 +8827,11 @@ def create_cloud_app(
                     exc_info=True,
                 )
             finally:
-                await run_in_threadpool(conn.close)
+                # `db.close_when_idle`, not `conn.close`: `on_model_ready`
+                # blocks in `asyncio.to_thread`, and this task can be
+                # cancelled (shutdown, or a caller cancelling the session)
+                # while one of those is in flight. See that function.
+                await run_in_threadpool(dbmod.close_when_idle, conn)
 
         # Its own connection, not the request's: `db_conn` closes on the way
         # out of this response, and this task outlives it by up to fifteen
