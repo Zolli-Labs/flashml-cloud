@@ -245,6 +245,103 @@ that keeps task code away from cloud credentials. A new node type also touches
 `flashruntime.protocol`, which is a public-repo release plus a four-site pin
 bump.
 
+### D8 — A rental belongs to the work, not to one job. Drain, never cut. *(owner decision, 2026-08-12)*
+
+**The code today implements the opposite rule and must change.** `JOB_FINISHED`
+and `settle.rentals_for_jobs` both release a rental when *its* job ends, even
+while its machine is mid-task on another job in the same pool. That was left
+undecided pending this decision. It is now decided: they are wrong.
+
+**Why, in the owner's framing.** Jobs in one pool are usually iterations of the
+same workload — different jobs, same model. Handing the machine back between
+iterations does not save money; it throws away state we already paid for and
+then pays to rebuild it.
+
+**What is actually expensive is warm state, not GPU-seconds.** Before a rented
+machine does one second of useful work it must boot, pull a multi-gigabyte
+image, download and cache the dataset, and install and enrol the agent. That is
+why `DEFAULT_BOOT_GRACE_S` is an hour. Every minute of it bills at the full
+rate and produces nothing.
+
+**So the trade is arithmetic, not judgement:**
+
+> **cost of holding it idle** vs **cost of warming a replacement**
+
+Both are dollars per hour and both are measurable. If the gap between
+iterations is shorter than the re-warm time, holding is cheaper *and* faster —
+releasing loses on both axes. If it is longer, releasing wins. The threshold is
+a number the first real rental measures; it is not a guess.
+
+**The rule.** Hold the rental while its pool still has work it is eligible for.
+When the pool goes quiet, start a clock sized to the re-warm cost. When it
+expires: **drain, then destroy** —
+
+1. unbind the machine from the pool, so it can claim nothing new;
+2. let it finish whatever it is holding;
+3. destroy.
+
+**Unbinding is already a drain switch.** A machine gets work only because it is
+bound to a pool, so removing the binding stops new claims while leaving the
+current lease intact. Nobody's iteration is killed halfway, and the rule is one
+sentence to a user: *we give the machine back when it finishes what it is
+doing.*
+
+**Pool as proxy for "the campaign".** FlashML has jobs and tasks but no notion
+of an experiment spanning several jobs — twenty iterations of one model are
+twenty unrelated jobs. The pool is the closest existing grouping and needs no
+new schema. A real campaign id would be better and is a larger change.
+
+**The ceiling, because this rule has no natural end.** "Hold while there is
+work" means the bill follows the user's queue, not a job — work left queued
+overnight runs overnight. The wallet is the honest bound: an account holds
+10 ZC = $10 and cannot spend past it. **Confirm renting actually debits the
+wallet.** If it does not, that ceiling is imaginary and this rule is unbounded.
+
+### D9 — Every guard is a ledger read. Work that bypasses this API is invisible. *(owner decision, 2026-08-12)*
+
+**This is a constraint on the architecture, not a note about a URL.**
+
+Three parties: the **coordinator** hands out work; **this API** is the business
+layer; the **rented machine** asks for work and does it. A normal host talks to
+this API, which forwards to the coordinator — **and that forwarding is the
+moment we write things down.** "Machine X claimed task Y", "machine X is still
+going". Those rows are the entire basis of `WORK_IN_FLIGHT_SQL` and every
+teardown guard built on it.
+
+**Point a rented host at the coordinator instead and everything still works.**
+The coordinator does not care who asks. Jobs run, tasks complete, results come
+back. The only casualty is our visibility — and visibility is what the safety
+system is made of. Every guard then answers the same way:
+
+> is it working? → no rows → **no**
+
+An hour later the sweep does exactly what it was built to do, to a machine that
+was busy throughout. It is a nurse reading a chart to see whether a room is in
+use: if surgery stops writing to the chart, the room reads free and is cleared
+with the patient on the table. The guard is not broken; the record stopped
+being true.
+
+**Blast radius is total.** A wrong address is not a per-machine accident — it
+is one line in the adapter, applied identically to every rental. It does not
+lose one GPU; it loses every rented GPU at once, silently.
+
+**Why the mistake is easy:** `settings.coordinator_url` exists and sounds
+right, the coordinator genuinely is who hands out work, it passes local testing
+because jobs really do run, and the failure surfaces only later and in
+production. `app.py` already warns that `settings.coordinator_url` is "right
+for a single-host dev run and wrong for every deployed one". The field on
+`CapacityRequest` is named `enrolment_url` for this reason.
+
+**The standing constraint:** *any path that lets a machine do work without this
+API seeing it disables every teardown guard at once.* A future direct-to-
+coordinator path added for speed would not be an optimisation; it would
+silently switch off the thing that stops us destroying live jobs.
+
+**The check before arming, and it outranks every other safety item:** rent one
+real machine, let it start a task, and **look in `public.attempts` for a row
+naming it.** A row means the ledger can see it. No row means nothing else we
+built matters. Not a code review — read the table.
+
 ### D3 — The rented instance is the isolation boundary. Three requirements.
 
 Dropping the container is sound — it is how Modal, Replicate and RunPod
