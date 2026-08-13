@@ -43,6 +43,16 @@ export function creditRequestSummary(request: {
   return `${formatZc(request.requested_zc)} ZC requested`;
 }
 
+/** The sum of `requested_zc` across the queue rows currently on screen —
+ * never across a read that has not finished, since a queue this page has not
+ * fully read cannot honestly claim a total for it. Callers pass only the
+ * rows a `present`/`empty` panel actually holds (`lib/console/queue-panel.ts`
+ * `queueBadgeCount` draws the same line for the row count beside it), so an
+ * empty array here is a real "nothing pending", not "not read yet". */
+export function totalRequestedZc(requests: readonly { requested_zc: number }[]): number {
+  return requests.reduce((sum, request) => sum + request.requested_zc, 0);
+}
+
 /** Restores an optimistically removed oldest-first admin queue row. The id
  * check makes it safe if a refresh repopulated that same pending row before
  * the failed action's catch handler runs. */

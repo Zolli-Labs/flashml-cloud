@@ -6,6 +6,7 @@ import {
   nextCreditQueueGeneration,
   parseZcInput,
   restoreCreditRequest,
+  totalRequestedZc,
   usdForMillicredits,
 } from "./credit-requests";
 
@@ -34,6 +35,18 @@ describe("creditRequestSummary", () => {
     expect(
       creditRequestSummary({ requested_zc: 50_000, approved_zc: 25_000 })
     ).toContain("25 ZC approved from 50 ZC requested");
+  });
+});
+
+describe("totalRequestedZc", () => {
+  it("sums requested_zc across the visible queue", () => {
+    expect(
+      totalRequestedZc([{ requested_zc: 12_000 }, { requested_zc: 3_500 }])
+    ).toBe(15_500);
+  });
+
+  it("is a real 0 for an empty queue, not a claim about an unread one", () => {
+    expect(totalRequestedZc([])).toBe(0);
   });
 });
 

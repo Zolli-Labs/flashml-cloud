@@ -73,3 +73,22 @@ export function queuePanelState<T>(
   // `panel-state.ts` exists to protect.
   return { kind: "empty" };
 }
+
+/**
+ * The count a tab trigger's badge may show, from the SAME panel this
+ * module already resolved — never recomputed from `rows.length` directly,
+ * because that would drift from `queuePanelState`'s "stays `present` during
+ * a refresh" rule the moment one of the two call sites changed and the
+ * other did not.
+ *
+ * `null` on `loading` (nothing established yet) and `unreadable` (a failed
+ * read does not get to claim a count) — a badge is a claim about how many
+ * requests are pending, and `queuePanelState` is the one place that already
+ * knows when that claim is backed by a real read. `0` on `empty`, because a
+ * read that succeeded and found nothing pending really does mean 0.
+ */
+export function queueBadgeCount(panel: PanelState<readonly unknown[]>): number | null {
+  if (panel.kind === "present") return panel.data.length;
+  if (panel.kind === "empty") return 0;
+  return null;
+}

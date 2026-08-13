@@ -87,6 +87,11 @@ export function StatTile({
       <div className={cn("text-right", className)}>
         <div className={valueClass}>{display}</div>
         <div className="label-caps mt-0.5">{label}</div>
+        {hint && (
+          <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+            {hint}
+          </div>
+        )}
       </div>
     );
   }
