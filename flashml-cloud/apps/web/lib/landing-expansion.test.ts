@@ -29,6 +29,7 @@ describe("proof-led Zolli landing", () => {
   it("uses one canonical console, schedule, runtime, and contact destination", () => {
     expect(MARKETING).toEqual({
       consolePath: "/workspaces",
+      machinesPath: "/account/machines",
       calendlyUrl: "https://calendly.com/phongct1105/zolli-ai",
       contactEmail: "phongct1105@gmail.com",
       runtimeRepo: "https://github.com/Zolli-Labs/flashml",
@@ -39,7 +40,7 @@ describe("proof-led Zolli landing", () => {
     const calendlyAnchors = anchorTags(markup).filter((anchor) =>
       anchor.includes("calendly.com"),
     );
-    expect(calendlyAnchors).toHaveLength(4);
+    expect(calendlyAnchors).toHaveLength(3);
     for (const anchor of calendlyAnchors) {
       expect(anchor).toContain(`href="${MARKETING.calendlyUrl}"`);
       expect(anchor).toContain('target="_blank"');

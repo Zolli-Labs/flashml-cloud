@@ -3,6 +3,7 @@ import { act, createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hero } from "@/components/landing/Hero";
+import { HeroMarketSwitch } from "@/components/landing/HeroMarketSwitch";
 import { CoordinatorMap } from "@/components/landing/coordinator-map/CoordinatorMap";
 import { PlatformSupport } from "@/components/landing/PlatformSupport";
 import { SystemJourney } from "@/components/landing/SystemJourney";
@@ -796,19 +797,29 @@ describe("the infrastructure story", () => {
     environment.restore();
   });
 
-  it("renders the approved hero definition and action hierarchy", () => {
+  it("renders the open-compute hero and its two market paths", () => {
     const markup = renderToStaticMarkup(createElement(Hero));
-    const renderedText = markup.replace(/<[^>]+>/g, "").replace(/\s+/g, " ");
-    const definition = "Zolli unifies compatible cloud capacity, rented compute, owned GPU infrastructure, and everyday machines under one control plane, then recovers work when a node disappears.";
+    const roleMarkup = renderToStaticMarkup(createElement(HeroMarketSwitch));
+    const text = markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
-    expect(renderedText).toContain("Compute that finishes the job.");
-    expect(renderedText).toContain(definition);
-    expect(markup.indexOf("Open console")).toBeLessThan(markup.indexOf("Talk to Zolli"));
+    expect(text).toContain("Computing power, without the lock-in.");
+    expect(text).toContain("Need computing power?");
+    expect(text).toContain("Access more compute at a competitive price.");
+    expect(text).toContain("Have unused computing power?");
+    expect(text).toContain("Host it and earn from the work it completes.");
+    expect(markup).toContain('data-market-role="demand"');
+    expect(markup).toContain('data-market-role="supply"');
+    expect(roleMarkup).not.toContain("aria-live");
+    expect(markup).toContain('href="/workspaces"');
+    expect(markup).toContain('href="/account/machines"');
+    expect(markup.indexOf("Get early access")).toBeLessThan(
+      markup.indexOf("Provide compute"),
+    );
   });
 });
 
 describe("the coordinator map hero", () => {
-  it("promotes the coordinator map without changing the hero message", () => {
+  it("keeps the coordinator map while the hero leads with the open compute network", () => {
     const hero = source("components/landing/Hero.tsx");
 
     expect(hero).toContain(
@@ -819,8 +830,8 @@ describe("the coordinator map hero", () => {
     expect(hero).toContain("useMapStory()");
     expect(hero).not.toContain("HeroComputeFabric");
     expect(hero).not.toContain("HeroInfrastructureStack");
-    expect(hero.indexOf("Compute that ")).toBeLessThan(hero.indexOf("finishes the job."));
-    expect(hero.indexOf("Open console")).toBeLessThan(hero.indexOf("Talk to Zolli"));
+    expect(hero.indexOf("Computing power,")).toBeLessThan(hero.indexOf("without the lock-in."));
+    expect(hero.indexOf("Get early access")).toBeLessThan(hero.indexOf("Provide compute"));
   });
 
   it("removes the three.js compute fabric and everything generated for it", () => {

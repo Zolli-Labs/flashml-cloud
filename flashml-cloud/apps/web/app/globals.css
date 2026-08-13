@@ -584,6 +584,22 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .hero-market-switch {
+    display: block;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .hero-market-role {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .hero-market-role + .hero-market-role {
+    margin-top: 1.25rem;
+  }
+
   .workflow-scene-canvas [data-scene-path] {
     animation: none;
     stroke-dashoffset: 0;
@@ -593,6 +609,35 @@
     opacity: 1;
     transition: none;
   }
+}
+
+.hero-market-switch {
+  display: grid;
+  min-height: 5.25rem;
+  overflow: hidden;
+}
+
+.hero-market-role {
+  grid-area: 1 / 1;
+  animation: hero-market-demand 10s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+
+.hero-market-role[data-market-role="supply"] {
+  animation-name: hero-market-supply;
+}
+
+@keyframes hero-market-demand {
+  0%, 40% { opacity: 1; transform: translateY(0); }
+  48%, 92% { opacity: 0; transform: translateY(-1rem); }
+  92.01% { opacity: 0; transform: translateY(1rem); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes hero-market-supply {
+  0%, 40% { opacity: 0; transform: translateY(1rem); }
+  48%, 92% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-1rem); }
 }
 
 @layer base {

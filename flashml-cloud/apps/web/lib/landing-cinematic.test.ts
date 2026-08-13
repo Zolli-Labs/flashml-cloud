@@ -27,8 +27,10 @@ describe("cinematic landing foundation", () => {
   it("contains landing motion without hiding server content", () => {
     const markup = renderLanding();
     expect(markup).toContain('data-landing="cinematic"');
-    expect(markup).toContain("Compute that");
-    expect(markup).toContain("Open console");
+    expect(markup).toContain("Computing power,");
+    expect(markup).toContain("without the lock-in.");
+    expect(markup).toContain('data-market-role="demand"');
+    expect(markup).toContain('data-market-role="supply"');
     expect(markup).not.toContain('style="opacity:0"');
   });
 
@@ -57,10 +59,12 @@ describe("cinematic landing foundation", () => {
     expect(hero).toContain('data-map-core="coordinator"');
     expect(hero.match(/data-map-node=/g) ?? []).toHaveLength(4);
     expect(hero).toMatch(/data-map-readout="(?:running|lost|resumed|accepted)"/);
-    expect(hero).toContain("Compute that");
-    expect(hero).toContain("finishes the job.");
+    expect(hero).toContain("Computing power,");
+    expect(hero).toContain("without the lock-in.");
+    expect(hero).toContain('data-market-role="demand"');
+    expect(hero).toContain('data-market-role="supply"');
     expect(hero).toContain('href="/workspaces"');
-    expect(hero).toContain('href="https://calendly.com/phongct1105/zolli-ai"');
+    expect(hero).toContain('href="/account/machines"');
     expect(hero).not.toMatch(/data-evidence-value|production attempts/);
   });
 
