@@ -52,12 +52,28 @@ function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
   )
 }
 
+/**
+ * NO HOVER FILL BY DEFAULT — changed from the stock `hover:bg-muted-50`.
+ *
+ * Measured across `app/` and `components/`: of 27 `<tr>` in the console,
+ * exactly ONE carries a hover fill (the jobs table, whose rows are links).
+ * A hover fill is this codebase's signal that a row goes somewhere, and
+ * putting it on by default would have told a reader that every member row
+ * and every fleet row is clickable. A table whose rows navigate opts in with
+ * `className="hover:bg-surface-2/70"` — the value that one row already uses.
+ *
+ * `border-b` and not the `divide-y divide-border` the console hand-writes on
+ * 12 `<tbody>`s: same rendered hairline (`@layer base` sets `*` to
+ * `border-border`, so the bare `border-b` is the token and not
+ * `currentColor`), and `[&_tr:last-child]:border-0` on `TableBody` matches
+ * `divide-y`'s "between, not after" behaviour.
+ */
 function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
   return (
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b transition-colors hover:bg-muted-50 has-aria-expanded:bg-muted-50 data-[state=selected]:bg-muted",
+        "border-b transition-colors has-aria-expanded:bg-muted-50 data-[state=selected]:bg-muted",
         className
       )}
       {...props}
@@ -65,12 +81,19 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
   )
 }
 
+/**
+ * `px-3 py-2` and no `h-10` — the console's own modal header treatment,
+ * counted rather than chosen: 8 of the 20 hand-written `<th>` in `app/` and
+ * `components/` use exactly this, more than any other value. The stock
+ * `h-10 px-2` matched none of them, and `h-10` in particular forced a 40px
+ * header row that the console's 11px `.label-caps` labels do not fill.
+ */
 function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   return (
     <th
       data-slot="table-head"
       className={cn(
-        "h-10 px-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0",
+        "px-3 py-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0",
         className
       )}
       {...props}
@@ -78,12 +101,25 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   )
 }
 
+/**
+ * `px-3 py-2.5` — the console's modal cell treatment, 23 of 39 hand-written
+ * `<td>`, against `px-4 py-2.5` (14) and `px-3 py-3` (13). The stock `p-2`
+ * (8px on both axes) matched nothing in the console.
+ *
+ * MOVING THE PRIMITIVE RATHER THAN THE CALL SITES was the point: this file
+ * had no consumers at all before this sweep, so its defaults had never been
+ * under any pressure to agree with the tables people actually look at. With
+ * the default set to what the plurality already renders, the remaining
+ * hand-written tables convert with no pixels moving — which matters more
+ * than usual here, because no session in this workspace can sign in to check
+ * a console screen.
+ */
 function TableCell({ className, ...props }: React.ComponentProps<"td">) {
   return (
     <td
       data-slot="table-cell"
       className={cn(
-        "p-2 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0",
+        "px-3 py-2.5 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0",
         className
       )}
       {...props}

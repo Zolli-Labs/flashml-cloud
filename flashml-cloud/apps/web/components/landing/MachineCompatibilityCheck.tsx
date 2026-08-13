@@ -1,11 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import {
   MACHINE_HINTS,
   inferPlatformFamily,
   type MachineHint,
 } from "@/lib/landing/platform";
+import { DURATIONS, EASINGS } from "@/lib/motion/timing";
+
+/** `transition-colors` supplies the property list; the table supplies the
+ * timing, so this control agrees with the 180ms house curve rather than with
+ * Tailwind's stock 150ms `cubic-bezier(0.4, 0, 0.2, 1)`. */
+const CONTROL_TRANSITION: CSSProperties = {
+  transitionDuration: `${DURATIONS.control}ms`,
+  transitionTimingFunction: EASINGS.control.css,
+};
 
 export function MachineCompatibilityCheck() {
   const [result, setResult] = useState<MachineHint | null>(null);
@@ -30,6 +39,7 @@ export function MachineCompatibilityCheck() {
       <button
         type="button"
         onClick={checkThisBrowser}
+        style={CONTROL_TRANSITION}
         className="mt-4 inline-flex h-10 items-center rounded-full border border-brand-foreground px-4 text-sm font-medium text-brand-foreground transition-colors hover:bg-brand-foreground hover:text-background"
       >
         Check this browser

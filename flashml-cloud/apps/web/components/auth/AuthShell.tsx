@@ -65,7 +65,7 @@ export function AuthShell({
     <main id="content" className="grid min-h-dvh w-full bg-[var(--z-app-canvas)] text-ink lg:grid-cols-2">
       <section className="marketing-dark hidden min-h-dvh flex-col border-r border-border bg-background p-10 text-foreground lg:flex xl:p-14">
         <div className="flex items-center justify-between">
-          <Link href="/" aria-label="Zolli Cloud home" className="inline-flex">
+          <Link href="/" aria-label="Zolli Cloud home" className="interactive inline-flex rounded-[7px]">
             <Wordmark size={27} product tone="dark" />
           </Link>
           <HomeLink dark />
@@ -82,25 +82,25 @@ export function AuthShell({
             Zolli keeps machine loss visible and recoverable through real protocol state,
             not optimistic status messages.
           </p>
-        </div>
 
-        <div className="border-t border-[var(--z-border-strong)]">
-          {SYSTEM_STATES.map(([label, description]) => (
-            <div
-              key={label}
-              className="grid min-h-14 grid-cols-[120px_1fr] items-center border-b border-border font-mono text-[10px]"
-            >
-              <span className="text-foreground">{label}</span>
-              <span className="text-muted-foreground">{description}</span>
-            </div>
-          ))}
+          <div className="mt-10 border-t border-[var(--z-border-strong)]">
+            {SYSTEM_STATES.map(([label, description]) => (
+              <div
+                key={label}
+                className="grid min-h-14 grid-cols-[120px_1fr] items-center border-b border-border font-mono text-[10px]"
+              >
+                <span className="text-foreground">{label}</span>
+                <span className="text-muted-foreground">{description}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
       <section className="flex min-h-dvh w-full items-center justify-center px-5 py-10 sm:px-8 lg:px-12">
         <div className={bare ? "w-full max-w-xl" : "w-full max-w-[470px]"}>
           <div className="mb-9 flex items-center justify-between lg:hidden">
-            <Link href="/" aria-label="Zolli Cloud home" className="inline-flex">
+            <Link href="/" aria-label="Zolli Cloud home" className="interactive inline-flex rounded-[7px]">
               <Wordmark size={24} product />
             </Link>
             <HomeLink />

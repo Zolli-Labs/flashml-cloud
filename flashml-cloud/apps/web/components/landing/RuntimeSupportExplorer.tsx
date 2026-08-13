@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import {
   siDocker,
   siGithub,
@@ -16,6 +16,16 @@ import {
   RUNTIME_SUPPORT,
   type RuntimeIconKey,
 } from "@/lib/landing/platform";
+import { DURATIONS, EASINGS } from "@/lib/motion/timing";
+
+/** `transition-colors` supplies the property list; the table supplies the
+ * timing. Tailwind's stock default is 150ms on `cubic-bezier(0.4, 0, 0.2, 1)`
+ * — a second curve competing with the 180ms house control curve on 30 other
+ * elements of this page. Same properties, one curve. */
+const CONTROL_TRANSITION: CSSProperties = {
+  transitionDuration: `${DURATIONS.control}ms`,
+  transitionTimingFunction: EASINGS.control.css,
+};
 
 const RUNTIME_ICONS = {
   python: siPython,
@@ -68,6 +78,7 @@ export function RuntimeSupportExplorer() {
               data-runtime-button={runtime.icon}
               aria-pressed={active}
               onClick={() => setSelectedIndex(index)}
+              style={CONTROL_TRANSITION}
               className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-sm font-medium transition-colors ${
                 active
                   ? "border-brand-foreground bg-card text-foreground"

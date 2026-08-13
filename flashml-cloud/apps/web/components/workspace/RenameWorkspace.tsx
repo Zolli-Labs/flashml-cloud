@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ApiError, NotFound, renamePool } from "@/lib/cloud-api";
 import { notifyWorkspacesChanged } from "@/lib/workspace-events";
@@ -89,13 +90,9 @@ export function RenameWorkspace({
           />
           {error && <p className="mt-1.5 text-xs text-destructive">{error}</p>}
         </div>
-        <button
-          type="submit"
-          disabled={saving || !trimmed || unchanged}
-          className="interactive rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-        >
+        <Button type="submit" disabled={saving || !trimmed || unchanged}>
           {saving ? "Saving…" : "Save"}
-        </button>
+        </Button>
       </form>
     </section>
   );

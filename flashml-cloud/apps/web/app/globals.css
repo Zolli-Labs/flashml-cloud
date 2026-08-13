@@ -15,8 +15,18 @@
   --color-brand-foreground: var(--brand-foreground);
   --color-evergreen: var(--evergreen);
   --color-warning-foreground: var(--warning-foreground);
-  --font-sans: var(--font-instrument-sans);
-  --font-mono: var(--font-geist-mono);
+  /* Same missing fallback as `--font-mono` below, and found the same way:
+     the test written for mono failed on sans too. `.title` and `.display`
+     both carry `, sans-serif` in their own rules; the utility did not. */
+  --font-sans: var(--font-instrument-sans), sans-serif;
+  /* The `, monospace` fallback is load-bearing and was missing here while
+     every hand-written rule below carries it (`.meta`, `.terminal-text`,
+     `.metric-value`, and four more). Without it, `font-mono` compiles to a
+     lone `var(--font-geist-mono)`: anywhere that next/font variable fails to
+     resolve, monospace text silently renders as sans — and silently, because
+     the class is present and the utility exists. `lib/font-token.test.ts`
+     asserts the fallback survives into the compiled bundle. */
+  --font-mono: var(--font-geist-mono), monospace;
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -50,6 +60,11 @@
   --color-surface-elevated: var(--surface-elevated);
   --color-bg-rail: var(--bg-rail);
   --color-accent-text: var(--accent-text);
+  /* Without this, `bg-skeleton` generates NOTHING — same failure mode as the
+     `--color-popover` note above and the `--color-muted` one that
+     `lib/theme-tokens.test.ts` was written for. `lib/loading-token.test.ts`
+     asserts against the COMPILED output, because source alone cannot catch it. */
+  --color-skeleton: var(--skeleton);
 }
 
 /* Zolli's product register is warm mineral light. The marketing route
@@ -110,6 +125,16 @@
   --focus: var(--z-orange);
   --ring: var(--focus);
   --accent-text: var(--brand-hover);
+
+  /* The loading surface, and deliberately NOT `--surface-2`.
+     `--surface-2` is #f0eee8 against a --cream #f1efe9 page: one value per
+     channel. `components/ui/skeleton.tsx` painted `bg-muted` (which resolves
+     through `--surface-2`) and was therefore invisible — a panel mid-load
+     looked like a panel that was empty, which is exactly the distinction the
+     honesty rules require the UI to keep. This value is the one the working
+     `.skeleton` class already used as a bare hex; it is a token now so both
+     the class and the primitive read from one place. */
+  --skeleton: #eee5dc;
 
   /* Migration shims for unconverted console components. Do not use in new
      UI; pages will move to `brand` and `evergreen` as they are reskinned. */
@@ -815,6 +840,31 @@ body [class~="hover:bg-white/[0.08]"]:hover {
   text-wrap: balance;
 }
 
+/* A page title that is an IDENTIFIER — a job id, a machine name — rather than
+   prose. Same scale and rhythm as `.title`; monospace, and it may be
+   truncated, because an identifier has no good wrap point.
+ *
+ * This exists as its own class because `.title` is declared UNLAYERED, so it
+ * outranks every Tailwind utility regardless of specificity: writing
+ * `class="title font-mono"` silently renders as sans. Nothing catches that —
+ * the class is present, the utility compiles, and only the render disagrees.
+ *
+ * The root fix is to move these rules into `@layer components` so utilities
+ * win normally. That is deliberately NOT done here: it changes precedence
+ * everywhere `.title` meets a utility, and no session in this workspace can
+ * sign in to see the console pages it would affect. It wants a reviewed
+ * commit with someone looking, not a drive-by in a sweep. */
+.title-mono {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: clamp(1.5rem, 2.8vw, 2.25rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Machine-emitted supporting text: ids, counts, states. Small enough to
    read as annotation rather than as content competing with the heading. */
 .meta {
@@ -890,7 +940,7 @@ body [class~="hover:bg-white/[0.08]"]:hover {
 .skeleton {
   position: relative;
   overflow: hidden;
-  background: #eee5dc;
+  background: var(--skeleton);
   border-radius: var(--radius-sm);
 }
 

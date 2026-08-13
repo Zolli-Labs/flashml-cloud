@@ -1,5 +1,6 @@
 "use client";
 
+import { PageShell } from "@/components/shell/PageShell";
 import { InviteManager } from "@/components/workspace/InviteManager";
 import { RenameWorkspace } from "@/components/workspace/RenameWorkspace";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
@@ -19,7 +20,7 @@ export default function WorkspaceSettingsPage() {
   const owner = members.find((m) => m.user_id === pool.owner_id);
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+    <PageShell width="wide">
       <WorkspaceHeader />
 
       {isOwner ? (
@@ -65,7 +66,7 @@ export default function WorkspaceSettingsPage() {
           </DetailRow>
         </dl>
       </section>
-    </div>
+    </PageShell>
   );
 }
 

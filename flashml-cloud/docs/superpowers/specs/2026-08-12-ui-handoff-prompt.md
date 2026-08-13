@@ -83,6 +83,15 @@ respectively, and a baseline that is too low is worse than none: it certifies
 a regression as an improvement. Three sessions committed to `develop` on
 2026-08-12 alone. Any figure written here is a snapshot, not a fact about now.
 
+**The gate is two commands, not one.** `npm run build` needs `.env.dev`
+sourced, and sourcing it makes `middleware.test.ts` fail — that test asserts
+the signed-out contract when Supabase config is *absent*, so an ambient
+`NEXT_PUBLIC_SUPABASE_URL` defeats it. Run `vitest` / `tsc` / `lint` with no
+env, and the build in its own subshell. Run as written, you get a red
+middleware test and will reasonably suspect you broke **G-1** when you changed
+nothing — and the inverse mistake, waving a real middleware regression through
+as "just the env", is worse.
+
 ## Environment
 
 - Dev API `https://flashml-dev-api.onrender.com` · console `https://flashml-dev-web.onrender.com`
