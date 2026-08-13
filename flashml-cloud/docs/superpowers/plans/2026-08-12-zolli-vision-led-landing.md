@@ -127,6 +127,7 @@ behavior assertions:
 
 ```ts
 const markup = renderToStaticMarkup(createElement(Hero));
+const roleMarkup = renderToStaticMarkup(createElement(HeroMarketSwitch));
 const text = markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
 expect(text).toContain("Computing power, without the lock-in.");
@@ -136,7 +137,7 @@ expect(text).toContain("Have unused computing power?");
 expect(text).toContain("Host it and earn from the work it completes.");
 expect(markup).toContain('data-market-role="demand"');
 expect(markup).toContain('data-market-role="supply"');
-expect(markup).not.toContain("aria-live");
+expect(roleMarkup).not.toContain("aria-live");
 expect(markup).toContain('href="/workspaces"');
 expect(markup).toContain('href="/account/machines"');
 expect(markup.indexOf("Get early access")).toBeLessThan(
