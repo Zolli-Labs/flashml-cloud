@@ -8,7 +8,9 @@ import {
   classRow,
   classSpecLine,
   dayVerdict,
+  derivedChangeCell,
   filterRows,
+  historyStamp,
   hostClassGroups,
   hottestRows,
   kindChips,
@@ -16,7 +18,7 @@ import {
   rowKind,
   rowVramGb,
 } from "./board";
-import { REFERENCE_CLASSES, referenceClass } from "./reference";
+import { REFERENCE_CLASSES, referenceClass, referenceSeries } from "./reference";
 
 function point(over: Partial<PricePoint> = {}): PricePoint {
   return {
@@ -42,6 +44,19 @@ function rung(over: Partial<ZcRung> = {}): ZcRung {
   };
 }
 
+/** The coordinator's own eight rungs, in ladder order — the rows this
+ * console renders whether or not anything has traded in them. */
+const LADDER = [
+  "cpu-small",
+  "cpu-large",
+  "gpu-8gb",
+  "gpu-16gb",
+  "gpu-24gb",
+  "gpu-48gb",
+  "gpu-80gb",
+  "gpu-80gb-hopper",
+] as const;
+
 function view(over: Partial<PricesView> = {}): PricesView {
   return {
     quotes: [],
@@ -54,7 +69,11 @@ function view(over: Partial<PricesView> = {}): PricesView {
 
 describe("changeCell", () => {
   it("says why there is no delta instead of printing a zero", () => {
-    expect(changeCell(null)).toEqual({ direction: "none", text: "no history" });
+    expect(changeCell(null)).toEqual({
+      direction: "none",
+      text: "no history",
+      reference: false,
+    });
   });
 
   it("keeps a measured zero as a measured zero", () => {
@@ -64,8 +83,68 @@ describe("changeCell", () => {
   });
 
   it("marks direction the way a market does", () => {
-    expect(changeCell(250)).toEqual({ direction: "up", text: "▲ 0.25 ZC" });
-    expect(changeCell(-250)).toEqual({ direction: "down", text: "▼ 0.25 ZC" });
+    expect(changeCell(250)).toEqual({
+      direction: "up",
+      text: "▲ 0.25 ZC",
+      reference: false,
+    });
+    expect(changeCell(-250)).toEqual({
+      direction: "down",
+      text: "▼ 0.25 ZC",
+      reference: false,
+    });
+  });
+
+  it("never marks a measured move as somebody else's", () => {
+    // The flag is what keeps green and red for our own book. A cell built
+    // from `change_zc` is always ours, whatever else is on the board.
+    for (const change of [null, 0, 250, -250]) {
+      expect(changeCell(change).reference).toBe(false);
+    }
+  });
+});
+
+describe("derivedChangeCell", () => {
+  const day = (n: number, valueMzc: number) => ({
+    at: `2026-08-${String(n).padStart(2, "0")}`,
+    valueMzc,
+  });
+
+  it("reports a percentage, not a ZC amount nobody paid", () => {
+    // A live cell says `▲ 0.25 ZC` — an amount somebody could have been
+    // charged. A derived cell may only describe a shape.
+    const cell = derivedChangeCell([day(12, 1_000), day(13, 1_034)]);
+    expect(cell).toEqual({ direction: "up", text: "▲ 3.4%", reference: true });
+    expect(derivedChangeCell([day(12, 1_000), day(13, 900)]).text).toBe(
+      "▼ 10.0%"
+    );
+  });
+
+  it("stays marked as somebody else's, in every direction", () => {
+    expect(derivedChangeCell([day(12, 5), day(13, 5)])).toEqual({
+      direction: "none",
+      text: "unchanged",
+      reference: true,
+    });
+    expect(derivedChangeCell([]).reference).toBe(true);
+    expect(derivedChangeCell([day(13, 5)]).text).toBe("—");
+  });
+
+  it("states a direction without a percentage off a zero baseline", () => {
+    const cell = derivedChangeCell([day(12, 0), day(13, 500)]);
+    expect(cell).toEqual({ direction: "up", text: "▲", reference: true });
+  });
+
+  it("agrees with the verdict drawn under the same points", () => {
+    // One reading behind both sentences: the card cannot say 3.4% while the
+    // board row says 3.5%.
+    const points = [day(12, 1_000), day(13, 1_034)];
+    const cell = derivedChangeCell(points);
+    const verdict = dayVerdict({ source: "derived", points, note: "n" });
+    expect(verdict.text).toContain("3.4%");
+    expect(cell.text).toContain("3.4%");
+    expect(verdict.direction).toBe(cell.direction);
+    expect(verdict.reference).toBe(cell.reference);
   });
 });
 
@@ -125,8 +204,140 @@ describe("boardRows", () => {
 
   it("never leaves a row unsourced", () => {
     for (const row of boardRows(view())) {
-      expect(["live", "reference"]).toContain(row.source.kind);
+      expect(["live", "reference", "derived", "empty"]).toContain(
+        row.source.kind
+      );
     }
+  });
+});
+
+describe("a rung nobody has quoted into", () => {
+  /** The shape the owner was looking at: the coordinator publishes the rung
+   * because its ladder has it, and nothing has ever happened in it. */
+  const untouched = (klass: string) =>
+    rung({
+      capability_class: klass,
+      best_ask_zc: null,
+      best_ask_usd: null,
+      change_zc: null,
+      depth: 0,
+      history: [],
+    });
+
+  const rowFor = (klass: string) =>
+    boardRows(view({ zc: [untouched(klass)] }))[0];
+
+  it("never claims a live book behind nothing", () => {
+    // `LIVE · 0 obs` on an empty book is a market badge on a market that has
+    // not opened. Neither the derived rows below nor the unknown one carry
+    // the live stamp at all.
+    for (const klass of ["gpu-24gb", "cpu-small", "npu-shiny"]) {
+      expect(rowFor(klass).source.kind, klass).not.toBe("live");
+    }
+  });
+
+  it("keeps the live stamp for a rung with an ask but no observation", () => {
+    // Zero observations is not zero market: somebody has an open ask, which
+    // is our own book saying something.
+    const row = boardRows(
+      view({ zc: [rung({ history: [], depth: 2, best_ask_zc: 900 })] })
+    )[0];
+    expect(row.source).toEqual({ kind: "live", observations: 0 });
+    expect(row.lastAskText).toBe("0.90 ZC/hr");
+  });
+
+  it("prices the eight rungs of the ladder from the seed", () => {
+    const table = LADDER.map((klass) => {
+      const row = rowFor(klass);
+      return [klass, row.lastAskText];
+    });
+    expect(table).toEqual([
+      ["cpu-small", "≈ 0.16 ZC/hr"],
+      ["cpu-large", "≈ 0.32 ZC/hr"],
+      ["gpu-8gb", "≈ 0.19 ZC/hr"],
+      ["gpu-16gb", "≈ 0.19 ZC/hr"],
+      ["gpu-24gb", "≈ 0.27 ZC/hr"],
+      ["gpu-48gb", "≈ 0.44 ZC/hr"],
+      ["gpu-80gb", "≈ 1.59 ZC/hr"],
+      ["gpu-80gb-hopper", "≈ 3.29 ZC/hr"],
+    ]);
+  });
+
+  it("marks every derived figure as an estimate, in both currencies", () => {
+    const row = rowFor("gpu-24gb");
+    expect(row.equivalentText).toBe("≈ $0.27/hr");
+    // No ask, whatever the text says: the field a sort would read must not
+    // hold an estimate.
+    expect(row.lastAskMzc).toBeNull();
+  });
+
+  it("stamps the row with the sentence naming its donor", () => {
+    expect(rowFor("gpu-48gb").source).toEqual({
+      kind: "derived",
+      note: "cheapest card meeting the 48 GB floor: NVIDIA A40",
+    });
+  });
+
+  it("does not rename the class after the card it borrowed from", () => {
+    // `gpu-24gb` is not an A5000 and must not be labelled one. The two
+    // definitional classes keep the name the alias already gave them.
+    expect(rowFor("gpu-24gb").displayName).toBeNull();
+    expect(rowFor("gpu-80gb-hopper").displayName).toContain("H100");
+  });
+
+  it("moves in the reference marking, never in the market's colours", () => {
+    const change = rowFor("gpu-80gb-hopper").change;
+    expect(change.reference).toBe(true);
+    // The H100's last daily step, as a shape rather than an amount.
+    expect(change.text).toBe("▼ 2.9%");
+    expect(change.direction).toBe("down");
+  });
+
+  it("draws the donor's last week as a dashed curve", () => {
+    const row = rowFor("gpu-24gb");
+    expect(row.sparkDashed).toBe(true);
+    expect(row.spark).toHaveLength(7);
+    // Normalised into the same 0–100 box a live sparkline uses.
+    expect(row.spark?.[0].x).toBe(0);
+    expect(row.spark?.[6].x).toBe(100);
+    for (const point of row.spark ?? []) {
+      expect(point.y).toBeGreaterThanOrEqual(0);
+      expect(point.y).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it("keeps an empty book's real zero, which a seed row does not have", () => {
+    // 0 open asks is a fact about our book; the seed rows have no book at
+    // all and print an em dash.
+    expect(rowFor("gpu-24gb").depth).toBe(0);
+    expect(
+      boardRows(view()).find((row) => row.source.kind === "reference")?.depth
+    ).toBeNull();
+  });
+
+  it("says so plainly for a rung nothing in the seed describes", () => {
+    const row = rowFor("npu-shiny");
+    expect(row.source).toEqual({ kind: "empty" });
+    expect(row.lastAskText).toBe("—");
+    expect(row.equivalentText).toBeNull();
+    expect(row.change.text).toBe("no history");
+    expect(row.spark).toBeNull();
+    expect(row.sparkDashed).toBe(false);
+  });
+
+  it("still leaves the donor's own row on the board", () => {
+    // A borrowed price is not a claim on the vendor row: the A5000 is a
+    // ticker of its own and stays one.
+    const rows = boardRows(view({ zc: [untouched("gpu-24gb")] }));
+    expect(rows.map((row) => row.klass)).toContain("RTX-A5000-24G");
+  });
+
+  it("keeps an estimate out of the hottest rail", () => {
+    // The rail reads rungs, not rows, and an untouched rung answers none of
+    // its three questions however priceable its class is.
+    expect(hottestRows([untouched("gpu-24gb"), untouched("cpu-large")])).toEqual(
+      []
+    );
   });
 });
 
@@ -147,7 +358,24 @@ describe("classRow", () => {
     expect(classRow(null, "H100-80G")?.source.kind).toBe("reference");
   });
 
-  it("is null for a ticker neither source knows", () => {
+  it("derives a class the board has published no rung for", () => {
+    const row = classRow(view(), "cpu-large");
+    expect(row?.klass).toBe("cpu-large");
+    expect(row?.source.kind).toBe("derived");
+    // No rung means no book at all, which is not a book with nothing in it.
+    expect(row?.depth).toBeNull();
+  });
+
+  it("answers a capability class under its own ticker, not the donor's", () => {
+    // The seed would answer `gpu-80gb-hopper` with a row calling itself
+    // `H100-80G` — a different ticker, with a different page behind it.
+    const row = classRow(null, "gpu-80gb-hopper");
+    expect(row?.klass).toBe("gpu-80gb-hopper");
+    expect(row?.href).toBe("/market/prices/gpu-80gb-hopper");
+    expect(row?.lastAskText).toBe("≈ 3.29 ZC/hr");
+  });
+
+  it("is null for a ticker no source knows", () => {
     expect(classRow(view(), "gpu-1tb")).toBeNull();
     expect(classRow(null, "")).toBeNull();
   });
@@ -419,12 +647,28 @@ describe("hostClassGroups", () => {
     expect(groups[0].verdict.reference).toBe(false);
   });
 
-  it("falls back to the seed series, flagged, for a class with no book", () => {
+  it("falls back to a borrowed series, flagged, for a class with no book", () => {
     const groups = hostClassGroups(view(), machines);
     const hopper = groups[1];
-    expect(hopper.history?.source).toBe("reference");
+    expect(hopper.history?.source).toBe("derived");
     expect(hopper.verdict.reference).toBe(true);
     expect(hopper.displayName).toContain("H100");
+  });
+
+  it("gives a host in an untouched class a price, a verdict and a donor", () => {
+    // The complaint this whole change answers, one card at a time: a
+    // cpu-large machine used to show "—" and "no history yet".
+    const groups = hostClassGroups(view(), [
+      { id: "m1", label: "workstation", klass: "cpu-large" },
+    ]);
+    expect(groups[0].row?.lastAskText).toBe("≈ 0.32 ZC/hr");
+    expect(groups[0].row?.source).toEqual({
+      kind: "derived",
+      note: expect.stringContaining("128 vCPU"),
+    });
+    expect(groups[0].history?.source).toBe("derived");
+    expect(groups[0].verdict.text).not.toBe("no history yet");
+    expect(groups[0].verdict.reference).toBe(true);
   });
 
   it("still makes a card for a class neither source knows", () => {
@@ -512,17 +756,60 @@ describe("classHistory", () => {
   });
 
   it("falls back to the seed only when we have fewer than two of our own", () => {
-    const data = classHistory(
-      rung({ history: [point()] }),
-      referenceClass("H100-80G")
-    );
+    // A seed ticker's own page: no rung of ours, so the seed's series is
+    // the only one there is.
+    const data = classHistory(null, referenceClass("RTX-4090-24G"));
     expect(data?.source).toBe("reference");
     expect(data?.points.length).toBeGreaterThan(2);
   });
 
-  it("is null when neither source has a series", () => {
-    expect(classHistory(rung({ history: [] }), null)).toBeNull();
+  it("borrows a donor series for a class with one observation", () => {
+    // One point is not a chart. The class still has a derivation, and it is
+    // stamped derived rather than passed off as the beginning of our own.
+    const data = classHistory(rung({ history: [point()] }), null);
+    expect(data?.source).toBe("derived");
+    expect(data?.points).toHaveLength(30);
+    expect(data?.source === "derived" && data.note).toContain("RTX A5000");
+  });
+
+  it("reads the class off the rung when the caller does not pass one", () => {
+    // What lets `/market/prices/[klass]` pick a derivation up unchanged.
+    expect(classHistory(rung({ history: [] }), null)?.source).toBe("derived");
+    expect(classHistory(null, null, "cpu-large")?.source).toBe("derived");
+  });
+
+  it("prefers the derivation to the seed row for the two aliased classes", () => {
+    // Both would answer with the H100's points; only one of them also says
+    // whose points they are.
+    const data = classHistory(
+      rung({ capability_class: "gpu-80gb-hopper", history: [] }),
+      referenceClass("gpu-80gb-hopper")
+    );
+    expect(data?.source).toBe("derived");
+    expect(data?.points).toEqual(referenceSeries(referenceClass("H100-80G")!));
+  });
+
+  it("is null when no source has a series", () => {
+    expect(
+      classHistory(rung({ capability_class: "npu-shiny", history: [] }), null)
+    ).toBeNull();
     expect(classHistory(null, null)).toBeNull();
+  });
+});
+
+describe("historyStamp", () => {
+  it("says nothing about our own series", () => {
+    expect(historyStamp(null)).toBeNull();
+    expect(historyStamp({ source: "live", points: [] })).toBeNull();
+  });
+
+  it("hands the derived chip its donor sentence", () => {
+    expect(
+      historyStamp({ source: "derived", points: [], note: "from a card" })
+    ).toEqual({ kind: "derived", note: "from a card" });
+    expect(historyStamp({ source: "reference", points: [] })).toEqual({
+      kind: "reference",
+    });
   });
 });
 

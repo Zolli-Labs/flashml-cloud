@@ -1,10 +1,11 @@
 /** What the price board is allowed to say, once the seed sits beside it.
  *
  * WHY THIS MODULE EXISTS. `lib/market-prices.ts` shapes one rung at a time
- * and knows nothing about the reference table. The board now interleaves two
- * sources with different guarantees — the coordinator's own book, and a
- * generated snapshot of vendor prices — and every rule for keeping them
- * apart is a decision rather than markup: which rows exist, what a row says
+ * and knows nothing about the reference table. The board now interleaves
+ * three kinds of number with different guarantees — the coordinator's own
+ * book, a generated snapshot of vendor prices, and a class priced FROM that
+ * snapshot because nobody has quoted into it yet — and every rule for keeping
+ * them apart is a decision rather than markup: which rows exist, what a row says
  * when it has no number, which source stamp it carries, which rows a filter
  * chip selects, and which way a host's own class moved overnight. Those
  * live here where a test can reach them, and the components render what
@@ -23,26 +24,48 @@ import { formatZc } from "../market-credits";
 import { deltaCell, sparkPoints } from "../market-prices";
 import {
   REFERENCE_CLASSES,
+  classDerivation,
   referenceClass,
   referenceKlassFor,
   referenceSeries,
   referenceSpecLine,
   referenceZcPerHour,
+  type ClassDerivation,
   type ReferenceClass,
+  type SeriesPoint,
 } from "./reference";
 
-/** Where a row's numbers came from. `observations` is the count behind a
- * live row — the honest denominator for "LIVE", including when it is 0. */
+/** Where a row's numbers came from.
+ *
+ * `live` carries the observation count behind the row — the honest
+ * denominator for "LIVE". It is only ever stamped on a rung that HAS
+ * something: an observation, or an open ask. A rung with neither is not a
+ * quiet live market, it is a book nobody has touched, and `LIVE · 0 obs` on
+ * one advertised a market that did not exist yet.
+ *
+ * `reference` is a seed row: a vendor SKU, priced by the snapshot.
+ * `derived` is a capability class priced FROM a seed row, and `note` is the
+ * sentence naming which one — the chip cannot render without it.
+ * `empty` is the honest fourth answer: a rung with no book and nothing in
+ * the seed that describes it. No stamp, because there is nothing to stamp. */
 export type RowSource =
   | { kind: "live"; observations: number }
-  | { kind: "reference" };
+  | { kind: "reference" }
+  | { kind: "derived"; note: string }
+  | { kind: "empty" };
 
 /** The 24-hour move as a ticker cell. `direction` is purely directional
  * (market convention colours it) and the text never contains a number the
- * API did not report: a null change is the words, not a zero. */
+ * API did not report: a null change is the words, not a zero.
+ *
+ * `reference` says the movement was read off a series that is not our book.
+ * It travels with the cell for the same reason `DayVerdict` carries one: a
+ * green +3.4% in a column of live moves is a claim about our market, and a
+ * view that cannot tell the two apart will make it. */
 export interface ChangeCell {
   direction: "up" | "down" | "none";
   text: string;
+  reference: boolean;
 }
 
 export function changeCell(changeZc: number | null): ChangeCell {
@@ -51,10 +74,39 @@ export function changeCell(changeZc: number | null): ChangeCell {
   // kind". Here the reason is specific — there is no observation older than
   // 24 h to subtract — so it gets its own words. The direction is still
   // its decision, not one taken twice.
-  if (changeZc === null) return { direction: "none", text: "no history" };
+  if (changeZc === null)
+    return { direction: "none", text: "no history", reference: false };
   const { direction } = deltaCell(changeZc);
   const arrow = direction === "up" ? "▲ " : direction === "down" ? "▼ " : "";
-  return { direction, text: `${arrow}${zcAmountText(Math.abs(changeZc))} ZC` };
+  return {
+    direction,
+    text: `${arrow}${zcAmountText(Math.abs(changeZc))} ZC`,
+    reference: false,
+  };
+}
+
+/** The 24 h cell for a derived row: the last step of the very series the
+ * row's sparkline draws.
+ *
+ * A PERCENTAGE, NOT A ZC DELTA, and that is the tell. A live cell says
+ * `▲ 0.25 ZC` — an amount somebody could have paid. A derived cell says
+ * `▲ 3.4%` — a shape, off a vendor series, with `reference` set so the
+ * column renders it in neither of the market's two colours. */
+export function derivedChangeCell(points: readonly SeriesPoint[]): ChangeCell {
+  const step = lastStep(points);
+  if (step === null)
+    return { direction: "none", text: "—", reference: true };
+  if (step.delta === 0)
+    return { direction: "none", text: "unchanged", reference: true };
+  const arrow = step.delta < 0 ? "▼" : "▲";
+  // No percentage off a zero baseline — the same rule `dayVerdict` applies
+  // to a donated ask, for the same reason: the division means nothing.
+  const pct = step.pct === null ? "" : ` ${step.pct.toFixed(1)}%`;
+  return {
+    direction: step.delta < 0 ? "down" : "up",
+    text: `${arrow}${pct}`,
+    reference: true,
+  };
 }
 
 /** A millicredit amount as money: `formatZc` plus the trailing zero it
@@ -81,7 +133,11 @@ export interface BoardRow {
    * Null rather than a repeat of the ticker. */
   displayName: string | null;
   /** Millicredits per hour, or null for an empty book. Kept alongside the
-   * text because the rankings below sort on it. */
+   * text because the rankings below sort on it.
+   *
+   * NULL ON A DERIVED ROW, whose text carries a price. The field means "the
+   * ask", a derived row has none, and a sort that could not tell an estimate
+   * from an ask would rank a vendor number against money somebody offered. */
   lastAskMzc: number | null;
   lastAskText: string;
   /** The fixed-parity cash equivalent, as the API worded it for a live row
@@ -94,8 +150,14 @@ export interface BoardRow {
    * daily points. The sparkline in a table cell has no room for a caption,
    * and an unlabelled line next to a live one claims to be the same kind of
    * fact. The class page draws the seed history properly, with its badge.
-   */
+   *
+   * A DERIVED row is the exception, and `sparkDashed` is what buys it: the
+   * caption a table cell cannot hold is replaced by the stroke itself, which
+   * is dashed and muted and cannot be read as one of our own lines. */
   spark: { x: number; y: number }[] | null;
+  /** Draw `spark` as a dashed curve rather than a solid one. Set here rather
+   * than inferred from `source` in the table, so the two can never drift. */
+  sparkDashed: boolean;
   /** Open asks behind the price. Null for a reference row: it has no book,
    * which is not the same as a book with nothing in it. */
   depth: number | null;
@@ -155,10 +217,46 @@ function classHref(klass: string): string {
   return `/market/prices/${encodeURIComponent(klass)}`;
 }
 
+/** Whether a rung has anything of its own to say.
+ *
+ * An observation or an open ask, either one. Both absent is the case the
+ * owner was looking at: a rung the coordinator publishes because the ladder
+ * has it, not because anything has happened in it. */
+function rungHasBook(rung: ZcRung): boolean {
+  return (
+    rung.history.length > 0 || rung.depth > 0 || rung.best_ask_zc !== null
+  );
+}
+
 function liveRow(rung: ZcRung): BoardRow {
-  const entry = referenceClass(rung.capability_class);
+  const klass = rung.capability_class;
+  const entry = referenceClass(klass);
+
+  // An untouched rung is not a live row with zeroes in it. It borrows a
+  // vendor price if the seed describes its class, and says so plainly if
+  // not — but either way it stops claiming a market.
+  if (!rungHasBook(rung)) {
+    const derived = classDerivation(klass);
+    if (derived) return derivedRow(klass, derived, rung.depth);
+    return {
+      klass,
+      displayName: entry?.displayName ?? null,
+      lastAskMzc: null,
+      lastAskText: "—",
+      equivalentText: null,
+      change: changeCell(null),
+      spark: null,
+      sparkDashed: false,
+      depth: rung.depth,
+      source: { kind: "empty" },
+      href: classHref(klass),
+      kind: rowKind(klass, entry),
+      vramGb: rowVramGb(klass, entry),
+    };
+  }
+
   return {
-    klass: rung.capability_class,
+    klass,
     displayName: entry?.displayName ?? null,
     lastAskMzc: rung.best_ask_zc,
     lastAskText:
@@ -171,12 +269,74 @@ function liveRow(rung: ZcRung): BoardRow {
       rung.best_ask_usd === null ? null : `$${rung.best_ask_usd}/hr`,
     change: changeCell(rung.change_zc),
     spark: sparkPoints(rung.history),
+    sparkDashed: false,
     depth: rung.depth,
     source: { kind: "live", observations: rung.history.length },
-    href: classHref(rung.capability_class),
-    kind: rowKind(rung.capability_class, entry),
-    vramGb: rowVramGb(rung.capability_class, entry),
+    href: classHref(klass),
+    kind: rowKind(klass, entry),
+    vramGb: rowVramGb(klass, entry),
   };
+}
+
+/** How many of a derived series' points the 7d cell draws. The column says
+ * 7d; thirty daily points squeezed into the same 96px beside a live row's
+ * week would be two different spans drawn as if they were one. */
+const SPARK_POINTS = 7;
+
+/** A capability class priced from the seed.
+ *
+ * THE ≈ IS PART OF THE NUMBER. Every string this row carries is prefixed,
+ * because the row sits in a right-aligned column of asks somebody actually
+ * made and is otherwise indistinguishable from them at a glance.
+ *
+ * `depth` is the rung's own count when there is a rung — an empty book is a
+ * real 0 and reads differently from a seed row's "—", which has no book at
+ * all — and null when this row stands in for a class no rung was published
+ * for. */
+function derivedRow(
+  klass: string,
+  derived: ClassDerivation,
+  depth: number | null
+): BoardRow {
+  const entry = referenceClass(klass);
+  return {
+    klass,
+    // The donor's name is NOT this class's name: `gpu-24gb` is not an A5000
+    // and must not be labelled one. The two definitional classes keep the
+    // name they already had, because for them the alias IS the definition.
+    displayName: entry?.displayName ?? null,
+    lastAskMzc: null,
+    lastAskText: `≈ ${zcAmountText(derived.priceMzc)} ZC/hr`,
+    equivalentText: `≈ $${zcAmountText(derived.priceMzc)}/hr`,
+    change: derivedChangeCell(derived.history),
+    spark: seriesSpark(derived.history.slice(-SPARK_POINTS)),
+    sparkDashed: true,
+    depth,
+    source: { kind: "derived", note: derived.note },
+    href: classHref(klass),
+    kind: rowKind(klass, entry),
+    vramGb: rowVramGb(klass, entry),
+  };
+}
+
+/** A millicredit series in `<Sparkline>`'s 0–100 box, oldest → newest.
+ *
+ * The same normalisation as `sparkPoints`, including the flat-series centre
+ * line, for a series that is already in order and already in millicredits —
+ * so a derived curve and a live one are the same drawing of the same shape. */
+function seriesSpark(
+  points: readonly SeriesPoint[]
+): { x: number; y: number }[] | null {
+  if (points.length < 2) return null;
+  const values = points.map((point) => point.valueMzc);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min;
+  const step = 100 / (values.length - 1);
+  return values.map((value, i) => ({
+    x: i * step,
+    y: span === 0 ? 50 : 100 - ((value - min) / span) * 100,
+  }));
 }
 
 function referenceRow(entry: ReferenceClass): BoardRow {
@@ -191,8 +351,9 @@ function referenceRow(entry: ReferenceClass): BoardRow {
     // would yield a daily delta, but calling it the 24h change of a book
     // nobody has listed in would be the exact confusion this row is badged
     // to prevent — so the cell states the absence and stops there.
-    change: { direction: "none", text: "—" },
+    change: { direction: "none", text: "—", reference: true },
     spark: null,
+    sparkDashed: false,
     depth: null,
     source: { kind: "reference" },
     href: classHref(entry.klass),
@@ -235,6 +396,12 @@ export function classRow(
 ): BoardRow | null {
   const rung = view?.zc.find((r) => r.capability_class === klass);
   if (rung) return liveRow(rung);
+  // A derivation before the seed row, because a derivation is ABOUT this
+  // class and a seed row is about a card: asked for `gpu-80gb-hopper` with
+  // no rung to answer from, the seed hands back a row that calls itself
+  // `H100-80G`, which is a different ticker with a different page.
+  const derived = classDerivation(klass);
+  if (derived) return derivedRow(klass, derived, null);
   const entry = referenceClass(klass);
   return entry ? referenceRow(entry) : null;
 }
@@ -383,9 +550,12 @@ export interface HotRow {
 
 /** What the live book is doing, in at most three lines.
  *
- * LIVE RUNGS ONLY. The seed cannot answer any of these questions — it has
- * no depth, no movement and no ask — so a quiet market returns fewer lines,
- * or none, rather than lines about vendor prices dressed as our own.
+ * LIVE RUNGS ONLY, and it takes rungs rather than rows so that it cannot be
+ * handed anything else. Neither the seed nor a derivation can answer any of
+ * these questions — no depth, no movement, no ask — so a quiet market returns
+ * fewer lines, or none, rather than lines about vendor prices dressed as our
+ * own. "Cheapest live ask" naming a class nobody has listed in would be the
+ * one place on this page where an estimate reads as a transaction.
  *
  * Each line is skipped when nothing qualifies for it, which is why the
  * result is a list and not a fixed triple. */
@@ -439,25 +609,55 @@ export function hottestRows(zc: readonly ZcRung[]): HotRow[] {
 
 /** The series behind a class page's chart, and which kind of series it is.
  *
- * The order of the three answers is the whole point: OUR observations if
- * there are two of them, the seed only when there are not, and null when
- * neither source has anything — never a seed line quietly standing in for a
- * live one on a class that has started trading. */
+ * The order of the answers is the whole point: OUR observations if there are
+ * two of them, a borrowed series only when there are not, and null when
+ * nothing has one — never a vendor line quietly standing in for a live one on
+ * a class that has started trading.
+ *
+ * `derived` carries the sentence naming its donor, because the chart it
+ * draws is a card's history under a class's name and the caption has to say
+ * whose. */
 export type PriceHistoryData =
-  | { source: "live"; points: { at: string; valueMzc: number }[] }
-  | { source: "reference"; points: { at: string; valueMzc: number }[] }
+  | { source: "live"; points: SeriesPoint[] }
+  | { source: "reference"; points: SeriesPoint[] }
+  | { source: "derived"; points: SeriesPoint[]; note: string }
   | null;
 
+/** @param klass the capability class being charted, when the caller knows it
+ * independently of the rung. Defaults to the rung's own class, which is what
+ * lets the class page pick a derivation up without being rewritten. */
 export function classHistory(
   rung: ZcRung | null,
-  entry: ReferenceClass | null
+  entry: ReferenceClass | null,
+  klass?: string
 ): PriceHistoryData {
   const observed = livePoints(rung?.history ?? []);
   if (observed.length >= 2) return { source: "live", points: observed };
+  // Derivation before the seed row, for the two definitional classes where
+  // both would answer: they resolve to the same donor and the same points,
+  // and the derived arm is the one that also names it.
+  const derived = classDerivation(klass ?? rung?.capability_class ?? "");
+  if (derived && derived.history.length >= 2) {
+    return {
+      source: "derived",
+      points: derived.history,
+      note: derived.note,
+    };
+  }
   if (entry && entry.history.length >= 2) {
     return { source: "reference", points: referenceSeries(entry) };
   }
   return null;
+}
+
+/** The stamp a SERIES deserves, which is not always the stamp its price got:
+ * a class with one live observation prices itself live and still has to
+ * borrow a line to draw. Null where the series is ours, or absent — there is
+ * nothing to disclose about our own book. */
+export function historyStamp(data: PriceHistoryData): RowSource | null {
+  if (data === null || data.source === "live") return null;
+  if (data.source === "derived") return { kind: "derived", note: data.note };
+  return { kind: "reference" };
 }
 
 /** Observations as chart points, oldest → newest, dropping the ones with no
@@ -522,13 +722,15 @@ export interface DayVerdict {
  * just move", off the very points the chart drew — so the words under a
  * chart can never disagree with the chart. */
 export function dayVerdict(data: PriceHistoryData): DayVerdict {
-  if (data === null || data.points.length < 2) {
+  const step = data === null ? null : lastStep(data.points);
+  if (data === null || step === null) {
     return { direction: "none", text: "no history yet", reference: false };
   }
-  const reference = data.source === "reference";
-  const prev = data.points[data.points.length - 2];
-  const last = data.points[data.points.length - 1];
-  const delta = last.valueMzc - prev.valueMzc;
+  // Anything that is not our own book: seed row or derivation alike. The
+  // flag means "this movement is not ours", and a derived line is no more
+  // ours than the seed line it was scaled from.
+  const reference = data.source !== "live";
+  const { prev, last, delta } = step;
   if (delta === 0) return { direction: "none", text: "unchanged today", reference };
 
   // "yesterday" only when a day actually turned over between the two
@@ -545,14 +747,38 @@ export function dayVerdict(data: PriceHistoryData): DayVerdict {
   // A move off a donated (0) baseline has no percentage — the division is
   // Infinity — so the words stand alone rather than carrying a figure that
   // means nothing. The direction is still true and still coloured.
-  const pct =
-    prev.valueMzc > 0
-      ? ` ${arrow} ${((Math.abs(delta) / prev.valueMzc) * 100).toFixed(1)}%`
-      : "";
+  const pct = step.pct === null ? "" : ` ${arrow} ${step.pct.toFixed(1)}%`;
   return {
     direction: delta < 0 ? "down" : "up",
     text: `${word} than ${since}${pct}`,
     reference,
+  };
+}
+
+/** The last movement in a series: the two points, the signed delta between
+ * them, and the size of it as a percentage of where it started.
+ *
+ * ONE READING, TWO SENTENCES. `dayVerdict` puts it under a chart and
+ * `derivedChangeCell` puts it in a table column; sharing the arithmetic is
+ * what stops a card saying 3.4% while the row beside it says 3.5%. `pct` is
+ * null off a zero baseline — a move up from a donated hour has a direction
+ * and no percentage. */
+function lastStep(points: readonly SeriesPoint[]): {
+  prev: SeriesPoint;
+  last: SeriesPoint;
+  delta: number;
+  pct: number | null;
+} | null {
+  if (points.length < 2) return null;
+  const prev = points[points.length - 2];
+  const last = points[points.length - 1];
+  const delta = last.valueMzc - prev.valueMzc;
+  return {
+    prev,
+    last,
+    delta,
+    pct:
+      prev.valueMzc > 0 ? (Math.abs(delta) / prev.valueMzc) * 100 : null,
   };
 }
 
@@ -598,7 +824,10 @@ export function hostClassGroups(
   return order.map((klass) => {
     const rung = view?.zc.find((r) => r.capability_class === klass) ?? null;
     const entry = referenceClass(klass);
-    const history = classHistory(rung, entry);
+    // The class is passed explicitly: a host can own a machine in a class the
+    // board has not published a rung for, and that card should still draw the
+    // derived line rather than the words "no history yet".
+    const history = classHistory(rung, entry, klass);
     const row = classRow(view, klass);
     return {
       klass,

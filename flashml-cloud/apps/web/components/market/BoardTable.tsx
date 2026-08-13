@@ -156,12 +156,16 @@ export function BoardTable({ rows }: { rows: BoardRow[] }) {
                   )}
                 </td>
                 <td
-                  className={`px-2 py-2.5 text-right font-mono tabular-nums ${DELTA_TONE[row.change.direction]}`}
+                  className={`px-2 py-2.5 text-right font-mono tabular-nums ${
+                    row.change.reference
+                      ? "text-muted-foreground"
+                      : DELTA_TONE[row.change.direction]
+                  }`}
                 >
                   {row.change.text}
                 </td>
                 <td className="px-2 py-2.5">
-                  <Sparkline points={row.spark} />
+                  <Sparkline points={row.spark} dashed={row.sparkDashed} />
                 </td>
                 <td className="px-2 py-2.5 text-right font-mono tabular-nums">
                   {row.depth === null ? (
@@ -226,14 +230,19 @@ export function BoardTable({ rows }: { rows: BoardRow[] }) {
 
       <p className="mt-2 text-[11px] text-muted-foreground">
         Reference rows are generated {REFERENCE_META.generatedAt} from live
-        vendor bands.
+        vendor bands. A ≈ price is estimated from one of them for a class
+        nobody has quoted into yet — hover its chip for which.
       </p>
     </div>
   );
 }
 
 /** Market-convention colours for a movement, purely directional: the
- * direction is the lib's decision, this only maps it to a token. */
+ * direction is the lib's decision, this only maps it to a token.
+ *
+ * Never applied to a `reference` cell. Green and red on this board mean our
+ * book moved; a vendor series moving is a fact about somebody else's, and it
+ * gets the muted tone whichever way it went. */
 const DELTA_TONE: Record<"up" | "down" | "none", string> = {
   up: "text-evergreen",
   down: "text-destructive",

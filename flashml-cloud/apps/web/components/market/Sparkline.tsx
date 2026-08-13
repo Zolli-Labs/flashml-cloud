@@ -7,11 +7,20 @@
  *
  * `null` means fewer than two real observations, and renders as a dashed
  * baseline of the same visual weight — an honest "no history", never a
- * fabricated flat line. */
+ * fabricated flat line.
+ *
+ * `dashed` draws a real curve in the reference family: same geometry, muted,
+ * broken stroke. THE TWO DASHES ARE NOT THE SAME DASH. The baseline is a
+ * long 5-4 rule across the middle of the box; a derived curve is a fine 3-3
+ * trace of a series that exists. A flat derived series would otherwise be
+ * pixel-identical to "no data", which is the one confusion a dashed line was
+ * introduced to prevent. */
 export function Sparkline({
   points,
+  dashed = false,
 }: {
   points: { x: number; y: number }[] | null;
+  dashed?: boolean;
 }) {
   if (points === null) {
     return (
@@ -42,15 +51,20 @@ export function Sparkline({
     <svg
       viewBox="-2 -6 104 112"
       preserveAspectRatio="none"
-      className="h-7 w-24"
+      className={`h-7 w-24 ${dashed ? "text-muted-foreground" : ""}`}
       role="img"
-      aria-label="recent price observations"
+      aria-label={
+        dashed
+          ? "derived price history, from a reference card"
+          : "recent price observations"
+      }
     >
       <polyline
         points={points.map((p) => `${p.x},${p.y}`).join(" ")}
         fill="none"
-        stroke="var(--z-orange)"
+        stroke={dashed ? "currentColor" : "var(--z-orange)"}
         strokeWidth={2}
+        strokeDasharray={dashed ? "3 3" : undefined}
         strokeLinecap="round"
         strokeLinejoin="round"
         vectorEffect="non-scaling-stroke"
