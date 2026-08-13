@@ -50,6 +50,28 @@ describe("cinematic landing foundation", () => {
     expect(css).toContain("prefers-reduced-motion: reduce");
   });
 
+  it("places the hero's reduced-motion rules after its animated rules", () => {
+    const css = source("app/globals.css");
+    const animatedSwitch = css.indexOf(
+      ".hero-market-switch {\n  display: grid;",
+    );
+    const animatedRole = css.indexOf(
+      ".hero-market-role {\n  grid-area: 1 / 1;",
+    );
+    const reducedMotion = css.indexOf(
+      "@media (prefers-reduced-motion: reduce) {\n  .hero-market-switch {\n    display: block;",
+    );
+    const reducedRole = css.indexOf(
+      ".hero-market-role {\n    animation: none;",
+      reducedMotion,
+    );
+
+    expect(animatedSwitch).toBeGreaterThanOrEqual(0);
+    expect(animatedRole).toBeGreaterThanOrEqual(0);
+    expect(reducedMotion).toBeGreaterThan(animatedSwitch);
+    expect(reducedRole).toBeGreaterThan(animatedRole);
+  });
+
   it("renders the editorial hero and the live coordinator map", () => {
     const markup = renderLanding();
     const hero = markup.match(/<section[^>]*id="hero"[\s\S]*?<\/section>/)?.[0] ?? "";

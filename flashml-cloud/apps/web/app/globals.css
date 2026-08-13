@@ -584,22 +584,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero-market-switch {
-    display: block;
-    min-height: 0;
-    overflow: visible;
-  }
-
-  .hero-market-role {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
-
-  .hero-market-role + .hero-market-role {
-    margin-top: 1.25rem;
-  }
-
   .workflow-scene-canvas [data-scene-path] {
     animation: none;
     stroke-dashoffset: 0;
@@ -638,6 +622,24 @@
   0%, 40% { opacity: 0; transform: translateY(1rem); }
   48%, 92% { opacity: 1; transform: translateY(0); }
   100% { opacity: 0; transform: translateY(-1rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-market-switch {
+    display: block;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .hero-market-role {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .hero-market-role + .hero-market-role {
+    margin-top: 1.25rem;
+  }
 }
 
 @layer base {
