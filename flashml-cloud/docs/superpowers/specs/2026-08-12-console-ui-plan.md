@@ -144,8 +144,13 @@ testable without rendering. `lib/job-routing.ts`, `lib/job-artifacts.ts` and
 **Verification gate for every change:** `npm test`, `npx tsc --noEmit`,
 `npm run lint`, `npm run build` (needs `flashml-cloud/.env.dev` sourced —
 `next.config.ts` hard-fails without `NEXT_PUBLIC_CLOUD_API`). Baselines to beat,
-not regress: **web 767 passed / 46 files**, **api 2177 passed, 2 skipped,
-3 deselected, 1 xfailed**.
+not regress — measured 2026-08-12 ~22:00: **web 866 passed / 52 files**,
+**api 2633 passed, 2 skipped, 3 deselected, 1 xfailed**.
+
+**Measure them yourself before you start, including these.** The figures this
+replaced (web 767/46, api 2177) were stale by roughly 100 and 450 tests. A
+baseline that is too low certifies a regression as an improvement, which is
+strictly worse than having no baseline at all.
 
 ## 6. §C — After the deadline
 

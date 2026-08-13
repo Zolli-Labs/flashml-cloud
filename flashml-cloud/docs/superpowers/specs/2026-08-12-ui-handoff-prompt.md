@@ -73,8 +73,15 @@ npm test && npx tsc --noEmit && npm run lint && npm run build
 
 If you touch `app.py`: `cd flashml-cloud/apps/api && .venv/bin/python -m pytest -q`
 
-**Baselines to beat, never regress:** web **767 passed / 46 files** · api
-**2177 passed, 2 skipped, 3 deselected, 1 xfailed**.
+**Baselines to beat, never regress** — measured 2026-08-12 ~22:00, web by
+`zolli-labs-e5` in a clean worktree and api by this session: web **866 passed
+/ 52 files** · api **2633 passed, 2 skipped, 3 deselected, 1 xfailed**.
+
+**MEASURE THEM YOURSELF BEFORE YOU START, INCLUDING THESE.** The numbers this
+line replaced — web 767/46 and api 2177 — were stale by ~100 and ~450 tests
+respectively, and a baseline that is too low is worse than none: it certifies
+a regression as an improvement. Three sessions committed to `develop` on
+2026-08-12 alone. Any figure written here is a snapshot, not a fact about now.
 
 ## Environment
 

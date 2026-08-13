@@ -1,6 +1,6 @@
 # The agent surface and the market — decision record
 
-**Date:** 2026-08-12. **Status:** decisions D1–D10 made with the owner in
+**Date:** 2026-08-12. **Status:** decisions AS-1–AS-10 made with the owner in
 conversation, this session. **Deadline context:** submission 2026-08-15.
 
 **Why this document exists.** This session runs unattended for ~4–5 hours in
@@ -12,12 +12,24 @@ indistinguishable later from a mistake — so each entry names the reason and
 
 Companion documents: `2026-08-10-developer-surface-and-mcp-design.md` (the
 approved design being executed), `2026-08-11-competition-requirements.md`
-(the requirements source, amended by D3), `2026-08-12-market-design-v2.md`,
+(the requirements source, amended by AS-3), `2026-08-12-market-design-v2.md`,
 `2026-08-12-next-phase.md`.
+
+**Decision ids are prefixed `AS-` (agent surface), and that is not
+decoration.** This document and `2026-08-12-on-demand-capacity-design.md`
+were written the same day, about the same feature area, by two sessions that
+both numbered from D1. Both had a **D9** meaning different things — here
+"spending requires a human", there "every teardown guard is a ledger read" —
+and both will be cited by whoever wires acquisition to the agent surface. An
+unprefixed "see D9" resolves to whichever document the reader happened to
+open. This repository has a documented incident of a stale document
+"correcting" working code back to a version that no longer existed; an
+ambiguous decision id is that same failure with an extra step. The capacity
+record uses `OC-`.
 
 ---
 
-## D1 — The decision layer stays deterministic. No trained model.
+## AS-1 — The decision layer stays deterministic. No trained model.
 
 **Owner question:** *"the decision layers is constraints based right now —
 should we train a model for this, or use context, or hardcodes for the
@@ -64,22 +76,22 @@ the decision deterministic.
 
 ---
 
-## D2 — Intelligence goes in the agent layer, outside the execution path.
+## AS-2 — Intelligence goes in the agent layer, outside the execution path.
 
 **Decision:** the split is *the agent decides what the human wants; the market
 decides where it runs.*
 
 An LLM is genuinely good at "turn this training script into a valid workload,
 tell me what it will cost, ask before spending" and genuinely bad at "silently
-pick a machine". D1 keeps it out of the second. This decision puts it firmly
+pick a machine". AS-1 keeps it out of the second. This decision puts it firmly
 in the first, which is also the "Software for Agents" track thesis.
 
 **What would reverse it:** nothing foreseeable. This is the load-bearing
-distinction that makes D3 defensible.
+distinction that makes AS-3 defensible.
 
 ---
 
-## D3 — §9's "Qwen / Model Studio: never for this submission" is AMENDED.
+## AS-3 — §9's "Qwen / Model Studio: never for this submission" is AMENDED.
 
 **Supersedes:** `2026-08-11-competition-requirements.md` §9, which reads
 *"never for this submission — no LLM exists in our execution path; adding one
@@ -99,7 +111,7 @@ is the 'model wrapper' the rubric penalises."*
 
 **The distinction that makes this not a wrapper.** A model wrapper is a thin
 UI over someone else's model. FlashML is a compute market with a deterministic
-allocator (D1). Running an agent *inside an FC Agent Sandbox that hibernates
+allocator (AS-1). Running an agent *inside an FC Agent Sandbox that hibernates
 between turns* does not put a model in the execution path — it makes the agent
 **a workload that demonstrates the sandbox's core advantage**, which is D-6,
 the largest scoring axis.
@@ -120,11 +132,11 @@ the article.
 
 **What would reverse it:** the P0 gates (G-1…G-4) still being unmet on
 2026-08-14. A hosted agent attached to a submission with no public URL and no
-sheet row scores zero. Sequencing enforces this — D8.
+sheet row scores zero. Sequencing enforces this — AS-8.
 
 ---
 
-## D4 — The model provider is Qwen via Bailian / DashScope.
+## AS-4 — The model provider is Qwen via Bailian / DashScope.
 
 **Decision:** Qwen, not Anthropic or OpenAI. **Owner decision, 2026-08-12.**
 
@@ -138,11 +150,11 @@ to answer on stage for no compensating benefit.
 from-scratch integration whichever provider wins, so provider choice cost
 nothing to defer to the strongest reason.
 
-**Build shape (D5) makes this cheap to revisit.**
+**Build shape (AS-5) makes this cheap to revisit.**
 
 ---
 
-## D5 — The provider sits behind a Protocol with a fake.
+## AS-5 — The provider sits behind a Protocol with a fake.
 
 **Decision:** the agent loop talks to a `ModelProvider` Protocol; a fake
 implementation backs every test; the DashScope implementation is wired when a
@@ -155,7 +167,7 @@ tonight, before any key exists — the owner is away and no key is available.
 
 ---
 
-## D6 — `POST /v1alpha1/preflight` answers 200 with findings; 4xx is reserved
+## AS-6 — `POST /v1alpha1/preflight` answers 200 with findings; 4xx is reserved
 ## for a malformed request.
 
 **Decision:** a *verdict about a workload* is a successful response.
@@ -179,7 +191,7 @@ CLI blesses a config the API refuses.
 
 ---
 
-## D7 — G-1 reuses the existing `shr_` share-token mechanism. No new repo,
+## AS-7 — G-1 reuses the existing `shr_` share-token mechanism. No new repo,
 ## no new branch, no middleware change.
 
 **Owner instruction:** *"with special token access on url they won't need to
@@ -207,7 +219,7 @@ one.
 
 ---
 
-## D8 — Sequencing: `app.py` first, public URL last, deploy never (this
+## AS-8 — Sequencing: `app.py` first, public URL last, deploy never (this
 ## session).
 
 **Owner instruction:** *"build all three, deploy nothing"* and *"let's build
@@ -226,7 +238,7 @@ not an unattended decision.
 
 ---
 
-## D9 — The agent must not be able to spend rented money without a human.
+## AS-9 — The agent must not be able to spend rented money without a human.
 
 **Decision:** the D-7 confirmation gate is built into the agent loop from the
 start, not retrofitted.
@@ -244,7 +256,7 @@ decision is it*, not *is it dangerous*. Spending joins that list.
 
 ---
 
-## D10 — One price vocabulary across both sessions.
+## AS-10 — One price vocabulary across both sessions.
 
 **Trigger:** a review of the peer's `/jobs/{id}/tradeoff` route found the
 response's `price_reason` asserting *"priced at $0.16/hr … Another SKU costs
@@ -289,7 +301,7 @@ does not observe a new price or invent one).
 
 ---
 
-## D11 — `_TRADEOFF_MAX_RENTED_STEPS` raised 16 → 64.
+## AS-11 — `_TRADEOFF_MAX_RENTED_STEPS` raised 16 → 64.
 
 **Decision:** raise it.
 
@@ -309,7 +321,7 @@ payload is small" was my reasoning and it was the wrong axis.
 
 ---
 
-## D12 — Two tradeoff-route rendering fixes, and a correction to my reasoning.
+## AS-12 — Two tradeoff-route rendering fixes, and a correction to my reasoning.
 
 **`price_reason` is suppressed when `renting.suited` is false.** A sentence
 about how well we priced a machine that can never run this work is noise, and
@@ -329,7 +341,7 @@ reader is when the question arises.
 
 ---
 
-## D13 — C-6.5 / C-6.4 hibernation evidence is ceded to `zolli-labs-d7`.
+## AS-13 — C-6.5 / C-6.4 hibernation evidence is ceded to `zolli-labs-d7`.
 
 **Decision:** dropped from this session's queue.
 
@@ -337,7 +349,7 @@ reader is when the question arises.
 and `alibaba_sandbox.py`. Two writers in one subsystem on a deadline is how a
 subtle merge defect ships. They were there first.
 
-**Consequence for D3's agent-in-sandbox work:** it is built in a **new
+**Consequence for AS-3's agent-in-sandbox work:** it is built in a **new
 module** and does not enter `sandbox_orchestrator.py` or `alibaba_sandbox.py`.
 If that turns out to be impossible, this session asks before writing.
 
@@ -349,7 +361,7 @@ shards".
 
 ---
 
-## D14 — This session runs as an orchestrator; subagents build.
+## AS-14 — This session runs as an orchestrator; subagents build.
 
 **Owner instruction:** *"for not losing context you are the main orchestrator
 and building by sub agent."*
@@ -368,10 +380,10 @@ sessions already broke HEAD once today.
 
 ---
 
-## D15 — D3's hosted agent is demoted behind the public page. The MCP
+## AS-15 — AS-3's hosted agent is demoted behind the public page. The MCP
 ## surface is not.
 
-**Amends D3 and D8's ordering. Argument made by `zolli-labs-d7`, accepted
+**Amends AS-3 and AS-8's ordering. Argument made by `zolli-labs-d7`, accepted
 here; recorded in their terms rather than paraphrased, because the reasoning
 is the valuable part and a summary would blunt it.**
 
@@ -423,10 +435,10 @@ public video) and G-4 (a row in the submission sheet).
 
 ---
 
-## D16 — The public job payload publishes our typed events, never the
+## AS-16 — The public job payload publishes our typed events, never the
 ## submitter's bytes.
 
-**Raised by `zolli-labs-d7` while reviewing D7's design. Accepted, with one
+**Raised by `zolli-labs-d7` while reviewing AS-7's design. Accepted, with one
 refinement.**
 
 **The problem.** Reusing `/share/<token>` for jobs moves the entire security
@@ -481,7 +493,7 @@ to be right, because it generalises to any job any user shares.
 
 **Review:** the job column list goes to `zolli-labs-d7` before it lands.
 
-### D16.1 — The provenance test, and what it disqualifies
+### AS-16.1 — The provenance test, and what it disqualifies
 
 **Raised by `zolli-labs-d7`. The question is not "which keys are safe" but
 "which values did our code assign" — and the two come apart, because a key we
@@ -519,3 +531,55 @@ codebase. **The step number is the submitter's and is not published.**
 **Consequence beyond the page:** if a demo claim rests on a submitter-authored
 value, that is worth knowing before Friday rather than after a judge asks
 where the number came from.
+
+---
+
+## AS-17 — The middle layer of the spend defence is empty, and a docstring
+## says otherwise.
+
+**Raised by `zolli-labs-d7`. Verified here rather than accepted, per Rule 7.**
+
+Three layers should stand between an agent and someone else's money. Two
+exist:
+
+1. **AS-9, the confirmation gate** — *"are you sure?"*. Built into the MCP
+   surface from the start.
+2. **`capacity.budget.assert_within_budget`** — *"is this rate sane?"*.
+   Refuses rather than queues, two rate ceilings, runs before anything is
+   created. Every path reaching `acquire_for_job` gets it.
+3. **The wallet check — *"can they afford it?"* — DOES NOT EXIST.**
+
+`marketplace.can_cover` is defined at `marketplace.py:324` and **has no
+production caller anywhere**. Confirmed: the only non-test references in the
+package are two docstrings. Nothing in this system refuses work an account
+cannot pay for, on any path.
+
+**And one of those docstrings asserts a bound that is not there.**
+`marketplace.py:1897` reads:
+
+> *"`can_cover` at grant time bounds this; nothing can eliminate it while the
+> balance is spendable between grant and claim."*
+
+`can_cover` bounds nothing at grant time, because nothing calls it at grant
+time. A reader is told the exposure is bounded when it is open. This is the
+**third** instance today of the Rule 7 failure — a claim that reads as
+verified because it arrives through our own code — and the first one found in
+a docstring rather than in evidence. `marketplace.py:1637`'s account is
+accurate by contrast: it says plainly that `can_cover` is *"a check a caller
+may make and not a gate this function imposes"*, because refusing a bid on a
+balance would be a reservation in all but name.
+
+**Not built here, and deliberately.** The peer records the owner's four
+rulings as OC-D10 — hold at acquire, drain at zero, warm-up on the operator,
+idle hold capped at re-warm cost — and that is a capacity decision, not an
+agent-surface one.
+
+**What this session owes it:** the AS-9 confirmation gate must not be
+described anywhere as protecting an account from overspending. It asks a
+human to approve a spend. It does not, and cannot, check that the spend is
+affordable.
+
+**What would close it:** a caller for `can_cover` on the grant path, and
+`marketplace.py:1897`'s docstring corrected in the same commit — a bound
+claimed and a bound enforced should never land separately, which is how this
+one came to be claimed at all.
