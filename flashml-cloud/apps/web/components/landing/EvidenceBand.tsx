@@ -1,10 +1,10 @@
 import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 
 const EVIDENCE = [
-  ["30", "production attempts", "Recorded across the first two contributing hosts."],
-  ["2", "proven architectures", "macOS arm64 and Linux x86_64."],
-  ["5", "steps lost, not 35", "Recovered from the last verified checkpoint."],
-  ["1", "accepted result per task", "Idempotent commits reject duplicate outcomes."],
+  ["6", "trials completed", "One model search completed all six independent trials."],
+  ["3", "machines shared the work", "A laptop and two rented GPUs completed the same search."],
+  ["58", "epochs preserved", "Completed training progress survived when a rented GPU was destroyed."],
+  ["1", "accepted result per task", "Duplicate outcomes are rejected instead of counted twice."],
 ] as const;
 
 export function EvidenceBand() {
@@ -22,11 +22,11 @@ export function EvidenceBand() {
               Product evidence
             </p>
             <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              Verified runs, <span className="text-muted-foreground">not scale claims.</span>
+              A growing network, <span className="text-muted-foreground">proven with real work.</span>
             </h2>
           </div>
           <p className="max-w-[55ch] self-end text-base leading-relaxed text-muted-foreground">
-            These figures are verified product evidence from documented runs, rather than scale metrics.
+            These figures document real runs and outcomes; they are not claims about the network&apos;s scale.
           </p>
         </div>
 

@@ -40,7 +40,7 @@ describe("proof-led Zolli landing", () => {
     const calendlyAnchors = anchorTags(markup).filter((anchor) =>
       anchor.includes("calendly.com"),
     );
-    expect(calendlyAnchors).toHaveLength(3);
+    expect(calendlyAnchors).toHaveLength(2);
     for (const anchor of calendlyAnchors) {
       expect(anchor).toContain(`href="${MARKETING.calendlyUrl}"`);
       expect(anchor).toContain('target="_blank"');
@@ -236,7 +236,7 @@ describe("proof-led Zolli landing", () => {
     expect(journey).not.toMatch(/\btext-white\/(?:35|38|42)\b/);
   });
 
-  it("enforces the exact approved evidence-band values and rejects unsupported comparisons", () => {
+  it("enforces the approved outcome-level evidence and rejects unsupported comparisons", () => {
     const markup = renderLanding();
     const text = visibleText(markup);
     const evidenceSection = markup.match(
@@ -246,16 +246,19 @@ describe("proof-led Zolli landing", () => {
       ...(evidenceSection ?? "").matchAll(/\bdata-evidence-value="([^"]*)"/g),
     ].map(([, value]) => value);
 
-    expect(evidenceValues).toEqual(["30", "2", "5", "1"]);
+    expect(evidenceValues).toEqual(["6", "3", "58", "1"]);
     expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?%/);
     expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?(?:×|x)(?!\w)/i);
     expect(text).not.toMatch(
       /\b\d[\d,]*(?:\.\d+)?\s+(?:customers?|companies|teams?)\b/i,
     );
     for (const claim of [
-      "30 production attempts",
-      "2 proven architectures",
-      "5 steps lost, not 35",
+      "6 trials completed",
+      "One model search completed all six independent trials.",
+      "3 machines shared the work",
+      "A laptop and two rented GPUs completed the same search.",
+      "58 epochs preserved",
+      "Completed training progress survived when a rented GPU was destroyed.",
       "1 accepted result per task",
       "macOS arm64",
       "Linux x86_64",
@@ -267,14 +270,16 @@ describe("proof-led Zolli landing", () => {
   });
 
   it("rejects universal support, customer, provider, and unverified performance claims", () => {
-    const text = visibleText(renderLanding());
+    const markup = renderLanding();
+    const text = visibleText(markup);
+    const nonFaqText = visibleText(markup.replace(scopedSection(markup, "faq"), ""));
 
     expect(text).not.toMatch(/\b(?:trusted by|used by)\b|\bcustomers?\b/i);
     expect(text).not.toMatch(/\b(?:all|every) (?:cloud )?providers?\b/i);
     expect(text).not.toMatch(/\b(?:supports?|works on|available on) (?:all|every)\b/i);
     expect(text).not.toMatch(/\b(?:Together AI|Lambda Labs|Vast\.ai)\b/i);
     expect(text).not.toMatch(/\b\d+(?:\.\d+)?\s?(?:%|×|x)(?!\w)/i);
-    expect(text).not.toMatch(/\bguarantee(?:d|s)?\b/i);
+    expect(nonFaqText).not.toMatch(/\bguarantee(?:d|s)?\b/i);
   });
 
   it("qualifies platform compatibility without overstating Windows", () => {
@@ -330,11 +335,12 @@ describe("proof-led Zolli landing", () => {
       expect(text).toContain(moduleName);
   });
 
-  it("connects the recovery ledger to the verified five-step result", () => {
+  it("connects the recovery ledger to the documented recovery outcome", () => {
     const text = visibleText(renderLanding());
-    expect(text).toContain("Failure at step 35");
-    expect(text).toContain("Checkpoint at step 30");
-    expect(text).toContain("5 steps of work lost");
+    expect(text).toContain("Affordable capacity matters only if the work finishes.");
+    expect(text).toContain("RTX 4090 machine destroyed");
+    expect(text).toContain("Resumed on an RTX 3090");
+    expect(text).toContain("58 epochs preserved");
     expect(text).toContain("sample data");
   });
 
@@ -361,7 +367,7 @@ describe("proof-led Zolli landing", () => {
       "Runtime and job-spec integration",
       "Private deployment and recovery design",
     ]);
-    expect(markup.indexOf("Open console")).toBeLessThan(markup.indexOf("Talk to Zolli"));
+    expect(text).toContain("Start with the machines and workloads you already have.");
   });
 
   it("uses editorial services instead of four equal cards", () => {
@@ -374,58 +380,38 @@ describe("proof-led Zolli landing", () => {
     expect(services.match(/<article\b/g) ?? []).toHaveLength(4);
   });
 
-  it("answers the seven buyer questions with native disclosures", () => {
+  it("answers the eight market-fit questions with native disclosures", () => {
     const markup = renderLanding();
     const disclosures = markup.match(/<details\b[^>]*>[\s\S]*?<\/details>/g) ?? [];
     const expectedFaqs = [
-      {
-        question: "What does Zolli coordinate?",
-        clauses: ["jobs", "tasks", "leases", "checkpoints", "recovery", "accepted results"],
-      },
-      {
-        question: "Which machines are supported?",
-        clauses: ["macOS arm64", "Linux x86_64", "production-proven", "Windows 11", "preview"],
-      },
-      {
-        question: "What happens when a machine disappears?",
-        clauses: ["missing heartbeat", "expires", "ownership", "requeued", "last verified checkpoint"],
-      },
-      {
-        question: "Does every machine need Docker?",
-        clauses: ["Subprocess execution", "trusted pools", "allowlisted Docker", "isolation path", "shared machines"],
-      },
-      {
-        question: "How are code, artifacts, and credentials handled?",
-        clauses: [
-          "Task environments are scrubbed",
-          "machine writes are authenticated and lease-scoped",
-          "artifacts and checkpoints are hash-verified",
-          "Deployment configuration still matters",
-        ],
-      },
-      {
-        question: "How is Zolli priced?",
-        clauses: ["Pricing is not published during early access", "Schedule", "email Zolli", "scope"],
-      },
-      {
-        question: "What support is available during early access?",
-        clauses: [
-          "onboarding",
-          "workload integration",
-          "deployment",
-          "recovery design by agreement",
-          "No service-level agreement",
-        ],
-      },
+      "What is Zolli?",
+      "Is Zolli another cloud provider?",
+      "Can machine owners earn money today?",
+      "Will Zolli always be cheaper?",
+      "Which machines work?",
+      "Which workloads fit?",
+      "What happens if a machine disappears?",
+      "How mature is the network?",
     ] as const;
 
     expect(disclosures).toHaveLength(expectedFaqs.length);
     disclosures.forEach((disclosure, index) => {
       const text = visibleText(disclosure);
-      const expected = expectedFaqs[index];
-      expect(text).toContain(expected.question);
-      for (const clause of expected.clauses) expect(text).toContain(clause);
+      expect(text).toContain(expectedFaqs[index]);
     });
+    const text = visibleText(markup);
+    expect(text).toContain("Cash payout is not live");
+    expect(text).toContain("cannot guarantee every job is cheaper");
+    expect(text).toContain("Tightly synchronized multi-machine training is not the current target");
+  });
+
+  it("ends with the demand choice before the provider choice", () => {
+    const start = scopedSection(renderLanding(), "start");
+
+    expect(visibleText(start)).toContain("Join the open compute network.");
+    expect(anchorForText(start, "I need compute")).toContain(`href="${MARKETING.consolePath}"`);
+    expect(anchorForText(start, "I want to provide compute")).toContain(`href="${MARKETING.machinesPath}"`);
+    expect(start.indexOf("I need compute")).toBeLessThan(start.indexOf("I want to provide compute"));
   });
 
   it("provides complete product, resource, company, and legal navigation", () => {

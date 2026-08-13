@@ -41,13 +41,13 @@ export function SystemModules() {
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
         <div className="max-w-3xl">
           <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
-            Runtime architecture
+            Technical depth
           </p>
           <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-            Mixed machines. <span className="text-muted-foreground">One recovery contract.</span>
+            The machinery behind a reliable compute market.
           </h2>
           <p className="mt-6 max-w-[58ch] text-lg leading-[1.55] text-muted-foreground">
-            Zolli separates ownership, execution, and integrity so unreliable compute can still produce one accepted outcome.
+            For technical evaluators, Zolli separates allocation, execution, and integrity so changing capacity can still produce one accepted outcome.
           </p>
         </div>
 

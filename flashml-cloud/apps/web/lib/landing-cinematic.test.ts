@@ -10,6 +10,8 @@ import { WorkloadVelocityRail } from "@/components/landing/WorkloadVelocityRail"
 const root = process.cwd();
 const source = (path: string) => readFileSync(`${root}/${path}`, "utf8");
 const renderLanding = () => renderToStaticMarkup(createElement(Home));
+const visibleText = (markup: string) =>
+  markup.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
 const renderWorkloadRail = () => renderToStaticMarkup(
   createElement(WorkloadVelocityRail, { labels: ["Federated training"] }),
 );
@@ -91,6 +93,7 @@ describe("cinematic landing foundation", () => {
     expect(platform).toContain('data-surface="sand"');
     expect(evidence.match(/data-evidence-value=/g)).toHaveLength(4);
     expect(evidence).toContain('data-layout="evidence-ledger"');
+    expect(visibleText(evidence)).toContain("A growing network, proven with real work.");
     expect(platform).toContain('data-layout="machine-lanes"');
     expect(platform).toContain("macOS Apple silicon");
     expect(platform).toContain("Windows 11");
@@ -150,7 +153,6 @@ describe("cinematic landing foundation", () => {
     const services = source("components/landing/ProfessionalServices.tsx");
 
     expect(services).toContain("landing-heading-balance");
-    expect(services).toContain("block text-muted-foreground");
     expect(services).toContain("SectionReveal");
     expect(services).toContain("MARKETING.calendlyUrl");
     expect(services).toContain("MARKETING.contactEmail");

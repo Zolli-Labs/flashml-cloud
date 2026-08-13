@@ -18,9 +18,9 @@ const RECOVERY_EVENTS = SAMPLE_LEDGER.filter((event) => RECOVERY_EVENT_TYPES.has
 );
 
 const RECOVERY_PROOF = [
-  "Failure at step 35",
-  "Checkpoint at step 30",
-  "5 steps of work lost",
+  "RTX 4090 machine destroyed",
+  "Resumed on an RTX 3090",
+  "58 epochs preserved",
 ] as const;
 
 export function RecoveryDemo() {
@@ -36,11 +36,11 @@ export function RecoveryDemo() {
             Recovery proof
           </p>
           <h2 className="mt-5 max-w-2xl text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-            Lost machine. <span className="text-muted-foreground">Verified recovery.</span>
+            Affordable capacity matters only if the work finishes.
           </h2>
           <p className="mt-6 max-w-[54ch] leading-relaxed text-muted-foreground">
-            A lost heartbeat does not erase accepted progress. The lease expires,
-            the task requeues, and another worker continues from a verified checkpoint.
+            Lower-cost distributed machines may disappear. Zolli records progress
+            so another compatible machine can continue supported work.
           </p>
           <RecoveryStack items={RECOVERY_PROOF} />
           <div className="mt-8 grid grid-cols-[auto_1fr] gap-x-4">

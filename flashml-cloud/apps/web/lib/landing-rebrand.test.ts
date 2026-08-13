@@ -12,23 +12,23 @@ function visibleText(markup: string) {
 }
 
 describe("warm technical landing", () => {
-  it("leads with the approved fault-tolerant compute promise", () => {
+  it("leads with the approved open-compute promise", () => {
     const markup = visibleText(renderLanding());
 
-    expect(markup).toContain("Compute that finishes the job.");
+    expect(markup).toContain("Computing power, without the lock-in.");
     expect(markup).toContain(
-      "Zolli unifies compatible cloud capacity, rented compute, owned GPU infrastructure, and everyday machines under one control plane, then recovers work when a node disappears.",
+      "Zolli is building a network that connects people who need compute with machines ready to work",
     );
   });
 
-  it("offers the console and Zolli consultation as the hero actions", () => {
+  it("offers demand and supply actions in the hero", () => {
     const markup = renderLanding();
 
-    expect(markup).toContain("Open console");
-    expect(markup).toContain("Talk to Zolli");
+    expect(markup).toContain("Get early access");
+    expect(markup).toContain("Provide compute");
     expect(markup).toContain('href="/workspaces"');
-    expect(markup).toContain('href="https://calendly.com/phongct1105/zolli-ai"');
-    expect(markup.indexOf("Open console")).toBeLessThan(markup.indexOf("Talk to Zolli"));
+    expect(markup).toContain('href="/account/machines"');
+    expect(markup.indexOf("Get early access")).toBeLessThan(markup.indexOf("Provide compute"));
   });
 
   it("keeps the evaluation and legal paths in the same public story", () => {
@@ -67,5 +67,14 @@ describe("warm technical landing", () => {
     expect(markup).toContain("NODE_HEARTBEAT_LOST");
     expect(markup).toContain("CHECKPOINT_MANIFEST_COMMITTED");
     expect(markup).toContain("sample data");
+  });
+
+  it("keeps the technical story tied to one accepted outcome", () => {
+    const markup = visibleText(renderLanding());
+
+    expect(markup).toContain("The machinery behind a reliable compute market.");
+    expect(markup).toContain(
+      "Zolli separates allocation, execution, and integrity so changing capacity can still produce one accepted outcome.",
+    );
   });
 });
