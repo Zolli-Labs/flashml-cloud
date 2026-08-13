@@ -11,6 +11,8 @@ import {
   InputOTPSlot,
 } from "@/components/ui/input-otp";
 import { Spinner } from "@/components/ui/spinner";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   ApiError,
   NotAuthenticated,
@@ -161,9 +163,14 @@ function ActivateInner() {
               weight="fill"
             />
           </div>
-          <h1 className="mt-5 font-display text-2xl font-semibold">
-            CLI access granted
-          </h1>
+          {/* `font-display` was here and is now gone. It was not a smaller
+              or larger heading — it was NOTHING: `--font-display` is not
+              declared in `app/globals.css` and Tailwind v4 has no such
+              default, so the utility compiled to no CSS at all. It was the
+              only use of the class in the repo. The sibling success screen
+              below sets the same heading without it, and both already
+              rendered identically; this makes the source say so. */}
+          <h1 className="mt-5 text-2xl font-semibold">CLI access granted</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             This program can now submit jobs as you. It has exactly your
             access and no more, and it keeps working until you revoke it.
@@ -184,9 +191,15 @@ function ActivateInner() {
             </p>
           </div>
 
+          {/* `buttonVariants` rather than `<Button>` because this is a
+              navigation, not an action, and it must stay an `<a>` that
+              Next can prefetch. `size="lg"` is h-10/px-4, which is what
+              `px-4 py-2.5` already computed to — so this adopts the
+              primitive's colour, focus ring and hover without moving a
+              pixel. */}
           <Link
             href="/account/cli"
-            className="interactive mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:brightness-110"
+            className={cn(buttonVariants({ size: "lg" }), "mt-5 w-full")}
           >
             Go to CLI access
             <ArrowRight className="h-4 w-4" weight="bold" />
@@ -248,7 +261,7 @@ function ActivateInner() {
 
           <Link
             href="/machines"
-            className="interactive mt-5 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:brightness-110"
+            className={cn(buttonVariants({ size: "lg" }), "mt-5 w-full")}
           >
             Go to My machines
             <ArrowRight className="h-4 w-4" weight="bold" />
@@ -330,10 +343,17 @@ function ActivateInner() {
             </div>
           )}
 
-          <button
+          {/* `h-11` is kept rather than taking `lg`'s h-10. This screen is
+              built to be used on a phone while reading a code off a laptop
+              (see the note at the top of this file), and 44px is the
+              smallest touch target iOS considers reliable. Shrinking the
+              one action on a phone-first screen to 40px is not a thing to
+              do without being able to look at it. */}
+          <Button
             type="submit"
+            size="lg"
+            className="h-11 w-full"
             disabled={code.length !== CODE_LENGTH || status === "submitting"}
-            className="interactive inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-primary text-sm font-semibold text-primary-foreground hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {status === "submitting" ? (
               <>
@@ -343,7 +363,7 @@ function ActivateInner() {
             ) : (
               "Approve machine"
             )}
-          </button>
+          </Button>
 
           {status === "error" && (
             <button

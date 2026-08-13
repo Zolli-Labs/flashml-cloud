@@ -18,7 +18,9 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(__dirname, "../..") },
   },
-  esbuild: { jsx: "automatic" },
+  // No JSX option: `main.tsx` imports React by name, so esbuild's default
+  // transform for .tsx resolves without one — and the option is not in this
+  // Vite version's `ESBuildOptions` type, so naming it fails `tsc`.
   build: {
     outDir: process.env.RIG_OUT ?? path.resolve(__dirname, "dist"),
     emptyOutDir: true,

@@ -10,6 +10,8 @@ import {
 } from "@/components/ui/accordion";
 import { Kbd } from "@/components/ui/kbd";
 import { CopyBlock } from "@/components/shared/CopyBlock";
+import { PageHeader } from "@/components/shell/PageHeader";
+import { PageShell } from "@/components/shell/PageShell";
 import { cloudApiBase } from "@/lib/cloud-api";
 
 // In-app docs: the things needed on day one, plus a glossary of the words
@@ -59,14 +61,21 @@ export default function DocsPage() {
   const base = cloudApiBase();
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+    // `wide`, which is the width this page already had, NOT the `reading`
+    // that `lib/console/page-width.ts` files it under. That entry's stated
+    // reason is that this page "contains no table and no grid" — it does:
+    // the `lg:grid` below puts a 180px contents rail beside the prose, which
+    // `reading` (768px) would leave a 492px column after the rail and the
+    // gap. Reported rather than resolved here: the table and its test are
+    // owned elsewhere, and `data-console-width` makes the disagreement
+    // visible instead of silent.
+    <PageShell width="wide">
       <div className="lg:grid lg:grid-cols-[1fr_180px] lg:gap-12">
         <div className="min-w-0">
-          <h1 className="title">Documentation</h1>
-          <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted-foreground">
-            Enough to get a job running and to read what the console tells you
-            afterwards. The full reference lives with the code.
-          </p>
+          <PageHeader
+            title="Documentation"
+            description="Enough to get a job running and to read what the console tells you afterwards. The full reference lives with the code."
+          />
 
           <section id="attach" className="scroll-mt-20 pt-12">
             <h2 className="text-lg font-semibold">Add a Machine</h2>
@@ -300,6 +309,6 @@ flashnode work --coordinator ${base} --runner trusted`}
           </div>
         </nav>
       </div>
-    </div>
+    </PageShell>
   );
 }
