@@ -651,7 +651,16 @@ describe("TradeoffCard — the rendered page", () => {
   it("prints the API's own sentences about renting verbatim", () => {
     expect(markup).toContain("this job is scoped to a workspace");
     expect(markup).toContain("priced at $0.16/hr");
-    expect(markup).toContain("the sweep stops one machine past the task count");
+    // `slots_reason` is NOT asserted here: this fixture's sweep is complete
+    // and gains, so the panel prints the stronger, definitive "Nothing past
+    // N slots finishes this job any sooner" claim below the table instead
+    // (see "says where buying stops helping") — and, on purpose, does not
+    // ALSO print `slots_reason` beside the renting summary above the table
+    // the way it once did. Printing both was the exact bug fixed here: the
+    // same sentence twice on a truncated curve (see "says the
+    // truncated-sweep sentence once" below, and "claims no ceiling when the
+    // sweep was cut short" for `slots_reason` actually rendering when the
+    // sweep is NOT complete).
   });
 
   it("shows the price with its provenance", () => {
@@ -782,5 +791,75 @@ describe("TradeoffCard — the rendered page", () => {
     expect(empty).toContain("There is no fleet to compare for this job.");
     expect(empty).toContain("this spec expands to no tasks");
     expect(empty).not.toContain("Couldn&#x27;t read");
+  });
+
+  it("gives no sentence about pricing to a job that can never rent", () => {
+    // `suited: false` means no rented machine is ever eligible for this
+    // job's work — a public job with sandboxed tasks, say. Printing a price
+    // sentence under that refusal reads as a non-sequitur: how carefully we
+    // priced a machine this job may not use is not information, it is noise
+    // beside the answer that actually matters.
+    const cannotRent = render(
+      summariseTradeoff(
+        read({
+          renting: renting({
+            suited: false,
+            reason: "renting cannot make this job faster at any price.",
+            price_reason: "priced at $0.16/hr from RunPod.",
+          }),
+          points: [
+            point({
+              total_slots: 1,
+              advice_code: "baseline",
+              finish_seconds: 300,
+            }),
+          ],
+        })
+      )
+    );
+    expect(cannotRent).toContain(
+      "renting cannot make this job faster at any price."
+    );
+    expect(cannotRent).not.toContain("priced at $0.16/hr from RunPod.");
+
+    // The same sentence prints when renting IS available for the job —
+    // `suited: true`, whether or not a price was actually found — so the
+    // guard is on `suited` and nothing else.
+    const canRent = render(
+      summariseTradeoff(
+        read({
+          renting: renting({
+            suited: true,
+            reason: "this job carries the waiver.",
+            price_reason: "priced at $0.16/hr from RunPod.",
+          }),
+        })
+      )
+    );
+    expect(canRent).toContain("priced at $0.16/hr from RunPod.");
+  });
+
+  it("says the truncated-sweep sentence once, not once above the table and once below it", () => {
+    // Both placements were correct in isolation — the route's own
+    // `slots_reason` printed beside the renting summary, and again as the
+    // panel's fallback explanation under the curve. Together they say the
+    // exact same sentence twice on one page, which reads as a bug even
+    // though neither copy is wrong on its own. Keep the one closest to what
+    // it explains: where the curve stops, not the header above it.
+    const cut = render(
+      summariseTradeoff(
+        read({
+          tasks: 40,
+          task_seconds: 90,
+          renting: renting({ slots: 16, slots_reason: SIZE_LIMIT_REASON }),
+          points: truncatedSweep(),
+        })
+      )
+    );
+    // Matched without the apostrophe: `renderToStaticMarkup` HTML-encodes it
+    // (`answer&#x27;s`), so splitting on the raw sentence would under-count.
+    const needle = "a fleet size where renting stops helping.";
+    const occurrences = cut.split(needle).length - 1;
+    expect(occurrences).toBe(1);
   });
 });

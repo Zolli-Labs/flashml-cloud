@@ -285,9 +285,15 @@ function Renting({ panel }: { panel: TradeoffPanel }) {
       <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted-foreground">
         {renting.reason}
       </p>
-      <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        {renting.priceReason}
-      </p>
+      {/* A job renting can never help — `suited` false — gets no sentence
+          about how carefully a rented machine was priced: that price was
+          never relevant to this job, and printing it under the refusal
+          directly above reads as a non-sequitur. */}
+      {renting.suited && (
+        <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
+          {renting.priceReason}
+        </p>
+      )}
       {renting.price && (
         <p className="mt-1.5 max-w-prose font-mono text-[11px] text-muted-foreground">
           {renting.price.provider} · {renting.price.sku}
@@ -297,11 +303,10 @@ function Renting({ panel }: { panel: TradeoffPanel }) {
           {renting.price.stale ? " · STALE" : ""}
         </p>
       )}
-      {renting.slotsReason && (
-        <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
-          {renting.slotsReason}
-        </p>
-      )}
+      {/* `slotsReason` is said once, near where the curve actually stops —
+          the ternary below the table, closest to the rows it explains — and
+          deliberately NOT here beside the renting summary too. Two copies of
+          the same sentence in one panel reads as a bug, not as emphasis. */}
     </div>
   );
 }

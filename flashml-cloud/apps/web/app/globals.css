@@ -23,6 +23,7 @@
   --color-destructive: var(--destructive);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
+  --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-secondary: var(--secondary);
@@ -655,10 +656,17 @@
   }
 }
 
-/* `muted` remains a sand fill for the existing shadcn controls. It is not a
-   Tailwind color namespace: registering it would also generate an unsafe
-   generic text utility. Keep readable copy on
-   `text-muted-foreground` instead. */
+/* `muted` is registered in `@theme inline` above (`--color-muted`) so that
+   `border-muted` — used by several badge components for a refusal that is
+   not an alarm — actually compiles; Tailwind only emits `border-*` /
+   `bg-*` / `text-*` for colours that exist as `--color-*` theme keys.
+   Registering it also makes `text-muted` compile, which this repo does not
+   want as READABLE COPY — `--muted` is a sand fill, not a text colour. Keep
+   readable copy on `text-muted-foreground` instead; `text-muted` is not
+   used anywhere in this codebase and should stay that way.
+   This utility stays for the existing shadcn call sites: same value as the
+   theme-generated `.bg-muted`, kept explicit rather than relying on
+   generation order. */
 @utility bg-muted {
   background-color: var(--muted);
 }
