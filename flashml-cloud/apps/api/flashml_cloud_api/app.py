@@ -89,6 +89,7 @@ from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api import job_share as jobsharemod
 from flashml_cloud_api import metrics as metricsmod
 from flashml_cloud_api import marketplace as marketplacemod
+from flashml_cloud_api import network as networkmod
 from flashml_cloud_api import observability
 from flashml_cloud_api import repo as repomod
 from flashml_cloud_api import placement as placementmod
@@ -4237,6 +4238,75 @@ def create_cloud_app(
             item["pools"] = chips.get(item["id"], [])
             out.append(item)
         return out
+
+    @app.get("/v1alpha1/network/providers", tags=["browser"])
+    async def list_network_providers(
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Every active provider in the network, anonymised for everyone but
+        its owner, plus what the fleet adds up to.
+
+        `current_user` rather than `admitted_user`: this is a read, and reads
+        stay open to un-admitted accounts for the reason `admitted_user`'s own
+        docstring gives — an account waiting on approval still needs to see
+        what it is waiting to join.
+        """
+        return networkmod.providers_overview(db, user_id)
+
+    @app.get("/v1alpha1/network/providers/{machine_id}", tags=["browser"])
+    async def network_provider_detail(
+        machine_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """One provider's profile. A stranger gets the anonymised version —
+        that is the point of a provider network — and only the owner gets the
+        `owner` block.
+
+        404 covers unknown, deleted and not-even-a-uuid alike: the same fold
+        every machine and pool lookup in this file uses, so the route cannot be
+        used to learn which ids are real.
+        """
+        detail = networkmod.provider_detail(db, machine_id, user_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="unknown provider")
+        return detail
+
+    @app.patch("/v1alpha1/machines/{machine_id}/location", tags=["browser"])
+    async def set_machine_location_route(
+        machine_id: str,
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Declare where one of your own machines is.
+
+        `admitted_user`, not `current_user`: this writes state, and that is the
+        line `admitted_user` draws.
+
+        400 and 404 are deliberately different answers. A latitude of 500 is
+        the caller's own input and they can fix it; "that machine is not yours"
+        must read identically to "no such machine", so ownership never confirms
+        which ids exist.
+        """
+        payload = await _json_object(request)
+        try:
+            written = networkmod.set_machine_location(
+                db,
+                machine_id,
+                user_id,
+                country=payload.get("country"),
+                region=payload.get("region"),
+                city=payload.get("city"),
+                lat=payload.get("lat"),
+                lon=payload.get("lon"),
+            )
+        except networkmod.InvalidLocation as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if not written:
+            raise HTTPException(status_code=404, detail="unknown machine")
+        return {"machine_id": machine_id, "location": "declared"}
 
     @app.post("/v1alpha1/device/approve", tags=["browser"])
     async def approve(
