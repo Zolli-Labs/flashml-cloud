@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from fractions import Fraction
 from math import ceil, prod
 
 import yaml
@@ -107,11 +108,18 @@ MAX_SWEEP_COMBINATIONS = 100
 # indefinitely.
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
+#: Decimal ZC per machine-hour to integer millicredits conversion factor.
+#: Evidence: migrations/0018_marketplace.sql:366 (ask_zc_per_hour column comment:
+#: "Millicredits per machine-hour"); apps/web/components/market/ListingsPanel.tsx:792
+#: (parseZcToMzc multiplies by 1000).
+ZC_PER_HOUR_UNIT = 1000
+
 REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "epochs", "sync_every",
                  "local_inputs", "partition", "validators", "reduce",
-                 "allow_partial", "dependencies", "datasets", "python"}
+                 "allow_partial", "dependencies", "datasets", "python", "price",
+                 "placement"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: The shape a ``python:`` declaration may take: CPython ``major.minor``.
@@ -278,6 +286,36 @@ class FlashmlConfig:
     #: where an interpreter mismatch turns a pinned wheel into a source
     #: build (see PYTHON_PARAM for the live evidence).
     python: str | None = None
+    #: Market opt-in pricing. ``None`` (default) means today's behavior:
+    #: workspace only, free. A price block declares ``max_per_hour`` (decimal
+    #: ZC, converted to millicredits) and may declare ``objective``, which
+    #: names the order the router ranks the book in (:data:`PRICE_OBJECTIVES`,
+    #: default :data:`DEFAULT_PRICE_OBJECTIVE`).
+    #: ``budget`` is still refused outright if present, not parsed and quietly
+    #: ignored: the claim-side spend guard that would enforce it does not
+    #: exist, and accepting the key would let a submitter believe their job is
+    #: capped when it is not.
+    #: Shape: ``{"max_zc_per_hour": int, "objective": str}``.
+    price: dict | None = None
+    #: Where this job is willing to run. ``None`` (default) means "let the
+    #: router derive it from ``resources``", which is what every config
+    #: written before this key existed keeps doing.
+    #:
+    #: Shape: ``{"accept": [str, ...]}`` — an ORDERED, non-empty, duplicate-
+    #: free list of capability-class names. The order is the order the router
+    #: walks: it bids in the first class, and only spills into the next with
+    #: whatever tasks the first could not fill.
+    #:
+    #: **The names are not validated here.** This module knows nothing about
+    #: the capability ladder and must not learn: ``marketplace`` owns it, and
+    #: importing ``marketplace`` from a config parser would put the market's
+    #: vocabulary on the import path of every yaml parse (including the ones
+    #: that never price anything). ``routing.job_accept_classes`` is the one
+    #: place a class name is checked against the real ladder, and it refuses
+    #: an unknown one by name. So a shape-valid ``accept`` is not a
+    #: routable one, and this key's presence proves only that the submitter
+    #: wrote a well-formed list.
+    placement: dict | None = None
 
     @property
     def is_federated(self) -> bool:
@@ -376,6 +414,12 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     dependencies = _validate_dependencies(raw.get("dependencies", []))
     datasets = _validate_datasets(raw.get("datasets"))
     python = _validate_python(raw.get("python"))
+    price = _validate_price(raw.get("price")) if raw.get("price") is not None else None
+    placement = (
+        _validate_placement(raw.get("placement"))
+        if raw.get("placement") is not None
+        else None
+    )
     mode, epochs, sync_every = _validate_mode(raw, version)
 
     return FlashmlConfig(
@@ -398,6 +442,8 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         dependencies=dependencies,
         datasets=datasets,
         python=python,
+        price=price,
+        placement=placement,
     )
 
 
@@ -859,3 +905,195 @@ def _validate_timeout_seconds(value: object) -> int | None:
             f"{MAX_TIMEOUT_SECONDS} ({MAX_TIMEOUT_SECONDS // 3600}h)"
         )
     return value
+
+
+#: What ``price.objective`` may name, and what each one asks the router for.
+#:
+#: The same three words as ``marketplace.OBJECTIVES``, written out again
+#: rather than imported: this module validates the SHAPE of a config and
+#: knows nothing about the capability ladder, the book or the ranking
+#: arithmetic — the rule ``placement.accept`` already follows, and the reason
+#: every semantic refusal lives in ``routing``. ``test_flashml_yaml_price``
+#: asserts the two lists are the same list, which is the guard an import
+#: would have been.
+PRICE_OBJECTIVES: tuple[str, ...] = ("cheapest", "balanced", "fastest")
+
+#: The objective a priced job gets when it names none. **Owner-approved,
+#: 2026-08-13.**
+#:
+#: ``balanced`` rather than ``cheapest`` because the cheapest ask is the one
+#: number a buyer can already read off the book for themselves; what they
+#: cannot compute is price per ACCEPTED result scaled by how a machine times
+#: against its class, and that is the whole reason this market records
+#: acceptance rates and durations at all. A default of ``cheapest`` would
+#: leave both measurements unused for every submitter who did not know the
+#: knob existed.
+DEFAULT_PRICE_OBJECTIVE = "balanced"
+
+
+def _validate_price(value: object) -> dict:
+    """The market opt-in. Absent means today's behavior: workspace only, free.
+
+    ``max_per_hour`` is decimal ZC per machine-hour and converts exactly into
+    the ledger's integer unit; a value the unit cannot represent exactly
+    (more decimal places than the unit carries) is refused rather than
+    rounded — a price the user typed must be the price the bid carries.
+
+    ``objective`` names how the router ranks the book
+    (:data:`PRICE_OBJECTIVES`), defaulting to :data:`DEFAULT_PRICE_OBJECTIVE`.
+    It was refused outright in the previous increment, as an unenforced knob;
+    it is enforced now — ``marketplace.rank_asks`` implements all three orders
+    and ``routing`` passes this value into every ``match_bid`` — so parsing it
+    tells a submitter the truth where refusing it used to.
+
+    ``budget`` is still refused when present (final review I2, Ruling 1): the
+    claim-side spend guard that would enforce a cap does not exist, and
+    accepting the key would tell a submitter their job is protected when it is
+    not. It is refused by name, BEFORE the generic unknown-key check below,
+    for the same reason ``REMOVED_FEDERATED_KEYS`` is: "price: unknown key(s)
+    ['budget']" sends someone hunting for a typo in a key that is spelled
+    exactly right.
+    """
+    raw = _validate_mapping(value, "price")
+    if "budget" in raw:
+        raise ConfigError(
+            "price.budget: not enforced yet — Phase 2 adds the claim-side "
+            "spend guard that would enforce it; remove it until then "
+            f"(got {raw['budget']!r})"
+        )
+
+    allowed = {"max_per_hour", "objective"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ConfigError(
+            f"price: unknown key(s) {sorted(unknown)!r}; "
+            f"allowed: {sorted(allowed)!r}"
+        )
+
+    objective = raw.get("objective", DEFAULT_PRICE_OBJECTIVE)
+    if objective not in PRICE_OBJECTIVES:
+        raise ConfigError(
+            f"price.objective: {objective!r} is not one of "
+            f"{list(PRICE_OBJECTIVES)!r}"
+        )
+
+    def to_unit(field: str, val: object, *, minimum_units: int) -> int:
+        try:
+            units = Fraction(str(val)) * ZC_PER_HOUR_UNIT
+        except (ValueError, ZeroDivisionError):
+            raise ConfigError(f"price.{field}: not a number: {val!r}")
+        if units.denominator != 1:
+            raise ConfigError(
+                f"price.{field}: {val!r} has more precision than "
+                f"1/{ZC_PER_HOUR_UNIT} ZC"
+            )
+        if units < minimum_units:
+            raise ConfigError(f"price.{field}: must be at least "
+                                   f"{minimum_units}/{ZC_PER_HOUR_UNIT} ZC")
+        return int(units)
+
+    if "max_per_hour" not in raw:
+        raise ConfigError("price: max_per_hour is required")
+    max_zc = to_unit("max_per_hour", raw["max_per_hour"], minimum_units=1)
+
+    return {"max_zc_per_hour": max_zc, "objective": objective}
+
+
+#: The one key ``placement:`` takes today. A constant rather than a literal
+#: inside the validator for the same reason ``DATASET_KEYS`` is one: the
+#: message that refuses an unknown key has to list what IS allowed, and a
+#: list that drifts from the check is worse than no list at all.
+PLACEMENT_KEYS = ("accept",)
+
+
+def _validate_placement(value: object) -> dict:
+    """Where a job is willing to run. SHAPE only — see ``FlashmlConfig.placement``.
+
+    ``accept`` is an ordered, non-empty, duplicate-free list of non-empty
+    strings, and every one of those four words is a rule this function
+    enforces and the router relies on:
+
+    - **ordered** — the router bids in the first class and spills into the
+      next only with the tasks the first could not fill, so the list is a
+      preference, not a set. It is therefore returned as a ``list`` in the
+      order written, never sorted or normalised.
+    - **non-empty** — ``accept: []`` reads as "run nowhere", which is not a
+      constraint anybody means to write; it is a list somebody meant to fill
+      in. Refused rather than silently routed as if the key were absent,
+      which would do the OPPOSITE of what it says.
+    - **duplicate-free** — the router walks one class per entry and re-reads
+      the same open book each time, with nothing written between the reads.
+      A class named twice would plan the same listing's capacity twice and
+      report a fill that only one machine can honour. Refused here, and
+      refused again in ``routing.job_accept_classes`` for the callers that
+      never came through a yaml file.
+    - **strings** — a class name is a name. ``4`` and ``[cpu-small]`` are
+      typos, and coercing either would hand ``routing`` a value it can only
+      answer with "unknown capability class ``'4'``", naming the symptom
+      instead of the mistake.
+
+    ``countries`` and ``pool`` are refused BY NAME, before the generic
+    unknown-key check, for the reason ``_validate_price`` refuses
+    ``objective``/``budget`` there: "unknown key(s) ['pool']" sends someone
+    hunting for a typo in a key that is spelled exactly right. They are two
+    different kinds of not-here, and the messages say which — ``countries``
+    is a real future key that nothing enforces yet, while ``pool`` exists
+    TODAY, at submit, as a request parameter, so the fix is to move one line
+    rather than to drop a constraint the submitter still wants.
+
+    What is deliberately NOT checked here: whether an entry names a real
+    capability class, and whether the list is consistent with
+    ``resources.gpus``/``resources.cpus``. Both need the marketplace ladder,
+    this module never imports ``marketplace``, and
+    ``routing.job_accept_classes`` is the single place that owns those
+    answers.
+    """
+    raw = _validate_mapping(value, "placement")
+    if "countries" in raw:
+        raise ConfigError(
+            "placement.countries: not supported yet — nothing filters "
+            f"placement by country today; remove it until then "
+            f"(got {raw['countries']!r})"
+        )
+    if "pool" in raw:
+        raise ConfigError(
+            "placement.pool: pool is chosen at submit, not in the yaml — "
+            "pass it as the submit request's `pool` parameter (or pick the "
+            f"workspace in the console); remove it here (got {raw['pool']!r})"
+        )
+
+    unknown = set(raw) - set(PLACEMENT_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"placement: unknown key(s) {sorted(unknown)!r}; "
+            f"allowed: {sorted(PLACEMENT_KEYS)!r}"
+        )
+
+    if "accept" not in raw:
+        raise ConfigError(
+            "placement: accept is required — it is the only key placement "
+            f"takes today, so a block without it constrains nothing"
+        )
+
+    accept = raw["accept"]
+    if not isinstance(accept, list) or not accept:
+        raise ConfigError(
+            "placement.accept must be a non-empty list of capability class "
+            f"names, got {accept!r}"
+        )
+
+    seen: list[str] = []
+    for entry in accept:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigError(
+                "placement.accept entries must be non-empty strings, got "
+                f"{entry!r}"
+            )
+        if entry in seen:
+            raise ConfigError(
+                f"placement.accept lists {entry!r} twice; a duplicate class "
+                "would plan the same machines' capacity twice"
+            )
+        seen.append(entry)
+
+    return {"accept": seen}

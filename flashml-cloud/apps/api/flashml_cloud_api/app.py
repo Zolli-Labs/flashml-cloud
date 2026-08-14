@@ -96,6 +96,7 @@ from flashml_cloud_api import repo as repomod
 from flashml_cloud_api import placement as placementmod
 from flashml_cloud_api import prices as pricesmod
 from flashml_cloud_api import router as routermod
+from flashml_cloud_api import routing as routingmod
 from flashml_cloud_api.router import tradeoff as tradeoffmod
 from flashml_cloud_api import sandbox_orchestrator as orchmod
 from flashml_cloud_api import sandbox_sessions as ssmod
@@ -411,6 +412,29 @@ def _parse_and_preflight_tree(
         config = parse_flashml_yaml(config_text)
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
+
+    # A priced job whose `resources`/`placement` cannot be turned into a set
+    # of books is refused HERE, at validation time, before a single byte
+    # leaves this process: a `resources.cpus`/`gpus` value that is not a
+    # count at all (a string, a list, a dict), a `placement.accept` naming a
+    # class that does not exist, or an `accept` that contradicts the job's
+    # own resources. All of them are `routing.RoutingValidationError`, so a
+    # malformed block 400s before a job row exists, instead of reaching the
+    # routing hook's fail-open catch after the job (and its row) already
+    # exist and turning into an unhandled 500.
+    #
+    # This ran only ONE check until 2026-08-14: a priced GPU job was refused
+    # outright, because the pinned runtime dropped `gpuPerTask` and a bid
+    # sized for GPU capacity would have been priced for hardware nobody
+    # could claim against. The pin now declares it, so GPU jobs route.
+    #
+    # Unpriced jobs are untouched by all of this and submit exactly as they
+    # do today — routing only ever looks at a job that named a price.
+    if config.price is not None:
+        try:
+            routingmod.job_accept_classes(config.resources, config.placement)
+        except routingmod.RoutingValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     try:
         image = resolve_image(config.image)
@@ -6648,17 +6672,31 @@ def create_cloud_app(
                 settings=settings,
                 connect=request.app.state.connect,
             )
+            federated_response: dict[str, Any] = {
+                "job_id": job_id,
+                "state": "PENDING",
+                "mode": config.mode,
+                "epochs": config.epochs,
+                "sync_every": config.sync_every,
+                "rounds": config.round_count,
+                "slots": fleet.slots,
+                "findings": rendered,
+            }
+            # Priced routing does not reach federated rounds yet — this run
+            # is N coordinator jobs the driver submits itself, one per round,
+            # not the single accepted job `routing.route_submitted_job`
+            # needs. No refusal (the run above already started) and no bid,
+            # but the plan's explainability rule holds regardless: every
+            # routing decision is visible in the response, so a `price:`
+            # block here is reported skipped rather than silently ignored,
+            # same shape as a runtime routing-error skip.
+            if config.price is not None:
+                federated_response["routing"] = {
+                    "state": "skipped",
+                    "reason": "federated-unsupported",
+                }
             return Response(
-                content=json.dumps({
-                    "job_id": job_id,
-                    "state": "PENDING",
-                    "mode": config.mode,
-                    "epochs": config.epochs,
-                    "sync_every": config.sync_every,
-                    "rounds": config.round_count,
-                    "slots": fleet.slots,
-                    "findings": rendered,
-                }),
+                content=json.dumps(federated_response),
                 status_code=201,
                 media_type="application/json",
             )
@@ -6696,8 +6734,125 @@ def create_cloud_app(
             pool_id=pool,
             correlation_id=observability.new_correlation_id(),
         )
+
+        # Priced pool routing: a bid at submit time, matched against the
+        # open book. The job row above is already written and the job is
+        # already accepted, so from here on nothing may turn a submit that
+        # would have succeeded into a failure — same fail-open discipline as
+        # `_human_spend_guard` and its callers: any exception anywhere in
+        # this block — including this line's own task-count lookup, and
+        # anything `route_submitted_job`/`plan_pool_routing` raises — leaves
+        # the submit itself untouched. `route_submitted_job` is ITSELF
+        # atomic (its own docstring: `create_bid` + `grant_matches` share
+        # one `db.transaction()`), so a "skipped" response below is never
+        # describing a book with an orphaned bid in it — this block does not
+        # need to, and does not, undo routing's writes; there are none left
+        # to undo. A priced job whose `resources`/`placement` cannot be
+        # turned into books never reaches here at all:
+        # `_parse_and_preflight_tree` already refused it with a 400 before a
+        # byte of this request left the process.
+        routing_block: dict[str, Any] | None = None
+        if config.price is not None:
+            try:
+                # The SAME expansion `preview_plans`/`cost_quote` use via
+                # `_route_plan` (`expand_tasks(job_id, spec)`) — never a
+                # second, hand-rolled count. `candidate_spec` is the exact
+                # validated model already built above for the spend guard;
+                # `job_id` is real now (the coordinator has accepted), where
+                # `_route_plan` only ever had `job_id or "preview"`.
+                if candidate_spec is None or expand_tasks is None:
+                    raise RuntimeError(
+                        "no validated spec or task expander available to "
+                        "size the routing bid"
+                    )
+                task_count = len(list(expand_tasks(job_id, candidate_spec))) or 1
+                if pool is not None:
+                    # Pool-scoped priced jobs create NO bid (C1 part 2, final
+                    # review). The coordinator's own pool gate already
+                    # confines this job to machines bound to `pool`, which
+                    # are free to every member (M1/M12) — a bid here could
+                    # only ever charge a pool-mate wrongly for capacity they
+                    # already have for free, or sit open and inert against
+                    # non-members who can never pass the coordinator's gate
+                    # to claim it (`marketplace.live_matches_for_machine` has
+                    # no production caller, so a grant to a non-member would
+                    # never even be read). The explain still runs — read-only,
+                    # no `create_bid`, no `grant_matches` — so the response
+                    # shows exactly what a bid would have seen: the pool's
+                    # own members, labelled `workspace-free` the same as any
+                    # other workspace exclusion.
+                    accept = routingmod.job_accept_classes(
+                        config.resources, config.placement
+                    )
+                    planned = routingmod.plan_pool_routing(
+                        db,
+                        accept_classes=accept,
+                        max_zc_per_hour=config.price["max_zc_per_hour"],
+                        tasks_wanted=task_count,
+                        workspace_machine_ids=routingmod.workspace_machine_ids_for(
+                            db, user_id
+                        ),
+                        # The same objective the bid would have been matched
+                        # under, from the same reader `route_submitted_job`
+                        # uses. A read-only explain ranked differently from
+                        # the bid it stands in for would be a worse answer
+                        # than no explain.
+                        objective=routingmod.price_objective(config.price),
+                    )
+                    routing_block = {
+                        "state": "skipped",
+                        "reason": "pool-capacity-is-free",
+                        "book": planned["book"],
+                        "accept": planned["accept"],
+                        "objective": planned["objective"],
+                        "formula": planned["formula"],
+                        "tasks_wanted": planned["tasks_wanted"],
+                    }
+                else:
+                    routing_block = routingmod.route_submitted_job(
+                        db,
+                        user_id=user_id,
+                        job_id=job_id,
+                        config=config,
+                        task_count=task_count,
+                    )
+            except Exception as exc:
+                # Belt-and-braces, not the atomicity guarantee: under
+                # autocommit (this deployment's current mode) every
+                # statement inside `route_submitted_job`'s own
+                # `db.transaction()` has already committed or already rolled
+                # back by the time an exception reaches here, so this call is
+                # a no-op today. It exists for a future non-autocommit/pooled
+                # connection, where an exception can leave the session
+                # mid-transaction and the NEXT statement on this connection
+                # (e.g. this same route's eventual response work) would
+                # otherwise inherit an aborted one — exactly why
+                # `_human_spend_guard`'s callers carry the identical no-op
+                # today. Undoing `route_submitted_job`'s own writes is not
+                # this call's job; that function is atomic by construction
+                # (see its docstring).
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                # `repr(exc)` (I3, final review): "routing failed open" alone
+                # cannot tell a broken market path (a bug worth paging on)
+                # from ordinary no-priced-traffic quiet — the two produce the
+                # identical log line otherwise.
+                log.warning(
+                    json.dumps({
+                        "text": "routing failed open",
+                        "job_id": job_id,
+                        "error": repr(exc),
+                    })
+                )
+                routing_block = {"state": "skipped", "reason": "routing-error"}
+
+        response_body: dict[str, Any] = {**job, "findings": rendered}
+        if routing_block is not None:
+            response_body["routing"] = routing_block
         return Response(
-            content=json.dumps({**job, "findings": rendered}),
+            content=json.dumps(response_body),
             status_code=201,
             media_type="application/json",
         )
@@ -7705,6 +7860,125 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown job")
         return [_jsonable(r) for r in dbmod.list_verifications_for_job(db, job_id)]
 
+    @app.get("/v1alpha1/jobs/{job_id}/routing", tags=["browser"])
+    async def get_job_routing(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The routing inspection route: this job's bids, their granted
+        matches, and the open book re-explained AS IT STANDS NOW.
+
+        **Every bid, not the bid.** A submission posts one bid per
+        capability class its accept-walk visited, so a job that spilled from
+        ``cpu-small`` into ``cpu-large`` has two, in creation (walk) order,
+        each with its own matches and its own task count. Returning one of
+        them would hide whichever class did the rest of the work.
+
+        Task 4's submit hook stores nothing beyond the bid/matches rows it
+        writes at submission — no snapshot of the book that produced them —
+        so the ``live_book`` here is not read back from anywhere. It is
+        ``routing.plan_pool_routing`` run again, this instant, against
+        whatever the book looks like now. That recomputation IS the
+        feature: a listing withdrawn or added since submission changes what
+        this route reports without anything having to notice and update a
+        stored row. Immediately after submission, with nothing in the book
+        having moved, it reproduces the submit response's ``routing`` block
+        exactly (``tests/test_routing_routes.py``).
+
+        Visibility matches the sibling read routes exactly — the owner, or
+        any member of the job's pool, via ``fetch_job_for_viewer`` —
+        answering 404 (not 403) for a job that exists and the caller cannot
+        see. The bid itself is still looked up by the job's OWNER
+        (``row["owner_id"]``), not the caller: a bid is posted by the
+        submitter, and a viewing pool member is not that submitter, the
+        same distinction ``get_job_route``'s federated branch draws for
+        ``list_job_rounds_for_owner``.
+
+        The live book is re-derived from the BIDS' own classes, in creation
+        order, rather than from the job's config: the config would name
+        every class the job would ACCEPT, including the ones the original
+        walk never had to visit, and re-planning those would report a book
+        read that never happened at submit time. The first bid carries the
+        cap and the job's full task count (it was the first class walked and
+        was asked for everything), which is exactly what the original walk
+        started from.
+
+        **The live book is re-ranked under the objective the BID stored**
+        (``bids[0]["objective"]``, migration 0032), so the recomputation
+        answers the question the submission asked rather than a different
+        one. Until that column existed this route had nothing to recompute
+        with and re-ranked ``cheapest`` whatever the job wanted — an honest
+        label on the wrong answer, which is why the column landed.
+
+        It is read off the FIRST bid, beside the cap and the task count
+        already taken from it, and for the same reason: that bid is the walk's
+        first-choice class, asked for the whole job, and is exactly what the
+        original walk started from. One walk plans every class of one
+        submission, so all of a job's bids carry the same objective by
+        construction — the column is per bid rather than per job because a
+        SINGLE bid is what ``routing.refill_open_bids`` later comes back to,
+        not because two bids of one job could disagree.
+
+        Deliberately not re-derived from the job's config: that config lives
+        in a git repo that may have been edited since submission, and the
+        SPILLED classes were never derived from it anyway (each later class
+        is asked for the remainder, not for the job).
+
+        An unrouted job (no price block, so ``route_submitted_job`` never
+        ran) is not an error — it answers ``{"bids": [], "live_book":
+        None}``, 200, not 404.
+
+        Read-only: no bid is created, no match is granted, nothing is
+        written. ``plan_pool_routing``'s ``"class_plans"`` key (it carries
+        ``MatchPlan`` dataclasses, not JSON-safe) never leaves this handler.
+
+        ``workspace_machine_ids`` is re-derived for the BID'S owner
+        (``row["owner_id"]``, same as the bid lookup above), not the
+        caller — the same distinction the bid lookup itself draws — so a
+        pool-mate inspecting a teammate's routed job sees the same
+        ``workspace-free`` labels the submitter's own submit response did,
+        never a stranger's recomputation of "whose workspace is this".
+        Without this the recomputation here would silently diverge from
+        ``route_submitted_job``'s (C1, final review) the moment the
+        submitter has any workspace machine in the book.
+        """
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        bids = marketplacemod.bids_for_job(
+            db, job_id=job_id, owner_id=row["owner_id"]
+        )
+        if not bids:
+            return {"bids": [], "live_book": None}
+
+        live_book = routingmod.plan_pool_routing(
+            db,
+            accept_classes=[bid["capability_class"] for bid in bids],
+            max_zc_per_hour=bids[0]["max_zc_per_hour"],
+            tasks_wanted=bids[0]["tasks_wanted"],
+            workspace_machine_ids=routingmod.workspace_machine_ids_for(
+                db, row["owner_id"]
+            ),
+            objective=str(bids[0]["objective"]),
+        )
+        live_book.pop("class_plans", None)
+
+        return {
+            "bids": [
+                {
+                    **_jsonable(bid),
+                    "matches": [
+                        _jsonable(m)
+                        for m in marketplacemod.matches_for_bid(db, str(bid["id"]))
+                    ],
+                }
+                for bid in bids
+            ],
+            "live_book": live_book,
+        }
+
     @app.get("/v1alpha1/trace/{correlation_id}", tags=["browser"])
     async def get_trace(
         correlation_id: str,
@@ -8687,6 +8961,24 @@ def create_cloud_app(
         name their own class would sell a 3070 as Hopper-class. Refusals
         are 409, not 400 — the request was well formed, the machine is
         simply not something the ladder can promise.
+
+        **A new listing refills the demand that was waiting for it**
+        (``routing.refill_open_bids``, research doc §5.2 step 8). Bids left
+        ``open``/``partial`` because the book was thin at submit time are
+        matched against this listing here, and the response says which of
+        them got what under ``"refilled"`` — ``[]`` when nothing moved, which
+        is the ordinary case and is always present rather than omitted.
+
+        The refill is FAIL-OPEN, the same discipline the submit hook's
+        routing block follows: the listing row is already committed and the
+        host's action already succeeded, so nothing after it may turn a 201
+        into a 5xx. ``refill_open_bids`` runs every grant in ONE transaction,
+        so an exception leaves no half-written refill for the rollback below
+        to chase — that ``db.rollback()`` is the same belt-and-braces no-op
+        the submit hook carries, there for a future non-autocommit connection
+        rather than as the mechanism that keeps the writes atomic. The
+        warning carries ``repr(exc)``: "refill failed open" alone cannot tell
+        a broken market path from a market with nothing waiting in it.
         """
         payload = await _json_object(request)
         machine_id = payload.get("machine_id")
@@ -8723,8 +9015,29 @@ def create_cloud_app(
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+        klass = str(row["capability_class"])
+        refilled: list[dict[str, Any]] = []
+        try:
+            refilled = routingmod.refill_open_bids(db, capability_class=klass)
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(
+                json.dumps({
+                    "text": "listing refill failed open",
+                    "listing_id": str(row["id"]),
+                    "capability_class": klass,
+                    "error": repr(exc),
+                })
+            )
+            refilled = []
+
         return {
             **_jsonable(row),
+            "refilled": refilled,
             "donated": marketplacemod.is_donated(int(row["ask_zc_per_hour"])),
             "ask_usd_per_hour": pricesmod.zc_ask_usd_amount_text(
                 int(row["ask_zc_per_hour"])

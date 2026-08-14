@@ -226,6 +226,150 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-14 — Routing phase 1, three owner-approved increments: GPU accept-classes, objectives, and refill (flashml-cloud, branch feat/pool-routing-phase1)
+What/why: Three slices, each closing a gap the previous phase named rather
+than fixed. (1) **GPU classes + ordered accept walk** (`1a036eb`, `9d92831`):
+`routing.GpuRoutingUnavailable` is gone — a `gpus: 1` job now bids into every
+GPU book cheapest-reference-price first, and `placement.accept` in
+flashml.yaml lets a submitter write their own order; a job spills the
+REMAINDER into each class in turn, one bid per class actually walked.
+(2) **Objectives** (`fa5db5d`, `5b16a07`, `3cf9f5f`, `b3a5109`):
+`price.objective` (`cheapest`/`balanced`/`fastest`) reaches the ranking
+engine, every book row publishes its `rank_score` beside the `formula` that
+produced it, the newcomer share (`UNPROVEN_TASK_SHARE`) became the JOB's
+budget spent once across the whole walk instead of a fresh quarter-share per
+class, and migration **0032** stores the objective on the bid so nothing
+downstream has to guess it. (3) **Refill** (this commit):
+`routing.refill_open_bids` — research doc §5.2 step 8, "partial fills stay
+open and refill as listings appear". Nothing re-matched before it; a bid the
+book could not clear at submit time stayed starved for ever. `POST
+/market/listings` now calls it fail-open and reports `"refilled"`.
+How verified: `apps/api/.venv/bin/pytest -q` — **3400 passed, 2 skipped, 3
+  deselected, 1 xfailed** in ~70s, up from 3381 at the start of the day, zero
+  regressions. That is the API's own suite and NOTHING else: `e2e/` has not
+  been run against these commits (the priced-routing scenario from 2026-08-13
+  is the one that would cover the agent side), and no console pixel was
+  rendered. Also fixed a pre-existing cross-file isolation leak found on the
+  way: `tests/test_routing.py`'s `_clean_books` withdrew listings with raw SQL
+  and never re-recorded the book, so `class_board`'s `last_zc` kept quoting a
+  listing nobody could buy —
+  `test_market_routes.py::test_the_zc_ladder_matches_the_live_book_and_never
+  _zero_fills` failed with `assert 100 == None` whenever `test_routing*` ran
+  first. Reproduced, fixed, and both orderings verified green.
+  **e2e closed that scope gap later the same day** (same branch, worktree
+  `.worktrees/routing-phase1`): `e2e/.venv/bin/pytest
+  e2e/test_priced_pool_routing.py -q` — **2 passed in 6.1s** against the
+  PINNED `flashruntime==0.6.0`, no `LOCAL=1`, so it is release evidence: real
+  coordinator + real cloud-API subprocess + real Docker agent. The 2026-08-13
+  scenario was STALE, not broken code — it asserted the pre-`9d92831`
+  single-class shape (`routing.capability_class`, `routing.bid_id`,
+  `inspected["bid"]`) and died on `KeyError: 'capability_class'`; the walk now
+  publishes `accept`/`bids[]` and `GET /jobs/{id}/routing` returns `bids[]`
+  each carrying its own `matches`. Updated to the shipped contract and added
+  `test_priced_job_spills_from_cpu_small_into_cpu_large`: 8-task sweep, one
+  listing per class, the spill lands in `cpu-large` at that host's own 150 ZC
+  ask (not the buyer's 200 cap), two bids in walk order asked 8 then 7, live
+  book re-ranked under the bid's STORED `fastest` objective (0032). Falsified
+  before it was trusted — narrowing the sweep to 4 tasks drops the job-level
+  unproven budget to 1 and the spill correctly vanishes as
+  `excluded: "unproven-cap"`, which is increment (2)'s cross-class cap
+  observed through the authoring surface.
+  **Code-review fixes on the same branch, all four reproduced red first**
+  (worktree `.worktrees/routing-phase1`): (a) **concurrent refills
+  double-entitled a bid** — `refill_open_bids` read the remainder and the
+  held listings with no lock, so two walks over one bid both planned the same
+  listing and both granted it; now `marketplace.lock_bid` takes the row's
+  `for update` BEFORE any of that is read, each bid's plan+grant runs in its
+  own savepoint with a narrow `except IllegalTransition` (one bid's lost race
+  used to roll back every earlier bid's grants and report `"refilled": []`),
+  and migration **0033** adds the partial unique index
+  `matches (bid_id, listing_id) where state <> 'expired'` as the backstop.
+  Removing the lock makes the new two-connection test fail with a real
+  `UniqueViolation` on that index; removing either the savepoint or the
+  `except` fails the second test. (b) **`nearest_miss` was wrong under
+  `balanced`/`fastest`** — it latched the FIRST above-cap ask in rank order,
+  which is price order only under `cheapest`, so `fastest` reported 500 where
+  120 existed; it is a running minimum now. (c) `rank_score(..., "fastest")`
+  published a median for an ask `fastest_key` had demoted for having no finite
+  effective price — None now, matching what the row was ordered by.
+  (d) `test_schema.py` iterates `marketplace.OBJECTIVES` instead of a
+  hardcoded triple, so a fourth objective added without a migration turns a
+  silent fail-open unroute into a red test. Verified:
+  `apps/api/.venv/bin/pytest -q` — **3408 passed, 2 skipped, 3 deselected,
+  1 xfailed** in ~71s (3401 + 7 new), and `e2e/.venv/bin/pytest
+  e2e/test_priced_pool_routing.py -q` — **2 passed in 7.1s** against the
+  pinned `flashruntime==0.6.0`.
+Gotchas: **Migration 0032 must reach a database before the API that writes
+  it.** `marketplace.create_bid` names the column unconditionally, so an API
+  deployed first fails every priced submission's routing (fail-open, so jobs
+  still land — the market just goes silently quiet). CI already produces the
+  right order: `migrate-dev` and `migrate-prod` in `.github/workflows/ci.yml`
+  run `python -m flashml_cloud_api.migrate` before their deploy step, and
+  nothing migrates at API startup. The column defaults to `cheapest`, NOT
+  flashml.yaml's `balanced`: the default backfills every existing row, and
+  `cheapest` is what those rows were actually matched under. Refill's own
+  trap, written as a test first: never re-bid `tasks_wanted`. The remainder is
+  recomputed from non-expired matches every time, and the listings a bid
+  already holds are excluded from its book — `max_concurrent_tasks` is not
+  decremented by a match, so a naive refill hands one machine two live
+  entitlements for the same bid.
+Next: `pause_listing`/`resume_listing` still have no HTTP routes; when resume
+  grows one it MUST call `refill_open_bids` (a paused listing coming back is
+  new supply by every measure a waiting bid can see) — the docstring says so
+  where somebody will read it. Parking lot: nothing sweeps bids that go stale
+  without a listing ever appearing, and no e2e scenario yet exercises the
+  refill through the real agent path.
+
+### 2026-08-13 — Priced pool routing e2e rehearsal: real coordinator, real cloud API, real Docker agent (flashml-cloud, pool-routing-phase1 Task 6)
+What/why: Tasks 1-5 built `price:` in flashml.yaml, submit-time bid/match
+routing, the ranked book with exclusion reasons, and `GET /jobs/{id}/routing`
+— all proven only against `apps/api/tests`' scripted coordinator transport.
+Task 6 rehearses the same surface through the real authoring path: two hosts
+enrol machines and list them at different asks (`POST /market/listings`,
+never SQL), a third machine enrols and stays unlisted, a real flashml.yaml
+pool job (`gpus: 0`, price cap between the two asks) is submitted through
+`POST /jobs/from-upload` — the real compiler, not a hand-built JobSpec (the
+exact failure mode `e2e/test_training_resume.py`'s "hand-built its JobSpec
+and bypassed the authoring surface" gotcha names, 2026-08-12). New
+`e2e/test_priced_pool_routing.py` + `e2e/priced_pool_routing_seed.py`.
+How verified: `e2e/.venv/bin/pytest e2e/test_priced_pool_routing.py -q` — 1
+  passed (~3-4s), run 3x back to back for stability, all green. Full suite
+  `e2e/.venv/bin/pytest e2e -q` — 99 passed in 85.5s, zero regressions.
+  Assertions pinned: submit response's `routing.book` ranks the cheap
+  listing first (`excluded: null`, `tasks_assigned: 1`) and marks the
+  expensive one `"ask-above-cap"`; `GET /jobs/{id}/routing`'s `matches` row
+  carries the cheap machine's OWN ask (`agreed_zc_per_hour == 100`, not the
+  buyer's 200-millicredit cap) and `live_book` is byte-equal to the submit
+  response's `book`; the job COMPLETES, claimed by the third, unlisted,
+  never-in-the-book machine — proving routing/matching is a pricing overlay
+  over the pull scheduler, not a placement gate (M1's free-claim path is
+  unbroken).
+Gotchas: `apps/api/.venv` and `e2e/.venv` are deliberately disjoint
+  dependency sets (psycopg/fastapi/pyjwt vs flashnode/flashruntime — see
+  `test_repo_job_contract.py`'s own note on this). The scenario runs the
+  coordinator AND the cloud API as real uvicorn subprocesses under
+  `apps/api/.venv` — `scripts/dev.sh`'s exact recipe — and drives everything
+  else from `e2e/.venv` over plain HTTP (`requests`), including a
+  stdlib-only HS256 JWT builder (no `pyjwt` there) that verifies against
+  `Settings.supabase_jwt_secret` without ever reaching Supabase's JWKS
+  endpoint (`auth.verify_supabase_jwt`'s own algorithm dispatch). Machine
+  enrolment runs the real `enrolment.start_device_code`/
+  `approve_device_code`/`redeem_device_code` functions (same as
+  `test_agent_proxy.py`'s `_enrol` helper), never a hand-inserted machine
+  row. `from-upload` always compiles a `command` workload, whose isolation
+  is FIXED at `sandboxed` — not configurable from flashml.yaml — so
+  completing the job for real needs Docker (colima, already running on this
+  machine with the curated `python-slim` image pre-pulled); the scenario
+  skips cleanly, naming the missing piece, if Postgres tooling, the API
+  venv, or Docker is unavailable, rather than hanging in a claim loop
+  nothing would ever answer.
+Next: two items deliberately deferred, named rather than silently missing —
+  GPU capability classes are blocked on the 0.6.1 runtime pin
+  (`routing.GpuRoutingUnavailable`; this scenario only ever submits
+  `gpus: 0`), and per-gate placement reasons (why a SPECIFIC gate refused a
+  specific node) are an upstream `flashruntime.scheduler` concern this repo
+  does not own.
+
 ### 2026-08-13 — Landing page rework: 7-section restructure, public price board, timer-looped hero (flashml-cloud, branch agent/landing-market-board)
 What/why: Landing restructured from 12 sections down to 7. New unauthenticated
 `GET /v1alpha1/public/prices` serves curated GPU quotes plus a `Decimal`-computed

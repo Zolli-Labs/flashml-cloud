@@ -608,20 +608,29 @@ def _dataset_slices(
 def _resources(config: FlashmlConfig) -> dict[str, Any]:
     """``flashml.yaml resources:`` → the upstream ``ResourcesSpec`` fields.
 
-    **Known gap, verified against the pinned runtime rather than assumed:**
-    ``gpuPerTask`` is emitted here, but ``ResourcesSpec`` in the pinned
-    flashruntime (0.4.0) does not declare it. ``compile_to_jobspec`` returns
-    ``JobSpec.model_validate(spec).model_dump_json()``, and pydantic's default
-    ``extra="ignore"`` **drops the field silently** — no error, no warning, a
-    ``gpus: 1`` job that compiles to a CPU spec. The field lands upstream in
-    flashruntime 0.5.0; re-pinning is plan Task 10, and this repo cannot make
-    that change (hard rule 2).
+    **The GPU gap this docstring used to describe is closed** (verified
+    against the installed runtime, not assumed). At the current pin, 0.6.0:
 
-    So this validation is the submitter's half of the contract, complete and
-    correct, and the value simply does not yet reach the coordinator.
-    ``tests/test_compile.py`` asserts the emission here directly and gates the
-    round-trip assertion on the pin, so the day the pin moves the coverage
-    turns on by itself.
+    - ``ResourcesSpec`` declares ``gpuPerTask: int = Field(ge=0, default=0)``,
+      so ``compile_to_jobspec``'s ``JobSpec.model_validate(...)`` round-trip
+      keeps the field instead of dropping it under pydantic's default
+      ``extra="ignore"``;
+    - the command recipe reads ``spec.spec.resources.gpuPerTask`` and stamps
+      ``payload["gpus"]`` on every task that wants one, which is what
+      ``IsolationAwarePlacement``'s GPU gate matches on.
+
+    So a ``gpus: 1`` job now compiles to a GPU spec and lands on a machine
+    that has one, end to end. Until 0.5.0 it did not: the field was validated
+    here, silently dropped by the round-trip, and a CUDA job placed on a
+    CPU-only volunteer. That is why ``tests/test_compile.py`` gates its
+    round-trip assertion on the pin rather than asserting it flatly — the
+    guard for the OLD behaviour is the one that now skips, and the coverage
+    that matters turned itself on when the pin moved.
+
+    A materialised ``gpuPerTask: 0`` on a job that asked for no GPU is not a
+    weaker absent: the runtime's own gate engages only above zero. This
+    function still never injects the key — absent in, absent out — because
+    what this module owes the contract is the submitter's half of it.
     """
     raw = config.resources or {}
     resources: dict[str, Any] = {}

@@ -9,6 +9,7 @@ import psycopg
 import pytest
 
 from flashml_cloud_api import db as dbmod
+from flashml_cloud_api import marketplace as mk
 
 # One test below asserts against a real, freshly-migrated database rather
 # than against the SQL text: a column list read out of `information_schema`
@@ -919,3 +920,102 @@ def test_agent_principals_token_hash_allows_multiple_nulls(db):
             token_hash=None, token_prefix=None,
             revoked_at="2026-01-01T00:00:00Z",
         )
+
+
+# ---------------------------------------------------------------------------
+# 0032_bid_objective — the objective a bid was matched under, on the bid.
+# ---------------------------------------------------------------------------
+
+
+def _objective_owner(db) -> str:
+    """A profile a bid can reference. `bids.owner_id` cascades from
+    `public.profiles`, which cascades from `auth.users` (the local stub in
+    conftest.py stands in for Supabase's own schema)."""
+    owner = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute("insert into auth.users (id) values (%s::uuid)", (owner,))
+        cur.execute("insert into public.profiles (id) values (%s::uuid)", (owner,))
+    return owner
+
+
+def _insert_bid_without_an_objective(db, owner: str, objective=...) -> str:
+    """A bid written the way every writer BEFORE migration 0032 wrote one:
+    the column is not named at all, so the row takes the column default.
+
+    This is the only honest way to test the backfill. `marketplace.create_bid`
+    now always names the column, so going through it would test the Python
+    default and prove nothing about the rows already in the two deployed
+    databases.
+    """
+    columns = (
+        "job_id, owner_id, capability_class, max_zc_per_hour, tasks_wanted,"
+        " est_task_seconds"
+    )
+    values = "%s, %s::uuid, 'cpu-small', 100, 1, 3600"
+    params: list = [f"schema-obj-{uuid.uuid4().hex[:8]}", owner]
+    if objective is not ...:
+        columns += ", objective"
+        values += ", %s"
+        params.append(objective)
+    with db.cursor() as cur:
+        cur.execute(
+            f"insert into public.bids ({columns}) values ({values}) returning objective",
+            params,
+        )
+        return cur.fetchone()["objective"]
+
+
+def test_a_bid_written_before_0032_reads_as_cheapest(db):
+    """The backfill, checked against the applied schema rather than the SQL
+    text. Every bid in dev and prod predates this column, and the surfaces
+    that read it re-explain a book with it — so the default is not cosmetic,
+    it is a claim about how those matches were actually made.
+
+    `cheapest` is `marketplace.DEFAULT_RANK_OBJECTIVE`, which is what
+    `match_bid` does when nobody names an objective and therefore what every
+    one of those rows really was matched under. flashml.yaml's own default is
+    `balanced`; stamping THAT on the history would be a false claim published
+    as an explanation. See 0032's header.
+    """
+    assert _insert_bid_without_an_objective(db, _objective_owner(db)) == "cheapest"
+
+
+def test_a_bid_objective_is_constrained_to_the_three_the_engine_ranks_by(db):
+    """The database is the backstop for `marketplace._checked_objective`.
+
+    Same discipline as `bids.capability_class` one column up: a value nothing
+    in the ranking engine can act on is refused by the table, not discovered
+    when a response builder raises a KeyError over OBJECTIVE_FORMULAS.
+
+    **Iterated over `marketplace.OBJECTIVES`, never over a literal triple.**
+    0032's CHECK and that tuple are two copies of one register, and 0032's own
+    header names the constraint as a site that has to move with it. A
+    hardcoded list here would let a fourth objective be added in Python alone
+    and stay green: `create_bid` would accept it, the insert would hit this
+    CHECK, and — because the submit hook's routing block is fail-open — every
+    job asking for it would land UNROUTED with a warning line. Iterating the
+    real tuple turns that silent fail-open into a red test in this file.
+    """
+    owner = _objective_owner(db)
+    assert mk.OBJECTIVES, "the engine must rank by something"
+    for good in mk.OBJECTIVES:
+        with db.transaction():
+            assert _insert_bid_without_an_objective(db, owner, objective=good) == good
+
+
+def test_a_bid_objective_the_engine_does_not_have_is_refused_by_the_table(db):
+    """The other direction of the same drift: a CHECK widened past
+    `marketplace.OBJECTIVES` — or a caller reaching the table around
+    `_checked_objective` — must still be refused.
+
+    The name is derived from the tuple rather than written out, so it stays a
+    non-objective no matter what the register grows to.
+    """
+    owner = _objective_owner(db)
+    not_an_objective = "-and-".join(mk.OBJECTIVES)
+    assert not_an_objective not in mk.OBJECTIVES
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with db.transaction():
+            _insert_bid_without_an_objective(
+                db, owner, objective=not_an_objective
+            )
