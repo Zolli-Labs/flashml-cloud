@@ -75,7 +75,7 @@ import {
  * with the segment matching each file's theme marked active, so the control
  * itself is part of what gets compared.
  */
-const FONT_VARS = `:root{--font-instrument-sans:ui-sans-serif,system-ui,-apple-system,sans-serif;--font-geist-mono:ui-monospace,SFMono-Regular,Menlo,monospace}`;
+const FONT_VARS = `:root{--font-instrument-sans:ui-sans-serif,system-ui,-apple-system,sans-serif;--font-geist-sans:ui-sans-serif,system-ui,-apple-system,sans-serif;--font-geist-mono:ui-monospace,SFMono-Regular,Menlo,monospace}`;
 
 const webRoot = process.cwd();
 const outDir = process.env.PREVIEW_OUT ?? path.join(webRoot, ".preview");
@@ -139,13 +139,15 @@ function Rail() {
   ];
   return (
     <aside className="console-rail sticky top-0 hidden h-dvh w-[232px] shrink-0 flex-col self-start border-r border-border bg-bg-rail text-foreground lg:flex">
-      <div className="flex h-16 items-center px-4">
+      {/* `h-12`, matching `ConsoleShell`'s own wordmark row — kept in sync
+          by hand, same caveat as the FleetPill stand-in below. */}
+      <div className="flex h-12 items-center px-4">
         <span className="font-mono text-sm font-semibold tracking-tight">
           ZOLLI
         </span>
       </div>
       <div className="px-3 pb-2">
-        <div className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 text-sm text-muted-foreground shadow-sm">
+        <div className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1 text-[13px] text-muted-foreground">
           <MagnifyingGlass size={14} />
           <span className="flex-1">Search</span>
           <kbd className="meta rounded border border-border px-1 py-px">
@@ -158,29 +160,34 @@ function Rail() {
           {navItems.map(({ label, icon: NavIcon, active }) => (
             <div
               key={label}
-              className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm ${
+              className={`relative flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] ${
                 active
-                  ? "bg-primary/10 font-medium text-brand-foreground"
+                  ? "bg-primary/8 text-foreground before:absolute before:-left-3 before:top-0 before:bottom-0 before:w-0.5 before:bg-primary before:content-['']"
                   : "text-muted-foreground"
               }`}
             >
-              <NavIcon size={17} weight={active ? "fill" : "regular"} />
+              <NavIcon size={16} weight={active ? "fill" : "regular"} />
               {label}
             </div>
           ))}
-          <div className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-muted-foreground">
-            <RocketLaunch size={17} />
+          <div className="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] text-muted-foreground">
+            <RocketLaunch size={16} />
             Deploy
           </div>
         </div>
+        <div className="mt-5 space-y-0.5">
+          <p className="px-2.5 pb-1 text-[10px] uppercase tracking-[0.07em] text-[var(--z-app-text-dim)]">
+            Global
+          </p>
+        </div>
       </nav>
       <div className="mt-auto space-y-0.5 border-t border-border px-3 py-3">
-        <div className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-muted-foreground">
-          <BookOpen size={17} />
+        <div className="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground">
+          <BookOpen size={16} />
           Help
         </div>
-        <div className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-muted-foreground">
-          <GithubLogo size={17} />
+        <div className="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground">
+          <GithubLogo size={16} />
           Source
         </div>
       </div>
@@ -192,14 +199,16 @@ function Rail() {
  * the fleet pill, the theme switcher and the user menu. */
 function TopBar({ theme }: { theme: "light" | "dark" }) {
   return (
-    <header className="sticky top-0 z-30 flex h-[62px] items-center justify-between gap-3 border-b border-border bg-surface px-4 sm:px-6">
+    <header className="sticky top-0 z-30 flex h-12 items-center justify-between gap-3 border-b border-border bg-surface px-4 sm:px-6">
       <div className="flex min-w-0 items-center gap-2">
         <SidebarSimple size={18} className="text-muted-foreground lg:hidden" />
       </div>
       <div className="flex items-center gap-3">
-        {/* `rounded-sm`, matching `components/shell/FleetPill.tsx`'s own
-            update (was `rounded-[4px]`) — this stand-in is a copy of its
-            classes, not an import, so it has to be kept in sync by hand. */}
+        {/* `rounded-sm`, and the whole pill in mono, matching
+            `components/shell/FleetPill.tsx`'s own update (was
+            `rounded-[4px]` with plain-sans labels) — this stand-in is a
+            copy of its classes, not an import, so it has to be kept in sync
+            by hand. */}
         <div className="hidden items-center gap-2 rounded-sm border border-border bg-surface px-3 py-1.5 sm:inline-flex">
           <span
             className="status-dot"
@@ -209,7 +218,9 @@ function TopBar({ theme }: { theme: "light" | "dark" }) {
           <span className="font-mono text-xs tabular-nums text-foreground">
             4
           </span>
-          <span className="text-xs text-muted-foreground">machines online</span>
+          <span className="font-mono text-xs text-muted-foreground">
+            machines online
+          </span>
         </div>
         <StaticThemeSwitcher active={theme} />
         <div
@@ -306,7 +317,9 @@ function Content() {
       className="min-w-0 flex-1 bg-[var(--z-app-canvas)]"
       style={{ padding: "2.5rem 2rem" }}
     >
-      <h1 className="title" style={{ marginBottom: "0.35rem" }}>
+      {/* `.page-title` (was `.title`) — the console's own 20px heading
+          scale now, not the marketing/display scale. */}
+      <h1 className="page-title" style={{ marginBottom: "0.35rem" }}>
         Machines
       </h1>
       <p className="meta" style={{ marginBottom: "2rem" }}>

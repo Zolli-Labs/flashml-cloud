@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { ListingsPanel } from "@/components/market/ListingsPanel";
+import { PageHeader } from "@/components/shell/PageHeader";
 import {
   ApiError,
   NotAuthenticated,
@@ -114,28 +115,27 @@ export default function ListingsPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="title">Listings</h1>
-          <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-            Capacity offered at its host&apos;s own ask, ranked by what a
-            buyer actually pays per accepted result. A zero ask is donated,
-            and an unproven host says so rather than borrowing a number.
-          </p>
-        </div>
-        {/* The header strip exists only when there is a market to count:
-            real rows only, absent (not zeroed) for an empty book. */}
-        {state === "present" && data && data.asks.length > 0 && (
-          <div className="flex gap-6 pb-1">
-            <HeaderStat value={data.asks.length} label="Open asks" />
-            <HeaderStat
-              value={books.length}
-              label={books.length === 1 ? "Class" : "Classes"}
-            />
-            <HeaderStat value={data.mine.length} label="Your listings" />
-          </div>
-        )}
-      </div>
+      <PageHeader
+        title="Listings"
+        description="Capacity offered at its host's own ask, ranked by what a buyer actually pays per accepted result. A zero ask is donated, and an unproven host says so rather than borrowing a number."
+        // The header strip exists only when there is a market to count:
+        // real rows only, absent (not zeroed) for an empty book. `undefined`
+        // rather than `false`/`null`: PageHeader renders its actions wrapper
+        // only when this slot is truthy, and passing it a genuinely absent
+        // value is the same "no actions" every other page relies on.
+        actions={
+          state === "present" && data && data.asks.length > 0 ? (
+            <div className="flex gap-6 pb-1">
+              <HeaderStat value={data.asks.length} label="Open asks" />
+              <HeaderStat
+                value={books.length}
+                label={books.length === 1 ? "Class" : "Classes"}
+              />
+              <HeaderStat value={data.mine.length} label="Your listings" />
+            </div>
+          ) : undefined
+        }
+      />
 
       <div className="mt-8">
         <ListingsPanel

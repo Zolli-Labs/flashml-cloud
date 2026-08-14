@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist_Mono, Instrument_Sans } from "next/font/google";
+import { Geist, Geist_Mono, Instrument_Sans } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -7,6 +7,16 @@ import { ThemeProvider } from "@/components/shared/ThemeProvider";
 
 const instrumentSans = Instrument_Sans({
   variable: "--font-instrument-sans",
+  subsets: ["latin"],
+  display: "swap",
+});
+
+// The console's own face — see `.console-theme` in app/globals.css, which
+// sets this as the inherited font-family for every console page. Marketing
+// and auth keep Instrument Sans; loading both is the cost of that split, the
+// same tradeoff `geistMono` already made for the mono face used everywhere.
+const geistSans = Geist({
+  variable: "--font-geist-sans",
   subsets: ["latin"],
   display: "swap",
 });
@@ -87,7 +97,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${instrumentSans.variable} ${geistMono.variable}`}
+      className={`${instrumentSans.variable} ${geistSans.variable} ${geistMono.variable}`}
       // next-themes reads localStorage/`prefers-color-scheme` and sets
       // `.dark` on this element before React hydrates, so the class React
       // rendered on the server and the class the browser is now showing

@@ -71,17 +71,25 @@ export function FleetPill() {
           background: live ? "var(--node-green)" : "var(--muted-foreground)",
         }}
       />
+      {/* Whole pill in mono now, not just the counts — the counts are
+          machine-emitted and always were `font-mono`, but the surrounding
+          words sat in the ambient sans and read as two voices in one pill.
+          Same data, same wording; only the typeface changed. */}
       <span className="font-mono text-xs tabular-nums text-foreground">
         {fleet.online}
       </span>
-      <span className="text-xs text-muted-foreground">machines online</span>
-      <span aria-hidden className="text-xs text-muted-foreground/40">
+      <span className="font-mono text-xs text-muted-foreground">
+        machines online
+      </span>
+      <span aria-hidden className="font-mono text-xs text-muted-foreground/40">
         /
       </span>
       <span className="font-mono text-xs tabular-nums text-foreground">
         {fleet.running}
       </span>
-      <span className="text-xs text-muted-foreground">jobs running</span>
+      <span className="font-mono text-xs text-muted-foreground">
+        jobs running
+      </span>
     </div>
   );
 }

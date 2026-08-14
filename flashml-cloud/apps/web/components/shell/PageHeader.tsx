@@ -12,15 +12,19 @@ import { cn } from "@/lib/utils";
  * four sizes for the same rank of thing, which is the drift a reader
  * notices without being able to name.
  *
- * ONE HEADING TREATMENT. Every page heading is `.title` from
- * `app/globals.css`: Instrument Sans, semibold, -0.03em, clamped 1.75rem to
- * 2.75rem. Size, weight and tracking never vary by page. The single
- * enumerated exception is the TYPEFACE, and only for a machine-emitted name
- * — a job id, a run name — via `titleTone="identifier"`, which switches to
- * the mono face and truncates. That exception is not new taste: it is the
- * rule `.meta`, `.metric-value` and `.terminal-text` already encode, that
- * text a machine produced is set in the mono face so it is not mistaken for
- * something a person wrote.
+ * ONE HEADING TREATMENT. Every page heading is `.page-title` from
+ * `app/globals.css`: the console's own Geist Sans face, semibold, -0.01em,
+ * a flat 20px. Console page names are LABELS for the screen a reader is
+ * already on ("Machines", "Jobs"), not headlines competing for attention —
+ * `.title`/`.display`, the much larger marketing scale, stay exactly what
+ * they were and are used nowhere in here. Size, weight and tracking never
+ * vary by page. The single enumerated exception is the TYPEFACE, and only
+ * for a machine-emitted name — a job id, a run name — via
+ * `titleTone="identifier"`, which switches to the mono face, drops to 16px
+ * and truncates. That exception is not new taste: it is the rule `.meta`,
+ * `.metric-value` and `.terminal-text` already encode, that text a machine
+ * produced is set in the mono face so it is not mistaken for something a
+ * person wrote.
  *
  * Server-safe: no hooks and no icon-library import, so a static page can use
  * it without a client boundary. The back arrow is inline SVG for that reason
@@ -65,7 +69,7 @@ export function PageHeader({
       {back ? (
         <Link
           href={back.href}
-          className="mb-4 inline-flex items-center gap-1.5 text-sm text-brand-foreground hover:underline"
+          className="mb-4 inline-flex items-center gap-1.5 text-xs text-brand-foreground hover:underline"
         >
           <BackArrow />
           {back.label}
@@ -74,27 +78,24 @@ export function PageHeader({
 
       <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
         <div className="min-w-0">
-          {/* `font-mono!` / `truncate!`, and the `!` is load-bearing.
-              `.title` is declared UNLAYERED in `app/globals.css`, and
-              unlayered CSS beats every `@layer utilities` rule regardless of
-              specificity — so plain `font-mono` lost to `.title`'s
-              `font-family`, and plain `truncate` lost to its `text-wrap:
-              balance`. The identifier tone rendered as ordinary sans and
-              nobody would have seen it in a test: this was caught by looking
-              at a render, which is the only way it could have been.
-
-              The right home for this is a `.title-mono` beside `.title` in
-              globals.css, which this session does not own. Flagged. */}
+          {/* No `!important` needed here, unlike `.title` elsewhere in this
+              file's history: `.page-title` is declared inside
+              `@layer components` in app/globals.css specifically so that
+              plain `font-mono`/`truncate` utilities — Tailwind's own
+              `utilities` layer, which v4 orders AFTER `components` — win
+              normally. See the comment on `.page-title` for why `.title`
+              itself could not get this same treatment without a separate,
+              reviewed pass. */}
           <h1
             className={cn(
-              "title",
-              titleTone === "identifier" && "truncate! font-mono!"
+              "page-title",
+              titleTone === "identifier" && "truncate font-mono text-base"
             )}
           >
             {title}
           </h1>
           {description ? (
-            <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
+            <p className="mt-2 max-w-prose text-[13px] leading-relaxed text-muted-foreground">
               {description}
             </p>
           ) : null}

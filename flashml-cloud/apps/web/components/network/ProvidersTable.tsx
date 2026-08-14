@@ -283,8 +283,22 @@ function Row({
         <GpuChips chips={chips} limit={2} showVram={false} />
       </td>
 
-      <td className="px-2 py-2.5 font-mono tabular-nums">
-        {memory ?? <span className="font-sans text-muted-foreground">not reported</span>}
+      {/* `font-mono` moved onto the value itself (matching the `cpu_cores`
+          cell above), rather than sitting on the `<td>` with a `font-sans`
+          escape hatch on the null case — that escape hatch was this
+          codebase's `--font-sans` utility, which is hardcoded to Instrument
+          Sans and would render Instrument here even inside the console
+          (`.console-theme` sets an inherited Geist Sans face, but an
+          explicit utility on this element always wins over inheritance).
+          With no `font-mono` on the cell, "not reported" needs no override
+          at all: it just inherits the ambient sans, correctly, in both
+          registers. */}
+      <td className="px-2 py-2.5">
+        {memory === null ? (
+          <span className="text-muted-foreground">not reported</span>
+        ) : (
+          <span className="font-mono tabular-nums">{memory}</span>
+        )}
       </td>
 
       <td className="px-3 py-2.5 text-right">

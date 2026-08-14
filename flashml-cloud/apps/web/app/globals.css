@@ -266,6 +266,26 @@ html:has(.console-theme) {
   }
 }
 
+/* The "instrument panel" register's typeface. Console pages read as an
+   instrument panel — data-first, hairline-partitioned — and Geist Sans is
+   part of that: tighter and more mechanical than Instrument Sans, which
+   stays the marketing/auth face (`body`'s own `font-sans` below, and
+   `.marketing-dark` pages, are untouched). Set on `.console-theme` itself
+   (`ConsoleShell`'s root), not on `html:has(...)` the way the dark-mode
+   tokens above are — `font-family` is an ordinary inherited CSS property,
+   not a custom property substituted at declaration time, so a descendant
+   here needs no special element to inherit from correctly; every console
+   page under this class picks it up. Anything that portals OUTSIDE this
+   subtree (the Toaster, Base UI popups render into `<body>`, a sibling of
+   this element, not a descendant of it) keeps inheriting `body`'s own
+   Instrument Sans instead — a known, accepted gap: a toast shown while
+   looking at a console page renders in the marketing face, which is a minor
+   typeface mismatch, not the colour-contrast failure the dark-token bug
+   was. */
+.console-theme {
+  font-family: var(--font-geist-sans), var(--font-instrument-sans), sans-serif;
+}
+
 .marketing-dark {
   --z-bg: #0b0d0e;
   --z-surface: #111416;
@@ -1086,6 +1106,33 @@ body [class~="hover:bg-white/[0.08]"]:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The console's own heading scale — NOT `.title`/`.display` above, which
+   stay exactly as they are for marketing and auth. A console page name
+   ("Machines", "Jobs") is a LABEL for the screen a reader is already on,
+   not a headline competing for attention the way a landing page's hero
+   does — 20px says that, where `.title` clamps up to 44px.
+
+   Declared inside `@layer components`, unlike `.title`/`.title-mono`
+   above: `.title-mono`'s own doc comment explains that `.title` is
+   UNLAYERED, so a plain `font-mono`/`truncate` utility loses to it
+   regardless of specificity, and fixing that for `.title` itself needed
+   "a reviewed commit with someone looking, not a drive-by in a sweep."
+   `.page-title` is a new class, not a change to `.title`, so it can start
+   inside `components` rather than inherit that problem: Tailwind v4's
+   generated layer order puts `utilities` after `components`, so
+   `class="page-title font-mono truncate"` — exactly what `PageHeader`'s
+   `titleTone="identifier"` needs — wins normally, with no `!important`
+   escape hatch required. */
+@layer components {
+  .page-title {
+    font-family: var(--font-geist-sans), var(--font-instrument-sans), sans-serif;
+    font-size: 1.25rem;
+    line-height: 1.3;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
 }
 
 /* Machine-emitted supporting text: ids, counts, states. Small enough to

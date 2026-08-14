@@ -88,6 +88,10 @@ export const CONSOLE_PAGE_WIDTH: Record<string, ConsoleWidth> = {
   "/jobs/[jobId]": "wide",
   "/account/machines": "wide",
   "/machines": "wide",
+  // The detail view a card in the grid above leads to. Same column as the
+  // grid it is reached from — same reason `/market/providers/[id]` shares
+  // its list's width — so the header does not jump on the click.
+  "/machines/[id]": "wide",
   // The market tabs share one column so the tab bar (drawn at `wide` by
   // app/(console)/market/layout.tsx) lines up with every page under it.
   "/market/prices": "wide",
@@ -170,7 +174,12 @@ export function consoleRouteKey(pathname: string): string {
     .replace(/^\/pools\/(?!join$)[^/]+/, "/pools/[poolId]")
     .replace(/^\/jobs\/[^/]+/, "/jobs/[jobId]")
     .replace(/^\/market\/prices\/[^/]+/, "/market/prices/[klass]")
-    .replace(/^\/market\/providers\/[^/]+/, "/market/providers/[id]");
+    .replace(/^\/market\/providers\/[^/]+/, "/market/providers/[id]")
+    // `(?!add$)`, same reason `/pools/join` is excluded above: `/machines/add`
+    // is a real static page (the enrolment flow), not a machine id, and a
+    // naive collapse would file it under the detail route's width instead
+    // of its own considered entry.
+    .replace(/^\/machines\/(?!add$)[^/]+/, "/machines/[id]");
 }
 
 /** Which width a console route gets. Falls back to `DEFAULT_CONSOLE_WIDTH`
