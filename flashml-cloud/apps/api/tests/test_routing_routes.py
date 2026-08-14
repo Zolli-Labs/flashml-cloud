@@ -525,6 +525,49 @@ def test_routing_failure_fails_open(make_client, db, monkeypatch):
     assert _job_rows(db, alice) != []
 
 
+def test_a_grant_matches_failure_leaves_no_orphaned_bid(
+    make_client, db, monkeypatch, _withdraw_after
+):
+    """The atomicity proof: `test_routing_failure_fails_open` (above) patches
+    `routing.plan_pool_routing`, which fails BEFORE `create_bid` ever runs,
+    so it says nothing about whether a bid that WAS written gets cleaned up.
+    This monkeypatches
+    the failure to land right after `create_bid` would have committed —
+    seeding an open, cheap listing first so the plan actually has fills and
+    `route_submitted_job` actually reaches `grant_matches` — and pins that
+    under autocommit (this deployment's mode) a caller's `db.rollback()`
+    cannot undo an already-committed `create_bid`, so the only thing that
+    can keep the response's "skipped" honest is `route_submitted_job`
+    wrapping both writes in one `db.transaction()` itself."""
+    client = make_client(PRICED_REPO)
+    host = _new_user(db)
+    machine = _machine(db, host, capabilities=CPU_SMALL)
+    listing = marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=100,
+    )
+    _withdraw_after.append((str(listing["id"]), host))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("grant_matches exploded")
+
+    monkeypatch.setattr(marketmod, "grant_matches", _boom)
+
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+
+    assert body["routing"] == {"state": "skipped", "reason": "routing-error"}
+    # The atomicity proof: create_bid ran (the plan had a fill to grant),
+    # and would have committed a durable, open bid under autocommit if
+    # route_submitted_job did not wrap it with grant_matches in one
+    # transaction. Zero rows, not one orphaned "open" row the response
+    # claims does not exist.
+    assert _bids_for_job(db, job_id) == []
+    assert _job_rows(db, alice) != []
+
+
 # ---------------------------------------------------------------------------
 # 4. a priced GPU job is refused before the coordinator is ever asked
 # ---------------------------------------------------------------------------

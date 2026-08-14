@@ -6535,11 +6535,15 @@ def create_cloud_app(
         # open book. The job row above is already written and the job is
         # already accepted, so from here on nothing may turn a submit that
         # would have succeeded into a failure — same fail-open discipline as
-        # `_human_spend_guard` and its callers: only routing's
-        # own effects (a bid row, granted matches) are written by it, and
-        # any exception anywhere inside it — including one this line's own
-        # task-count lookup raises — leaves the submit itself untouched.
-        # A GPU-priced job never reaches here: `_parse_and_preflight_tree`
+        # `_human_spend_guard` and its callers: any exception anywhere in
+        # this block — including this line's own task-count lookup, and
+        # anything `route_submitted_job` raises — leaves the submit itself
+        # untouched. `route_submitted_job` is ITSELF atomic (its own
+        # docstring: `create_bid` + `grant_matches` share one
+        # `db.transaction()`), so a "skipped" response below is never
+        # describing a book with an orphaned bid in it — this block does not
+        # need to, and does not, undo routing's writes; there are none left
+        # to undo. A GPU-priced job never reaches here: `_parse_and_preflight_tree`
         # already refused it with a 400 before a byte of this request left
         # the process.
         routing_block: dict[str, Any] | None = None
@@ -6565,9 +6569,20 @@ def create_cloud_app(
                     task_count=task_count,
                 )
             except Exception:
-                # No-op under autocommit (the current mode); clears an
-                # aborted transaction if a future connection mode ever
-                # leaves one, exactly as `_human_spend_guard`'s callers do.
+                # Belt-and-braces, not the atomicity guarantee: under
+                # autocommit (this deployment's current mode) every
+                # statement inside `route_submitted_job`'s own
+                # `db.transaction()` has already committed or already rolled
+                # back by the time an exception reaches here, so this call is
+                # a no-op today. It exists for a future non-autocommit/pooled
+                # connection, where an exception can leave the session
+                # mid-transaction and the NEXT statement on this connection
+                # (e.g. this same route's eventual response work) would
+                # otherwise inherit an aborted one — exactly why
+                # `_human_spend_guard`'s callers carry the identical no-op
+                # today. Undoing `route_submitted_job`'s own writes is not
+                # this call's job; that function is atomic by construction
+                # (see its docstring).
                 try:
                     db.rollback()
                 except Exception:

@@ -223,12 +223,30 @@ def route_submitted_job(
     """Post a priced job's bid and grant whatever the open book clears for
     it, right after the coordinator has accepted the job.
 
-    **The caller is the fail-open boundary, not this function.** Every
-    write here (``create_bid``, ``grant_matches``) is real: a bid a caller
-    discards on exception is a bid that was still posted. So the submit
-    handler must call this inside its own try/except and roll back on any
-    failure — this function raises rather than swallowing anything, exactly
-    like :func:`plan_pool_routing` and the ``marketplace`` writers it calls.
+    **This function is atomic: no partial write escapes it.** The two real
+    writes — :func:`marketplace.create_bid` and, when the plan clears
+    anything, :func:`marketplace.grant_matches` — run inside one
+    ``with db.transaction():`` block, so an exception raised anywhere
+    between the bid and the grant (including inside ``grant_matches``
+    itself) leaves neither behind. This matters under autocommit (this
+    deployment's current connection mode): without an explicit transaction
+    each statement commits the instant it runs, so a caller's own
+    ``db.rollback()`` after catching this function's exception is a no-op —
+    it cannot undo a `create_bid` that already committed. A caller who
+    reports "routing was skipped" must be describing a book with no trace of
+    the attempt, not a caller that hoped rollback would clean up after it.
+    ``plan_pool_routing`` runs BEFORE the transaction (it only reads), so a
+    failure there costs nothing to roll back in the first place — the
+    transaction wraps exactly the two statements that write.
+
+    The caller (the submit handler) still owns fail-open: it decides that an
+    exception here degrades the response to
+    ``{"state": "skipped", "reason": "routing-error"}`` rather than failing
+    the submit. What it does NOT need to do, and must not be read as
+    needing to do, is undo this function's own writes — there are none left
+    un-done to undo. Any ``db.rollback()`` on the caller's side is
+    belt-and-braces for a future non-autocommit connection mode, not the
+    mechanism that keeps this function's writes atomic today.
 
     ``config.resources`` deciding the capability class here is the SECOND
     time it is checked: the handler already refused a GPU job with a price
@@ -248,17 +266,25 @@ def route_submitted_job(
         max_zc_per_hour=price["max_zc_per_hour"],
         tasks_wanted=task_count,
     )
-    bid = marketplace.create_bid(
-        db,
-        job_id=job_id,
-        owner_id=user_id,
-        capability_class_name=klass,
-        max_zc_per_hour=price["max_zc_per_hour"],
-        tasks_wanted=task_count,
-        est_task_seconds=est_seconds,
-    )
-    if planned["plan"].fills:
-        marketplace.grant_matches(db, bid_id=str(bid["id"]), plan=planned["plan"])
+
+    # One transaction for both writes. psycopg3's `transaction()` nests via
+    # savepoints, and `create_bid`/`grant_matches` already each open their
+    # own `with db.transaction():` internally — proven safe to nest by
+    # tests/test_routing_routes.py's atomicity test, not merely assumed.
+    # Anything raised inside this block, from either write, rolls both back
+    # before it ever reaches the caller.
+    with db.transaction():
+        bid = marketplace.create_bid(
+            db,
+            job_id=job_id,
+            owner_id=user_id,
+            capability_class_name=klass,
+            max_zc_per_hour=price["max_zc_per_hour"],
+            tasks_wanted=task_count,
+            est_task_seconds=est_seconds,
+        )
+        if planned["plan"].fills:
+            marketplace.grant_matches(db, bid_id=str(bid["id"]), plan=planned["plan"])
 
     out = {
         key: planned[key]
