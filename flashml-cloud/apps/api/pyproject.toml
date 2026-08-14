@@ -41,7 +41,7 @@ dependencies = [
     # coordinator, so team pools cannot resolve at all. `CommandRecipe.expand`
     # also gains the `allowFallback`-iff-`pool` rule this API's compile layer
     # depends on.
-    "flashruntime==0.6.0",
+    "flashruntime==0.6.1",
     "fastapi>=0.111",
     # Starlette's multipart parser, and the ONLY reason it is here:
     # `POST /v1alpha1/jobs/from-upload` takes a working tree as a file part.

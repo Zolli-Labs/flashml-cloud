@@ -39,7 +39,7 @@ JOB                   ?= $$(cat /tmp/flashml-last-job-id 2>/dev/null)
 # deployed path uses it. `make check-flashml` explains what to do if missing.
 # ---------------------------------------------------------------------------
 FLASHML_REPO    := https://github.com/Zolli-Labs/flashml
-RUNTIME_VERSION := 0.6.0
+RUNTIME_VERSION := 0.6.1
 # 0.3.0 advertises local_datasets, which needs flashruntime 0.4. Keep these two
 # in step: on an older runtime pydantic silently drops the field, the host
 # advertises nothing, and local-data work is never placed on it — fail-closed,
@@ -57,7 +57,11 @@ RUNTIME_VERSION := 0.6.0
 # 0.3.4 raises it again to >=0.4.3, for the same import-time reason: 0.4.3's
 # PlacementSpec.pool becomes an open str (team pools), and flashnode 0.3.4
 # imports against that shape.
-NODE_VERSION    := 0.4.0
+#
+# 0.4.1 raises it to >=0.6.1: the executor loop reads Lease.lease_seconds off
+# the claim response and drives the progress watchdog — fields 0.6.0 does not
+# carry, and pydantic's extra-ignore would drop them silently.
+NODE_VERSION    := 0.4.1
 FLASHML         ?= ../flashml
 
 RUNTIME_PIN := "flashruntime[service,sklearn,dev]==$(RUNTIME_VERSION)"

@@ -31,12 +31,12 @@ it were running different code, and nothing detected it.
 it.** It is consumed as an **exact PyPI version** — not a git ref — and
 **four** sites carry that version. All four move together:
 
-| Site | Line as of **0.6.0** (verified 2026-08-11) |
+| Site | Line as of **0.6.1** (verified 2026-08-14) |
 |---|---|
-| `Makefile` | `RUNTIME_VERSION := 0.6.0` |
-| `render.yaml` | **prod** coordinator `buildCommand` — `flashruntime[service]==0.6.0` |
-| `render.yaml` | **dev** coordinator `buildCommand` — `flashruntime[service]==0.6.0` |
-| `flashml-cloud/apps/api/pyproject.toml` | `"flashruntime==0.6.0"` |
+| `Makefile` | `RUNTIME_VERSION := 0.6.1` |
+| `render.yaml` | **prod** coordinator `buildCommand` — `flashruntime[service]==0.6.1` |
+| `render.yaml` | **dev** coordinator `buildCommand` — `flashruntime[service]==0.6.1` |
+| `flashml-cloud/apps/api/pyproject.toml` | `"flashruntime==0.6.1"` |
 
 Bumping three of the four ships an API and a coordinator speaking different
 protocol versions, which is precisely the failure this consolidation removed.
