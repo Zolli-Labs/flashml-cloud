@@ -413,23 +413,27 @@ def _parse_and_preflight_tree(
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
 
-    # A priced GPU job is refused HERE, at validation time, before a single
-    # byte leaves this process — never routed as a fiction the coordinator
-    # cannot yet reserve. See `routing.GpuRoutingUnavailable`: the pinned
-    # runtime drops `gpuPerTask`, so a bid sized for GPU capacity would be
-    # priced for hardware nobody can actually claim against. An unpriced GPU
-    # job is untouched by this check and submits exactly as it does today.
+    # A priced job whose `resources`/`placement` cannot be turned into a set
+    # of books is refused HERE, at validation time, before a single byte
+    # leaves this process: a `resources.cpus`/`gpus` value that is not a
+    # count at all (a string, a list, a dict), a `placement.accept` naming a
+    # class that does not exist, or an `accept` that contradicts the job's
+    # own resources. All of them are `routing.RoutingValidationError`, so a
+    # malformed block 400s before a job row exists, instead of reaching the
+    # routing hook's fail-open catch after the job (and its row) already
+    # exist and turning into an unhandled 500.
     #
-    # Same validation-time refusal for a `resources.cpus`/`gpus` value
-    # `job_capability_class` cannot read as a count at all (a string, a
-    # list, a dict) — `routing.UnroutableResources` — so a malformed
-    # `resources:` block 400s here, before a job row exists, instead of
-    # reaching the routing hook's fail-open catch after the job (and its
-    # row) already exist and turning into an unhandled 500.
+    # This ran only ONE check until 2026-08-14: a priced GPU job was refused
+    # outright, because the pinned runtime dropped `gpuPerTask` and a bid
+    # sized for GPU capacity would have been priced for hardware nobody
+    # could claim against. The pin now declares it, so GPU jobs route.
+    #
+    # Unpriced jobs are untouched by all of this and submit exactly as they
+    # do today — routing only ever looks at a job that named a price.
     if config.price is not None:
         try:
-            routingmod.job_capability_class(config.resources)
-        except (routingmod.GpuRoutingUnavailable, routingmod.UnroutableResources) as exc:
+            routingmod.job_accept_classes(config.resources, config.placement)
+        except routingmod.RoutingValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
     try:
@@ -6743,9 +6747,10 @@ def create_cloud_app(
         # one `db.transaction()`), so a "skipped" response below is never
         # describing a book with an orphaned bid in it — this block does not
         # need to, and does not, undo routing's writes; there are none left
-        # to undo. A GPU-priced job never reaches here: `_parse_and_preflight_tree`
-        # already refused it with a 400 before a byte of this request left
-        # the process.
+        # to undo. A priced job whose `resources`/`placement` cannot be
+        # turned into books never reaches here at all:
+        # `_parse_and_preflight_tree` already refused it with a 400 before a
+        # byte of this request left the process.
         routing_block: dict[str, Any] | None = None
         if config.price is not None:
             try:
@@ -6776,10 +6781,12 @@ def create_cloud_app(
                     # shows exactly what a bid would have seen: the pool's
                     # own members, labelled `workspace-free` the same as any
                     # other workspace exclusion.
-                    klass = routingmod.job_capability_class(config.resources)
+                    accept = routingmod.job_accept_classes(
+                        config.resources, config.placement
+                    )
                     planned = routingmod.plan_pool_routing(
                         db,
-                        capability_class=klass,
+                        accept_classes=accept,
                         max_zc_per_hour=config.price["max_zc_per_hour"],
                         tasks_wanted=task_count,
                         workspace_machine_ids=routingmod.workspace_machine_ids_for(
@@ -6790,7 +6797,7 @@ def create_cloud_app(
                         "state": "skipped",
                         "reason": "pool-capacity-is-free",
                         "book": planned["book"],
-                        "capability_class": planned["capability_class"],
+                        "accept": planned["accept"],
                         "tasks_wanted": planned["tasks_wanted"],
                     }
                 else:
@@ -7851,8 +7858,14 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        """The routing inspection route: this job's bid, its granted
+        """The routing inspection route: this job's bids, their granted
         matches, and the open book re-explained AS IT STANDS NOW.
+
+        **Every bid, not the bid.** A submission posts one bid per
+        capability class its accept-walk visited, so a job that spilled from
+        ``cpu-small`` into ``cpu-large`` has two, in creation (walk) order,
+        each with its own matches and its own task count. Returning one of
+        them would hide whichever class did the rest of the work.
 
         Task 4's submit hook stores nothing beyond the bid/matches rows it
         writes at submission — no snapshot of the book that produced them —
@@ -7874,13 +7887,22 @@ def create_cloud_app(
         same distinction ``get_job_route``'s federated branch draws for
         ``list_job_rounds_for_owner``.
 
+        The live book is re-derived from the BIDS' own classes, in creation
+        order, rather than from the job's config: the config would name
+        every class the job would ACCEPT, including the ones the original
+        walk never had to visit, and re-planning those would report a book
+        read that never happened at submit time. The first bid carries the
+        cap and the job's full task count (it was the first class walked and
+        was asked for everything), which is exactly what the original walk
+        started from.
+
         An unrouted job (no price block, so ``route_submitted_job`` never
-        ran) is not an error — it answers
-        ``{"bid": None, "matches": [], "live_book": None}``, 200, not 404.
+        ran) is not an error — it answers ``{"bids": [], "live_book":
+        None}``, 200, not 404.
 
         Read-only: no bid is created, no match is granted, nothing is
-        written. ``plan_pool_routing``'s ``"plan"`` key (a ``MatchPlan``
-        dataclass, not JSON-safe) never leaves this handler.
+        written. ``plan_pool_routing``'s ``"class_plans"`` key (it carries
+        ``MatchPlan`` dataclasses, not JSON-safe) never leaves this handler.
 
         ``workspace_machine_ids`` is re-derived for the BID'S owner
         (``row["owner_id"]``, same as the bid lookup above), not the
@@ -7896,25 +7918,34 @@ def create_cloud_app(
         if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
 
-        bid = marketplacemod.bid_for_job(db, job_id=job_id, owner_id=row["owner_id"])
-        if bid is None:
-            return {"bid": None, "matches": [], "live_book": None}
+        bids = marketplacemod.bids_for_job(
+            db, job_id=job_id, owner_id=row["owner_id"]
+        )
+        if not bids:
+            return {"bids": [], "live_book": None}
 
-        matches = marketplacemod.matches_for_bid(db, str(bid["id"]))
         live_book = routingmod.plan_pool_routing(
             db,
-            capability_class=bid["capability_class"],
-            max_zc_per_hour=bid["max_zc_per_hour"],
-            tasks_wanted=bid["tasks_wanted"],
+            accept_classes=[bid["capability_class"] for bid in bids],
+            max_zc_per_hour=bids[0]["max_zc_per_hour"],
+            tasks_wanted=bids[0]["tasks_wanted"],
             workspace_machine_ids=routingmod.workspace_machine_ids_for(
                 db, row["owner_id"]
             ),
         )
-        live_book.pop("plan", None)
+        live_book.pop("class_plans", None)
 
         return {
-            "bid": _jsonable(bid),
-            "matches": [_jsonable(m) for m in matches],
+            "bids": [
+                {
+                    **_jsonable(bid),
+                    "matches": [
+                        _jsonable(m)
+                        for m in marketplacemod.matches_for_bid(db, str(bid["id"]))
+                    ],
+                }
+                for bid in bids
+            ],
             "live_book": live_book,
         }
 

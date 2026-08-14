@@ -1664,12 +1664,24 @@ def create_bid(
 
     with db.transaction():
         with db.cursor() as cur:
+            # `clock_timestamp()`, NOT the column's `now()` default. One
+            # submission posts several bids — one per capability class its
+            # accept-walk visited — inside ONE transaction, and `now()` is the
+            # TRANSACTION's timestamp: every bid in that walk would carry the
+            # identical `created_at`, leaving `bids_for_job` sorting on a tie
+            # broken by a random uuid. Creation order is the walk order (the
+            # first bid is the first-choice class and wants the whole job),
+            # so losing it makes the descending task counts unreadable.
+            # `clock_timestamp()` is the actual wall clock at THIS statement,
+            # which is what the column was always meant to record.
             cur.execute(
                 f"""
                 insert into public.bids
                     (job_id, owner_id, capability_class, max_zc_per_hour,
-                     tasks_wanted, est_task_seconds, deadline, state)
-                values (%s, %s::uuid, %s, %s, %s, %s, %s, 'open')
+                     tasks_wanted, est_task_seconds, deadline, state,
+                     created_at, updated_at)
+                values (%s, %s::uuid, %s, %s, %s, %s, %s, 'open',
+                        clock_timestamp(), clock_timestamp())
                 returning {_BID_SELECT}
                 """,
                 (
@@ -1759,31 +1771,41 @@ def bids_for_owner(db: psycopg.Connection, owner_id: str) -> list[dict[str, Any]
         return list(cur.fetchall())
 
 
-def bid_for_job(
+def bids_for_job(
     db: psycopg.Connection, *, job_id: str, owner_id: str
-) -> dict[str, Any] | None:
-    """The bid ``route_submitted_job`` posted for this job, or ``None`` when
-    the job never priced (unrouted). ``owner_id`` is folded into the query
-    rather than filtered afterwards — the same doctrine every owner-scoped
-    read in this module follows — so this returns ``None`` identically for a
-    ``job_id`` with no bid at all and one whose bid belongs to somebody else;
-    the caller is trusted to have already resolved ``owner_id`` from the
-    job's own row (its actual submitter), not the viewer, exactly as
-    ``fetch_job_for_viewer``'s callers do for a pool-visible job.
+) -> list[dict[str, Any]]:
+    """Every bid ``route_submitted_job`` posted for this job, oldest first —
+    empty when the job never priced (unrouted).
 
-    A submission posts at most one bid per job (``route_submitted_job``
-    calls ``create_bid`` once), so ``limit 1`` is defensive rather than a
-    real branch; ``order by created_at desc`` picks the newest, should that
-    ever change.
+    **A list, not a row.** A submission posts ONE BID PER CAPABILITY CLASS
+    its walk visited (``routing.route_submitted_job``): a job that accepts
+    ``cpu-small`` then ``cpu-large`` and only half-fills the first has two
+    live bids, for different task counts, and either of them may match a
+    listing that appears later. A reader that took only the newest would
+    hide whichever class did most of the work, and one that took only the
+    oldest would hide the spill.
+
+    Oldest first, because that is WALK order: the first bid is the job's
+    first-choice class and was asked for the whole job; each later one was
+    asked for what its predecessors could not fill. Any other order makes
+    the descending task counts look arbitrary.
+
+    ``owner_id`` is folded into the query rather than filtered afterwards —
+    the same doctrine every owner-scoped read in this module follows — so
+    this returns empty identically for a ``job_id`` with no bid at all and
+    one whose bids belong to somebody else; the caller is trusted to have
+    already resolved ``owner_id`` from the job's own row (its actual
+    submitter), not the viewer, exactly as ``fetch_job_for_viewer``'s
+    callers do for a pool-visible job.
     """
     with db.cursor() as cur:
         cur.execute(
             f"select {_BID_SELECT} from public.bids"
             " where job_id = %s and owner_id = %s::uuid"
-            " order by created_at desc, id limit 1",
+            " order by created_at, id",
             (job_id, owner_id),
         )
-        return cur.fetchone()
+        return list(cur.fetchall())
 
 
 def open_bids(

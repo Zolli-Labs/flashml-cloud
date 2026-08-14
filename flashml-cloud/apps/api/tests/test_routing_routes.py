@@ -13,10 +13,13 @@ the four invariants task-4-brief.md names:
 * routing is FAIL-OPEN: any exception inside ``routing.route_submitted_job``
   still returns 201, with ``routing: {"state": "skipped", "reason":
   "routing-error"}`` and no bid row left behind;
-* a priced GPU job is refused with 400 naming ``gpuPerTask`` before a single
-  byte reaches the coordinator — a VALIDATION failure
-  (``routing.GpuRoutingUnavailable``), not a routing one, so no job row
-  exists either;
+* a priced GPU job ROUTES, against the GPU books, in reference-price order.
+  This file used to pin the opposite — a 400 naming ``gpuPerTask`` — because
+  the pinned runtime dropped ``ResourcesSpec.gpuPerTask`` and a GPU bid would
+  have been priced for hardware the coordinator could not reserve. That gap
+  is closed in the pin this suite resolves (``gpuPerTask`` is declared and
+  the command recipe stamps ``payload["gpus"]``), so the refusal went with
+  it. A malformed ``resources`` value is still a validation 400;
 * a priced FEDERATED job submits exactly as it does without Task 4 (no
   refusal, no bid — federated rounds are a named follow-up, not routed
   today) but the plan's explainability rule still holds: the response
@@ -81,6 +84,14 @@ BASE_YAML = """
 """
 
 PRICE_BLOCK = "    price:\n      max_per_hour: 5.00\n"
+#: A cap low enough that only THIS file's own seeded listings clear it. The
+#: session-scoped Postgres carries every earlier file's open listings
+#: (`test_market_routes.py` leaves cpu-small asks at 900 and 1200,
+#: `test_marketplace_class_board.py` leaves cpu-large asks at 1000 and 2000),
+#: and a spill test that those could fill is not testing the spill.
+CHEAP_PRICE_BLOCK = "    price:\n      max_per_hour: 0.20\n"
+#: Two tasks, so a one-task class has a remainder to spill.
+SWEEP_BLOCK = "    sweep:\n      lr:\n        - 0.1\n        - 0.2\n"
 GPU_BLOCK = "    resources:\n      gpus: 1\n"
 #: I1, final review: a non-numeric `gpus` must 400 (`routing.UnroutableResources`),
 #: never reach `int()`/`float()` unguarded and 500.
@@ -89,11 +100,13 @@ MALFORMED_RESOURCES_BLOCK = "    resources:\n      gpus: one\n"
 CLEAN_YAML = BASE_YAML
 PRICED_YAML = BASE_YAML + PRICE_BLOCK
 GPU_PRICED_YAML = BASE_YAML + PRICE_BLOCK + GPU_BLOCK
+SPILL_PRICED_YAML = BASE_YAML + CHEAP_PRICE_BLOCK + SWEEP_BLOCK
 MALFORMED_RESOURCES_PRICED_YAML = BASE_YAML + PRICE_BLOCK + MALFORMED_RESOURCES_BLOCK
 
 CLEAN_REPO = {"flashml.yaml": CLEAN_YAML, "train.py": CLEAN_TRAIN_PY}
 PRICED_REPO = {"flashml.yaml": PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
 GPU_PRICED_REPO = {"flashml.yaml": GPU_PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
+SPILL_PRICED_REPO = {"flashml.yaml": SPILL_PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
 MALFORMED_RESOURCES_PRICED_REPO = {
     "flashml.yaml": MALFORMED_RESOURCES_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
 }
@@ -410,6 +423,15 @@ def _machine(db, owner: str, *, capabilities: dict | None = None) -> str:
 
 
 CPU_SMALL = {"cpu_cores": 4}  # < CPU_LARGE_MIN_CORES (8): lands in cpu-small
+CPU_LARGE = {"cpu_cores": 16}  # >= CPU_LARGE_MIN_CORES (8): lands in cpu-large
+#: A GPU capabilities snapshot in the shape `marketplace.capability_class`
+#: reads, copied from `tests/test_marketplace.py`'s own `RTX_3070`. 8GB is
+#: deliberately the BOTTOM of the GPU ladder: it is the first class a derived
+#: GPU accept walks (cheapest reference price first), so a job that fills
+#: here never walks the other five, and this file leaves the rest of the GPU
+#: books untouched.
+RTX_3070 = {"index": 0, "name": "NVIDIA GeForce RTX 3070", "memory_total_mb": 8192,
+            "compute_capability": "8.6"}
 
 
 @pytest.fixture
@@ -442,6 +464,46 @@ def _withdraw_after(db):
         marketmod.withdraw_listing(db, listing_id=listing_id, owner_id=owner_id)
 
 
+@pytest.fixture
+def _forget_observations(db):
+    """Class names whose price-observation rows this test may not leave behind.
+
+    ``_withdraw_after`` (above) closes a listing and re-records the book, so
+    the LIVE state it restores is correct. What it cannot undo is the
+    ``price_observations`` history: a listing, a bid and a match each append
+    a row, and `class_board`'s ``history`` is that table verbatim. Two other
+    files assert a class's history is EXACTLY empty
+    (``test_marketplace_class_board.py`` for ``cpu-large``,
+    ``test_marketplace.py`` for ``gpu-48gb``), which a routing test bidding
+    into a new class would break the moment anything reordered the run.
+
+    So the classes a test reaches into for the FIRST time in this file name
+    themselves here, and every row they appended is deleted on teardown.
+    Precise, not a truncate: the high-water ``id`` is read at setup
+    (``bigserial``, so strictly increasing) and only rows above it in the
+    named classes go. Rows any earlier file wrote are untouched.
+
+    Request this fixture BEFORE ``_withdraw_after`` in a test's parameter
+    list. Same-scope fixtures tear down in reverse setup order, so being set
+    up first means being torn down last — after the withdrawal has written
+    its own observation row, which is one of the rows that must go.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select coalesce(max(id), 0) as high from public.price_observations"
+        )
+        high = int(cur.fetchone()["high"])
+    classes: list[str] = []
+    yield classes
+    if classes:
+        with db.cursor() as cur:
+            cur.execute(
+                "delete from public.price_observations"
+                " where id > %s and capability_class = any(%s)",
+                (high, classes),
+            )
+
+
 # ---------------------------------------------------------------------------
 # 1. a priced job that clears the book
 # ---------------------------------------------------------------------------
@@ -464,7 +526,9 @@ def test_a_priced_pool_job_creates_a_bid_and_matches(make_client, db, _withdraw_
 
     routing_block = body["routing"]
     assert routing_block["state"] == "routed"
-    assert routing_block["capability_class"] == "cpu-small"
+    # The derived accept for a job that named no resources: both CPU books,
+    # smaller first. Only the first is WALKED here, because it fills.
+    assert routing_block["accept"] == ["cpu-small", "cpu-large"]
     assert routing_block["tasks_wanted"] == 1
     assert routing_block["tasks_filled"] == 1
     assert routing_block["tasks_unfilled"] == 0
@@ -474,7 +538,10 @@ def test_a_priced_pool_job_creates_a_bid_and_matches(make_client, db, _withdraw_
     bid = bids[0]
     assert bid["state"] in ("partial", "filled")
     assert bid["est_task_seconds"] > 0
-    assert routing_block["bid_id"] == str(bid["id"])
+    assert bid["capability_class"] == "cpu-small"
+    assert routing_block["bids"] == [
+        {"capability_class": "cpu-small", "bid_id": str(bid["id"])}
+    ]
 
     matches = _matches_for_bid(db, bid["id"])
     filled_book_rows = [
@@ -539,7 +606,7 @@ def test_a_pool_scoped_priced_job_creates_no_bid(make_client, db, _withdraw_afte
     routing_block = body["routing"]
     assert routing_block["state"] == "skipped"
     assert routing_block["reason"] == "pool-capacity-is-free"
-    assert routing_block["capability_class"] == "cpu-small"
+    assert routing_block["accept"] == ["cpu-small", "cpu-large"]
     assert routing_block["tasks_wanted"] == 1
 
     book_by_machine = {row["machine_id"]: row for row in routing_block["book"]}
@@ -689,29 +756,143 @@ def test_a_grant_matches_failure_leaves_no_orphaned_bid(
 
 
 # ---------------------------------------------------------------------------
-# 4. a priced GPU job is refused before the coordinator is ever asked
+# 4. a priced GPU job routes against a GPU book
 # ---------------------------------------------------------------------------
 
 
-def test_a_gpu_priced_job_is_refused_before_the_coordinator(make_client, db, transport):
-    client = make_client(GPU_PRICED_REPO)
-    alice = _new_user(db)
+def test_a_gpu_priced_job_routes_against_a_gpu_book(
+    make_client, db, transport, _forget_observations, _withdraw_after
+):
+    """The inverse of what this file used to assert. The refusal named a
+    runtime gap — the pin dropped `ResourcesSpec.gpuPerTask`, so a GPU bid
+    would have been priced for capacity nobody could reserve — and that gap
+    is closed in the pin this venv resolves. So a `gpus: 1` job now reaches
+    the coordinator (a real job row, a real submission) and bids in the GPU
+    books, cheapest reference class first.
 
+    The seeded machine is a `gpu-8gb` one because that is the FIRST class a
+    derived GPU accept walks: it fills there, the walk stops, and the other
+    five GPU books are neither read nor bid in."""
+    _forget_observations.append("gpu-8gb")
+    client = make_client(GPU_PRICED_REPO)
+    host = _new_user(db)
+    machine = _machine(db, host, capabilities={"gpus": [RTX_3070]})
+    listing = marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=100,
+    )
+    assert listing["capability_class"] == "gpu-8gb"
+    _withdraw_after.append((str(listing["id"]), host))
+
+    alice = _new_user(db)
     r = _post(client, _jwt(alice))
 
-    assert r.status_code == 400, r.text
-    assert "gpuPerTask" in r.json()["detail"]
-    assert _job_rows(db, alice) == []
-    assert transport.job_submissions == []
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+    # A real submission reached the coordinator, carrying the GPU count.
+    assert len(transport.job_submissions) == 1
+    assert transport.submitted[-1]["spec"]["resources"]["gpuPerTask"] == 1
+    assert _job_rows(db, alice) != []
+
+    routing_block = body["routing"]
+    assert routing_block["state"] == "routed"
+    assert routing_block["accept"][0] == "gpu-8gb"
+    assert all(k.startswith("gpu-") for k in routing_block["accept"])
+    assert routing_block["tasks_filled"] == 1
+    assert routing_block["tasks_unfilled"] == 0
+
+    # One bid, in the one class the walk needed.
+    bids = _bids_for_job(db, job_id)
+    assert len(bids) == 1
+    assert bids[0]["capability_class"] == "gpu-8gb"
+    assert routing_block["bids"] == [
+        {"capability_class": "gpu-8gb", "bid_id": str(bids[0]["id"])}
+    ]
+
+    matches = _matches_for_bid(db, bids[0]["id"])
+    assert [str(m["listing_id"]) for m in matches] == [str(listing["id"])]
+
+
+# ---------------------------------------------------------------------------
+# 4b. the remainder spills into the next accepted class
+# ---------------------------------------------------------------------------
+
+
+def test_a_cpu_small_job_spills_into_the_cpu_large_book(
+    make_client, db, _forget_observations, _withdraw_after
+):
+    """Two tasks, a one-task `cpu-small` listing and a roomy `cpu-large` one:
+    the job bids in BOTH classes, and the second bid wants only what the
+    first could not fill.
+
+    Two mechanisms point the same way here and the test does not have to
+    choose between them: the `cpu-small` listing has capacity for one task,
+    and both machines are unproven, so `unproven_task_budget(2) == 1` caps
+    that class at one task regardless. Either way the walk must ask the
+    second class for exactly one task, and that is what is asserted."""
+    _forget_observations.append("cpu-large")
+    client = make_client(SPILL_PRICED_REPO)
+    host = _new_user(db)
+
+    small_machine = _machine(db, host, capabilities=CPU_SMALL)
+    small = marketmod.create_listing(
+        db, machine_id=small_machine, owner_id=host, ask_zc_per_hour=50,
+        max_concurrent_tasks=1,
+    )
+    _withdraw_after.append((str(small["id"]), host))
+
+    large_machine = _machine(db, host, capabilities=CPU_LARGE)
+    large = marketmod.create_listing(
+        db, machine_id=large_machine, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=4,
+    )
+    assert large["capability_class"] == "cpu-large"
+    _withdraw_after.append((str(large["id"]), host))
+
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+
+    routing_block = body["routing"]
+    assert routing_block["state"] == "routed"
+    assert routing_block["accept"] == ["cpu-small", "cpu-large"]
+    assert routing_block["tasks_wanted"] == 2
+    assert routing_block["tasks_filled"] == 2
+    assert routing_block["tasks_unfilled"] == 0
+
+    rows = {row["listing_id"]: row for row in routing_block["book"]}
+    assert rows[str(small["id"])]["tasks_assigned"] == 1
+    assert rows[str(small["id"])]["capability_class"] == "cpu-small"
+    assert rows[str(large["id"])]["tasks_assigned"] == 1
+    assert rows[str(large["id"])]["capability_class"] == "cpu-large"
+
+    # One bid per WALKED class, in walk order, and the second wants only the
+    # remainder — a second bid for the full two tasks would entitle four
+    # machines to a two-task job.
+    bids = sorted(_bids_for_job(db, job_id), key=lambda b: b["created_at"])
+    assert [b["capability_class"] for b in bids] == ["cpu-small", "cpu-large"]
+    assert [b["tasks_wanted"] for b in bids] == [2, 1]
+    assert routing_block["bids"] == [
+        {"capability_class": b["capability_class"], "bid_id": str(b["id"])}
+        for b in bids
+    ]
+
+    for bid, expected in zip(bids, (str(small["id"]), str(large["id"]))):
+        matches = _matches_for_bid(db, bid["id"])
+        assert [str(m["listing_id"]) for m in matches] == [expected]
 
 
 def test_a_priced_job_with_non_numeric_gpus_400s_not_500s(make_client, db, transport):
-    """I1, final review: `job_capability_class` coerces `resources.gpus`
-    with `int()`; a non-numeric value used to escape as a raw, unhandled
+    """I1, final review: `job_accept_classes` coerces `resources.gpus` with
+    `int()`; a non-numeric value used to escape as a raw, unhandled
     `ValueError` — a 500 with no job row visible to anyone but the log.
-    `routing.UnroutableResources` now names it, and the SAME validation-time
-    except clause that already catches `GpuRoutingUnavailable` (before the
-    coordinator is ever asked) catches this too."""
+    `routing.UnroutableResources` names it, and the validation-time except
+    clause catches its base `routing.RoutingValidationError` before the
+    coordinator is ever asked. This is the refusal that SURVIVED the GPU
+    one: a malformed count is the submitter's typo, where `gpus: 1` is now
+    a perfectly routable request."""
     client = make_client(MALFORMED_RESOURCES_PRICED_REPO)
     alice = _new_user(db)
 
@@ -763,13 +944,14 @@ def test_a_federated_priced_job_reports_skipped_not_routed(federated_client, db)
 # one that submission already created (or reports there is none). Three
 # invariants:
 #
-# * a routed job returns its bid row, its granted matches, and a freshly
+# * a routed job returns EVERY bid it posted (one per walked class, in
+#   creation order) with that bid's granted matches, and a freshly
 #   recomputed "live book" that agrees with the "routing" block the submit
 #   response itself returned moments earlier — the listing set has not
 #   moved between the two calls, so the recomputation must not either;
 # * an unrouted job (no price block, so no bid was ever created) answers
-#   ``{"bid": None, "matches": [], "live_book": None}``, not a 404 — the
-#   job exists and is visible, it simply never entered the book;
+#   ``{"bids": [], "live_book": None}``, not a 404 — the job exists and is
+#   visible, it simply never entered the book;
 # * a job that exists but belongs to somebody else 404s, with the exact
 #   same body an unknown job id gets — the not-found doctrine every other
 #   job GET route in this file already follows.
@@ -809,39 +991,91 @@ def test_routing_inspection_for_a_routed_job(make_client, db, _withdraw_after):
     assert resp.status_code == 200, resp.text
     out = resp.json()
 
-    # bid: the same row a fresh DB query finds, JSON-rendered.
-    assert out["bid"] is not None
-    assert out["bid"]["id"] == str(bid_row["id"])
-    assert out["bid"]["job_id"] == job_id
-    assert out["bid"]["owner_id"] == alice
-    assert out["bid"]["capability_class"] == routing_block["capability_class"]
-    assert out["bid"]["tasks_wanted"] == routing_block["tasks_wanted"]
-    assert out["bid"]["state"] == bid_row["state"]
+    # bids: the same rows a fresh DB query finds, JSON-rendered, each
+    # carrying its own matches.
+    assert len(out["bids"]) == 1
+    got = out["bids"][0]
+    assert got["id"] == str(bid_row["id"])
+    assert got["job_id"] == job_id
+    assert got["owner_id"] == alice
+    assert got["capability_class"] == "cpu-small"
+    assert got["tasks_wanted"] == routing_block["tasks_wanted"]
+    assert got["state"] == bid_row["state"]
 
     # matches: every granted entitlement for that bid, nothing else.
-    assert len(out["matches"]) == len(matches)
-    assert {m["id"] for m in out["matches"]} == {str(m["id"]) for m in matches}
-    assert {m["listing_id"] for m in out["matches"]} == {
+    assert len(got["matches"]) == len(matches)
+    assert {m["id"] for m in got["matches"]} == {str(m["id"]) for m in matches}
+    assert {m["listing_id"] for m in got["matches"]} == {
         str(m["listing_id"]) for m in matches
     }
 
     # live_book: recomputed against a book that has not moved since submit,
     # so it must agree with the "routing" block the submit response
-    # returned — same shape as Task 3's plan (minus "plan", which is not
-    # JSON-safe), not a subset or an approximation of it.
+    # returned — same shape as the plan (minus "class_plans", which carries
+    # MatchPlan dataclasses and is not JSON-safe), not a subset or an
+    # approximation of it.
     live_book = out["live_book"]
     assert live_book is not None
-    assert "plan" not in live_book
+    assert "class_plans" not in live_book
     assert set(live_book.keys()) == {
-        "capability_class", "tasks_wanted", "tasks_filled",
+        "accept", "tasks_wanted", "tasks_filled",
         "tasks_unfilled", "book", "nearest_miss",
     }
-    assert live_book["capability_class"] == routing_block["capability_class"]
+    # Re-derived from the bids that exist, so it names the classes actually
+    # WALKED — not the full accept list the submit response reported.
+    assert live_book["accept"] == ["cpu-small"]
     assert live_book["tasks_wanted"] == routing_block["tasks_wanted"]
     assert live_book["tasks_filled"] == routing_block["tasks_filled"]
     assert live_book["tasks_unfilled"] == routing_block["tasks_unfilled"]
     assert live_book["nearest_miss"] == routing_block["nearest_miss"]
     assert live_book["book"] == routing_block["book"]
+
+
+def test_routing_inspection_returns_every_bid_a_spilled_job_posted(
+    make_client, db, _forget_observations, _withdraw_after
+):
+    """A job that spilled across two classes has TWO bids, and the route
+    returns both in creation order with their own matches. Returning only
+    the newest (the pre-spill behaviour) would hide the class that actually
+    filled most of the job."""
+    _forget_observations.append("cpu-large")
+    client = make_client(SPILL_PRICED_REPO)
+    host = _new_user(db)
+
+    small_machine = _machine(db, host, capabilities=CPU_SMALL)
+    small = marketmod.create_listing(
+        db, machine_id=small_machine, owner_id=host, ask_zc_per_hour=50,
+        max_concurrent_tasks=1,
+    )
+    _withdraw_after.append((str(small["id"]), host))
+    large_machine = _machine(db, host, capabilities=CPU_LARGE)
+    large = marketmod.create_listing(
+        db, machine_id=large_machine, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=4,
+    )
+    _withdraw_after.append((str(large["id"]), host))
+
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+    assert body["routing"]["state"] == "routed"
+
+    resp = _get_routing(client, _jwt(alice), job_id)
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+
+    assert [b["capability_class"] for b in out["bids"]] == ["cpu-small", "cpu-large"]
+    assert [b["tasks_wanted"] for b in out["bids"]] == [2, 1]
+    assert [
+        [m["listing_id"] for m in b["matches"]] for b in out["bids"]
+    ] == [[str(small["id"])], [str(large["id"])]]
+
+    # The live book walks the bids' own classes, in the order they were
+    # created — the same walk, re-run against the book as it stands now.
+    assert out["live_book"]["accept"] == ["cpu-small", "cpu-large"]
+    assert out["live_book"]["book"] == body["routing"]["book"]
 
 
 def test_routing_inspection_for_an_unrouted_job(make_client, db):
@@ -856,7 +1090,7 @@ def test_routing_inspection_for_an_unrouted_job(make_client, db):
 
     resp = _get_routing(client, _jwt(alice), job_id)
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"bid": None, "matches": [], "live_book": None}
+    assert resp.json() == {"bids": [], "live_book": None}
 
 
 def test_routing_inspection_for_someone_elses_job_404s(make_client, db):

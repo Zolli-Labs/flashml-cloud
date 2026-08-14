@@ -11,65 +11,200 @@ from psycopg.types.json import Json
 from flashml_cloud_api import marketplace as mk
 from flashml_cloud_api import routing
 from flashml_cloud_api.routing import (
-    GpuRoutingUnavailable,
+    RoutingValidationError,
     UnroutableResources,
-    job_capability_class,
+    job_accept_classes,
     plan_pool_routing,
 )
 
 
-def test_no_resources_is_the_small_cpu_class():
-    assert job_capability_class(None) == "cpu-small"
-    assert job_capability_class({}) == "cpu-small"
+def _gpu_ladder() -> tuple[str, ...]:
+    """The derived GPU accept order, recomputed here from the SAME two
+    marketplace constants ``routing`` reads.
+
+    Deliberately not a literal list of six class names: a literal would pass
+    while the ladder and the reference prices moved underneath it, which is
+    the one failure this assertion exists to catch. Cheapest reference price
+    first; ties (``gpu-16gb`` and ``gpu-24gb`` are both 1_000) broken by the
+    ladder's own order, so the result is total and stable.
+    """
+    return tuple(
+        sorted(
+            (c for c in mk.CAPABILITY_CLASSES if c.startswith("gpu-")),
+            key=lambda c: (mk.REFERENCE_ZC_PER_HOUR[c], mk.CAPABILITY_CLASSES.index(c)),
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# job_accept_classes — the derived default
+# ---------------------------------------------------------------------------
+
+
+def test_no_resources_accepts_both_cpu_classes_small_first():
+    """A job that asked for nothing runs anywhere a CPU runs. Small first
+    because a laptop is the cheaper supply and the job named no reason to
+    need more; ``cpu-large`` follows so a thin ``cpu-small`` book does not
+    strand a job a workstation could run this second."""
+    assert job_accept_classes(None) == ("cpu-small", "cpu-large")
+    assert job_accept_classes({}) == ("cpu-small", "cpu-large")
 
 
 def test_the_cpu_split_mirrors_the_marketplace_threshold():
-    from flashml_cloud_api.marketplace import CPU_LARGE_MIN_CORES
-    assert job_capability_class({"cpus": CPU_LARGE_MIN_CORES}) == "cpu-large"
-    assert job_capability_class({"cpus": CPU_LARGE_MIN_CORES - 1}) == "cpu-small"
+    """Unchanged from the single-class era: `CPU_LARGE_MIN_CORES` is where a
+    workstation stops looking like a laptop, and a job at or above it cannot
+    fall back down the ladder."""
+    assert job_accept_classes({"cpus": mk.CPU_LARGE_MIN_CORES}) == ("cpu-large",)
+    assert job_accept_classes({"cpus": mk.CPU_LARGE_MIN_CORES - 1}) == (
+        "cpu-small", "cpu-large",
+    )
 
 
-def test_gpu_jobs_are_refused_with_the_pin_gap_named():
-    with pytest.raises(GpuRoutingUnavailable, match="gpuPerTask"):
-        job_capability_class({"gpus": 1})
-
-
-def test_the_result_is_always_a_ladder_class():
-    from flashml_cloud_api.marketplace import CAPABILITY_CLASSES
-    assert job_capability_class({"cpus": 2}) in CAPABILITY_CLASSES
+def test_a_gpu_job_accepts_every_gpu_class_cheapest_reference_first():
+    """The refusal this replaced ("routing for gpus > 0 is not available")
+    was pinned to a runtime gap that is closed: the pinned flashruntime
+    declares `ResourcesSpec.gpuPerTask` and its command recipe stamps
+    `payload["gpus"]`, so the coordinator's GPU count gate is live and a GPU
+    bid buys hardware somebody can actually claim against."""
+    accept = job_accept_classes({"gpus": 1})
+    assert accept == _gpu_ladder()
+    assert all(c.startswith("gpu-") for c in accept)
+    prices = [mk.REFERENCE_ZC_PER_HOUR[c] for c in accept]
+    assert prices == sorted(prices), "cheapest reference class is tried first"
 
 
 def test_a_boolean_gpu_flag_is_checked_before_any_coercion():
-    """Carried cleanup from Task 2's review: the old `isinstance(gpus, bool)`
+    """Carried from the single-class era: the old `isinstance(gpus, bool)`
     guard ran AFTER `res.get("gpus") or 0`, which collapses `False` to `0`
     before the guard ever sees it — dead for that branch, and only silently
     correct because `0` also fails the `int(gpus) > 0` check beside it.
     `True` survived the same coercion, so the guard caught one bool value and
     not the other. The fix reads the raw value first."""
-    with pytest.raises(GpuRoutingUnavailable, match="gpuPerTask"):
-        job_capability_class({"gpus": True})
-    assert job_capability_class({"gpus": False}) == "cpu-small"
+    assert job_accept_classes({"gpus": True}) == _gpu_ladder()
+    assert job_accept_classes({"gpus": False}) == ("cpu-small", "cpu-large")
 
 
 def test_a_non_numeric_gpus_is_a_typed_refusal_not_a_bare_typeerror():
-    """I1, final review: a string `int()` cannot parse used to escape as a
-    raw `ValueError` — 500 territory for the submit hook. `UnroutableResources`
-    is the sibling of `GpuRoutingUnavailable`, named so the submit hook's
-    validation-time except clause can catch it and answer 400."""
+    """A string `int()` cannot parse used to escape as a raw `ValueError` —
+    500 territory for the submit hook. `UnroutableResources` is named so the
+    hook's validation-time except clause can catch it and answer 400, and it
+    is a `RoutingValidationError` so that clause needs to name exactly one
+    base class."""
+    assert issubclass(UnroutableResources, RoutingValidationError)
     with pytest.raises(UnroutableResources, match="gpus"):
-        job_capability_class({"gpus": "one"})
+        job_accept_classes({"gpus": "one"})
 
 
 def test_a_list_or_dict_gpus_is_also_refused_not_a_bare_typeerror():
     with pytest.raises(UnroutableResources, match="gpus"):
-        job_capability_class({"gpus": [1]})
+        job_accept_classes({"gpus": [1]})
     with pytest.raises(UnroutableResources, match="gpus"):
-        job_capability_class({"gpus": {"count": 1}})
+        job_accept_classes({"gpus": {"count": 1}})
 
 
 def test_a_non_numeric_cpus_is_a_typed_refusal_not_a_bare_valueerror():
     with pytest.raises(UnroutableResources, match="cpus"):
-        job_capability_class({"cpus": "many"})
+        job_accept_classes({"cpus": "many"})
+
+
+def test_every_derived_class_is_a_real_ladder_class():
+    for resources in ({}, {"cpus": 2}, {"cpus": 64}, {"gpus": 1}, {"gpus": 4}):
+        assert set(job_accept_classes(resources)) <= set(mk.CAPABILITY_CLASSES)
+
+
+# ---------------------------------------------------------------------------
+# job_accept_classes — an explicit placement.accept
+# ---------------------------------------------------------------------------
+
+
+def test_an_explicit_accept_is_honoured_in_the_order_written():
+    """Order is the walk order, so it is preserved verbatim — not sorted into
+    the derived cheapest-first ladder. A submitter who names the expensive
+    class first has said something, and re-sorting would silently overrule
+    it."""
+    accept = job_accept_classes(
+        {"gpus": 1}, {"accept": ["gpu-80gb", "gpu-8gb", "gpu-24gb"]}
+    )
+    assert accept == ("gpu-80gb", "gpu-8gb", "gpu-24gb")
+
+
+def test_a_placement_without_accept_falls_back_to_the_derived_default():
+    """`placement:` cannot reach here without `accept` through the yaml
+    parser, which requires it. A hand-built mapping still can, and deriving
+    is the honest answer: an empty constraint constrains nothing."""
+    assert job_accept_classes({"cpus": 2}, {}) == ("cpu-small", "cpu-large")
+    assert job_accept_classes({"cpus": 2}, None) == ("cpu-small", "cpu-large")
+
+
+def test_an_unknown_class_is_refused_by_name_with_the_ladder_offered():
+    with pytest.raises(RoutingValidationError) as exc_info:
+        job_accept_classes({"gpus": 1}, {"accept": ["gpu-12gb"]})
+    message = str(exc_info.value)
+    assert "gpu-12gb" in message
+    # The suggestion is the real ladder, not a restated copy of it.
+    for klass in mk.CAPABILITY_CLASSES:
+        assert klass in message
+
+
+def test_a_gpu_job_may_not_accept_a_cpu_class():
+    """A promise the class cannot keep: `cpu-large` machines have no GPU, so
+    a `gpus: 1` job matched there would be entitled to hardware that is not
+    on the machine — an OOM or a placement refusal at claim time, paid for."""
+    with pytest.raises(RoutingValidationError) as exc_info:
+        job_accept_classes({"gpus": 1}, {"accept": ["gpu-8gb", "cpu-large"]})
+    message = str(exc_info.value)
+    assert "cpu-large" in message
+    assert "gpu" in message
+
+
+def test_a_cpu_job_may_not_accept_a_gpu_class():
+    """The mirror, and it is not symmetric reasoning: a GPU machine could
+    physically run CPU work, but its book is priced for its GPU, so buying
+    an hour of it for a CPU job is the buyer overpaying by the width of the
+    ladder — and it takes the machine out of reach of work that needs it."""
+    with pytest.raises(RoutingValidationError) as exc_info:
+        job_accept_classes({"cpus": 2}, {"accept": ["cpu-small", "gpu-24gb"]})
+    message = str(exc_info.value)
+    assert "gpu-24gb" in message
+    assert "cpu" in message
+
+
+def test_a_large_cpu_job_may_not_fall_back_to_cpu_small():
+    """A job that asked for a workstation cannot accept a laptop. This is the
+    one consistency rule that is about a NUMBER rather than a kind: the same
+    `CPU_LARGE_MIN_CORES` threshold that derives the default enforces the
+    explicit list, so `accept` cannot be used to route around it."""
+    with pytest.raises(RoutingValidationError) as exc_info:
+        job_accept_classes(
+            {"cpus": mk.CPU_LARGE_MIN_CORES},
+            {"accept": ["cpu-large", "cpu-small"]},
+        )
+    message = str(exc_info.value)
+    assert "cpu-small" in message
+    assert str(mk.CPU_LARGE_MIN_CORES) in message
+
+
+def test_a_large_cpu_job_may_still_accept_cpu_large_alone():
+    assert job_accept_classes(
+        {"cpus": mk.CPU_LARGE_MIN_CORES * 2}, {"accept": ["cpu-large"]}
+    ) == ("cpu-large",)
+
+
+def test_a_repeated_class_is_refused():
+    """The walk re-reads the same open book for each entry, with nothing
+    written between the reads, so a class named twice would plan the same
+    listing's capacity twice and promise a fill only one machine can honour.
+    The yaml layer refuses this too; this is the check for every caller that
+    did not come through a yaml file."""
+    with pytest.raises(RoutingValidationError, match="cpu-small"):
+        job_accept_classes({"cpus": 2}, {"accept": ["cpu-small", "cpu-small"]})
+
+
+def test_an_empty_accept_is_refused_rather_than_derived():
+    """`accept: []` says "run nowhere". Falling back to the derived default
+    would do the exact opposite of what it says."""
+    with pytest.raises(RoutingValidationError, match="accept"):
+        job_accept_classes({"cpus": 2}, {"accept": []})
 
 
 # ---------------------------------------------------------------------------
@@ -82,22 +217,35 @@ def test_a_non_numeric_cpus_is_a_typed_refusal_not_a_bare_valueerror():
 # never rolled back between tests, so — exactly as
 # tests/test_marketplace_class_board.py's module docstring documents for its
 # own `cpu-large`/`gpu-16gb` — every book here is real state that persists
-# across the whole session. `gpu-80gb-hopper` is the class: grepping every
-# other test file for it (and for the only GPU spec that classifies into it,
-# an H100-shaped `compute_capability: "9.0"` card) turns up nothing that ever
-# lists a machine there, so it starts clean. To stay a good citizen of that
-# same discipline for whatever runs after this file, `_clean_hopper_book`
-# withdraws every listing these tests create — on teardown, so it runs even
-# if an assertion above it fails — leaving the class exactly as empty as it
-# was found.
+# across the whole session.
+#
+# TWO classes now, because the walk is multi-class: `gpu-80gb-hopper`
+# (`CLASS`) and `gpu-80gb` (`SECOND`). Grepping the suite for the first turns
+# up nothing that ever lists a machine there, and the only other file that
+# lists into the second (`test_marketplace.py`'s donated-listing test) reads
+# `price_series` NEWEST-first and asserts a live `open_listings` count for its
+# own observation, so an earlier listing of ours cannot reach it — and
+# `_clean_books` withdraws ours on teardown regardless, so it runs even if an
+# assertion above it fails, leaving both classes exactly as empty as they were
+# found.
 # ---------------------------------------------------------------------------
 
 CLASS = "gpu-80gb-hopper"
+SECOND = "gpu-80gb"
 H100 = {
     "index": 0,
     "name": "NVIDIA H100 PCIe",
     "memory_total_mb": 81559,
     "compute_capability": "9.0",
+}
+#: Same VRAM tier, Ampere rather than Hopper — the one field that separates
+#: the two classes (marketplace.HOPPER_MIN_COMPUTE_CAPABILITY), copied from
+#: tests/test_marketplace.py's own `A100_80`.
+A100 = {
+    "index": 0,
+    "name": "NVIDIA A100-SXM4-80GB",
+    "memory_total_mb": 81920,
+    "compute_capability": "8.0",
 }
 
 
@@ -112,13 +260,13 @@ def db(postgres_dsn):
 
 
 @pytest.fixture
-def _clean_hopper_book(db):
+def _clean_books(db):
     yield
     with db.cursor() as cur:
         cur.execute(
             "update public.listings set state = 'withdrawn'"
-            " where capability_class = %s and state = 'open'",
-            (CLASS,),
+            " where capability_class = any(%s) and state = 'open'",
+            ([CLASS, SECOND],),
         )
 
 
@@ -178,7 +326,13 @@ def resolve_attempts(db, machine_id, *, accepted: int, failed: int) -> None:
                 )
 
 
-def test_the_book_is_ranked_and_matched_at_asks(db, _clean_hopper_book):
+def only_plan(result) -> object:
+    """The single walked class's `MatchPlan`, for the one-class tests below."""
+    assert len(result["class_plans"]) == 1
+    return result["class_plans"][0]["plan"]
+
+
+def test_the_book_is_ranked_and_matched_at_asks(db, _clean_books):
     """Design's ranking rule end to end: three machines at 100/300/200 with
     rates 0.5/None/1.0 rank on EFFECTIVE price (200, 300-unproven, 200), a
     250 bid over 4 tasks fills the two clearing listings at their own asks,
@@ -206,10 +360,10 @@ def test_the_book_is_ranked_and_matched_at_asks(db, _clean_hopper_book):
     )
 
     result = plan_pool_routing(
-        db, capability_class=CLASS, max_zc_per_hour=250, tasks_wanted=4,
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=4,
     )
 
-    assert result["capability_class"] == CLASS
+    assert result["accept"] == [CLASS]
     assert result["tasks_wanted"] == 4
     assert result["tasks_filled"] == 4
     assert result["tasks_unfilled"] == 0
@@ -225,6 +379,7 @@ def test_the_book_is_ranked_and_matched_at_asks(db, _clean_hopper_book):
 
     row_half = by_id[str(listing_half["id"])]
     assert row_half["machine_id"] == half
+    assert row_half["capability_class"] == CLASS
     assert row_half["acceptance_rate"] == 0.5
     assert row_half["effective_zc_per_hour"] == "200"
     assert row_half["tasks_assigned"] == 2
@@ -242,13 +397,14 @@ def test_the_book_is_ranked_and_matched_at_asks(db, _clean_hopper_book):
     assert row_new["tasks_assigned"] == 0
     assert row_new["excluded"] == "ask-above-cap"
 
-    assert result["plan"].tasks_filled == 4
-    assert {(f.listing_id, f.tasks) for f in result["plan"].fills} == {
+    plan = only_plan(result)
+    assert plan.tasks_filled == 4
+    assert {(f.listing_id, f.tasks) for f in plan.fills} == {
         (str(listing_half["id"]), 2), (str(listing_perfect["id"]), 2),
     }
 
 
-def test_a_starved_bid_reports_the_nearest_miss(db, _clean_hopper_book):
+def test_a_starved_bid_reports_the_nearest_miss(db, _clean_books):
     host = make_user(db)
     machine = make_machine(db, host)
     listing = mk.create_listing(
@@ -256,31 +412,33 @@ def test_a_starved_bid_reports_the_nearest_miss(db, _clean_hopper_book):
     )
 
     result = plan_pool_routing(
-        db, capability_class=CLASS, max_zc_per_hour=250, tasks_wanted=3,
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=3,
     )
 
     assert result["tasks_filled"] == 0
     assert result["tasks_unfilled"] == 3
     assert result["nearest_miss"] == {
-        "ask_zc_per_hour": 500, "listing_id": str(listing["id"]),
+        "ask_zc_per_hour": 500,
+        "listing_id": str(listing["id"]),
+        "capability_class": CLASS,
     }
     assert len(result["book"]) == 1
     assert result["book"][0]["excluded"] == "ask-above-cap"
     assert result["book"][0]["tasks_assigned"] == 0
-    assert result["plan"].fills == ()
+    assert only_plan(result).fills == ()
 
 
-def test_an_empty_book_explains_itself(db, _clean_hopper_book):
+def test_an_empty_book_explains_itself(db, _clean_books):
     result = plan_pool_routing(
-        db, capability_class=CLASS, max_zc_per_hour=250, tasks_wanted=5,
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=5,
     )
-    assert result["capability_class"] == CLASS
+    assert result["accept"] == [CLASS]
     assert result["book"] == []
     assert result["nearest_miss"] is None
     assert result["tasks_wanted"] == 5
     assert result["tasks_filled"] == 0
     assert result["tasks_unfilled"] == 5
-    assert result["plan"].fills == ()
+    assert only_plan(result).fills == ()
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +450,7 @@ def test_an_empty_book_explains_itself(db, _clean_hopper_book):
 # ---------------------------------------------------------------------------
 
 
-def test_an_unproven_host_past_the_share_cap_is_excluded(db, _clean_hopper_book):
+def test_an_unproven_host_past_the_share_cap_is_excluded(db, _clean_books):
     """Two unproven hosts (zero resolved attempts each, so both stay below
     `metrics.MIN_EVIDENCE`) both clear an 8-task bid's cap.
     `marketplace.unproven_task_budget(8)` is 2, so the cheaper one fills the
@@ -314,7 +472,7 @@ def test_an_unproven_host_past_the_share_cap_is_excluded(db, _clean_hopper_book)
     )
 
     result = plan_pool_routing(
-        db, capability_class=CLASS, max_zc_per_hour=250, tasks_wanted=8,
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=8,
     )
 
     by_id = {row["listing_id"]: row for row in result["book"]}
@@ -332,7 +490,7 @@ def test_an_unproven_host_past_the_share_cap_is_excluded(db, _clean_hopper_book)
 
 
 def test_a_clearing_listing_beyond_the_wanted_tasks_is_no_tasks_left(
-    db, _clean_hopper_book
+    db, _clean_books
 ):
     """A cheap, PROVEN listing with enough capacity fills the whole bid by
     itself; a second, still-clearing, still-proven listing ranked right
@@ -357,7 +515,7 @@ def test_a_clearing_listing_beyond_the_wanted_tasks_is_no_tasks_left(
     )
 
     result = plan_pool_routing(
-        db, capability_class=CLASS, max_zc_per_hour=250, tasks_wanted=2,
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=2,
     )
 
     by_id = {row["listing_id"]: row for row in result["book"]}
@@ -372,3 +530,170 @@ def test_a_clearing_listing_beyond_the_wanted_tasks_is_no_tasks_left(
 
     assert result["tasks_filled"] == 2
     assert result["tasks_unfilled"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The ordered multi-class walk.
+#
+# Every machine below is given five accepted attempts before it is listed, so
+# it is PROVEN: the unproven share cap (`unproven_task_budget`) would spill
+# tasks into the next class all by itself, and a spill test that cannot tell
+# "the first class ran out of capacity" from "the first class ran out of
+# unproven budget" is not testing the walk.
+# ---------------------------------------------------------------------------
+
+
+def _proven_listing(db, host, klass, *, ask, capacity):
+    machine = make_machine(
+        db, host, capabilities={"gpus": [H100 if klass == CLASS else A100]}
+    )
+    resolve_attempts(db, machine, accepted=5, failed=0)
+    listing = mk.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=ask,
+        max_concurrent_tasks=capacity,
+    )
+    assert listing["capability_class"] == klass
+    return listing
+
+
+def test_the_remainder_spills_into_the_next_class_in_walk_order(db, _clean_books):
+    """Three tasks, one task of capacity in the first class and plenty in the
+    second: the first class fills what it can and the SECOND is asked for the
+    remainder only — never for the original three, which would over-buy by
+    the amount the first class already covered."""
+    host = make_user(db)
+    first = _proven_listing(db, host, CLASS, ask=100, capacity=1)
+    second = _proven_listing(db, host, SECOND, ask=200, capacity=5)
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=3,
+    )
+
+    assert result["accept"] == [CLASS, SECOND]
+    assert result["tasks_filled"] == 3
+    assert result["tasks_unfilled"] == 0
+
+    assert [entry["capability_class"] for entry in result["class_plans"]] == [
+        CLASS, SECOND,
+    ]
+    assert [entry["tasks_wanted"] for entry in result["class_plans"]] == [3, 2]
+    assert [entry["plan"].tasks_filled for entry in result["class_plans"]] == [1, 2]
+
+    by_id = {row["listing_id"]: row for row in result["book"]}
+    assert by_id[str(first["id"])]["tasks_assigned"] == 1
+    assert by_id[str(second["id"])]["tasks_assigned"] == 2
+
+
+def test_book_rows_carry_the_class_they_came_from(db, _clean_books):
+    """One flat book across several classes is only readable if every row
+    says which book it is from — otherwise two listings at 100 in two
+    different classes are indistinguishable in the response."""
+    host = make_user(db)
+    first = _proven_listing(db, host, CLASS, ask=100, capacity=1)
+    second = _proven_listing(db, host, SECOND, ask=200, capacity=5)
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=3,
+    )
+
+    rows = {row["listing_id"]: row for row in result["book"]}
+    assert rows[str(first["id"])]["capability_class"] == CLASS
+    assert rows[str(second["id"])]["capability_class"] == SECOND
+    # Walk order, not price order: the whole first class precedes the second,
+    # even though the second class's listing is not the cheaper of the two.
+    classes_in_order = [row["capability_class"] for row in result["book"]]
+    assert classes_in_order == sorted(
+        classes_in_order, key=lambda c: [CLASS, SECOND].index(c)
+    )
+
+
+def test_a_class_that_fills_everything_ends_the_walk(db, _clean_books):
+    """Early stop. The second class is never queried, so it is absent from
+    the book and from `class_plans` — a plan that listed it would be
+    reporting a book read that never happened."""
+    host = make_user(db)
+    first = _proven_listing(db, host, CLASS, ask=100, capacity=4)
+    second = _proven_listing(db, host, SECOND, ask=50, capacity=4)
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=2,
+    )
+
+    assert result["tasks_filled"] == 2
+    assert result["tasks_unfilled"] == 0
+    assert [entry["capability_class"] for entry in result["class_plans"]] == [CLASS]
+    listed = {row["listing_id"] for row in result["book"]}
+    assert str(first["id"]) in listed
+    # Cheaper, and still not consulted: `accept` is a preference order, not a
+    # price search across every class at once.
+    assert str(second["id"]) not in listed
+
+
+def test_the_nearest_miss_is_the_cheapest_across_every_walked_class(
+    db, _clean_books
+):
+    """Both classes are walked and neither clears. The reported miss is the
+    cheapest ask above the cap ANYWHERE in the walk — 300 in the second
+    class — not the first one the walk happened to see (500, in the first
+    class), which is what a per-class "first wins" would report."""
+    host = make_user(db)
+    _proven_listing(db, host, CLASS, ask=500, capacity=4)
+    cheaper_miss = _proven_listing(db, host, SECOND, ask=300, capacity=4)
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=2,
+    )
+
+    assert result["tasks_filled"] == 0
+    assert result["tasks_unfilled"] == 2
+    assert result["nearest_miss"] == {
+        "ask_zc_per_hour": 300,
+        "listing_id": str(cheaper_miss["id"]),
+        "capability_class": SECOND,
+    }
+
+
+def test_a_fully_filled_walk_reports_no_nearest_miss(db, _clean_books):
+    """`nearest_miss` answers "why did this not fill" — a filled plan has no
+    such question, so an above-cap listing in a walked class is reported in
+    the book and nowhere else."""
+    host = make_user(db)
+    _proven_listing(db, host, CLASS, ask=500, capacity=4)
+    _proven_listing(db, host, SECOND, ask=100, capacity=4)
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=2,
+    )
+
+    assert result["tasks_filled"] == 2
+    assert result["nearest_miss"] is None
+
+
+def test_workspace_machines_stay_withheld_across_the_whole_walk(db, _clean_books):
+    """C1: workspace demand takes priority over the open book, and that is a
+    property of the MACHINE, not of the class it is listed in — so the
+    reserved set is applied to every class the walk touches, not only the
+    first."""
+    host = make_user(db)
+    first = _proven_listing(db, host, CLASS, ask=100, capacity=4)
+    second = _proven_listing(db, host, SECOND, ask=100, capacity=4)
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=2,
+        workspace_machine_ids=[first["machine_id"], second["machine_id"]],
+    )
+
+    rows = {row["listing_id"]: row for row in result["book"]}
+    assert rows[str(first["id"])]["excluded"] == "workspace-free"
+    assert rows[str(second["id"])]["excluded"] == "workspace-free"
+    assert result["tasks_filled"] == 0
+
+
+def test_the_module_never_reaches_for_the_runtime():
+    """routing.py orchestrates `marketplace`/`metrics`/`db` and nothing else —
+    eligibility stays the coordinator's. A GPU class arriving in this module
+    is a marketplace name, not a runtime import."""
+    import inspect
+
+    source = inspect.getsource(routing)
+    assert "flashruntime" not in source
