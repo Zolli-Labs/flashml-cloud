@@ -180,3 +180,102 @@ def plan_pool_routing(
         "nearest_miss": nearest_miss if plan.tasks_unfilled > 0 else None,
         "plan": plan,
     }
+
+
+def _estimate_task_seconds(
+    db: psycopg.Connection, config: Any, capability_class: str
+) -> int:
+    """How long one task of this job is expected to take, for sizing the
+    bid's hold (``marketplace.create_bid``'s ``est_task_seconds``).
+
+    Mirrors the cost-quote route's own precedence (``_cost_quote_row`` in
+    app.py): a caller-declared duration wins over any recorded-evidence
+    estimate. It never reaches for the evidence rung itself, for two
+    reasons that both hold at once — this is called from
+    :func:`route_submitted_job`, on a job that was JUST minted by the
+    coordinator, so ``db.peer_task_observations`` (keyed by ``job_id``,
+    filtered to accepted ``contributions``) is *structurally* empty: no
+    attempt has run yet, so there is nothing for that rung to find. And
+    reaching it at all would mean importing ``router.estimator``, which
+    sits outside this module's permitted imports (``marketplace``,
+    ``metrics``, ``db``, ``psycopg`` — the routing module never imports
+    the runtime, directly or by way of the router package). So the only
+    honest source here is what the submitter declared: ``timeout_seconds``,
+    falling back to one hour when absent. Never zero —
+    ``marketplace.create_bid`` refuses a zero estimate (marketplace.py:1655).
+
+    ``db`` and ``capability_class`` are accepted, not read, so this call
+    site does not have to change shape if a class-level source is ever
+    wired up here without reaching past the permitted imports above.
+    """
+    seconds = getattr(config, "timeout_seconds", None)
+    return int(seconds) if seconds else 3600
+
+
+def route_submitted_job(
+    db: psycopg.Connection,
+    *,
+    user_id: str,
+    job_id: str,
+    config: Any,
+    task_count: int,
+) -> dict[str, Any]:
+    """Post a priced job's bid and grant whatever the open book clears for
+    it, right after the coordinator has accepted the job.
+
+    **The caller is the fail-open boundary, not this function.** Every
+    write here (``create_bid``, ``grant_matches``) is real: a bid a caller
+    discards on exception is a bid that was still posted. So the submit
+    handler must call this inside its own try/except and roll back on any
+    failure — this function raises rather than swallowing anything, exactly
+    like :func:`plan_pool_routing` and the ``marketplace`` writers it calls.
+
+    ``config.resources`` deciding the capability class here is the SECOND
+    time it is checked: the handler already refused a GPU job with a price
+    block at validation time, before the coordinator ever saw it
+    (:class:`GpuRoutingUnavailable`). Re-deriving the class here rather than
+    accepting it as a parameter keeps this function the single place that
+    reads "what class does this job's resources need" — a caller passing a
+    stale or hand-computed class is exactly the drift a second argument
+    would invite.
+    """
+    price = config.price
+    klass = job_capability_class(config.resources)
+    est_seconds = _estimate_task_seconds(db, config, klass)
+    planned = plan_pool_routing(
+        db,
+        capability_class=klass,
+        max_zc_per_hour=price["max_zc_per_hour"],
+        tasks_wanted=task_count,
+    )
+    bid = marketplace.create_bid(
+        db,
+        job_id=job_id,
+        owner_id=user_id,
+        capability_class_name=klass,
+        max_zc_per_hour=price["max_zc_per_hour"],
+        tasks_wanted=task_count,
+        est_task_seconds=est_seconds,
+    )
+    if planned["plan"].fills:
+        marketplace.grant_matches(db, bid_id=str(bid["id"]), plan=planned["plan"])
+
+    out = {
+        key: planned[key]
+        for key in (
+            "capability_class",
+            "tasks_wanted",
+            "tasks_filled",
+            "tasks_unfilled",
+            "book",
+            "nearest_miss",
+        )
+    }
+    out.update(
+        {
+            "state": "routed",
+            "bid_id": str(bid["id"]),
+            "objective": price["objective"],
+        }
+    )
+    return out

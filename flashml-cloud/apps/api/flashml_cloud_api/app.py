@@ -94,6 +94,7 @@ from flashml_cloud_api import repo as repomod
 from flashml_cloud_api import placement as placementmod
 from flashml_cloud_api import prices as pricesmod
 from flashml_cloud_api import router as routermod
+from flashml_cloud_api import routing as routingmod
 from flashml_cloud_api.router import tradeoff as tradeoffmod
 from flashml_cloud_api import sandbox_orchestrator as orchmod
 from flashml_cloud_api import sandbox_sessions as ssmod
@@ -409,6 +410,18 @@ def _parse_and_preflight_tree(
         config = parse_flashml_yaml(config_text)
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
+
+    # A priced GPU job is refused HERE, at validation time, before a single
+    # byte leaves this process — never routed as a fiction the coordinator
+    # cannot yet reserve. See `routing.GpuRoutingUnavailable`: the pinned
+    # runtime drops `gpuPerTask`, so a bid sized for GPU capacity would be
+    # priced for hardware nobody can actually claim against. An unpriced GPU
+    # job is untouched by this check and submits exactly as it does today.
+    if config.price is not None:
+        try:
+            routingmod.job_capability_class(config.resources)
+        except routingmod.GpuRoutingUnavailable as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     try:
         image = resolve_image(config.image)
@@ -6503,8 +6516,58 @@ def create_cloud_app(
             pool_id=pool,
             correlation_id=observability.new_correlation_id(),
         )
+
+        # Priced pool routing: a bid at submit time, matched against the
+        # open book. The job row above is already written and the job is
+        # already accepted, so from here on nothing may turn a submit that
+        # would have succeeded into a failure — same fail-open discipline as
+        # `_human_spend_guard` and its callers: only routing's
+        # own effects (a bid row, granted matches) are written by it, and
+        # any exception anywhere inside it — including one this line's own
+        # task-count lookup raises — leaves the submit itself untouched.
+        # A GPU-priced job never reaches here: `_parse_and_preflight_tree`
+        # already refused it with a 400 before a byte of this request left
+        # the process.
+        routing_block: dict[str, Any] | None = None
+        if config.price is not None:
+            try:
+                # The SAME expansion `preview_plans`/`cost_quote` use via
+                # `_route_plan` (`expand_tasks(job_id, spec)`) — never a
+                # second, hand-rolled count. `candidate_spec` is the exact
+                # validated model already built above for the spend guard;
+                # `job_id` is real now (the coordinator has accepted), where
+                # `_route_plan` only ever had `job_id or "preview"`.
+                if candidate_spec is None or expand_tasks is None:
+                    raise RuntimeError(
+                        "no validated spec or task expander available to "
+                        "size the routing bid"
+                    )
+                task_count = len(list(expand_tasks(job_id, candidate_spec))) or 1
+                routing_block = routingmod.route_submitted_job(
+                    db,
+                    user_id=user_id,
+                    job_id=job_id,
+                    config=config,
+                    task_count=task_count,
+                )
+            except Exception:
+                # No-op under autocommit (the current mode); clears an
+                # aborted transaction if a future connection mode ever
+                # leaves one, exactly as `_human_spend_guard`'s callers do.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                log.warning(
+                    json.dumps({"text": "routing failed open", "job_id": job_id})
+                )
+                routing_block = {"state": "skipped", "reason": "routing-error"}
+
+        response_body: dict[str, Any] = {**job, "findings": rendered}
+        if routing_block is not None:
+            response_body["routing"] = routing_block
         return Response(
-            content=json.dumps({**job, "findings": rendered}),
+            content=json.dumps(response_body),
             status_code=201,
             media_type="application/json",
         )
