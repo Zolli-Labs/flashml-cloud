@@ -8961,6 +8961,24 @@ def create_cloud_app(
         name their own class would sell a 3070 as Hopper-class. Refusals
         are 409, not 400 — the request was well formed, the machine is
         simply not something the ladder can promise.
+
+        **A new listing refills the demand that was waiting for it**
+        (``routing.refill_open_bids``, research doc §5.2 step 8). Bids left
+        ``open``/``partial`` because the book was thin at submit time are
+        matched against this listing here, and the response says which of
+        them got what under ``"refilled"`` — ``[]`` when nothing moved, which
+        is the ordinary case and is always present rather than omitted.
+
+        The refill is FAIL-OPEN, the same discipline the submit hook's
+        routing block follows: the listing row is already committed and the
+        host's action already succeeded, so nothing after it may turn a 201
+        into a 5xx. ``refill_open_bids`` runs every grant in ONE transaction,
+        so an exception leaves no half-written refill for the rollback below
+        to chase — that ``db.rollback()`` is the same belt-and-braces no-op
+        the submit hook carries, there for a future non-autocommit connection
+        rather than as the mechanism that keeps the writes atomic. The
+        warning carries ``repr(exc)``: "refill failed open" alone cannot tell
+        a broken market path from a market with nothing waiting in it.
         """
         payload = await _json_object(request)
         machine_id = payload.get("machine_id")
@@ -8997,8 +9015,29 @@ def create_cloud_app(
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+        klass = str(row["capability_class"])
+        refilled: list[dict[str, Any]] = []
+        try:
+            refilled = routingmod.refill_open_bids(db, capability_class=klass)
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(
+                json.dumps({
+                    "text": "listing refill failed open",
+                    "listing_id": str(row["id"]),
+                    "capability_class": klass,
+                    "error": repr(exc),
+                })
+            )
+            refilled = []
+
         return {
             **_jsonable(row),
+            "refilled": refilled,
             "donated": marketplacemod.is_donated(int(row["ask_zc_per_hour"])),
             "ask_usd_per_hour": pricesmod.zc_ask_usd_amount_text(
                 int(row["ask_zc_per_hour"])

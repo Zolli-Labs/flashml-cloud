@@ -8,6 +8,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import marketplace as mk
 from flashml_cloud_api import metrics
 from flashml_cloud_api import routing
@@ -16,6 +17,7 @@ from flashml_cloud_api.routing import (
     UnroutableResources,
     job_accept_classes,
     plan_pool_routing,
+    refill_open_bids,
 )
 
 
@@ -262,6 +264,30 @@ def db(postgres_dsn):
 
 @pytest.fixture
 def _clean_books(db):
+    """Leave both of this file's books as empty as they were found.
+
+    Listings are withdrawn, and any live BID is cancelled: since
+    ``routing.refill_open_bids`` a bid left `open`/`partial` in a class is not
+    inert state, it is live demand that the next listing to appear in that
+    class will be matched against. The refill tests below are the only ones
+    here that post bids, but the sweep is unconditional for the same reason
+    the listing sweep is — a test that fails midway must still hand the class
+    back clean.
+
+    **And the book is RE-RECORDED afterwards.** This used to be a bare
+    ``update ... set state = 'withdrawn'``, which moves the rows and leaves
+    the last `price_observations` row frozen at whatever this file's asks
+    were — so `class_board`'s `last_zc` (what `GET /prices` publishes as
+    `best_ask_zc`) kept quoting a listing nobody could buy. That is a real
+    cross-file leak and it was reproducible:
+    ``test_market_routes.py::test_the_zc_ladder_matches_the_live_book_and_never
+    _zero_fills`` compares that published number against the LIVE asks and
+    failed with `assert 100 == None` whenever this file ran before it. One
+    observation per class, exactly as `marketplace.withdraw_listing` would
+    have written, is what closes it — the same argument
+    ``test_routing_routes.py``'s `_withdraw_after` docstring makes for going
+    through the real withdrawal path rather than raw SQL.
+    """
     yield
     with db.cursor() as cur:
         cur.execute(
@@ -269,6 +295,13 @@ def _clean_books(db):
             " where capability_class = any(%s) and state = 'open'",
             ([CLASS, SECOND],),
         )
+        cur.execute(
+            "update public.bids set state = 'cancelled'"
+            " where capability_class = any(%s) and state in ('open', 'partial')",
+            ([CLASS, SECOND],),
+        )
+    for klass in (CLASS, SECOND):
+        mk.record_price_observation(db, capability_class_name=klass, cause="listing")
 
 
 def make_user(db) -> str:
@@ -928,3 +961,322 @@ def test_the_module_never_reaches_for_the_runtime():
 
     source = inspect.getsource(routing)
     assert "flashruntime" not in source
+
+
+# ---------------------------------------------------------------------------
+# refill_open_bids — partial demand refills when supply appears.
+#
+# Research doc §5.2 step 8: "partial fills stay open and refill as listings
+# appear". Until this function existed nothing ever re-matched: a bid left
+# `open`/`partial` because the book was thin at submit time stayed starved for
+# ever, even when a listing that would have cleared it appeared a minute
+# later. Everything below is `CLASS`, this file's own book, and `_clean_books`
+# now cancels the bids as well as withdrawing the listings.
+# ---------------------------------------------------------------------------
+
+
+def _bid_for(db, buyer, klass, *, cap, tasks, objective="cheapest", job_id=None):
+    """One bid, posted through the real writer so it carries a real
+    objective, a real estimate and a real state machine."""
+    return mk.create_bid(
+        db,
+        job_id=job_id or f"job-refill-{uuid.uuid4().hex[:10]}",
+        owner_id=buyer,
+        capability_class_name=klass,
+        max_zc_per_hour=cap,
+        tasks_wanted=tasks,
+        est_task_seconds=3600,
+        objective=objective,
+    )
+
+
+def _grant_from_the_live_book(db, bid, *, tasks, klass=CLASS):
+    """Match `tasks` of `bid` against the book AS IT STANDS, through the same
+    two functions the submit hook uses. Never a hand-built `MatchPlan`: the
+    thing under test is what a real grant leaves behind, and a fixture-shaped
+    plan can leave behind a shape production never produces."""
+    planned = plan_pool_routing(
+        db, accept_classes=(klass,), max_zc_per_hour=int(bid["max_zc_per_hour"]),
+        tasks_wanted=tasks,
+    )
+    plan = planned["class_plans"][0]["plan"]
+    assert plan.fills, "the fixture book should have cleared this bid"
+    return mk.grant_matches(db, bid_id=str(bid["id"]), plan=plan)
+
+
+def _matches(db, bid_id):
+    return mk.matches_for_bid(db, str(bid_id))
+
+
+def _assigned(db, bid_id) -> int:
+    return sum(
+        int(m["tasks_assigned"]) for m in _matches(db, bid_id)
+        if m["state"] != "expired"
+    )
+
+
+def _bid_row(db, bid_id) -> dict:
+    with db.cursor() as cur:
+        cur.execute(
+            "select * from public.bids where id = %s::uuid", (str(bid_id),)
+        )
+        return cur.fetchone()
+
+
+def test_a_new_listing_refills_an_open_bid_for_its_whole_remainder(
+    db, _clean_books
+):
+    """The base case the function exists for: a bid posted into an empty book
+    is starved, a listing appears, and the bid is matched WITHOUT anybody
+    resubmitting the job. Nothing else in the system does this — before it, a
+    thin book at submit time was permanent."""
+    buyer, host = make_user(db), make_user(db)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=3)
+    assert _bid_row(db, bid["id"])["state"] == "open"
+
+    listing = _proven_listing(db, host, CLASS, ask=100, capacity=10)
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    assert summary == [{"bid_id": str(bid["id"]), "tasks_granted": 3}]
+    granted = _matches(db, bid["id"])
+    assert [str(m["listing_id"]) for m in granted] == [str(listing["id"])]
+    assert sum(int(m["tasks_assigned"]) for m in granted) == 3
+    # `grant_matches` owns the state move; the refill does not second-guess it.
+    assert _bid_row(db, bid["id"])["state"] == "filled"
+
+
+def test_a_refill_grants_the_gap_and_never_the_whole_bid_again(db, _clean_books):
+    """The failure mode this function must not have.
+
+    The bid wants four tasks and already holds one. A refill that re-bid
+    `tasks_wanted` would entitle five machines to a four-task job — and an
+    entitlement is not free just because no money moves at grant: it is
+    capacity promised to work that does not exist, and the ledger's escrow
+    holds it the moment one of those hosts claims.
+
+    The already-matched listing is deliberately the CHEAPEST in the book and
+    is deliberately still open. Ranked first, it would be matched again if the
+    refill did not exclude the listings this bid already holds — its
+    `max_concurrent_tasks` is not decremented by a match and nothing in
+    `open_asks` or `match_bid` knows the bid has been here before.
+    """
+    buyer, host = make_user(db), make_user(db)
+    first = _proven_listing(db, host, CLASS, ask=100, capacity=1)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=4)
+    _grant_from_the_live_book(db, bid, tasks=1)
+    assert _bid_row(db, bid["id"])["state"] == "partial"
+    assert _assigned(db, bid["id"]) == 1
+
+    second = _proven_listing(db, host, CLASS, ask=200, capacity=10)
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    assert summary == [{"bid_id": str(bid["id"]), "tasks_granted": 3}]
+    by_listing: dict[str, int] = {}
+    for m in _matches(db, bid["id"]):
+        by_listing[str(m["listing_id"])] = (
+            by_listing.get(str(m["listing_id"]), 0) + int(m["tasks_assigned"])
+        )
+    assert by_listing == {str(first["id"]): 1, str(second["id"]): 3}
+    assert _assigned(db, bid["id"]) == 4 == int(bid["tasks_wanted"])
+    assert _bid_row(db, bid["id"])["state"] == "filled"
+
+
+def test_an_expired_match_gives_its_tasks_back_to_the_remainder(db, _clean_books):
+    """The remainder is computed over NON-EXPIRED matches, which is the whole
+    reason it is recomputed rather than read off the bid.
+
+    An expired match is the ordinary end of an entitlement nobody claimed
+    (0018's header: "a matched host that never claims produces no work and no
+    charge"). The tasks it was holding are unspent demand again, and a refill
+    that counted them as filled would leave the job permanently short by
+    however many hosts ghosted it.
+
+    The SAME predicate governs the exclusion set, and this pins both halves:
+    the host who ghosted is offered to this bid again, because what the
+    exclusion prevents is a second LIVE entitlement on one listing, not a
+    second chance for a listing whose entitlement has ended.
+    """
+    buyer, host = make_user(db), make_user(db)
+    ghosted = _proven_listing(db, host, CLASS, ask=100, capacity=1)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=4)
+    match = _grant_from_the_live_book(db, bid, tasks=1)[0]
+    assert mk.close_match(
+        db, match_id=str(match["id"]), from_state="granted", to_state="expired"
+    )
+
+    fresh = _proven_listing(db, host, CLASS, ask=200, capacity=10)
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    # Four, not three: the expired task came back into the remainder.
+    assert summary == [{"bid_id": str(bid["id"]), "tasks_granted": 4}]
+    live: dict[str, int] = {}
+    for m in _matches(db, bid["id"]):
+        if m["state"] == "expired":
+            continue
+        live[str(m["listing_id"])] = (
+            live.get(str(m["listing_id"]), 0) + int(m["tasks_assigned"])
+        )
+    assert live == {str(ghosted["id"]): 1, str(fresh["id"]): 3}
+    assert _assigned(db, bid["id"]) == 4
+
+
+def test_a_refill_spends_the_jobs_unproven_share_not_a_fresh_one(db, _clean_books):
+    """`UNPROVEN_TASK_SHARE` is a bound on how much of ONE JOB may be lost to
+    newcomers, and a refill is not a new job.
+
+    The bid has already spent its whole allowance on an unproven host. A
+    second unproven listing appears alongside a proven one, both clearing and
+    the newcomer CHEAPER — so it would be matched first if the refill computed
+    a fresh per-call budget from the remainder. It gets nothing; the proven
+    machine takes the gap.
+    """
+    buyer, host = make_user(db), make_user(db)
+    newcomer = make_machine(db, host, capabilities={"gpus": [H100]})
+    first = mk.create_listing(
+        db, machine_id=newcomer, owner_id=host, ask_zc_per_hour=50,
+        max_concurrent_tasks=4,
+    )
+    assert first["capability_class"] == CLASS
+
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=4)
+    # `unproven_task_budget(4)` is 1, so this grant spends the lot.
+    _grant_from_the_live_book(db, bid, tasks=4)
+    assert _assigned(db, bid["id"]) == 1
+    assert [m["unproven_host"] for m in _matches(db, bid["id"])] == [True]
+
+    cheap_newcomer = make_machine(db, host, capabilities={"gpus": [H100]})
+    second = mk.create_listing(
+        db, machine_id=cheap_newcomer, owner_id=host, ask_zc_per_hour=60,
+        max_concurrent_tasks=4,
+    )
+    proven = _proven_listing(db, host, CLASS, ask=200, capacity=4)
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    assert summary == [{"bid_id": str(bid["id"]), "tasks_granted": 3}]
+    by_listing = {
+        str(m["listing_id"]): int(m["tasks_assigned"])
+        for m in _matches(db, bid["id"])
+    }
+    assert str(second["id"]) not in by_listing
+    assert by_listing[str(proven["id"])] == 3
+    assert _assigned(db, bid["id"]) == 4
+
+
+def test_a_filled_bid_is_never_refilled(db, _clean_books):
+    """`open_bids` selects `open`/`partial` and `grant_matches` refuses
+    anything else, so this is belt and braces — but it is the invariant a
+    reader of this function most needs to be sure of: a bid that got
+    everything it asked for must not keep accruing entitlements every time a
+    host lists a machine."""
+    buyer, host = make_user(db), make_user(db)
+    _proven_listing(db, host, CLASS, ask=100, capacity=4)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=1)
+    _grant_from_the_live_book(db, bid, tasks=1)
+    assert _bid_row(db, bid["id"])["state"] == "filled"
+
+    _proven_listing(db, host, CLASS, ask=50, capacity=10)
+
+    assert refill_open_bids(db, capability_class=CLASS) == []
+    assert len(_matches(db, bid["id"])) == 1
+
+
+def test_a_withdrawn_listing_refills_nothing(db, _clean_books):
+    """A listing out of the book is not supply. `open_asks` already joins on
+    `state = 'open'`; this pins that the refill reads the LIVE book rather
+    than anything it was handed when the hook fired."""
+    buyer, host = make_user(db), make_user(db)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=3)
+    listing = _proven_listing(db, host, CLASS, ask=100, capacity=10)
+    mk.withdraw_listing(db, listing_id=str(listing["id"]), owner_id=host)
+
+    assert refill_open_bids(db, capability_class=CLASS) == []
+    assert _matches(db, bid["id"]) == []
+    assert _bid_row(db, bid["id"])["state"] == "open"
+
+
+def test_a_refill_withholds_the_buyers_own_workspace_machines(db, _clean_books):
+    """C1/M12, unchanged by the refill: a machine bound to a pool the BID'S
+    OWNER belongs to is free to them already, so entitling them to it at a
+    price would charge for capacity they have for nothing.
+
+    The exclusion is derived from the bid's `owner_id` — the job's actual
+    submitter, which is what `route_submitted_job` passed as `user_id` when it
+    posted this row — through the same `workspace_machine_ids_for` the submit
+    path uses. A second, hand-rolled notion of "whose workspace is this" is
+    exactly the drift that helper exists to prevent.
+    """
+    buyer, teammate = make_user(db), make_user(db)
+    pool = dbmod.create_pool(db, name="refill-team", owner_id=buyer)
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.pool_members (pool_id, user_id)"
+            " values (%s::uuid, %s::uuid)",
+            (str(pool["id"]), teammate),
+        )
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=2)
+
+    free = _proven_listing(db, teammate, CLASS, ask=10, capacity=10)
+    dbmod.bind_machine_pool(
+        db, machine_id=str(free["machine_id"]), pool_id=str(pool["id"])
+    )
+
+    assert refill_open_bids(db, capability_class=CLASS) == []
+    assert _matches(db, bid["id"]) == []
+
+
+def test_a_refill_ranks_the_book_by_the_objective_the_bid_stored(db, _clean_books):
+    """Migration 0032 is what makes a refill honest.
+
+    The bid was submitted `fastest`; the cheap machine is slow and the dear
+    one is quick. A refill that fell back to the engine's `cheapest` — the
+    only thing it COULD have done before the column existed — would quietly
+    buy this buyer the opposite machine to the one their submission chose, at
+    the same cap, with nothing anywhere to say the objective had changed.
+    """
+    buyer, host = make_user(db), make_user(db)
+    slow = _proven_timed_listing(db, host, CLASS, ask=100, capacity=4, seconds=90)
+    fast = _proven_timed_listing(db, host, CLASS, ask=200, capacity=4, seconds=5)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=2, objective="fastest")
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    assert summary == [{"bid_id": str(bid["id"]), "tasks_granted": 2}]
+    assert [str(m["listing_id"]) for m in _matches(db, bid["id"])] == [
+        str(fast["id"])
+    ]
+    assert str(slow["id"]) not in {
+        str(m["listing_id"]) for m in _matches(db, bid["id"])
+    }
+
+
+def test_a_refill_walks_every_open_bid_in_the_class_highest_first(db, _clean_books):
+    """The order is `marketplace.open_bids`' — highest cap first — and it is
+    left exactly as written rather than re-derived here: it is the fairness
+    rule the matching engine already states ("live demand in one book, highest
+    bid first — the order matching walks"), and a refill that walked its own
+    order would be a second, silent auction rule.
+
+    One listing, two competing bids, capacity for only one of them: the
+    higher cap gets it.
+    """
+    low_buyer, high_buyer, host = make_user(db), make_user(db), make_user(db)
+    low = _bid_for(db, low_buyer, CLASS, cap=150, tasks=1)
+    high = _bid_for(db, high_buyer, CLASS, cap=250, tasks=1)
+    listing = _proven_listing(db, host, CLASS, ask=100, capacity=1)
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    assert [entry["bid_id"] for entry in summary] == [
+        str(high["id"]), str(low["id"]),
+    ]
+    # Both are entitled: `max_concurrent_tasks` is a concurrency hint, not a
+    # decrementing quota, and over-entitling is how volunteer supply finishes
+    # a job when a third of the hosts never show up (0018's header). What the
+    # order decides is who is asked FIRST, which is what this pins.
+    assert [str(m["listing_id"]) for m in _matches(db, high["id"])] == [
+        str(listing["id"])
+    ]

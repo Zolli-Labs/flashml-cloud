@@ -11,6 +11,12 @@ A job resolves to an ORDERED list of capability classes it will accept
 remainder into each in turn until the tasks run out (`plan_pool_routing`,
 `route_submitted_job`). The class names live in `marketplace`; this module
 is the only place that decides which of them a given job may have.
+
+Submit time is not the only time. `refill_open_bids` runs the same planning
+against the demand that is STILL waiting whenever new supply appears in a
+class, so a bid the book could not clear at submission is matched when a
+listing shows up rather than staying starved for ever (research doc §5.2
+step 8: "partial fills stay open and refill as listings appear").
 """
 from __future__ import annotations
 
@@ -291,6 +297,7 @@ def _plan_one_class(
     reserved: set[str],
     objective: str = marketplace.DEFAULT_RANK_OBJECTIVE,
     unproven_cap: int | None = None,
+    exclude_listings: Collection[str] = (),
 ) -> dict[str, Any]:
     """Rank the open book for one class, match a bid against it, and explain
     every listing's place in the outcome — matched or not.
@@ -374,6 +381,22 @@ def _plan_one_class(
     ranks them last under ``fastest`` and at a factor of exactly 1 under
     ``balanced``. Neither excludes them.
 
+    ``exclude_listings`` drops listings from the book BEFORE it is ranked or
+    matched, and it exists for exactly one caller: :func:`refill_open_bids`,
+    which must not hand a bid a second entitlement on a listing it already
+    holds one on. Nothing else in the stack can do that job —
+    :func:`marketplace.open_asks` filters on listing state and machine status
+    and knows nothing about matches, and :func:`marketplace.match_bid`
+    excludes only ``workspace_reserved`` — so an already-matched listing is a
+    perfectly ordinary candidate to both, ranked on its ask like any other and
+    offering its whole ``max_concurrent_tasks`` again (a match does not
+    decrement it; see 0018's header on why capacity is a concurrency hint and
+    not a quota). Dropped rather than labelled ``excluded``: unlike a
+    workspace machine, this one is not being withheld from the buyer at all —
+    they already have it — so a row saying otherwise would misdescribe the
+    negotiation. Empty for every submit-time caller, where the bid is new and
+    holds nothing.
+
     Private, and one class at a time, because the two jobs are genuinely
     separate: this reads and explains ONE book, and
     :func:`plan_pool_routing` decides how many books to read and with how
@@ -381,7 +404,12 @@ def _plan_one_class(
     accidentally grow a second, subtly different notion of what a book row
     means.
     """
-    unrated = marketplace.open_asks(db, capability_class)
+    dropped = {str(listing_id) for listing_id in exclude_listings}
+    unrated = [
+        ask
+        for ask in marketplace.open_asks(db, capability_class)
+        if ask.listing_id not in dropped
+    ]
     machine_ids = [ask.machine_id for ask in unrated]
     rate_rows = metrics.acceptance_rates(
         dbmod.acceptance_rate_rows(db, machine_ids=machine_ids)
@@ -395,9 +423,13 @@ def _plan_one_class(
         for row in rate_rows
         if int(row["resolved"]) >= metrics.MIN_EVIDENCE
     }
-    asks = marketplace.open_asks(
-        db, capability_class, acceptance_rates=rates, median_seconds=medians
-    )
+    asks = [
+        ask
+        for ask in marketplace.open_asks(
+            db, capability_class, acceptance_rates=rates, median_seconds=medians
+        )
+        if ask.listing_id not in dropped
+    ]
 
     plan = marketplace.match_bid(
         max_zc_per_hour=max_zc_per_hour,
@@ -652,6 +684,201 @@ def plan_pool_routing(
         "nearest_miss": nearest_miss if remaining > 0 else None,
         "class_plans": class_plans,
     }
+
+
+def _live_tasks_assigned(db: psycopg.Connection, bid_ids: Collection[str]) -> int:
+    """Tasks currently entitled across ``bid_ids`` — non-expired matches only.
+
+    ``expired`` is the ordinary end of an entitlement nobody claimed (0018's
+    header: a matched host that never claims "produces no work and no
+    charge"), so its tasks are unspent demand again. Counting them as filled
+    is how a job stays permanently short by however many hosts ghosted it.
+    The same ``state <> 'expired'`` predicate :func:`marketplace.grant_matches`
+    uses to decide ``partial`` versus ``filled`` — deliberately, so the
+    remainder this module computes and the state that function writes cannot
+    disagree about the same bid.
+    """
+    ids = [str(bid_id) for bid_id in bid_ids]
+    if not ids:
+        return 0
+    with db.cursor() as cur:
+        cur.execute(
+            "select coalesce(sum(tasks_assigned), 0) as assigned"
+            "  from public.matches"
+            " where bid_id = any(%s::uuid[]) and state <> 'expired'",
+            (ids,),
+        )
+        return int(cur.fetchone()["assigned"])
+
+
+def _unproven_tasks_spent(db: psycopg.Connection, bid_ids: Collection[str]) -> int:
+    """Tasks already placed on unproven hosts across ``bid_ids``.
+
+    Summed over ``tasks_assigned``, not counted as rows: the budget it is
+    compared against (:func:`marketplace.unproven_task_budget`) is denominated
+    in TASKS, and one match may carry several. A row count would report a
+    three-task entitlement on one newcomer as a single task spent and let the
+    job place three more.
+    """
+    ids = [str(bid_id) for bid_id in bid_ids]
+    if not ids:
+        return 0
+    with db.cursor() as cur:
+        cur.execute(
+            "select coalesce(sum(tasks_assigned), 0) as assigned"
+            "  from public.matches"
+            " where bid_id = any(%s::uuid[]) and state <> 'expired'"
+            "   and unproven_host",
+            (ids,),
+        )
+        return int(cur.fetchone()["assigned"])
+
+
+def refill_open_bids(
+    db: psycopg.Connection, *, capability_class: str
+) -> list[dict[str, Any]]:
+    """New supply appeared in ``capability_class``: match it against the demand
+    that is still waiting, and return what each bid got.
+
+    Design: research doc §5.2 step 8 — "partial fills stay open and refill as
+    listings appear". Before this function nothing ever re-matched. A bid
+    posted into a thin book stayed exactly as starved as it was that second,
+    for ever, even when a listing that would have cleared it appeared a minute
+    later; the only way to reach the new supply was to resubmit the job. The
+    bid states were already right for this (``open`` and ``partial`` are both
+    live demand, and 0018 made ``partial`` first-class precisely because a
+    partial fill is the expected outcome) — nothing was reading them.
+
+    **Called when a listing appears in a class**, from
+    ``create_market_listing``. Reactivation should call it too: when
+    :func:`marketplace.resume_listing` grows a route — it has none today, and
+    this increment deliberately does not add one — that route must call this
+    same hook, because a paused listing coming back is new supply by every
+    measure a waiting bid can see.
+
+    **Bid order is** :func:`marketplace.open_bids`' **and is not re-derived
+    here.** Highest cap first, ties by creation time: that is the fairness
+    rule the matching engine already states in its own words ("live demand in
+    one book, highest bid first — the order matching walks"), and a refill
+    that sorted its own way would be a second, silent auction rule competing
+    with the first.
+
+    Four things are recomputed for every bid, and each of them is a way this
+    function could have been wrong:
+
+    - **The TRUE remainder**, ``tasks_wanted`` minus what non-expired matches
+      already hold (:func:`_live_tasks_assigned`). Never ``tasks_wanted``: a
+      refill that re-bid the whole thing would entitle a four-task job's worth
+      of machines *again*, every time anybody listed anything. Zero or less
+      and the bid is skipped rather than matched for nothing.
+    - **The JOB's unproven allowance, not a fresh one.**
+      :data:`marketplace.UNPROVEN_TASK_SHARE` bounds how much of ONE JOB may
+      be lost to newcomers, so the budget is computed over the summed
+      ``tasks_wanted`` of every bid this job posted
+      (:func:`marketplace.bids_for_job` — a job spilling across classes has
+      several) and drawn down by what those bids have already spent on
+      unproven hosts. Letting each refill compute a budget from its own
+      remainder would hand the job a new quarter-share every time a listing
+      appeared, which is the same amplification
+      :func:`plan_pool_routing` removes across classes, one axis over.
+    - **The bid's STORED objective** (``bids.objective``, migration 0032) and
+      its stored cap. A refill that fell back to the engine's ``cheapest`` —
+      all it could have done before that column — would buy a ``fastest``
+      buyer the opposite machine to the one their submission chose, at the
+      same price, with nothing anywhere saying the objective had changed.
+    - **The listings this bid already holds**, excluded from the book
+      (``exclude_listings``). Neither :func:`marketplace.open_asks` nor
+      :func:`marketplace.match_bid` knows a bid has been here before, and
+      ``max_concurrent_tasks`` is not decremented by a match, so an
+      already-matched listing would otherwise be ranked and filled a second
+      time for the same bid — a double entitlement on one machine, which is
+      the one shape of over-entitlement 0018's "over-entitling is how
+      volunteer supply finishes a job" argument does NOT cover.
+
+    **Workspace exclusion is the submit path's, unchanged.** The set comes
+    from :func:`workspace_machine_ids_for` applied to ``bid["owner_id"]``,
+    which IS the account :func:`route_submitted_job` passed as ``user_id``
+    when it posted the row — so the context is fully recoverable from the bid
+    and no conservative guess is needed. Pool SCOPING needs no thought either:
+    a pool-scoped priced job posts no bid at all (the submit hook skips
+    routing with ``pool-capacity-is-free``), so every bid this function can
+    reach belongs to an unpooled submission, exactly the shape
+    ``route_submitted_job`` handles. The lookup is cached per owner across the
+    walk; two bids of one job must not produce two different answers to "whose
+    workspace is this", and it is a query per owner rather than per bid.
+
+    **One transaction for the whole refill.** Every grant in the walk shares
+    it, so a failure on the third bid leaves the first two's entitlements
+    un-written rather than half a refill nobody asked for. That is what lets
+    the caller's fail-open be honest: ``create_market_listing`` reports the
+    listing as created and the refill as not-having-happened, and the book
+    agrees with it.
+
+    Returns one ``{"bid_id", "tasks_granted"}`` entry per bid that ACTUALLY
+    got something, in walk order — so an empty list means the new supply moved
+    nothing, which is the ordinary case and the one the route reports as
+    ``"refilled": []``. Bids that were considered and skipped are not
+    reported: the caller's question is what changed.
+    """
+    granted: list[dict[str, Any]] = []
+    workspace_by_owner: dict[str, set[str]] = {}
+
+    with db.transaction():
+        for bid in marketplace.open_bids(db, capability_class):
+            bid_id = str(bid["id"])
+            owner_id = str(bid["owner_id"])
+
+            # Every bid this JOB posted, because the newcomer allowance is the
+            # job's. `bids_for_job` is owner-scoped and this bid's owner IS the
+            # job's submitter, so it returns the whole spill.
+            siblings = marketplace.bids_for_job(
+                db, job_id=str(bid["job_id"]), owner_id=owner_id
+            )
+            sibling_ids = [str(row["id"]) for row in siblings] or [bid_id]
+
+            remainder = int(bid["tasks_wanted"]) - _live_tasks_assigned(db, [bid_id])
+            if remainder <= 0:
+                continue
+
+            job_tasks = sum(int(row["tasks_wanted"]) for row in siblings) or int(
+                bid["tasks_wanted"]
+            )
+            unproven_remaining = max(
+                0,
+                marketplace.unproven_task_budget(job_tasks)
+                - _unproven_tasks_spent(db, sibling_ids),
+            )
+
+            if owner_id not in workspace_by_owner:
+                workspace_by_owner[owner_id] = workspace_machine_ids_for(db, owner_id)
+
+            held = {
+                str(match["listing_id"])
+                for match in marketplace.matches_for_bid(db, bid_id)
+                if match["state"] != "expired"
+            }
+
+            one = _plan_one_class(
+                db,
+                capability_class=capability_class,
+                max_zc_per_hour=int(bid["max_zc_per_hour"]),
+                tasks_wanted=remainder,
+                reserved=workspace_by_owner[owner_id],
+                objective=str(bid["objective"]),
+                unproven_cap=unproven_remaining,
+                exclude_listings=held,
+            )
+            plan = one["plan"]
+            if not plan.fills:
+                continue
+
+            # `grant_matches` owns the legality of the bid's state and the
+            # `partial`/`filled` recomputation, exactly as it does at submit
+            # time. This function never writes a bid state itself.
+            marketplace.grant_matches(db, bid_id=bid_id, plan=plan)
+            granted.append({"bid_id": bid_id, "tasks_granted": plan.tasks_filled})
+
+    return granted
 
 
 def _estimate_task_seconds(

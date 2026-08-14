@@ -226,6 +226,57 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-14 — Routing phase 1, three owner-approved increments: GPU accept-classes, objectives, and refill (flashml-cloud, branch feat/pool-routing-phase1)
+What/why: Three slices, each closing a gap the previous phase named rather
+than fixed. (1) **GPU classes + ordered accept walk** (`1a036eb`, `9d92831`):
+`routing.GpuRoutingUnavailable` is gone — a `gpus: 1` job now bids into every
+GPU book cheapest-reference-price first, and `placement.accept` in
+flashml.yaml lets a submitter write their own order; a job spills the
+REMAINDER into each class in turn, one bid per class actually walked.
+(2) **Objectives** (`fa5db5d`, `5b16a07`, `3cf9f5f`, `b3a5109`):
+`price.objective` (`cheapest`/`balanced`/`fastest`) reaches the ranking
+engine, every book row publishes its `rank_score` beside the `formula` that
+produced it, the newcomer share (`UNPROVEN_TASK_SHARE`) became the JOB's
+budget spent once across the whole walk instead of a fresh quarter-share per
+class, and migration **0032** stores the objective on the bid so nothing
+downstream has to guess it. (3) **Refill** (this commit):
+`routing.refill_open_bids` — research doc §5.2 step 8, "partial fills stay
+open and refill as listings appear". Nothing re-matched before it; a bid the
+book could not clear at submit time stayed starved for ever. `POST
+/market/listings` now calls it fail-open and reports `"refilled"`.
+How verified: `apps/api/.venv/bin/pytest -q` — **3400 passed, 2 skipped, 3
+  deselected, 1 xfailed** in ~70s, up from 3381 at the start of the day, zero
+  regressions. That is the API's own suite and NOTHING else: `e2e/` has not
+  been run against these commits (the priced-routing scenario from 2026-08-13
+  is the one that would cover the agent side), and no console pixel was
+  rendered. Also fixed a pre-existing cross-file isolation leak found on the
+  way: `tests/test_routing.py`'s `_clean_books` withdrew listings with raw SQL
+  and never re-recorded the book, so `class_board`'s `last_zc` kept quoting a
+  listing nobody could buy —
+  `test_market_routes.py::test_the_zc_ladder_matches_the_live_book_and_never
+  _zero_fills` failed with `assert 100 == None` whenever `test_routing*` ran
+  first. Reproduced, fixed, and both orderings verified green.
+Gotchas: **Migration 0032 must reach a database before the API that writes
+  it.** `marketplace.create_bid` names the column unconditionally, so an API
+  deployed first fails every priced submission's routing (fail-open, so jobs
+  still land — the market just goes silently quiet). CI already produces the
+  right order: `migrate-dev` and `migrate-prod` in `.github/workflows/ci.yml`
+  run `python -m flashml_cloud_api.migrate` before their deploy step, and
+  nothing migrates at API startup. The column defaults to `cheapest`, NOT
+  flashml.yaml's `balanced`: the default backfills every existing row, and
+  `cheapest` is what those rows were actually matched under. Refill's own
+  trap, written as a test first: never re-bid `tasks_wanted`. The remainder is
+  recomputed from non-expired matches every time, and the listings a bid
+  already holds are excluded from its book — `max_concurrent_tasks` is not
+  decremented by a match, so a naive refill hands one machine two live
+  entitlements for the same bid.
+Next: `pause_listing`/`resume_listing` still have no HTTP routes; when resume
+  grows one it MUST call `refill_open_bids` (a paused listing coming back is
+  new supply by every measure a waiting bid can see) — the docstring says so
+  where somebody will read it. Parking lot: nothing sweeps bids that go stale
+  without a listing ever appearing, and no e2e scenario yet exercises the
+  refill through the real agent path.
+
 ### 2026-08-13 — Priced pool routing e2e rehearsal: real coordinator, real cloud API, real Docker agent (flashml-cloud, pool-routing-phase1 Task 6)
 What/why: Tasks 1-5 built `price:` in flashml.yaml, submit-time bid/match
 routing, the ranked book with exclusion reasons, and `GET /jobs/{id}/routing`

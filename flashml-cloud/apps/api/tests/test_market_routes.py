@@ -41,6 +41,7 @@ from psycopg.rows import dict_row
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import marketplace as marketmod
 from flashml_cloud_api import prices as pricesmod
+from flashml_cloud_api import routing as routingmod
 from flashml_cloud_api.app import create_cloud_app
 from flashml_cloud_api.settings import Settings
 
@@ -750,6 +751,170 @@ def test_withdraw_removes_the_ask_and_a_second_withdraw_is_404(client, db):
     ids = [a["id"] for a in asks]
     assert str(listing["id"]) not in ids
     assert str(listing2["id"]) in ids
+
+
+# ---------------------------------------------------------------------------
+# POST /market/listings refills the demand that was waiting for it.
+#
+# Research doc §5.2 step 8: "partial fills stay open and refill as listings
+# appear." The hook is on listing CREATION only — `pause_listing` and
+# `resume_listing` have no routes yet, and when resume grows one it must call
+# the same hook (see `routing.refill_open_bids`' docstring).
+#
+# `gpu-16gb` throughout: the rest of this file trades in `gpu-24gb`, so the
+# open bids these tests post are the only demand the refill can find here.
+# `gpu-16gb` is NOT unclaimed, though — `test_marketplace_class_board.py`
+# owns it and asserts its recorded history is EXACTLY six rows — so the
+# fixture below has to hand it back untouched rather than merely tidy.
+# ---------------------------------------------------------------------------
+
+REFILL_CLASS = "gpu-16gb"
+GPU_16GB = {"gpus": [{"memory_total_mb": 16384}]}
+
+
+@pytest.fixture
+def _refill_book(db):
+    """Hand `gpu-16gb` back exactly as it was found: listings withdrawn, bids
+    cancelled, and every `price_observations` row these tests appended
+    deleted.
+
+    Cancelling the bids is not tidiness. Since `routing.refill_open_bids`, a
+    live bid left in a class is not inert state — it is demand that the next
+    listing to appear in that class, anywhere in the session, will be matched
+    against.
+
+    Deleting the observations is the `_forget_observations` pattern from
+    `tests/test_routing_routes.py`, and it is what makes this fixture a
+    RESTORE rather than a tidy-up: a listing, a bid and a match each append a
+    row, and `test_marketplace_class_board.py` asserts this class's history is
+    exactly six rows long. Precise, not a truncate — the high-water `id` is
+    read at setup (`bigserial`, strictly increasing) and only rows above it in
+    this class go, so anything an earlier file wrote survives. With the rows
+    gone and the listings withdrawn, `class_board`'s `last_zc` and the live
+    book agree again, which is the invariant
+    `test_the_zc_ladder_matches_the_live_book_and_never_zero_fills` checks.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select coalesce(max(id), 0) as high from public.price_observations"
+        )
+        high = int(cur.fetchone()["high"])
+    yield
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.listings set state = 'withdrawn'"
+            " where capability_class = %s and state = 'open'",
+            (REFILL_CLASS,),
+        )
+        cur.execute(
+            "update public.bids set state = 'cancelled'"
+            " where capability_class = %s and state in ('open', 'partial')",
+            (REFILL_CLASS,),
+        )
+        cur.execute(
+            "delete from public.price_observations"
+            " where id > %s and capability_class = %s",
+            (high, REFILL_CLASS),
+        )
+
+
+def _waiting_bid(db, buyer: str, *, cap: int = 1_000, tasks: int = 2):
+    return marketmod.create_bid(
+        db,
+        job_id=f"refill-{uuid.uuid4().hex[:10]}",
+        owner_id=buyer,
+        capability_class_name=REFILL_CLASS,
+        max_zc_per_hour=cap,
+        tasks_wanted=tasks,
+        est_task_seconds=3600,
+    )
+
+
+def test_listing_a_machine_refills_the_bids_that_were_waiting(
+    client, db, _refill_book
+):
+    """The loop this increment closes: a bid that the book could not clear at
+    submit time is matched the moment somebody lists a machine, with no
+    resubmission and nothing polling. The response says what it did."""
+    host, buyer = _new_user(db), _new_user(db)
+    bid = _waiting_bid(db, buyer, tasks=1)
+    machine = _machine(db, host, capabilities=GPU_16GB)
+
+    r = client.post(
+        "/v1alpha1/market/listings",
+        headers=_auth(host),
+        json={"machine_id": machine, "ask_zc_per_hour": 500},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["capability_class"] == REFILL_CLASS
+    assert body["refilled"] == [{"bid_id": str(bid["id"]), "tasks_granted": 1}]
+
+    matches = marketmod.matches_for_bid(db, str(bid["id"]))
+    assert [str(m["listing_id"]) for m in matches] == [body["id"]]
+    assert matches[0]["state"] == "granted"
+    assert str(matches[0]["buyer_id"]) == buyer
+
+
+def test_a_listing_nobody_was_waiting_for_reports_an_empty_refill(
+    client, db, _refill_book
+):
+    """`refilled` is always present and is `[]` when the new supply moved
+    nothing — the ordinary case. A key that appears only when something
+    happened arrives at the console as `undefined`."""
+    host = _new_user(db)
+    machine = _machine(db, host, capabilities=GPU_16GB)
+
+    r = client.post(
+        "/v1alpha1/market/listings",
+        headers=_auth(host),
+        json={"machine_id": machine, "ask_zc_per_hour": 500},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["refilled"] == []
+
+
+def test_a_refill_failure_never_fails_the_listing(
+    client, db, monkeypatch, caplog, _refill_book
+):
+    """FAIL-OPEN, the same discipline the submit hook's routing block follows.
+
+    The listing is the host's own action and it succeeded; a bug in the
+    matching that happens to run afterwards must not turn that into a 5xx and
+    lose it. The refill's own writes are inside one transaction, so nothing
+    half-done escapes — and the warning carries `repr(exc)` because "refill
+    failed open" alone cannot tell a broken market path from ordinary quiet.
+    """
+    host, buyer = _new_user(db), _new_user(db)
+    bid = _waiting_bid(db, buyer, tasks=1)
+    machine = _machine(db, host, capabilities=GPU_16GB)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("refill exploded")
+
+    monkeypatch.setattr(routingmod, "refill_open_bids", _boom)
+
+    with caplog.at_level("WARNING", logger="flashml-cloud-api"):
+        r = client.post(
+            "/v1alpha1/market/listings",
+            headers=_auth(host),
+            json={"machine_id": machine, "ask_zc_per_hour": 500},
+        )
+
+    assert r.status_code == 201, r.text
+    assert r.json()["refilled"] == []
+    # The listing is real; only the refill was lost.
+    assert r.json()["capability_class"] == REFILL_CLASS
+    assert marketmod.matches_for_bid(db, str(bid["id"])) == []
+
+    warnings = [rec for rec in caplog.records if rec.levelname == "WARNING"]
+    logged = [json.loads(rec.getMessage()) for rec in warnings]
+    refill_warnings = [
+        entry for entry in logged if entry.get("text") == "listing refill failed open"
+    ]
+    assert len(refill_warnings) == 1
+    assert refill_warnings[0]["capability_class"] == REFILL_CLASS
+    assert "refill exploded" in refill_warnings[0]["error"]
 
 
 # ---------------------------------------------------------------------------
