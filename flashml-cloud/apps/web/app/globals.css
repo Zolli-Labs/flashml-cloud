@@ -220,6 +220,38 @@ html.dark:has(.console-theme) {
   --shadow-lg: 0 24px 52px -28px rgb(0 0 0 / 0.65);
 }
 
+/* The canvas behind the console. Scroll-lock gutters, the shrunken body
+   box, and macOS rubber-band overscroll all expose <html> itself, which
+   otherwise paints as the browser's default canvas — a white/gray flash
+   next to a dark rail (or, in light mode, next to the dark rail on the
+   left and the app's own page colour everywhere else — see the reported
+   bug: a gray strip down the scrollbar gutter and a gray band under the
+   displaced rail). Continue the shell onto the canvas: rail colour under
+   the rail column, page colour elsewhere. Tokens resolve on <html> in both
+   themes — the dark register above lives on `html.dark:has(...)`, so
+   `--background` and `--bg-rail` are already the right values for whichever
+   theme is active by the time this rule reads them.
+
+   232px matches `ConsoleShell`'s rail width (`w-[232px]`, both the sticky
+   desktop rail and the mobile drawer) and `lg:` matches its `lg:flex`
+   breakpoint — below that the rail is a drawer overlay, not a column, so
+   the canvas is just the page colour edge to edge. If `ConsoleShell` ever
+   changes the rail's width or breakpoint, update both this rule and that
+   className together; the width is deliberately not a variable that could
+   drift silently between the two. */
+html:has(.console-theme) {
+  background: var(--background);
+}
+@media (min-width: 1024px) {
+  html:has(.console-theme) {
+    background: linear-gradient(
+      90deg,
+      var(--bg-rail) 0 232px,
+      var(--background) 232px
+    );
+  }
+}
+
 .marketing-dark {
   --z-bg: #0b0d0e;
   --z-surface: #111416;
@@ -779,6 +811,24 @@ html.dark:has(.console-theme) {
   html {
     @apply antialiased;
     color-scheme: light;
+    /* Visually a no-op — `body`'s own overflow already drives the viewport
+       scrollbar, so nothing about normal scrolling changes. It is NOT a
+       no-op for @base-ui/react: `useScrollLock` picks its lock target with
+       `isOverflowElement(html) ? html : body`, and with no overflow style
+       here that check was always false, so every Base UI dialog/popup
+       (AlertDialog, Select, …) locked scroll by mutating `body` instead —
+       `overflow: hidden`, and in the no-scrollbar-gutter fallback
+       `position: relative; height: 100dvh`. The console rail is
+       `position: sticky` INSIDE `body`, and Base UI's own comment in
+       `useScrollLock.js` ("sticky elements shift otherwise") is exactly the
+       failure that caused: opening the Revoke dialog on /machines bumped
+       the rail out of place with a gray gutter/gap around it. Declaring
+       `overflow-y: auto` here makes `isOverflowElement(html)` true, so the
+       lock lands on `<html>` and `body` — and the sticky rail inside it —
+       is never touched. Load-bearing: removing this silently reintroduces
+       the rail bump the next time a dialog opens.
+       `lib/canvas-and-scroll-lock.test.ts` asserts it survives compilation. */
+    overflow-y: auto;
   }
 
   /* Respect the OS setting — vestibular disorders are the reason this
