@@ -7604,6 +7604,66 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown job")
         return [_jsonable(r) for r in dbmod.list_verifications_for_job(db, job_id)]
 
+    @app.get("/v1alpha1/jobs/{job_id}/routing", tags=["browser"])
+    async def get_job_routing(
+        job_id: str,
+        user_id: str = Depends(current_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The routing inspection route: this job's bid, its granted
+        matches, and the open book re-explained AS IT STANDS NOW.
+
+        Task 4's submit hook stores nothing beyond the bid/matches rows it
+        writes at submission — no snapshot of the book that produced them —
+        so the ``live_book`` here is not read back from anywhere. It is
+        ``routing.plan_pool_routing`` run again, this instant, against
+        whatever the book looks like now. That recomputation IS the
+        feature: a listing withdrawn or added since submission changes what
+        this route reports without anything having to notice and update a
+        stored row. Immediately after submission, with nothing in the book
+        having moved, it reproduces the submit response's ``routing`` block
+        exactly (``tests/test_routing_routes.py``).
+
+        Visibility matches the sibling read routes exactly — the owner, or
+        any member of the job's pool, via ``fetch_job_for_viewer`` —
+        answering 404 (not 403) for a job that exists and the caller cannot
+        see. The bid itself is still looked up by the job's OWNER
+        (``row["owner_id"]``), not the caller: a bid is posted by the
+        submitter, and a viewing pool member is not that submitter, the
+        same distinction ``get_job_route``'s federated branch draws for
+        ``list_job_rounds_for_owner``.
+
+        An unrouted job (no price block, so ``route_submitted_job`` never
+        ran) is not an error — it answers
+        ``{"bid": None, "matches": [], "live_book": None}``, 200, not 404.
+
+        Read-only: no bid is created, no match is granted, nothing is
+        written. ``plan_pool_routing``'s ``"plan"`` key (a ``MatchPlan``
+        dataclass, not JSON-safe) never leaves this handler.
+        """
+        row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+
+        bid = marketplacemod.bid_for_job(db, job_id=job_id, owner_id=row["owner_id"])
+        if bid is None:
+            return {"bid": None, "matches": [], "live_book": None}
+
+        matches = marketplacemod.matches_for_bid(db, str(bid["id"]))
+        live_book = routingmod.plan_pool_routing(
+            db,
+            capability_class=bid["capability_class"],
+            max_zc_per_hour=bid["max_zc_per_hour"],
+            tasks_wanted=bid["tasks_wanted"],
+        )
+        live_book.pop("plan", None)
+
+        return {
+            "bid": _jsonable(bid),
+            "matches": [_jsonable(m) for m in matches],
+            "live_book": live_book,
+        }
+
     @app.get("/v1alpha1/trace/{correlation_id}", tags=["browser"])
     async def get_trace(
         correlation_id: str,

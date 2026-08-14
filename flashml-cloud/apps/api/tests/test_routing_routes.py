@@ -615,3 +615,126 @@ def test_a_federated_priced_job_reports_skipped_not_routed(federated_client, db)
     # exactly as it would have before this task existed.
     assert len(client.starter.runs) == 1
     assert client.starter.runs[0].job_id == body["job_id"]
+
+
+# ---------------------------------------------------------------------------
+# Task 5: GET /v1alpha1/jobs/{job_id}/routing — the routing inspection route
+# ---------------------------------------------------------------------------
+#
+# The route is read-only: it never plans a bid into existence, it re-explains
+# one that submission already created (or reports there is none). Three
+# invariants:
+#
+# * a routed job returns its bid row, its granted matches, and a freshly
+#   recomputed "live book" that agrees with the "routing" block the submit
+#   response itself returned moments earlier — the listing set has not
+#   moved between the two calls, so the recomputation must not either;
+# * an unrouted job (no price block, so no bid was ever created) answers
+#   ``{"bid": None, "matches": [], "live_book": None}``, not a 404 — the
+#   job exists and is visible, it simply never entered the book;
+# * a job that exists but belongs to somebody else 404s, with the exact
+#   same body an unknown job id gets — the not-found doctrine every other
+#   job GET route in this file already follows.
+
+
+def _get_routing(client, token: str, job_id: str):
+    return client.get(
+        f"/v1alpha1/jobs/{job_id}/routing",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def test_routing_inspection_for_a_routed_job(make_client, db, _withdraw_after):
+    client = make_client(PRICED_REPO)
+    host = _new_user(db)
+    machine = _machine(db, host, capabilities=CPU_SMALL)
+    listing = marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=100,
+    )
+    _withdraw_after.append((str(listing["id"]), host))
+
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+    routing_block = body["routing"]
+    assert routing_block["state"] == "routed"
+
+    bids = _bids_for_job(db, job_id)
+    assert len(bids) == 1
+    bid_row = bids[0]
+    matches = _matches_for_bid(db, bid_row["id"])
+    assert matches, "the fixture listing is cheap enough to have filled"
+
+    resp = _get_routing(client, _jwt(alice), job_id)
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+
+    # bid: the same row a fresh DB query finds, JSON-rendered.
+    assert out["bid"] is not None
+    assert out["bid"]["id"] == str(bid_row["id"])
+    assert out["bid"]["job_id"] == job_id
+    assert out["bid"]["owner_id"] == alice
+    assert out["bid"]["capability_class"] == routing_block["capability_class"]
+    assert out["bid"]["tasks_wanted"] == routing_block["tasks_wanted"]
+    assert out["bid"]["state"] == bid_row["state"]
+
+    # matches: every granted entitlement for that bid, nothing else.
+    assert len(out["matches"]) == len(matches)
+    assert {m["id"] for m in out["matches"]} == {str(m["id"]) for m in matches}
+    assert {m["listing_id"] for m in out["matches"]} == {
+        str(m["listing_id"]) for m in matches
+    }
+
+    # live_book: recomputed against a book that has not moved since submit,
+    # so it must agree with the "routing" block the submit response
+    # returned — same shape as Task 3's plan (minus "plan", which is not
+    # JSON-safe), not a subset or an approximation of it.
+    live_book = out["live_book"]
+    assert live_book is not None
+    assert "plan" not in live_book
+    assert set(live_book.keys()) == {
+        "capability_class", "tasks_wanted", "tasks_filled",
+        "tasks_unfilled", "book", "nearest_miss",
+    }
+    assert live_book["capability_class"] == routing_block["capability_class"]
+    assert live_book["tasks_wanted"] == routing_block["tasks_wanted"]
+    assert live_book["tasks_filled"] == routing_block["tasks_filled"]
+    assert live_book["tasks_unfilled"] == routing_block["tasks_unfilled"]
+    assert live_book["nearest_miss"] == routing_block["nearest_miss"]
+    assert live_book["book"] == routing_block["book"]
+
+
+def test_routing_inspection_for_an_unrouted_job(make_client, db):
+    client = make_client(CLEAN_REPO)
+    alice = _new_user(db)
+
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    job_id = r.json()["job_id"]
+    assert "routing" not in r.json()
+    assert _bids_for_job(db, job_id) == []
+
+    resp = _get_routing(client, _jwt(alice), job_id)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"bid": None, "matches": [], "live_book": None}
+
+
+def test_routing_inspection_for_someone_elses_job_404s(make_client, db):
+    client = make_client(CLEAN_REPO)
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    job_id = r.json()["job_id"]
+
+    mallory = _new_user(db)
+    not_yours = _get_routing(client, _jwt(mallory), job_id)
+    assert not_yours.status_code == 404
+    assert not_yours.json() == {"detail": "unknown job"}
+
+    # Not-yours and does-not-exist must be indistinguishable — the same
+    # doctrine every sibling job GET route in this API follows.
+    unknown = _get_routing(client, _jwt(mallory), "no-such-job-at-all")
+    assert unknown.status_code == 404
+    assert unknown.json() == not_yours.json()

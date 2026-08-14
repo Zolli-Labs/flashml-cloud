@@ -1759,6 +1759,33 @@ def bids_for_owner(db: psycopg.Connection, owner_id: str) -> list[dict[str, Any]
         return list(cur.fetchall())
 
 
+def bid_for_job(
+    db: psycopg.Connection, *, job_id: str, owner_id: str
+) -> dict[str, Any] | None:
+    """The bid ``route_submitted_job`` posted for this job, or ``None`` when
+    the job never priced (unrouted). ``owner_id`` is folded into the query
+    rather than filtered afterwards — the same doctrine every owner-scoped
+    read in this module follows — so this returns ``None`` identically for a
+    ``job_id`` with no bid at all and one whose bid belongs to somebody else;
+    the caller is trusted to have already resolved ``owner_id`` from the
+    job's own row (its actual submitter), not the viewer, exactly as
+    ``fetch_job_for_viewer``'s callers do for a pool-visible job.
+
+    A submission posts at most one bid per job (``route_submitted_job``
+    calls ``create_bid`` once), so ``limit 1`` is defensive rather than a
+    real branch; ``order by created_at desc`` picks the newest, should that
+    ever change.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            f"select {_BID_SELECT} from public.bids"
+            " where job_id = %s and owner_id = %s::uuid"
+            " order by created_at desc, id limit 1",
+            (job_id, owner_id),
+        )
+        return cur.fetchone()
+
+
 def open_bids(
     db: psycopg.Connection, capability_class_name: str
 ) -> list[dict[str, Any]]:
