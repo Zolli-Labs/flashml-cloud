@@ -256,6 +256,24 @@ How verified: `apps/api/.venv/bin/pytest -q` — **3400 passed, 2 skipped, 3
   `test_market_routes.py::test_the_zc_ladder_matches_the_live_book_and_never
   _zero_fills` failed with `assert 100 == None` whenever `test_routing*` ran
   first. Reproduced, fixed, and both orderings verified green.
+  **e2e closed that scope gap later the same day** (same branch, worktree
+  `.worktrees/routing-phase1`): `e2e/.venv/bin/pytest
+  e2e/test_priced_pool_routing.py -q` — **2 passed in 6.1s** against the
+  PINNED `flashruntime==0.6.0`, no `LOCAL=1`, so it is release evidence: real
+  coordinator + real cloud-API subprocess + real Docker agent. The 2026-08-13
+  scenario was STALE, not broken code — it asserted the pre-`9d92831`
+  single-class shape (`routing.capability_class`, `routing.bid_id`,
+  `inspected["bid"]`) and died on `KeyError: 'capability_class'`; the walk now
+  publishes `accept`/`bids[]` and `GET /jobs/{id}/routing` returns `bids[]`
+  each carrying its own `matches`. Updated to the shipped contract and added
+  `test_priced_job_spills_from_cpu_small_into_cpu_large`: 8-task sweep, one
+  listing per class, the spill lands in `cpu-large` at that host's own 150 ZC
+  ask (not the buyer's 200 cap), two bids in walk order asked 8 then 7, live
+  book re-ranked under the bid's STORED `fastest` objective (0032). Falsified
+  before it was trusted — narrowing the sweep to 4 tasks drops the job-level
+  unproven budget to 1 and the spill correctly vanishes as
+  `excluded: "unproven-cap"`, which is increment (2)'s cross-class cap
+  observed through the authoring surface.
 Gotchas: **Migration 0032 must reach a database before the API that writes
   it.** `marketplace.create_bid` names the column unconditionally, so an API
   deployed first fails every priced submission's routing (fail-open, so jobs
