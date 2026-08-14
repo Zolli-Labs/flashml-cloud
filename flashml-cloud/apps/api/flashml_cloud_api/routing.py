@@ -290,6 +290,7 @@ def _plan_one_class(
     tasks_wanted: int,
     reserved: set[str],
     objective: str = marketplace.DEFAULT_RANK_OBJECTIVE,
+    unproven_cap: int | None = None,
 ) -> dict[str, Any]:
     """Rank the open book for one class, match a bid against it, and explain
     every listing's place in the outcome — matched or not.
@@ -348,6 +349,14 @@ def _plan_one_class(
     every class it walks, because "this machine is my workspace's" is a fact
     about the machine and not about the book it happens to be listed in.
 
+    ``unproven_cap`` is how much of the JOB's newcomer allowance is still
+    unspent when this class is reached; None lets ``match_bid`` compute a
+    per-bid one, which is right for a single-class caller and wrong for the
+    walk (see :func:`plan_pool_routing`). Whatever the plan comes back with
+    as ``unproven_task_cap`` is also what the ``"unproven-cap"`` reason below
+    is attributed against — never a locally recomputed number, so the label
+    cannot claim a listing was capped by a budget the match never used.
+
     ``objective`` is passed straight through to
     :func:`marketplace.match_bid` and used again to score every row of the
     explain, from the SAME class median the match was computed against
@@ -396,6 +405,7 @@ def _plan_one_class(
         asks=asks,
         workspace_reserved=reserved,
         objective=objective,
+        unproven_cap=unproven_cap,
     )
 
     fills_by_listing = {fill.listing_id: fill for fill in plan.fills}
@@ -538,15 +548,30 @@ def plan_pool_routing(
       bid per entry, so the bids and the explanation cannot disagree about
       who was asked for what.
 
-    **The unproven share cap is per class walked, not per job.**
-    ``marketplace.unproven_task_budget`` is computed inside each
-    :func:`marketplace.match_bid` call from the tasks THAT call was given, so
-    a job spilling across three classes can reach three times the blast
-    radius a single-class job of the same size would. That is a real
-    widening and it is accepted for now: the alternative is threading a
-    remaining-unproven budget through the walk, which prices a job's
-    newcomer exposure on the accident of how many books it touched. Worth
-    revisiting the moment accept lists get long.
+    **The unproven share cap is the JOB's, spent once across the whole walk.**
+    ``marketplace.unproven_task_budget`` is computed HERE, from the job's
+    total ``tasks_wanted``, and what remains of it is threaded into each
+    class's :func:`marketplace.match_bid` as ``unproven_cap``; every fill to
+    an unproven host draws the allowance down (``MatchPlan.unproven_tasks``)
+    and a class reached with nothing left gets exactly zero.
+
+    Letting each ``match_bid`` compute its own budget — which is what it does
+    for every other caller, from the tasks THAT call was given — made a job
+    spilling across three classes reach three times the blast radius a
+    single-class job of the same size would, and the width was set by the
+    accident of how many books the job happened to touch rather than by any
+    decision. :data:`marketplace.UNPROVEN_TASK_SHARE` is a bound on how much
+    of ONE JOB may be lost to newcomers; a bound that multiplies by the
+    length of an accept list is not that bound.
+
+    Two details that are not incidental. The budget comes off the job's
+    ORIGINAL task count, not the remainder each class is asked for, so
+    spilling never shrinks the allowance either — the cap is a property of
+    the job, and it is the same number whichever books it ends up in. And an
+    exhausted allowance is threaded as an explicit 0: ``unproven_task_budget``
+    floors at one so a single-task job can still try a newcomer, and
+    re-applying that floor per class is exactly the amplification being
+    removed.
 
     ``class_plans`` carries ``MatchPlan`` dataclasses, which are not
     JSON-safe — every HTTP caller drops the key before serialising (see
@@ -582,6 +607,9 @@ def plan_pool_routing(
     nearest_miss: dict[str, Any] | None = None
     nearest_miss_price: Fraction | None = None
     remaining = wanted
+    # One allowance for the whole job, from the whole job's task count. See
+    # the docstring: computed once here, drawn down as each class spends it.
+    unproven_remaining = marketplace.unproven_task_budget(wanted)
 
     for capability_class in classes:
         if remaining <= 0:
@@ -594,6 +622,7 @@ def plan_pool_routing(
             tasks_wanted=remaining,
             reserved=reserved,
             objective=objective,
+            unproven_cap=unproven_remaining,
         )
         book.extend(one["book"])
         class_plans.append(
@@ -610,6 +639,7 @@ def plan_pool_routing(
             nearest_miss_price = price
 
         remaining -= one["plan"].tasks_filled
+        unproven_remaining -= one["plan"].unproven_tasks
 
     return {
         "accept": list(classes),

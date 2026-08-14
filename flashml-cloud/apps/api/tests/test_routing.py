@@ -847,6 +847,79 @@ def test_a_machine_below_the_evidence_threshold_reports_no_median(db, _clean_boo
     assert result["tasks_filled"] == 1
 
 
+# ---------------------------------------------------------------------------
+# The unproven share cap is the JOB's, not each class's.
+# ---------------------------------------------------------------------------
+
+
+def test_the_unproven_cap_is_spent_once_across_every_walked_class(db, _clean_books):
+    """Before this fix each `match_bid` recomputed the quarter-share from the
+    tasks IT was given, so a job walking two classes could hand newcomers
+    half its tasks and a job walking three could hand them three quarters —
+    the blast radius growing with the accident of how many books the job
+    touched.
+
+    Eight tasks, so the job's whole unproven allowance is 2
+    (`unproven_task_budget(8)`). The first class has one unproven machine
+    with room for both; the second class has another with room for six. The
+    second must be able to spend NOTHING, because the first already spent the
+    job's allowance."""
+    host = make_user(db)
+    first = make_machine(db, host, capabilities={"gpus": [H100]})
+    second = make_machine(db, host, capabilities={"gpus": [A100]})
+    # Neither is given attempts: both stay below MIN_EVIDENCE, both unproven.
+    listing_first = mk.create_listing(
+        db, machine_id=first, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=2,
+    )
+    listing_second = mk.create_listing(
+        db, machine_id=second, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=6,
+    )
+    assert listing_first["capability_class"] == CLASS
+    assert listing_second["capability_class"] == SECOND
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=8,
+    )
+
+    assert [entry["plan"].unproven_task_cap for entry in result["class_plans"]] == [2, 0]
+    assert [entry["plan"].unproven_tasks for entry in result["class_plans"]] == [2, 0]
+    assert result["tasks_filled"] == 2
+    assert result["tasks_unfilled"] == 6
+
+    rows = {row["listing_id"]: row for row in result["book"]}
+    assert rows[str(listing_first["id"])]["tasks_assigned"] == 2
+    # Excluded by the JOB's exhausted allowance, and labelled as such rather
+    # than as "no tasks left" — six of the eight tasks were still wanted.
+    assert rows[str(listing_second["id"])]["tasks_assigned"] == 0
+    assert rows[str(listing_second["id"])]["excluded"] == "unproven-cap"
+
+
+def test_a_proven_class_leaves_the_whole_unproven_allowance_for_the_next(
+    db, _clean_books
+):
+    """The other half of the same rule: what the walk threads is what is
+    LEFT, so a first class that spent none of the allowance hands all of it
+    on. Otherwise the fix would trade one wrong answer for another."""
+    host = make_user(db)
+    proven = _proven_listing(db, host, CLASS, ask=100, capacity=1)
+    newcomer = make_machine(db, host, capabilities={"gpus": [A100]})
+    listing_new = mk.create_listing(
+        db, machine_id=newcomer, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=6,
+    )
+    assert listing_new["capability_class"] == SECOND
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS, SECOND), max_zc_per_hour=250, tasks_wanted=8,
+    )
+
+    assert [entry["plan"].unproven_tasks for entry in result["class_plans"]] == [0, 2]
+    assert [entry["plan"].unproven_task_cap for entry in result["class_plans"]] == [2, 2]
+    assert result["tasks_filled"] == 3  # 1 proven + 2 of the job's allowance
+
+
 def test_the_module_never_reaches_for_the_runtime():
     """routing.py orchestrates `marketplace`/`metrics`/`db` and nothing else —
     eligibility stays the coordinator's. A GPU class arriving in this module

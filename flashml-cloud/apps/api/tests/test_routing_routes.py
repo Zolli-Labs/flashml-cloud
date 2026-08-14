@@ -44,6 +44,7 @@ import tarfile
 import textwrap
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
 import httpx
@@ -453,6 +454,39 @@ def _machine(db, owner: str, *, capabilities: dict | None = None) -> str:
             ),
         )
         return str(cur.fetchone()["id"])
+
+
+def _resolve_attempts(db, machine_id: str, *, accepted: int = 5, seconds: int = 12):
+    """Enough RESOLVED, ACCEPTED attempts to make one machine PROVEN.
+
+    Five is `metrics.MIN_EVIDENCE`: below it `acceptance_rates` reports no
+    rate and `routing` reports no median, and the machine is a newcomer — a
+    state with its own cap (`marketplace.UNPROVEN_TASK_SHARE`) that will
+    otherwise decide a test that meant to be about something else.
+
+    Mirrors `tests/test_routing.py`'s own `resolve_attempts`, including the
+    single `now` per row: `db.acceptance_rate_rows` derives a duration as
+    `resolved_at - claimed_at`, so re-reading the clock between the two would
+    make the median depend on how long the insert took.
+    """
+    with db.cursor() as cur:
+        for _ in range(accepted):
+            now = datetime.now(timezone.utc)
+            cur.execute(
+                "insert into public.attempts"
+                " (lease_id, machine_id, job_id, task_id, claimed_at,"
+                "  accepted_at, resolved_at, outcome)"
+                " values (%s, %s::uuid, %s, %s, %s, %s, %s, 'accepted')",
+                (
+                    f"lease-{uuid.uuid4().hex[:12]}",
+                    machine_id,
+                    f"job-{uuid.uuid4().hex[:8]}",
+                    "t1",
+                    now - timedelta(seconds=seconds),
+                    now,
+                    now,
+                ),
+            )
 
 
 CPU_SMALL = {"cpu_cores": 4}  # < CPU_LARGE_MIN_CORES (8): lands in cpu-small
@@ -926,16 +960,20 @@ def test_a_cpu_small_job_spills_into_the_cpu_large_book(
     the job bids in BOTH classes, and the second bid wants only what the
     first could not fill.
 
-    Two mechanisms point the same way here and the test does not have to
-    choose between them: the `cpu-small` listing has capacity for one task,
-    and both machines are unproven, so `unproven_task_budget(2) == 1` caps
-    that class at one task regardless. Either way the walk must ask the
-    second class for exactly one task, and that is what is asserted."""
+    Both machines are PROVEN first (`_resolve_attempts`), so exactly one
+    mechanism drives the spill: the `cpu-small` listing has capacity for one
+    task. Leaving them unproven used to point the same way by accident, and
+    since the unproven allowance became the JOB's rather than each class's
+    it points somewhere else entirely — the first class would spend
+    `unproven_task_budget(2) == 1` and the second would have nothing left,
+    filling one task of two. That is the correct answer to a different
+    question; this test is about capacity."""
     _forget_observations.append("cpu-large")
     client = make_client(SPILL_PRICED_REPO)
     host = _new_user(db)
 
     small_machine = _machine(db, host, capabilities=CPU_SMALL)
+    _resolve_attempts(db, small_machine)
     small = marketmod.create_listing(
         db, machine_id=small_machine, owner_id=host, ask_zc_per_hour=50,
         max_concurrent_tasks=1,
@@ -943,6 +981,7 @@ def test_a_cpu_small_job_spills_into_the_cpu_large_book(
     _withdraw_after.append((str(small["id"]), host))
 
     large_machine = _machine(db, host, capabilities=CPU_LARGE)
+    _resolve_attempts(db, large_machine)
     large = marketmod.create_listing(
         db, machine_id=large_machine, owner_id=host, ask_zc_per_hour=100,
         max_concurrent_tasks=4,
@@ -1151,13 +1190,18 @@ def test_routing_inspection_returns_every_bid_a_spilled_job_posted(
     client = make_client(CHEAPEST_SPILL_PRICED_REPO)
     host = _new_user(db)
 
+    # Proven, for the same reason as the spill test above: the second class
+    # must fill because the first ran out of CAPACITY, not because the job's
+    # newcomer allowance happened to bind first.
     small_machine = _machine(db, host, capabilities=CPU_SMALL)
+    _resolve_attempts(db, small_machine)
     small = marketmod.create_listing(
         db, machine_id=small_machine, owner_id=host, ask_zc_per_hour=50,
         max_concurrent_tasks=1,
     )
     _withdraw_after.append((str(small["id"]), host))
     large_machine = _machine(db, host, capabilities=CPU_LARGE)
+    _resolve_attempts(db, large_machine)
     large = marketmod.create_listing(
         db, machine_id=large_machine, owner_id=host, ask_zc_per_hour=100,
         max_concurrent_tasks=4,
