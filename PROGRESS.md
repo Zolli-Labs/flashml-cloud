@@ -226,6 +226,56 @@ Decisions and their revisit-triggers: `M1_DECISIONS.md`.
 
 ## Entries
 
+### 2026-08-13 — Priced pool routing e2e rehearsal: real coordinator, real cloud API, real Docker agent (flashml-cloud, pool-routing-phase1 Task 6)
+What/why: Tasks 1-5 built `price:` in flashml.yaml, submit-time bid/match
+routing, the ranked book with exclusion reasons, and `GET /jobs/{id}/routing`
+— all proven only against `apps/api/tests`' scripted coordinator transport.
+Task 6 rehearses the same surface through the real authoring path: two hosts
+enrol machines and list them at different asks (`POST /market/listings`,
+never SQL), a third machine enrols and stays unlisted, a real flashml.yaml
+pool job (`gpus: 0`, price cap between the two asks) is submitted through
+`POST /jobs/from-upload` — the real compiler, not a hand-built JobSpec (the
+exact failure mode `e2e/test_training_resume.py`'s "hand-built its JobSpec
+and bypassed the authoring surface" gotcha names, 2026-08-12). New
+`e2e/test_priced_pool_routing.py` + `e2e/priced_pool_routing_seed.py`.
+How verified: `e2e/.venv/bin/pytest e2e/test_priced_pool_routing.py -q` — 1
+  passed (~3-4s), run 3x back to back for stability, all green. Full suite
+  `e2e/.venv/bin/pytest e2e -q` — 99 passed in 85.5s, zero regressions.
+  Assertions pinned: submit response's `routing.book` ranks the cheap
+  listing first (`excluded: null`, `tasks_assigned: 1`) and marks the
+  expensive one `"ask-above-cap"`; `GET /jobs/{id}/routing`'s `matches` row
+  carries the cheap machine's OWN ask (`agreed_zc_per_hour == 100`, not the
+  buyer's 200-millicredit cap) and `live_book` is byte-equal to the submit
+  response's `book`; the job COMPLETES, claimed by the third, unlisted,
+  never-in-the-book machine — proving routing/matching is a pricing overlay
+  over the pull scheduler, not a placement gate (M1's free-claim path is
+  unbroken).
+Gotchas: `apps/api/.venv` and `e2e/.venv` are deliberately disjoint
+  dependency sets (psycopg/fastapi/pyjwt vs flashnode/flashruntime — see
+  `test_repo_job_contract.py`'s own note on this). The scenario runs the
+  coordinator AND the cloud API as real uvicorn subprocesses under
+  `apps/api/.venv` — `scripts/dev.sh`'s exact recipe — and drives everything
+  else from `e2e/.venv` over plain HTTP (`requests`), including a
+  stdlib-only HS256 JWT builder (no `pyjwt` there) that verifies against
+  `Settings.supabase_jwt_secret` without ever reaching Supabase's JWKS
+  endpoint (`auth.verify_supabase_jwt`'s own algorithm dispatch). Machine
+  enrolment runs the real `enrolment.start_device_code`/
+  `approve_device_code`/`redeem_device_code` functions (same as
+  `test_agent_proxy.py`'s `_enrol` helper), never a hand-inserted machine
+  row. `from-upload` always compiles a `command` workload, whose isolation
+  is FIXED at `sandboxed` — not configurable from flashml.yaml — so
+  completing the job for real needs Docker (colima, already running on this
+  machine with the curated `python-slim` image pre-pulled); the scenario
+  skips cleanly, naming the missing piece, if Postgres tooling, the API
+  venv, or Docker is unavailable, rather than hanging in a claim loop
+  nothing would ever answer.
+Next: two items deliberately deferred, named rather than silently missing —
+  GPU capability classes are blocked on the 0.6.1 runtime pin
+  (`routing.GpuRoutingUnavailable`; this scenario only ever submits
+  `gpus: 0`), and per-gate placement reasons (why a SPECIFIC gate refused a
+  specific node) are an upstream `flashruntime.scheduler` concern this repo
+  does not own.
+
 ### 2026-08-13 — Landing page rework: 7-section restructure, public price board, timer-looped hero (flashml-cloud, branch agent/landing-market-board)
 What/why: Landing restructured from 12 sections down to 7. New unauthenticated
 `GET /v1alpha1/public/prices` serves curated GPU quotes plus a `Decimal`-computed
