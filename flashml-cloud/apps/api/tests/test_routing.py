@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -1365,3 +1367,228 @@ def test_a_refill_walks_every_open_bid_in_the_class_highest_first(db, _clean_boo
     assert [str(m["listing_id"]) for m in _matches(db, high["id"])] == [
         str(listing["id"])
     ]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: two refills over one bid, and one bid's failure over a walk.
+#
+# The refill hook fires from `create_market_listing`, so two hosts listing into
+# the same class in the same second run two of these walks at once over the
+# same open bids. Everything `refill_open_bids` recomputes per bid — the
+# remainder, the held listings, the job's unproven spend — is a READ, and a
+# read cannot see a write the other connection has not committed yet.
+# ---------------------------------------------------------------------------
+
+
+def _second_connection(dsn):
+    conn = psycopg.connect(dsn, row_factory=dict_row, connect_timeout=5)
+    conn.autocommit = True
+    return conn
+
+
+def _wait_until_someone_blocks_on_a_lock(db, *, timeout=5.0) -> bool:
+    """True once another backend is waiting on a lock.
+
+    Polled rather than slept for: with the bid lock in place the second walk
+    blocks within milliseconds, so the passing run costs nothing. A run where
+    nobody ever blocks (the unlocked shape this test exists to refuse) falls
+    through after `timeout` and the assertions below do the failing — the
+    outcome is what is under test, not the timing.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with db.cursor() as cur:
+            cur.execute(
+                "select count(*) as waiting from pg_stat_activity"
+                " where wait_event_type = 'Lock' and state = 'active'"
+            )
+            if int(cur.fetchone()["waiting"]) > 0:
+                return True
+        time.sleep(0.02)
+    return False
+
+
+def test_two_concurrent_refills_entitle_one_bid_exactly_once(
+    db, postgres_dsn, _clean_books, monkeypatch
+):
+    """The race the bid's row lock exists for.
+
+    One bid wanting four tasks, one listing offering two, and two refill walks
+    on two connections. Unlocked, both walks read "this bid still wants four
+    and holds nothing", both plan the same listing and both grant it: two
+    entitlements on ONE machine for ONE bid, four tasks' worth of promises
+    against two tasks of capacity. That is the single shape of over-entitlement
+    0018's "over-entitling is how volunteer supply finishes a job" argument
+    does not cover, and the shape `exclude_listings` exists to prevent — which
+    it cannot, because it is built from a read of matches the other walk has
+    not committed.
+
+    The first walk is held between its reads and its grant; the second is
+    started and observed to BLOCK (on the bid's row lock) before the first is
+    released. Afterwards the second re-reads a remainder and a held-set that
+    include the first's grant, finds the only listing in the book excluded,
+    and grants nothing.
+    """
+    buyer, host = make_user(db), make_user(db)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=4)
+    listing = _proven_listing(db, host, CLASS, ask=100, capacity=2)
+
+    first = "refill-first"
+    real_plan = routing._plan_one_class
+    reached = threading.Event()
+    release = threading.Event()
+
+    def paused(*args, **kwargs):
+        if threading.current_thread().name == first:
+            reached.set()
+            assert release.wait(timeout=20), "the first walk was never released"
+        return real_plan(*args, **kwargs)
+
+    monkeypatch.setattr(routing, "_plan_one_class", paused)
+
+    summaries: dict[str, list] = {}
+    errors: list[BaseException] = []
+
+    def walk(name):
+        conn = _second_connection(postgres_dsn)
+        try:
+            summaries[name] = refill_open_bids(conn, capability_class=CLASS)
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the test body
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    a = threading.Thread(target=walk, args=(first,), name=first)
+    b = threading.Thread(target=walk, args=("refill-second",), name="refill-second")
+    a.start()
+    try:
+        assert reached.wait(timeout=20), "the first walk never reached its plan"
+        b.start()
+        # The second walk must be WAITING, not planning. If this ever returns
+        # False the lock is gone and the assertions below report the damage.
+        blocked = _wait_until_someone_blocks_on_a_lock(db)
+    finally:
+        release.set()
+        a.join(timeout=20)
+        b.join(timeout=20)
+
+    assert not errors, errors
+    assert blocked, "the second refill planned against the first's stale state"
+    assert summaries[first] == [{"bid_id": str(bid["id"]), "tasks_granted": 2}]
+    assert summaries["refill-second"] == []
+
+    granted = _matches(db, bid["id"])
+    assert [str(m["listing_id"]) for m in granted] == [str(listing["id"])]
+    assert sum(int(m["tasks_assigned"]) for m in granted) == 2
+    assert _bid_row(db, bid["id"])["state"] == "partial"
+
+
+def test_one_bids_lost_race_does_not_discard_the_walks_earlier_grants(
+    db, _clean_books, monkeypatch
+):
+    """The walk is one transaction, and it used to be one savepoint too.
+
+    Two bids, the second of which fails its grant the way a racer can make it
+    fail — `IllegalTransition`, because somebody filled or cancelled it between
+    this walk's two reads. Without a per-bid savepoint that exception unwinds
+    the WHOLE transaction: the first bid's perfectly good entitlement is rolled
+    back with it, and `create_market_listing`'s fail-open reports
+    `"refilled": []` about a refill that really did match somebody.
+
+    The stub grants for real before raising, so what is asserted below is that
+    the savepoint undid writes that existed — the match row and the bid-state
+    move `grant_matches` had already made — rather than that the writes never
+    happened.
+    """
+    buyer_a, buyer_b, host = make_user(db), make_user(db), make_user(db)
+    high = _bid_for(db, buyer_a, CLASS, cap=250, tasks=1)
+    low = _bid_for(db, buyer_b, CLASS, cap=150, tasks=1)
+    listing = _proven_listing(db, host, CLASS, ask=100, capacity=4)
+
+    real_grant = mk.grant_matches
+
+    def grant_then_lose_the_race(conn, *, bid_id, plan):
+        rows = real_grant(conn, bid_id=bid_id, plan=plan)
+        if bid_id == str(low["id"]):
+            raise mk.IllegalTransition("a filled bid cannot be matched")
+        return rows
+
+    monkeypatch.setattr(mk, "grant_matches", grant_then_lose_the_race)
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    # The walk finished, and it reports exactly the bid that kept its grant.
+    assert summary == [{"bid_id": str(high["id"]), "tasks_granted": 1}]
+    assert [str(m["listing_id"]) for m in _matches(db, high["id"])] == [
+        str(listing["id"])
+    ]
+    assert _bid_row(db, high["id"])["state"] == "filled"
+
+    # And the loser is exactly as it was: no match, no state move.
+    assert _matches(db, low["id"]) == []
+    assert _bid_row(db, low["id"])["state"] == "open"
+
+
+def _clone_match(db, match_id) -> None:
+    """A second row with the same `(bid_id, listing_id)` — the shape a lost
+    race leaves behind — written straight at the table, past every guard in
+    `marketplace` and `routing`."""
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.matches"
+            " (bid_id, listing_id, machine_id, buyer_id, host_id,"
+            "  capability_class, agreed_zc_per_hour, tasks_assigned,"
+            "  est_task_seconds, unproven_host, state)"
+            " select bid_id, listing_id, machine_id, buyer_id, host_id,"
+            "        capability_class, agreed_zc_per_hour, tasks_assigned,"
+            "        est_task_seconds, unproven_host, 'granted'"
+            "   from public.matches where id = %s::uuid",
+            (str(match_id),),
+        )
+
+
+def test_the_table_refuses_a_second_live_match_on_one_listing_for_one_bid(
+    db, _clean_books
+):
+    """Migration 0033, checked against the applied schema.
+
+    The lock is the fix; this is the backstop, and it is the reason a third
+    caller that re-matches a live bid one day inherits the guarantee without
+    having to rediscover the argument.
+    """
+    buyer, host = make_user(db), make_user(db)
+    listing = _proven_listing(db, host, CLASS, ask=100, capacity=4)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=4)
+    granted = _grant_from_the_live_book(db, bid, tasks=1)
+    assert [str(m["listing_id"]) for m in granted] == [str(listing["id"])]
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        with db.transaction():
+            _clone_match(db, granted[0]["id"])
+
+
+def test_an_expired_match_leaves_its_listing_matchable_by_the_same_bid_again(
+    db, _clean_books
+):
+    """Why 0033 is PARTIAL and not a bare unique index.
+
+    An expired entitlement holds nothing — 0018's "no work, no charge, not an
+    error" — and `_live_tasks_assigned`, `grant_matches` and the refill's own
+    held-set all agree by filtering `state <> 'expired'`. A bare unique index
+    would disagree with all three and permanently burn a listing for a bid
+    because one host went offline once.
+    """
+    buyer, host = make_user(db), make_user(db)
+    _proven_listing(db, host, CLASS, ask=100, capacity=4)
+    bid = _bid_for(db, buyer, CLASS, cap=250, tasks=4)
+    granted = _grant_from_the_live_book(db, bid, tasks=1)
+
+    with db.cursor() as cur:
+        cur.execute(
+            "update public.matches set state = 'expired' where id = %s::uuid",
+            (str(granted[0]["id"]),),
+        )
+
+    # No violation: the row that held this listing no longer holds anything.
+    _clone_match(db, granted[0]["id"])
+    assert _assigned(db, bid["id"]) == 1

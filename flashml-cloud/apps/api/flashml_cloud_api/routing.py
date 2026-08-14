@@ -20,6 +20,8 @@ step 8: "partial fills stay open and refill as listings appear").
 """
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Collection, Mapping
 from fractions import Fraction
 from typing import Any
@@ -29,6 +31,8 @@ import psycopg
 from . import db as dbmod
 from . import marketplace
 from . import metrics
+
+log = logging.getLogger("flashml-cloud-api")
 
 
 class RoutingValidationError(ValueError):
@@ -809,25 +813,84 @@ def refill_open_bids(
     walk; two bids of one job must not produce two different answers to "whose
     workspace is this", and it is a query per owner rather than per bid.
 
-    **One transaction for the whole refill.** Every grant in the walk shares
-    it, so a failure on the third bid leaves the first two's entitlements
-    un-written rather than half a refill nobody asked for. That is what lets
-    the caller's fail-open be honest: ``create_market_listing`` reports the
-    listing as created and the refill as not-having-happened, and the book
-    agrees with it.
+    **The bid's row lock is taken BEFORE any of that is read**
+    (:func:`marketplace.lock_bid`), and the row it returns is what the rest of
+    the loop reads — not the one :func:`marketplace.open_bids` handed over.
+    Every recomputation above is a read-then-plan-then-write against one bid,
+    and two connections doing that at once is not hypothetical: the hook fires
+    from ``create_market_listing``, and two hosts listing into the same class
+    in the same second is the ordinary busy case. Unlocked, both walks read
+    "this bid still wants four tasks" and "it holds nothing", both plan the
+    same listing, and both grant — a four-task job entitled to eight tasks'
+    worth of machines on ONE listing, which is precisely the double
+    entitlement ``exclude_listings`` exists to prevent and which
+    ``exclude_listings`` cannot see because the other walk had not committed
+    yet. With the lock the loser waits, then re-reads a remainder and a held
+    set that already include the winner's grant, and plans against those.
+
+    **Lock ordering is safe by construction.** The only other lock on a bid
+    row is :func:`marketplace.grant_matches`' own ``for update``, which runs
+    inside this transaction and therefore on a row this loop already holds —
+    free, and no second waiter. Across concurrent walks, bids are locked ONE
+    AT A TIME in ``open_bids`` order, which is deterministic (highest cap,
+    then creation time, then id) and identical for every walk of the same
+    class; a walk blocked on a bid holds every EARLIER bid in that same total
+    order and never an later one, so two walks cannot each hold what the other
+    wants. Different classes never contend at all — a bid has exactly one
+    class, so their bid sets are disjoint.
+
+    **One transaction for the whole refill, one SAVEPOINT per bid.** Every
+    grant shares the transaction, so a caller that catches an exception out of
+    here finds no half-written refill — that is what lets
+    ``create_market_listing``'s fail-open be honest. But a bid whose grant
+    hits an expected state race must not take the rest of the walk down with
+    it: each bid's plan-and-grant runs in a nested ``db.transaction()``
+    (psycopg3 emits ``SAVEPOINT``/``ROLLBACK TO``), so an
+    :class:`marketplace.IllegalTransition` — the one failure another
+    connection can legitimately cause here, by filling or cancelling this bid
+    between our two reads — rolls back THAT bid's writes, is logged, and the
+    walk carries on. Before the savepoints, one such bid discarded every
+    earlier bid's grants and the route reported ``"refilled": []`` about a
+    refill that had really matched three of them.
+
+    The ``except`` is deliberately narrow. ``grant_matches``' other refusal,
+    ``LookupError`` for a bid that is gone, is NOT caught: this loop holds
+    that row's lock, so it cannot vanish underneath us and a LookupError here
+    would mean something is wrong with the lock rather than with the bid. Nor
+    is a unique-index violation from 0033 — that index is the backstop for
+    exactly the double entitlement the lock above prevents, so a violation is
+    evidence the lock is not doing its job and must surface, not be swallowed
+    as an ordinary race.
 
     Returns one ``{"bid_id", "tasks_granted"}`` entry per bid that ACTUALLY
     got something, in walk order — so an empty list means the new supply moved
     nothing, which is the ordinary case and the one the route reports as
-    ``"refilled": []``. Bids that were considered and skipped are not
-    reported: the caller's question is what changed.
+    ``"refilled": []``. Bids that were considered, skipped or rolled back are
+    not reported: the caller's question is what changed.
     """
     granted: list[dict[str, Any]] = []
     workspace_by_owner: dict[str, set[str]] = {}
 
     with db.transaction():
-        for bid in marketplace.open_bids(db, capability_class):
-            bid_id = str(bid["id"])
+        for listed in marketplace.open_bids(db, capability_class):
+            bid_id = str(listed["id"])
+
+            # THE LOCK COMES FIRST — before the remainder, before the held
+            # listings, before anything this loop plans against. `open_bids`
+            # returned a snapshot; another refill may already be granting
+            # against the same row. Everything below therefore reads `bid`,
+            # the row `lock_bid` hands back, and never `listed`.
+            bid = marketplace.lock_bid(db, bid_id)
+            if bid is None:
+                # Deleted between the snapshot and the lock. Nothing to
+                # refill and nothing to report.
+                continue
+            if bid["state"] not in ("open", "partial"):
+                # Filled or cancelled while we waited for the lock. The
+                # snapshot said live demand; the row says otherwise, and the
+                # row is what `grant_matches` would refuse.
+                continue
+
             owner_id = str(bid["owner_id"])
 
             # Every bid this JOB posted, because the newcomer allowance is the
@@ -874,25 +937,50 @@ def refill_open_bids(
                 if match["state"] != "expired"
             }
 
-            one = _plan_one_class(
-                db,
-                capability_class=capability_class,
-                max_zc_per_hour=int(bid["max_zc_per_hour"]),
-                tasks_wanted=remainder,
-                reserved=workspace_by_owner[owner_id],
-                objective=str(bid["objective"]),
-                unproven_cap=unproven_remaining,
-                exclude_listings=held,
-            )
-            plan = one["plan"]
-            if not plan.fills:
+            # ONE SAVEPOINT PER BID. Nested inside the walk's transaction,
+            # psycopg3 emits SAVEPOINT/RELEASE — or ROLLBACK TO on the way
+            # out with an exception — so this bid's writes can be undone
+            # without touching the grants of the bids walked before it.
+            filled = 0
+            try:
+                with db.transaction():
+                    one = _plan_one_class(
+                        db,
+                        capability_class=capability_class,
+                        max_zc_per_hour=int(bid["max_zc_per_hour"]),
+                        tasks_wanted=remainder,
+                        reserved=workspace_by_owner[owner_id],
+                        objective=str(bid["objective"]),
+                        unproven_cap=unproven_remaining,
+                        exclude_listings=held,
+                    )
+                    plan = one["plan"]
+                    if plan.fills:
+                        # `grant_matches` owns the legality of the bid's state
+                        # and the `partial`/`filled` recomputation, exactly as
+                        # it does at submit time. This function never writes a
+                        # bid state itself.
+                        marketplace.grant_matches(db, bid_id=bid_id, plan=plan)
+                        filled = plan.tasks_filled
+            except marketplace.IllegalTransition as exc:
+                # The one state race another connection can still cause here,
+                # and the only exception this walk absorbs. Narrow on purpose:
+                # see the docstring for why `LookupError` and a 0033 unique
+                # violation must NOT be caught. The savepoint has already
+                # rolled back this bid's rows; every earlier bid's grants
+                # survive and are still reported.
+                log.warning(
+                    json.dumps({
+                        "text": "refill skipped a bid that moved underneath it",
+                        "bid_id": bid_id,
+                        "capability_class": capability_class,
+                        "error": repr(exc),
+                    })
+                )
                 continue
 
-            # `grant_matches` owns the legality of the bid's state and the
-            # `partial`/`filled` recomputation, exactly as it does at submit
-            # time. This function never writes a bid state itself.
-            marketplace.grant_matches(db, bid_id=bid_id, plan=plan)
-            granted.append({"bid_id": bid_id, "tasks_granted": plan.tasks_filled})
+            if filled:
+                granted.append({"bid_id": bid_id, "tasks_granted": filled})
 
     return granted
 

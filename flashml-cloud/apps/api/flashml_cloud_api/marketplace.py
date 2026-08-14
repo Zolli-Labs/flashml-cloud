@@ -2138,10 +2138,49 @@ def bids_for_job(
         return list(cur.fetchall())
 
 
+def lock_bid(db: psycopg.Connection, bid_id: str) -> dict[str, Any] | None:
+    """Take this bid's row lock and return it as it is NOW, or None if there
+    is no such bid.
+
+    ``select ... for update``, so a second transaction asking for the same bid
+    waits here rather than planning against a snapshot the first one is about
+    to invalidate. The row that comes back is the post-wait truth: under READ
+    COMMITTED the lock is acquired on the newest committed version, so a
+    caller that reads its state, its remainder and its held listings AFTER
+    this call sees whatever the winner of the race committed.
+
+    Exists for :func:`routing.refill_open_bids`, which plans a whole match
+    against a bid before writing anything and must not do that planning
+    concurrently with another walk over the same bid — two refills reading
+    "this bid still wants four tasks" at once grant it eight tasks' worth of
+    machines. :func:`grant_matches` takes the same lock on the same row and is
+    normally called INSIDE the caller's transaction, so by then the lock is
+    already held and re-taking it is free.
+
+    Deliberately no state filter: "this bid is no longer live" is a fact the
+    caller must be able to SEE (and skip on), not one this function hides by
+    answering None to it. :func:`open_bids` is still what decides which bids a
+    walk visits; this is what makes that decision safe to act on.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            f"select {_BID_SELECT} from public.bids"
+            " where id = %s::uuid for update",
+            (str(bid_id),),
+        )
+        return cur.fetchone()
+
+
 def open_bids(
     db: psycopg.Connection, capability_class_name: str
 ) -> list[dict[str, Any]]:
-    """Live demand in one book, highest bid first — the order matching walks."""
+    """Live demand in one book, highest bid first — the order matching walks.
+
+    **A snapshot, not a lock.** A caller that will WRITE against one of these
+    rows must take :func:`lock_bid` on it first and re-read what comes back:
+    between this query and that write another connection may have filled,
+    cancelled or partially matched the same bid.
+    """
     with db.cursor() as cur:
         cur.execute(
             f"select {_BID_SELECT} from public.bids"
