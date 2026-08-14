@@ -5,6 +5,7 @@ import { ArrowRight, Lightning } from "@phosphor-icons/react";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { PageShell } from "@/components/shell/PageShell";
 import { StatePanel } from "@/components/shell/StatePanel";
+import { StatStrip } from "@/components/shared/StatStrip";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
 import {
@@ -51,15 +52,20 @@ export default function WorkspaceOverviewPage() {
           animation on any of them: §1.1 and the motion spec both say a
           number is animated only when it was measured, and these are
           already exact. */}
-      <div className="mt-6 grid gap-3 sm:grid-cols-3">
-        <Stat
-          label="Machines online"
-          value={online.length}
-          total={machines.length}
-        />
-        <Stat label="Jobs running" value={active.length} total={jobs.length} />
-        <Stat label="Jobs finished" value={jobs.length - active.length} />
-      </div>
+      <StatStrip
+        className="mt-6"
+        items={[
+          {
+            label: "Machines online",
+            value: <Ratio value={online.length} total={machines.length} />,
+          },
+          {
+            label: "Jobs running",
+            value: <Ratio value={active.length} total={jobs.length} />,
+          },
+          { label: "Jobs finished", value: jobs.length - active.length },
+        ]}
+      />
 
       <section className="mt-8">
         <div className="flex items-end justify-between gap-3">
@@ -142,24 +148,17 @@ export default function WorkspaceOverviewPage() {
   );
 }
 
-function Stat({
-  label,
-  value,
-  total,
-}: {
-  label: string;
-  value: number;
-  total?: number;
-}) {
+/** A count, with its denominator shown only when it differs — "5" alone
+ * when everything is online, "5/9" when it is not. The `/total` half reads
+ * `text-muted-foreground`; the family (mono, tabular, weight) comes from
+ * `StatStrip`'s own value styling, since this renders directly inside it. */
+function Ratio({ value, total }: { value: number; total?: number }) {
   return (
-    <div className="panel px-4 py-3.5">
-      <div className="metric-value text-2xl">
-        {value}
-        {total !== undefined && total !== value && (
-          <span className="text-base text-muted-foreground">/{total}</span>
-        )}
-      </div>
-      <div className="label-caps mt-1">{label}</div>
-    </div>
+    <>
+      {value}
+      {total !== undefined && total !== value && (
+        <span className="text-muted-foreground">/{total}</span>
+      )}
+    </>
   );
 }
