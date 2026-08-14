@@ -58,9 +58,14 @@ substrate) and `2026-08-11-zolli-marketplace-design.md` (vocabulary M1–M14).
 
 1. **Trust lifecycle**: `machines.trust_state` in
    `('unverified','verified','deverified')`, automated transitions, failures
-   carrying machine-readable reasons; deverified = hidden from matching,
-   auto-restored when the cause clears (Vast/io.net pattern). Routing gates
-   its book on this.
+   carrying machine-readable reasons; auto-restored when the cause clears
+   (Vast/io.net pattern). **Deverified means excluded from the MARKET BOOK**
+   — `open_asks` omits it, so no new priced matches or entitlements — and
+   nothing more: a deverified machine still pulls workspace-free jobs in its
+   own pools, because the coordinator's capability gates remain the only
+   claim-side authority (M1 workspace-free and reliability-ranks-never-
+   excludes both survive on the free path; the trust gate governs the priced
+   path only).
 2. **Allocatable vs host-visible CPU**: rented pods report the host's cores
    (measured: 96 on a 2-vCPU pod). Two fields; `capability_class` reads
    allocatable. Needs a flashnode change → release-gated (four pin sites).
