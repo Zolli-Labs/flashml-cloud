@@ -814,6 +814,18 @@ def rank_score(
     return price
 
 
+def objective_formula(objective: str) -> str:
+    """The one-line description of what ``objective`` ranks by, for a surface
+    that publishes the arithmetic beside the result of it.
+
+    A function rather than a bare dictionary lookup so an objective this
+    engine does not have fails the same way here as it does in the ranking —
+    with the name it was given and the three it could have been — instead of
+    as a ``KeyError`` from inside a response builder.
+    """
+    return OBJECTIVE_FORMULAS[_checked_objective(objective)]
+
+
 def _checked_objective(objective: str) -> str:
     name = str(objective)
     if name not in OBJECTIVES:

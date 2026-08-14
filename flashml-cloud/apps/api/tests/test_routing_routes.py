@@ -90,6 +90,19 @@ PRICE_BLOCK = "    price:\n      max_per_hour: 5.00\n"
 #: `test_marketplace_class_board.py` leaves cpu-large asks at 1000 and 2000),
 #: and a spill test that those could fill is not testing the spill.
 CHEAP_PRICE_BLOCK = "    price:\n      max_per_hour: 0.20\n"
+#: `price.objective` pinned to the engine's own default.
+#:
+#: The yaml default is `balanced` (flashml_yaml.DEFAULT_PRICE_OBJECTIVE), and
+#: most of this file exercises it. The two inspection tests below compare the
+#: submit response's book against `GET /jobs/{id}/routing`'s recomputed one
+#: BYTE FOR BYTE, and that route has no objective to recompute with — bids do
+#: not store one (v1) — so it re-ranks `cheapest`. Pinning the submit side to
+#: the same objective is what makes the two comparable; leaving it on
+#: `balanced` would compare two different questions and call the difference a
+#: bug the first time a machine in the cpu books has a measured median.
+CHEAPEST_PRICE_BLOCK = (
+    "    price:\n      max_per_hour: 5.00\n      objective: cheapest\n"
+)
 #: Two tasks, so a one-task class has a remainder to spill.
 SWEEP_BLOCK = "    sweep:\n      lr:\n        - 0.1\n        - 0.2\n"
 GPU_BLOCK = "    resources:\n      gpus: 1\n"
@@ -99,12 +112,32 @@ MALFORMED_RESOURCES_BLOCK = "    resources:\n      gpus: one\n"
 
 CLEAN_YAML = BASE_YAML
 PRICED_YAML = BASE_YAML + PRICE_BLOCK
+CHEAPEST_PRICED_YAML = BASE_YAML + CHEAPEST_PRICE_BLOCK
 GPU_PRICED_YAML = BASE_YAML + PRICE_BLOCK + GPU_BLOCK
 SPILL_PRICED_YAML = BASE_YAML + CHEAP_PRICE_BLOCK + SWEEP_BLOCK
+#: The spill repo, with the same objective pin and for the same reason.
+CHEAPEST_SPILL_PRICED_YAML = (
+    BASE_YAML
+    + CHEAP_PRICE_BLOCK.rstrip("\n")
+    + "\n      objective: cheapest\n"
+    + SWEEP_BLOCK
+)
+FASTEST_PRICED_YAML = (
+    BASE_YAML + PRICE_BLOCK.rstrip("\n") + "\n      objective: fastest\n"
+)
 MALFORMED_RESOURCES_PRICED_YAML = BASE_YAML + PRICE_BLOCK + MALFORMED_RESOURCES_BLOCK
 
 CLEAN_REPO = {"flashml.yaml": CLEAN_YAML, "train.py": CLEAN_TRAIN_PY}
 PRICED_REPO = {"flashml.yaml": PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
+CHEAPEST_PRICED_REPO = {
+    "flashml.yaml": CHEAPEST_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
+}
+CHEAPEST_SPILL_PRICED_REPO = {
+    "flashml.yaml": CHEAPEST_SPILL_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
+}
+FASTEST_PRICED_REPO = {
+    "flashml.yaml": FASTEST_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
+}
 GPU_PRICED_REPO = {"flashml.yaml": GPU_PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
 SPILL_PRICED_REPO = {"flashml.yaml": SPILL_PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
 MALFORMED_RESOURCES_PRICED_REPO = {
@@ -557,6 +590,74 @@ def test_a_priced_pool_job_creates_a_bid_and_matches(make_client, db, _withdraw_
 
 
 # ---------------------------------------------------------------------------
+# 1b. the objective travels from the yaml to the response, and the response
+#     publishes the arithmetic it used.
+# ---------------------------------------------------------------------------
+
+
+def _routing_of(client, db, *, ask=100):
+    """Submit through `client` against one seeded cpu-small listing and
+    return `(routing_block, cleanup)`."""
+    host = _new_user(db)
+    machine = _machine(db, host, capabilities=CPU_SMALL)
+    listing = marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=ask,
+    )
+    r = _post(client, _jwt(_new_user(db)))
+    assert r.status_code == 201, r.text
+    return r.json()["routing"], (str(listing["id"]), host)
+
+
+def test_a_priced_job_that_names_no_objective_is_routed_balanced(
+    make_client, db, _withdraw_after
+):
+    """The owner-approved default (2026-08-13) arrives all the way at the
+    response, so a submitter who wrote only `max_per_hour` can still read
+    which of the three orders their book was ranked in."""
+    routing_block, cleanup = _routing_of(make_client(PRICED_REPO), db)
+    _withdraw_after.append(cleanup)
+
+    assert routing_block["state"] == "routed"
+    assert routing_block["objective"] == "balanced"
+    assert routing_block["formula"] == marketmod.OBJECTIVE_FORMULAS["balanced"]
+
+
+def test_a_declared_objective_reaches_the_response_with_its_formula(
+    make_client, db, _withdraw_after
+):
+    """`price.objective: fastest` in the yaml, `"fastest"` in the response,
+    and the published formula is the engine's own constant rather than a
+    string the response builder made up — the two cannot drift."""
+    routing_block, cleanup = _routing_of(make_client(FASTEST_PRICED_REPO), db)
+    _withdraw_after.append(cleanup)
+
+    assert routing_block["objective"] == "fastest"
+    assert routing_block["formula"] == marketmod.OBJECTIVE_FORMULAS["fastest"]
+    assert "median_seconds" in routing_block["formula"]
+
+
+def test_every_book_row_publishes_its_median_and_its_rank_score(
+    make_client, db, _withdraw_after
+):
+    """Both fields on every row, whatever the objective and whether or not
+    the machine has been measured. A field that disappears when it has
+    nothing to say arrives at the console as `undefined`."""
+    routing_block, cleanup = _routing_of(make_client(PRICED_REPO), db)
+    _withdraw_after.append(cleanup)
+
+    assert routing_block["book"]
+    for row in routing_block["book"]:
+        assert "median_seconds" in row
+        assert "rank_score" in row
+    ours = {row["listing_id"]: row for row in routing_block["book"]}[cleanup[0]]
+    # A machine that has never resolved an attempt: unproven AND unmeasured,
+    # so it ranks on its ask alone and its balanced factor is exactly 1.
+    assert ours["acceptance_rate"] is None
+    assert ours["median_seconds"] is None
+    assert ours["rank_score"] == ours["effective_zc_per_hour"] == "100"
+
+
+# ---------------------------------------------------------------------------
 # C1 (final review): the book must respect pools/workspace.
 #
 # Part 1 — workspace exclusion applies to EVERY priced job, pooled or not:
@@ -965,7 +1066,7 @@ def _get_routing(client, token: str, job_id: str):
 
 
 def test_routing_inspection_for_a_routed_job(make_client, db, _withdraw_after):
-    client = make_client(PRICED_REPO)
+    client = make_client(CHEAPEST_PRICED_REPO)
     host = _new_user(db)
     machine = _machine(db, host, capabilities=CPU_SMALL)
     listing = marketmod.create_listing(
@@ -1018,9 +1119,17 @@ def test_routing_inspection_for_a_routed_job(make_client, db, _withdraw_after):
     assert live_book is not None
     assert "class_plans" not in live_book
     assert set(live_book.keys()) == {
-        "accept", "tasks_wanted", "tasks_filled",
+        "accept", "objective", "formula", "tasks_wanted", "tasks_filled",
         "tasks_unfilled", "book", "nearest_miss",
     }
+    # The live re-explain has no stored objective to recompute with — a bid
+    # records its class, cap and task count, not what the submitter asked the
+    # book to be ranked by — so it says `cheapest` and means it. This job
+    # pinned `objective: cheapest` in its yaml precisely so the two sides
+    # are the same question; see CHEAPEST_PRICE_BLOCK.
+    assert live_book["objective"] == "cheapest"
+    assert live_book["objective"] == routing_block["objective"]
+    assert live_book["formula"] == routing_block["formula"]
     # Re-derived from the bids that exist, so it names the classes actually
     # WALKED — not the full accept list the submit response reported.
     assert live_book["accept"] == ["cpu-small"]
@@ -1039,7 +1148,7 @@ def test_routing_inspection_returns_every_bid_a_spilled_job_posted(
     the newest (the pre-spill behaviour) would hide the class that actually
     filled most of the job."""
     _forget_observations.append("cpu-large")
-    client = make_client(SPILL_PRICED_REPO)
+    client = make_client(CHEAPEST_SPILL_PRICED_REPO)
     host = _new_user(db)
 
     small_machine = _machine(db, host, capabilities=CPU_SMALL)

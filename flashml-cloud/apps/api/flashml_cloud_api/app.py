@@ -6792,12 +6792,20 @@ def create_cloud_app(
                         workspace_machine_ids=routingmod.workspace_machine_ids_for(
                             db, user_id
                         ),
+                        # The same objective the bid would have been matched
+                        # under, from the same reader `route_submitted_job`
+                        # uses. A read-only explain ranked differently from
+                        # the bid it stands in for would be a worse answer
+                        # than no explain.
+                        objective=routingmod.price_objective(config.price),
                     )
                     routing_block = {
                         "state": "skipped",
                         "reason": "pool-capacity-is-free",
                         "book": planned["book"],
                         "accept": planned["accept"],
+                        "objective": planned["objective"],
+                        "formula": planned["formula"],
                         "tasks_wanted": planned["tasks_wanted"],
                     }
                 else:
@@ -7895,6 +7903,18 @@ def create_cloud_app(
         cap and the job's full task count (it was the first class walked and
         was asked for everything), which is exactly what the original walk
         started from.
+
+        **The live book is re-ranked ``cheapest``, whatever the job asked
+        for.** A bid records the class, the cap and the task count — not the
+        objective the submitter chose — and this route reads bids, so the
+        objective is simply not recoverable here. Rather than guess it from
+        the job's config (which may have been edited in the repo since, and
+        which the SPILLED classes were never re-derived from anyway), the
+        recomputation names what it actually did: ``live_book["objective"]``
+        is ``"cheapest"`` and ``live_book["formula"]`` says what that means.
+        Storing the objective on the bid is a migration and is deliberately
+        not done for v1 — the honest label costs nothing and the wrong label
+        would cost a buyer's trust in the whole explain surface.
 
         An unrouted job (no price block, so ``route_submitted_job`` never
         ran) is not an error — it answers ``{"bids": [], "live_book":

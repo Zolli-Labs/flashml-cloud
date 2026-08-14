@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from flashml_cloud_api import marketplace as mk
+from flashml_cloud_api import metrics
 from flashml_cloud_api import routing
 from flashml_cloud_api.routing import (
     RoutingValidationError,
@@ -297,17 +298,31 @@ def make_machine(db, owner_id, *, capabilities=None) -> str:
     return machine_id
 
 
-def resolve_attempts(db, machine_id, *, accepted: int, failed: int) -> None:
+def resolve_attempts(
+    db, machine_id, *, accepted: int, failed: int, seconds: float = 12
+) -> None:
     """`accepted` + `failed` RESOLVED attempts for one machine, written the
     way the three real writers leave them (mirrors
     tests/test_router_evidence.py's `resolve_attempt`) — enough for
     `metrics.acceptance_rates` (via `db.acceptance_rate_rows`) to report a
-    real rate once the total reaches `metrics.MIN_EVIDENCE`."""
+    real rate once the total reaches `metrics.MIN_EVIDENCE`.
+
+    ``seconds`` is how long each attempt is made to have taken:
+    `db.acceptance_rate_rows` derives `duration_s` as
+    `resolved_at - claimed_at` on ACCEPTED rows only, so this is what a
+    machine's `median_seconds` comes out as — and a failed attempt
+    contributes to the rate while timing nothing, exactly as production
+    leaves it."""
     with db.cursor() as cur:
         for outcome, count in (("accepted", accepted), ("failed", failed)):
             for _ in range(count):
                 lease = f"lease-{uuid.uuid4().hex[:12]}"
-                claimed = datetime.now(timezone.utc) - timedelta(seconds=12)
+                # One `now` per row, not three: `resolved_at - claimed_at` IS
+                # the duration this fixture is declaring, and re-reading the
+                # clock between the two would leave it `seconds` plus however
+                # long the insert took — enough to turn an exact median into
+                # a number no test can assert.
+                now = datetime.now(timezone.utc)
                 cur.execute(
                     "insert into public.attempts"
                     " (lease_id, machine_id, job_id, task_id, claimed_at,"
@@ -318,9 +333,9 @@ def resolve_attempts(db, machine_id, *, accepted: int, failed: int) -> None:
                         machine_id,
                         f"job-{uuid.uuid4().hex[:8]}",
                         "t1",
-                        claimed,
-                        datetime.now(timezone.utc) if outcome == "accepted" else None,
-                        datetime.now(timezone.utc),
+                        now - timedelta(seconds=seconds),
+                        now if outcome == "accepted" else None,
+                        now,
                         outcome,
                     ),
                 )
@@ -687,6 +702,149 @@ def test_workspace_machines_stay_withheld_across_the_whole_walk(db, _clean_books
     assert rows[str(first["id"])]["excluded"] == "workspace-free"
     assert rows[str(second["id"])]["excluded"] == "workspace-free"
     assert result["tasks_filled"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The objective, and the math the explain surface publishes.
+#
+# `_proven_fast_listing` below is `_proven_listing` with a duration: five
+# accepted attempts of a stated length, which is what turns
+# `metrics.acceptance_rates`' `median_seconds` into a real number for this
+# machine in this class. Everything here is `CLASS`/`SECOND`, still this
+# file's own two books.
+# ---------------------------------------------------------------------------
+
+
+def _proven_timed_listing(db, host, klass, *, ask, capacity, seconds):
+    machine = make_machine(
+        db, host, capabilities={"gpus": [H100 if klass == CLASS else A100]}
+    )
+    resolve_attempts(db, machine, accepted=5, failed=0, seconds=seconds)
+    listing = mk.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=ask,
+        max_concurrent_tasks=capacity,
+    )
+    assert listing["capability_class"] == klass
+    return listing
+
+
+def test_the_plan_publishes_the_objective_and_the_formula_it_used(db, _clean_books):
+    """Publishing the formula is the point (owner-approved): a buyer who can
+    read `objective`, `formula` and each row's `rank_score` together can
+    check the engine's arithmetic without being asked to trust it. The string
+    comes from `marketplace.OBJECTIVE_FORMULAS`, never from a literal here or
+    in the response builder, so the published formula cannot drift from the
+    code that ranked the book."""
+    host = make_user(db)
+    _proven_timed_listing(db, host, CLASS, ask=100, capacity=2, seconds=30)
+
+    for objective in mk.OBJECTIVES:
+        result = plan_pool_routing(
+            db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=1,
+            objective=objective,
+        )
+        assert result["objective"] == objective
+        assert result["formula"] == mk.OBJECTIVE_FORMULAS[objective]
+
+    # The engine's fallback, for a caller that names none — `cheapest`, which
+    # is what this walk did before objectives existed. (A job that arrived
+    # through flashml.yaml always names one; its default is `balanced`.)
+    default = plan_pool_routing(
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=1,
+    )
+    assert default["objective"] == mk.DEFAULT_RANK_OBJECTIVE == "cheapest"
+
+
+def test_every_book_row_carries_its_median_and_the_score_it_was_ranked_by(
+    db, _clean_books
+):
+    """Two fields per row, on every objective, so a reader never has to know
+    which one is live to know what they are looking at: `median_seconds` (the
+    measurement, None when there is none) and `rank_score` (what that row was
+    ORDERED by, as an exact Fraction rendered to a string)."""
+    host = make_user(db)
+    slow = _proven_timed_listing(db, host, CLASS, ask=100, capacity=1, seconds=120)
+    quick = _proven_timed_listing(db, host, CLASS, ask=200, capacity=1, seconds=5)
+
+    cheapest = plan_pool_routing(
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=2,
+        objective="cheapest",
+    )
+    rows = {row["listing_id"]: row for row in cheapest["book"]}
+    assert rows[str(slow["id"])]["median_seconds"] == 120.0
+    assert rows[str(quick["id"])]["median_seconds"] == 5.0
+    # Under `cheapest` the score IS the effective price the row already
+    # shows. Both fields are kept anyway, so every objective's row has one
+    # shape.
+    for row in rows.values():
+        assert row["rank_score"] == row["effective_zc_per_hour"]
+
+    fastest = plan_pool_routing(
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=2,
+        objective="fastest",
+    )
+    rows = {row["listing_id"]: row for row in fastest["book"]}
+    assert rows[str(quick["id"])]["rank_score"] == "5"
+    assert rows[str(slow["id"])]["rank_score"] == "120"
+
+    balanced = plan_pool_routing(
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=2,
+        objective="balanced",
+    )
+    rows = {row["listing_id"]: row for row in balanced["book"]}
+    # class median of {120, 5} is 62.5; 120/62.5 clamps to 2 (100 x 2), and
+    # 5/62.5 clamps to 1/2 (200 x 1/2). Exact, and asserted exactly.
+    assert rows[str(slow["id"])]["rank_score"] == "192"
+    assert rows[str(quick["id"])]["rank_score"] == "100"
+
+
+def test_the_objective_decides_which_machine_the_job_fills(db, _clean_books):
+    """The whole point of the knob, end to end against a real book: a cheap
+    slow machine and a dearer quick one, one task, and the fill follows what
+    the submitter asked for rather than the ask alone."""
+    host = make_user(db)
+    slow = _proven_timed_listing(db, host, CLASS, ask=100, capacity=1, seconds=120)
+    quick = _proven_timed_listing(db, host, CLASS, ask=200, capacity=1, seconds=5)
+
+    def filled(objective):
+        result = plan_pool_routing(
+            db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=1,
+            objective=objective,
+        )
+        assert result["tasks_filled"] == 1
+        return [f.listing_id for f in only_plan(result).fills]
+
+    assert filled("cheapest") == [str(slow["id"])]
+    assert filled("fastest") == [str(quick["id"])]
+    # 100 x clamp(120/62.5) = 192 against 200 x clamp(5/62.5) = 100: the
+    # quicker machine is the better buy per result even though it asks twice
+    # as much, which is the case `balanced` exists to notice.
+    assert filled("balanced") == [str(quick["id"])]
+
+
+def test_a_machine_below_the_evidence_threshold_reports_no_median(db, _clean_books):
+    """`metrics.MIN_EVIDENCE` gates the median exactly as it gates the rate.
+    Four timed attempts are not evidence of how long this machine takes, and
+    reporting their middle value would let `fastest` rank a machine top on
+    one lucky short task."""
+    host = make_user(db)
+    machine = make_machine(db, host)
+    resolve_attempts(db, machine, accepted=metrics.MIN_EVIDENCE - 1, failed=0, seconds=3)
+    listing = mk.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=100,
+    )
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS,), max_zc_per_hour=250, tasks_wanted=1,
+        objective="fastest",
+    )
+    row = next(r for r in result["book"] if r["listing_id"] == str(listing["id"]))
+    assert row["acceptance_rate"] is None
+    assert row["median_seconds"] is None
+    assert row["rank_score"] is None
+    # Unmeasured is not excluded: it is the only listing in the book and it
+    # still fills the job.
+    assert result["tasks_filled"] == 1
 
 
 def test_the_module_never_reaches_for_the_runtime():

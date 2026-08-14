@@ -288,13 +288,14 @@ class FlashmlConfig:
     python: str | None = None
     #: Market opt-in pricing. ``None`` (default) means today's behavior:
     #: workspace only, free. A price block declares ``max_per_hour`` (decimal
-    #: ZC, converted to millicredits) — the ONLY key Phase 1 enforces.
-    #: ``objective`` and ``budget`` are refused outright if present, not
-    #: parsed and quietly ignored: neither is wired to real behavior yet
-    #: (objective-driven plan selection and the claim-side spend guard that
-    #: would enforce a budget are both Phase 2), and accepting either would
-    #: let a submitter believe a knob does something it cannot yet do.
-    #: Shape: ``{"max_zc_per_hour": int}``.
+    #: ZC, converted to millicredits) and may declare ``objective``, which
+    #: names the order the router ranks the book in (:data:`PRICE_OBJECTIVES`,
+    #: default :data:`DEFAULT_PRICE_OBJECTIVE`).
+    #: ``budget`` is still refused outright if present, not parsed and quietly
+    #: ignored: the claim-side spend guard that would enforce it does not
+    #: exist, and accepting the key would let a submitter believe their job is
+    #: capped when it is not.
+    #: Shape: ``{"max_zc_per_hour": int, "objective": str}``.
     price: dict | None = None
     #: Where this job is willing to run. ``None`` (default) means "let the
     #: router derive it from ``resources``", which is what every config
@@ -906,6 +907,30 @@ def _validate_timeout_seconds(value: object) -> int | None:
     return value
 
 
+#: What ``price.objective`` may name, and what each one asks the router for.
+#:
+#: The same three words as ``marketplace.OBJECTIVES``, written out again
+#: rather than imported: this module validates the SHAPE of a config and
+#: knows nothing about the capability ladder, the book or the ranking
+#: arithmetic — the rule ``placement.accept`` already follows, and the reason
+#: every semantic refusal lives in ``routing``. ``test_flashml_yaml_price``
+#: asserts the two lists are the same list, which is the guard an import
+#: would have been.
+PRICE_OBJECTIVES: tuple[str, ...] = ("cheapest", "balanced", "fastest")
+
+#: The objective a priced job gets when it names none. **Owner-approved,
+#: 2026-08-13.**
+#:
+#: ``balanced`` rather than ``cheapest`` because the cheapest ask is the one
+#: number a buyer can already read off the book for themselves; what they
+#: cannot compute is price per ACCEPTED result scaled by how a machine times
+#: against its class, and that is the whole reason this market records
+#: acceptance rates and durations at all. A default of ``cheapest`` would
+#: leave both measurements unused for every submitter who did not know the
+#: knob existed.
+DEFAULT_PRICE_OBJECTIVE = "balanced"
+
+
 def _validate_price(value: object) -> dict:
     """The market opt-in. Absent means today's behavior: workspace only, free.
 
@@ -914,23 +939,22 @@ def _validate_price(value: object) -> dict:
     (more decimal places than the unit carries) is refused rather than
     rounded — a price the user typed must be the price the bid carries.
 
-    ``objective`` and ``budget`` are refused when present — final review I2:
-    neither is enforced in Phase 1 (objective-driven plan selection and the
-    claim-side spend guard a budget needs are both Phase 2), so accepting
-    either and silently doing nothing with it would tell a submitter their
-    job is protected by a cap or steered by an objective when it is not.
-    They are checked, and refused by name, BEFORE the generic unknown-key
-    check below for the same reason ``REMOVED_FEDERATED_KEYS`` is: "price:
-    unknown key(s) ['budget']" sends someone hunting for a typo in a key
-    that is spelled exactly right.
+    ``objective`` names how the router ranks the book
+    (:data:`PRICE_OBJECTIVES`), defaulting to :data:`DEFAULT_PRICE_OBJECTIVE`.
+    It was refused outright in the previous increment, as an unenforced knob;
+    it is enforced now — ``marketplace.rank_asks`` implements all three orders
+    and ``routing`` passes this value into every ``match_bid`` — so parsing it
+    tells a submitter the truth where refusing it used to.
+
+    ``budget`` is still refused when present (final review I2, Ruling 1): the
+    claim-side spend guard that would enforce a cap does not exist, and
+    accepting the key would tell a submitter their job is protected when it is
+    not. It is refused by name, BEFORE the generic unknown-key check below,
+    for the same reason ``REMOVED_FEDERATED_KEYS`` is: "price: unknown key(s)
+    ['budget']" sends someone hunting for a typo in a key that is spelled
+    exactly right.
     """
     raw = _validate_mapping(value, "price")
-    if "objective" in raw:
-        raise ConfigError(
-            "price.objective: not enforced yet — Phase 2 wires objective-"
-            "driven plan selection to this field; remove it until then "
-            f"(got {raw['objective']!r})"
-        )
     if "budget" in raw:
         raise ConfigError(
             "price.budget: not enforced yet — Phase 2 adds the claim-side "
@@ -938,12 +962,19 @@ def _validate_price(value: object) -> dict:
             f"(got {raw['budget']!r})"
         )
 
-    allowed = {"max_per_hour"}
+    allowed = {"max_per_hour", "objective"}
     unknown = set(raw) - allowed
     if unknown:
         raise ConfigError(
             f"price: unknown key(s) {sorted(unknown)!r}; "
             f"allowed: {sorted(allowed)!r}"
+        )
+
+    objective = raw.get("objective", DEFAULT_PRICE_OBJECTIVE)
+    if objective not in PRICE_OBJECTIVES:
+        raise ConfigError(
+            f"price.objective: {objective!r} is not one of "
+            f"{list(PRICE_OBJECTIVES)!r}"
         )
 
     def to_unit(field: str, val: object, *, minimum_units: int) -> int:
@@ -965,7 +996,7 @@ def _validate_price(value: object) -> dict:
         raise ConfigError("price: max_per_hour is required")
     max_zc = to_unit("max_per_hour", raw["max_per_hour"], minimum_units=1)
 
-    return {"max_zc_per_hour": max_zc}
+    return {"max_zc_per_hour": max_zc, "objective": objective}
 
 
 #: The one key ``placement:`` takes today. A constant rather than a literal

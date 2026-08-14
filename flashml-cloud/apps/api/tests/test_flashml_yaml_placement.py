@@ -62,7 +62,7 @@ def test_placement_with_price_parses_both():
         "price:\n  max_per_hour: 2.0\n"
         "placement:\n  accept:\n    - cpu-large\n"
     )
-    assert config.price == {"max_zc_per_hour": 2000}
+    assert config.price == {"max_zc_per_hour": 2000, "objective": "balanced"}
     assert config.placement == {"accept": ["cpu-large"]}
 
 

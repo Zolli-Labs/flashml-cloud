@@ -259,6 +259,29 @@ def workspace_machine_ids_for(db: psycopg.Connection, user_id: str) -> set[str]:
     return {c["machine_id"] for c in candidates if c["venue"] == "workspace"}
 
 
+def price_objective(price: Mapping[str, Any] | None) -> str:
+    """Which of :data:`marketplace.OBJECTIVES` a parsed ``price`` block asks
+    the book to be ranked by.
+
+    One reader for the field, because there are two callers — the submit
+    hook's pool-scoped explain and :func:`route_submitted_job` — and a job
+    whose explain was ranked one way and whose bid was matched another would
+    be the worst possible version of publishing the formula.
+
+    A price block that names none falls back to
+    :data:`marketplace.DEFAULT_RANK_OBJECTIVE`. Every block that came through
+    ``flashml_yaml`` carries one (that parser defaults it to ``balanced``), so
+    this fallback is only ever reached by a hand-built config — and for such a
+    caller the honest default is the engine's own, which is what this walk did
+    before objectives existed. A value that is not an objective at all is NOT
+    silently corrected here: it reaches ``marketplace`` and raises, because a
+    config asking for something this engine cannot do should say so rather
+    than quietly get something else.
+    """
+    named = dict(price or {}).get("objective")
+    return marketplace.DEFAULT_RANK_OBJECTIVE if named is None else str(named)
+
+
 def _plan_one_class(
     db: psycopg.Connection,
     *,
@@ -266,6 +289,7 @@ def _plan_one_class(
     max_zc_per_hour: int,
     tasks_wanted: int,
     reserved: set[str],
+    objective: str = marketplace.DEFAULT_RANK_OBJECTIVE,
 ) -> dict[str, Any]:
     """Rank the open book for one class, match a bid against it, and explain
     every listing's place in the outcome — matched or not.
@@ -324,6 +348,23 @@ def _plan_one_class(
     every class it walks, because "this machine is my workspace's" is a fact
     about the machine and not about the book it happens to be listed in.
 
+    ``objective`` is passed straight through to
+    :func:`marketplace.match_bid` and used again to score every row of the
+    explain, from the SAME class median the match was computed against
+    (:func:`marketplace.class_median_seconds` over the whole book, taken
+    before the workspace exclusion). The two must not be computed
+    independently: a published ``rank_score`` that disagrees with the order
+    the rows are printed in is worse than publishing nothing.
+
+    **``median_seconds`` reaches the book only above ``metrics.MIN_EVIDENCE``.**
+    ``metrics.acceptance_rates`` reports a median for any group with a timed
+    attempt in it, and one is not evidence of how long a machine takes — the
+    identical argument that constant already makes about the rate. So the
+    mapping handed to :func:`marketplace.open_asks` is built from the entries
+    that cleared the threshold, and everybody else arrives unmeasured, which
+    ranks them last under ``fastest`` and at a factor of exactly 1 under
+    ``balanced``. Neither excludes them.
+
     Private, and one class at a time, because the two jobs are genuinely
     separate: this reads and explains ONE book, and
     :func:`plan_pool_routing` decides how many books to read and with how
@@ -340,17 +381,28 @@ def _plan_one_class(
         (row["machine_id"], row["capability_class"]): row["acceptance_rate"]
         for row in rate_rows
     }
-    asks = marketplace.open_asks(db, capability_class, acceptance_rates=rates)
+    medians = {
+        (row["machine_id"], row["capability_class"]): row["median_seconds"]
+        for row in rate_rows
+        if int(row["resolved"]) >= metrics.MIN_EVIDENCE
+    }
+    asks = marketplace.open_asks(
+        db, capability_class, acceptance_rates=rates, median_seconds=medians
+    )
 
     plan = marketplace.match_bid(
         max_zc_per_hour=max_zc_per_hour,
         tasks_wanted=tasks_wanted,
         asks=asks,
         workspace_reserved=reserved,
+        objective=objective,
     )
 
     fills_by_listing = {fill.listing_id: fill for fill in plan.fills}
-    ranked = marketplace.rank_asks(asks)
+    class_median = marketplace.class_median_seconds(asks)
+    ranked = marketplace.rank_asks(
+        asks, objective=objective, class_median=class_median
+    )
 
     book: list[dict[str, Any]] = []
     nearest_miss: dict[str, Any] | None = None
@@ -405,6 +457,9 @@ def _plan_one_class(
                 }
                 nearest_miss_price = price
 
+        score = marketplace.rank_score(
+            ask, objective=objective, class_median=class_median
+        )
         book.append(
             {
                 "listing_id": ask.listing_id,
@@ -412,7 +467,14 @@ def _plan_one_class(
                 "capability_class": capability_class,
                 "ask_zc_per_hour": int(ask.ask_zc_per_hour),
                 "acceptance_rate": ask.acceptance_rate,
+                "median_seconds": ask.median_seconds,
                 "effective_zc_per_hour": None if price is None else str(price),
+                # The number this row was ORDERED by under the active
+                # objective, rendered from the exact Fraction rather than a
+                # float. Under `cheapest` it repeats `effective_zc_per_hour`
+                # — kept anyway, so a reader never has to know which
+                # objective is live to know which field to look at.
+                "rank_score": None if score is None else str(score),
                 "tasks_assigned": tasks_assigned,
                 "excluded": excluded,
             }
@@ -439,6 +501,7 @@ def plan_pool_routing(
     max_zc_per_hour: int,
     tasks_wanted: int,
     workspace_machine_ids: Collection[str] = (),
+    objective: str = marketplace.DEFAULT_RANK_OBJECTIVE,
 ) -> dict[str, Any]:
     """Walk the accepted classes in order, bidding the REMAINDER into each,
     and explain the whole outcome as one book.
@@ -495,10 +558,24 @@ def plan_pool_routing(
     so a caller that never passes it sees no exclusion. It is normalised
     once and applied to every class: workspace priority (M12) is a property
     of the machine, not of the book it is listed in.
+
+    ``objective`` orders every class's book (:data:`marketplace.OBJECTIVES`)
+    and is published back in the result, together with the ``formula`` that
+    describes it, so the plan says what it optimised for rather than leaving
+    a reader to infer it from the ordering. The formula string comes from
+    :data:`marketplace.OBJECTIVE_FORMULAS` — never a literal here — so the
+    published arithmetic and the arithmetic cannot drift apart. It defaults
+    to the engine's ``cheapest``: a caller that names no objective gets the
+    order this walk had before objectives existed.
     """
     reserved = {str(machine_id) for machine_id in workspace_machine_ids}
     classes = [str(name) for name in accept_classes]
     wanted = max(int(tasks_wanted), 0)
+    # Before the walk, so an objective this engine does not have is refused
+    # even when there is no book to rank — an empty accept list or a
+    # zero-task job would otherwise validate it nowhere and publish it
+    # anyway.
+    formula = marketplace.objective_formula(objective)
 
     book: list[dict[str, Any]] = []
     class_plans: list[dict[str, Any]] = []
@@ -516,6 +593,7 @@ def plan_pool_routing(
             max_zc_per_hour=max_zc_per_hour,
             tasks_wanted=remaining,
             reserved=reserved,
+            objective=objective,
         )
         book.extend(one["book"])
         class_plans.append(
@@ -535,6 +613,8 @@ def plan_pool_routing(
 
     return {
         "accept": list(classes),
+        "objective": objective,
+        "formula": formula,
         "tasks_wanted": wanted,
         "tasks_filled": wanted - remaining,
         "tasks_unfilled": remaining,
@@ -633,6 +713,14 @@ def route_submitted_job(
     belt-and-braces for a future non-autocommit connection mode, not the
     mechanism that keeps this function's writes atomic today.
 
+    ``config.price["objective"]`` decides how every class's book is ranked
+    (:func:`price_objective`), and the response says so: ``objective`` and
+    ``formula`` ride back with the book, next to the ``rank_score`` on each
+    row. Publishing the formula is deliberate — a buyer who can see the
+    arithmetic can check that a dearer machine really did win on measured
+    evidence, which is the only thing that makes "we picked this one for you"
+    a claim rather than an assertion.
+
     ``config.resources``/``config.placement`` deciding the accepted classes
     here is the SECOND time they are read: the handler already ran
     :func:`job_accept_classes` at validation time, before the coordinator
@@ -655,6 +743,7 @@ def route_submitted_job(
     ``plan_pool_routing``'s own read already sits.
     """
     price = config.price
+    objective = price_objective(price)
     accept = job_accept_classes(config.resources, getattr(config, "placement", None))
     # One estimate for the whole job, reused for every class's bid. A task
     # is not faster on a bigger machine by any number this function can
@@ -670,6 +759,7 @@ def route_submitted_job(
         max_zc_per_hour=price["max_zc_per_hour"],
         tasks_wanted=task_count,
         workspace_machine_ids=workspace_machine_ids_for(db, user_id),
+        objective=objective,
     )
 
     # One transaction for EVERY write in the walk. psycopg3's `transaction()`
@@ -705,6 +795,12 @@ def route_submitted_job(
         key: planned[key]
         for key in (
             "accept",
+            # Published, not merely obeyed: `objective` says what this job
+            # asked the book to be ranked by and `formula` says what that
+            # meant in arithmetic, beside the `rank_score` every row carries.
+            # A buyer can then check the ordering instead of trusting it.
+            "objective",
+            "formula",
             "tasks_wanted",
             "tasks_filled",
             "tasks_unfilled",
