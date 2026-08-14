@@ -38,10 +38,16 @@ function defaultBeatIndex(count: number): number {
 export function RecoveryStack({
   items,
   beatIndex,
+  active = true,
 }: {
   items: readonly string[];
   /** Which row is the survivor. Defaults to the second — see above. */
   beatIndex?: number;
+  /** `false` when `#recover`'s pinned scroll-scrub is driving these same
+   * `[data-recovery-row]` elements itself — see the identical prop on
+   * `SectionReveal`. Skips this component's own reveal outright so the two
+   * timelines never fight over the same rows' opacity/transform. */
+  active?: boolean;
 }) {
   const root = useRef<HTMLOListElement>(null);
   const { reduced, desktop } = useLandingMotion();
@@ -53,7 +59,7 @@ export function RecoveryStack({
   useGSAP(
     () => {
       const rootElement = root.current;
-      if (!rootElement) return;
+      if (!rootElement || !active) return;
 
       const rows = gsap.utils.toArray<HTMLElement>(
         rootElement.querySelectorAll("[data-recovery-row]"),
@@ -99,7 +105,7 @@ export function RecoveryStack({
         );
       });
     },
-    { scope: root, dependencies: [reduced, desktop, beat], revertOnUpdate: true },
+    { scope: root, dependencies: [reduced, desktop, beat, active], revertOnUpdate: true },
   );
 
   return (

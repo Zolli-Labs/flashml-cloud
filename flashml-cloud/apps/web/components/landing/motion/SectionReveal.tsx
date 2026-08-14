@@ -20,6 +20,7 @@ export function SectionReveal({
   className,
   lineClassName,
   bottomLineClassName,
+  active = true,
 }: {
   children: ReactNode;
   className?: string;
@@ -33,6 +34,19 @@ export function SectionReveal({
   lineClassName?: string;
   /** Same shim as `lineClassName`, for the line below the content. */
   bottomLineClassName?: string;
+  /**
+   * `false` when a caller is driving this exact content with its OWN
+   * timeline instead — `#recover`'s pinned scroll-scrub
+   * (`components/landing/RecoveryDemo.tsx`) is the first: on desktop with a
+   * fine pointer, the pin's five-beat timeline replaces this component's
+   * entrance entirely, and running both would animate the same elements
+   * twice. `active={false}` skips the effect body outright — no
+   * `gsap.set`, no `ScrollTrigger`, nothing — so `children` render at
+   * their plain CSS visibility and whatever OTHER timeline owns them can
+   * set their starting state itself. Every other call site leaves this at
+   * the default and is unaffected.
+   */
+  active?: boolean;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const { reduced, desktop } = useLandingMotion();
@@ -40,7 +54,7 @@ export function SectionReveal({
   useGSAP(
     () => {
       const rootElement = root.current;
-      if (!rootElement) return;
+      if (!rootElement || !active) return;
 
       // Callers mark each logical group inside — headline, copy, visual —
       // with `data-reveal-content`, in DOM order, and that order becomes the
@@ -82,7 +96,7 @@ export function SectionReveal({
           stagger: seconds(SECTION_REVEAL_STAGGER_MS),
         });
     },
-    { scope: root, dependencies: [reduced, desktop], revertOnUpdate: true },
+    { scope: root, dependencies: [reduced, desktop, active], revertOnUpdate: true },
   );
 
   return (

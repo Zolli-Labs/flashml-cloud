@@ -46,9 +46,19 @@ function formatOffset(seconds: number): string {
 
 export function LedgerRow({ event }: { event: LedgerEvent }) {
   return (
-    <li className="grid grid-cols-[0.3rem_minmax(0,1fr)] gap-x-3 border-b border-border py-3 last:border-b-0">
+    <li
+      // Both attributes are pure hooks for `RecoveryDemo.tsx`'s pinned
+      // scroll-scrub — this component itself reads neither. `data-ledger-row`
+      // lets the scrub select rows by protocol event type rather than by
+      // array position, so it cannot desync if `RECOVERY_EVENTS` is ever
+      // reordered; `data-ledger-dot` is the ONE row (NODE_HEARTBEAT_LOST)
+      // that scrub gives a one-shot halo pulse.
+      data-ledger-row={event.type}
+      className="grid grid-cols-[0.3rem_minmax(0,1fr)] gap-x-3 border-b border-border py-3 last:border-b-0"
+    >
       <span
         aria-hidden
+        data-ledger-dot={event.type === "NODE_HEARTBEAT_LOST" ? "" : undefined}
         className={`mt-[0.55rem] h-1.5 w-1.5 self-start rounded-full ${TONE_MARK[event.tone]}`}
       />
       <div className="min-w-0">
