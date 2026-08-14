@@ -95,6 +95,13 @@ substrate) and `2026-08-11-zolli-marketplace-design.md` (vocabulary M1–M14).
    totals — the console's fourth donut appears by itself when the API sends
    it), coarse IP-geo fallback for hosts who never declare, and a
    `.console-instrument` alias in `globals.css` for the dark panel scope.
+10. **Grant-mechanism prerequisites** (from routing Phase 1's final review;
+    load-bearing the moment `live_matches_for_machine` gets its production
+    caller): `can_cover` enforced at grant time (`marketplace.py` ~1932's
+    docstring already assumes it) and a reaper for stale granted matches
+    (`close_match` exists with no caller). Also then: an Entitlements column
+    on `/market/providers` — matches-by-machine, state in granted/claimed —
+    beside the claim-side active-lease count, which it leads by design.
 
 ## Non-goals
 
