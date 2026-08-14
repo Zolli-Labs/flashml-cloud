@@ -50,6 +50,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
+from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import marketplace as marketmod
 from flashml_cloud_api import routing as routingmod
 from flashml_cloud_api.app import create_cloud_app
@@ -81,14 +82,21 @@ BASE_YAML = """
 
 PRICE_BLOCK = "    price:\n      max_per_hour: 5.00\n"
 GPU_BLOCK = "    resources:\n      gpus: 1\n"
+#: I1, final review: a non-numeric `gpus` must 400 (`routing.UnroutableResources`),
+#: never reach `int()`/`float()` unguarded and 500.
+MALFORMED_RESOURCES_BLOCK = "    resources:\n      gpus: one\n"
 
 CLEAN_YAML = BASE_YAML
 PRICED_YAML = BASE_YAML + PRICE_BLOCK
 GPU_PRICED_YAML = BASE_YAML + PRICE_BLOCK + GPU_BLOCK
+MALFORMED_RESOURCES_PRICED_YAML = BASE_YAML + PRICE_BLOCK + MALFORMED_RESOURCES_BLOCK
 
 CLEAN_REPO = {"flashml.yaml": CLEAN_YAML, "train.py": CLEAN_TRAIN_PY}
 PRICED_REPO = {"flashml.yaml": PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
 GPU_PRICED_REPO = {"flashml.yaml": GPU_PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
+MALFORMED_RESOURCES_PRICED_REPO = {
+    "flashml.yaml": MALFORMED_RESOURCES_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
+}
 
 # A federated config, priced. `mode: federated` requires `version: 2` and
 # `epochs` (flashml_yaml._validate_mode); the price block is layered on top
@@ -482,6 +490,118 @@ def test_a_priced_pool_job_creates_a_bid_and_matches(make_client, db, _withdraw_
 
 
 # ---------------------------------------------------------------------------
+# C1 (final review): the book must respect pools/workspace.
+#
+# Part 1 — workspace exclusion applies to EVERY priced job, pooled or not:
+# a machine bound to a pool the submitter belongs to is withheld from the
+# bid entirely (`excluded: "workspace-free"`), never merely priced out of
+# it, even when the job itself carries no `pool` scoping.
+#
+# Part 2 — a pool-scoped priced job creates NO bid at all: the coordinator's
+# own pool gate already confines it to the pool's machines, which are free
+# to every member, so a bid could only ever charge a pool-mate wrongly or
+# sit open and inert against non-members who can never claim it. The explain
+# still runs, read-only, so the submitter sees the same ranked book (with
+# the pool's members labelled `workspace-free`) they would have gotten from
+# a real bid.
+# ---------------------------------------------------------------------------
+
+
+def _add_pool_member(db, pool_id: str, user_id: str) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.pool_members (pool_id, user_id)"
+            " values (%s::uuid, %s::uuid)",
+            (pool_id, user_id),
+        )
+
+
+def test_a_pool_scoped_priced_job_creates_no_bid(make_client, db, _withdraw_after):
+    client = make_client(PRICED_REPO)
+    alice = _new_user(db)
+    pool = dbmod.create_pool(db, name="alices-team", owner_id=alice)
+    pool_id = str(pool["id"])
+
+    host = _new_user(db)
+    _add_pool_member(db, pool_id, host)
+    machine = _machine(db, host, capabilities=CPU_SMALL)
+    listing = marketmod.create_listing(
+        db, machine_id=machine, owner_id=host, ask_zc_per_hour=100,
+    )
+    _withdraw_after.append((str(listing["id"]), host))
+    dbmod.bind_machine_pool(db, machine_id=machine, pool_id=pool_id)
+
+    r = _post(client, _jwt(alice), pool=pool_id)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+
+    routing_block = body["routing"]
+    assert routing_block["state"] == "skipped"
+    assert routing_block["reason"] == "pool-capacity-is-free"
+    assert routing_block["capability_class"] == "cpu-small"
+    assert routing_block["tasks_wanted"] == 1
+
+    book_by_machine = {row["machine_id"]: row for row in routing_block["book"]}
+    assert book_by_machine[machine]["excluded"] == "workspace-free"
+
+    # The whole point: no bid, ever, for a pool-scoped priced job.
+    assert _bids_for_job(db, job_id) == []
+    # The job itself still exists — this is a routing skip, not a refusal.
+    assert _job_rows(db, alice) != []
+
+
+def test_workspace_machines_are_excluded_from_an_unpooled_priced_bid(
+    make_client, db, _withdraw_after
+):
+    client = make_client(PRICED_REPO)
+    alice = _new_user(db)
+    pool = dbmod.create_pool(db, name="alices-team", owner_id=alice)
+    pool_id = str(pool["id"])
+
+    teammate = _new_user(db)
+    _add_pool_member(db, pool_id, teammate)
+    # Cheaper ask than the stranger below — if workspace exclusion did not
+    # apply, this listing would rank FIRST and be the one matched.
+    workspace_machine = _machine(db, teammate, capabilities=CPU_SMALL)
+    workspace_listing = marketmod.create_listing(
+        db, machine_id=workspace_machine, owner_id=teammate, ask_zc_per_hour=50,
+    )
+    _withdraw_after.append((str(workspace_listing["id"]), teammate))
+    dbmod.bind_machine_pool(db, machine_id=workspace_machine, pool_id=pool_id)
+
+    stranger = _new_user(db)
+    market_machine = _machine(db, stranger, capabilities=CPU_SMALL)
+    market_listing = marketmod.create_listing(
+        db, machine_id=market_machine, owner_id=stranger, ask_zc_per_hour=100,
+    )
+    _withdraw_after.append((str(market_listing["id"]), stranger))
+
+    # Unpooled submit — no `pool=` on the request at all.
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+    routing_block = body["routing"]
+    assert routing_block["state"] == "routed"
+
+    book_by_listing = {row["listing_id"]: row for row in routing_block["book"]}
+    ws_row = book_by_listing[str(workspace_listing["id"])]
+    assert ws_row["excluded"] == "workspace-free"
+    assert ws_row["tasks_assigned"] == 0
+
+    market_row = book_by_listing[str(market_listing["id"])]
+    assert market_row["excluded"] is None
+    assert market_row["tasks_assigned"] == 1
+
+    bids = _bids_for_job(db, job_id)
+    assert len(bids) == 1
+    matches = _matches_for_bid(db, bids[0]["id"])
+    assert len(matches) == 1
+    assert str(matches[0]["listing_id"]) == str(market_listing["id"])
+
+
+# ---------------------------------------------------------------------------
 # 2. no price, no routing — byte-identical to today
 # ---------------------------------------------------------------------------
 
@@ -581,6 +701,24 @@ def test_a_gpu_priced_job_is_refused_before_the_coordinator(make_client, db, tra
 
     assert r.status_code == 400, r.text
     assert "gpuPerTask" in r.json()["detail"]
+    assert _job_rows(db, alice) == []
+    assert transport.job_submissions == []
+
+
+def test_a_priced_job_with_non_numeric_gpus_400s_not_500s(make_client, db, transport):
+    """I1, final review: `job_capability_class` coerces `resources.gpus`
+    with `int()`; a non-numeric value used to escape as a raw, unhandled
+    `ValueError` — a 500 with no job row visible to anyone but the log.
+    `routing.UnroutableResources` now names it, and the SAME validation-time
+    except clause that already catches `GpuRoutingUnavailable` (before the
+    coordinator is ever asked) catches this too."""
+    client = make_client(MALFORMED_RESOURCES_PRICED_REPO)
+    alice = _new_user(db)
+
+    r = _post(client, _jwt(alice))
+
+    assert r.status_code == 400, r.text
+    assert "gpus" in r.json()["detail"]
     assert _job_rows(db, alice) == []
     assert transport.job_submissions == []
 

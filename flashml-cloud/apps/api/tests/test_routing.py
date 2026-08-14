@@ -12,6 +12,7 @@ from flashml_cloud_api import marketplace as mk
 from flashml_cloud_api import routing
 from flashml_cloud_api.routing import (
     GpuRoutingUnavailable,
+    UnroutableResources,
     job_capability_class,
     plan_pool_routing,
 )
@@ -48,6 +49,27 @@ def test_a_boolean_gpu_flag_is_checked_before_any_coercion():
     with pytest.raises(GpuRoutingUnavailable, match="gpuPerTask"):
         job_capability_class({"gpus": True})
     assert job_capability_class({"gpus": False}) == "cpu-small"
+
+
+def test_a_non_numeric_gpus_is_a_typed_refusal_not_a_bare_typeerror():
+    """I1, final review: a string `int()` cannot parse used to escape as a
+    raw `ValueError` — 500 territory for the submit hook. `UnroutableResources`
+    is the sibling of `GpuRoutingUnavailable`, named so the submit hook's
+    validation-time except clause can catch it and answer 400."""
+    with pytest.raises(UnroutableResources, match="gpus"):
+        job_capability_class({"gpus": "one"})
+
+
+def test_a_list_or_dict_gpus_is_also_refused_not_a_bare_typeerror():
+    with pytest.raises(UnroutableResources, match="gpus"):
+        job_capability_class({"gpus": [1]})
+    with pytest.raises(UnroutableResources, match="gpus"):
+        job_capability_class({"gpus": {"count": 1}})
+
+
+def test_a_non_numeric_cpus_is_a_typed_refusal_not_a_bare_valueerror():
+    with pytest.raises(UnroutableResources, match="cpus"):
+        job_capability_class({"cpus": "many"})
 
 
 # ---------------------------------------------------------------------------
@@ -259,3 +281,94 @@ def test_an_empty_book_explains_itself(db, _clean_hopper_book):
     assert result["tasks_filled"] == 0
     assert result["tasks_unfilled"] == 5
     assert result["plan"].fills == ()
+
+
+# ---------------------------------------------------------------------------
+# I4 (final review): the rest of the `excluded` vocabulary.
+# `test_the_book_is_ranked_and_matched_at_asks` above only ever exercises
+# "ask-above-cap"; these two pin the other two named reasons — an unproven
+# host past the 1/4 share cap, and a clearing listing the bid ran out of
+# tasks before reaching.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unproven_host_past_the_share_cap_is_excluded(db, _clean_hopper_book):
+    """Two unproven hosts (zero resolved attempts each, so both stay below
+    `metrics.MIN_EVIDENCE`) both clear an 8-task bid's cap.
+    `marketplace.unproven_task_budget(8)` is 2, so the cheaper one fills the
+    whole unproven share and the second — which would ALSO have cleared,
+    with 6 of the 8 tasks still wanted — is excluded `unproven-cap`, not
+    folded into `no-tasks-left` or any other reason."""
+    host = make_user(db)
+    first = make_machine(db, host)
+    second = make_machine(db, host)
+    # Neither gets `resolve_attempts`: both stay unproven.
+
+    listing_first = mk.create_listing(
+        db, machine_id=first, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=2,
+    )
+    listing_second = mk.create_listing(
+        db, machine_id=second, owner_id=host, ask_zc_per_hour=200,
+        max_concurrent_tasks=6,
+    )
+
+    result = plan_pool_routing(
+        db, capability_class=CLASS, max_zc_per_hour=250, tasks_wanted=8,
+    )
+
+    by_id = {row["listing_id"]: row for row in result["book"]}
+
+    row_first = by_id[str(listing_first["id"])]
+    assert row_first["excluded"] is None
+    assert row_first["tasks_assigned"] == 2  # unproven_task_budget(8) == 2
+
+    row_second = by_id[str(listing_second["id"])]
+    assert row_second["excluded"] == "unproven-cap"
+    assert row_second["tasks_assigned"] == 0
+
+    assert result["tasks_filled"] == 2
+    assert result["tasks_unfilled"] == 6
+
+
+def test_a_clearing_listing_beyond_the_wanted_tasks_is_no_tasks_left(
+    db, _clean_hopper_book
+):
+    """A cheap, PROVEN listing with enough capacity fills the whole bid by
+    itself; a second, still-clearing, still-proven listing ranked right
+    behind it is excluded `no-tasks-left` — it never got the chance to
+    clear because nothing was left to buy, not because its own price or
+    evidence disqualified it (both would otherwise be `ask-above-cap`- or
+    `unproven-cap`-eligible, and neither is what actually excluded it)."""
+    host = make_user(db)
+    cheap = make_machine(db, host)
+    also_clears = make_machine(db, host)
+
+    resolve_attempts(db, cheap, accepted=5, failed=0)
+    resolve_attempts(db, also_clears, accepted=5, failed=0)
+
+    listing_cheap = mk.create_listing(
+        db, machine_id=cheap, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=5,
+    )
+    listing_also = mk.create_listing(
+        db, machine_id=also_clears, owner_id=host, ask_zc_per_hour=150,
+        max_concurrent_tasks=5,
+    )
+
+    result = plan_pool_routing(
+        db, capability_class=CLASS, max_zc_per_hour=250, tasks_wanted=2,
+    )
+
+    by_id = {row["listing_id"]: row for row in result["book"]}
+
+    row_cheap = by_id[str(listing_cheap["id"])]
+    assert row_cheap["excluded"] is None
+    assert row_cheap["tasks_assigned"] == 2
+
+    row_also = by_id[str(listing_also["id"])]
+    assert row_also["excluded"] == "no-tasks-left"
+    assert row_also["tasks_assigned"] == 0
+
+    assert result["tasks_filled"] == 2
+    assert result["tasks_unfilled"] == 0

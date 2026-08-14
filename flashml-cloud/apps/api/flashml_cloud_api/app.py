@@ -418,10 +418,17 @@ def _parse_and_preflight_tree(
     # runtime drops `gpuPerTask`, so a bid sized for GPU capacity would be
     # priced for hardware nobody can actually claim against. An unpriced GPU
     # job is untouched by this check and submits exactly as it does today.
+    #
+    # Same validation-time refusal for a `resources.cpus`/`gpus` value
+    # `job_capability_class` cannot read as a count at all (a string, a
+    # list, a dict) — `routing.UnroutableResources` — so a malformed
+    # `resources:` block 400s here, before a job row exists, instead of
+    # reaching the routing hook's fail-open catch after the job (and its
+    # row) already exist and turning into an unhandled 500.
     if config.price is not None:
         try:
             routingmod.job_capability_class(config.resources)
-        except routingmod.GpuRoutingUnavailable as exc:
+        except (routingmod.GpuRoutingUnavailable, routingmod.UnroutableResources) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
     try:
@@ -6607,10 +6614,10 @@ def create_cloud_app(
         # would have succeeded into a failure — same fail-open discipline as
         # `_human_spend_guard` and its callers: any exception anywhere in
         # this block — including this line's own task-count lookup, and
-        # anything `route_submitted_job` raises — leaves the submit itself
-        # untouched. `route_submitted_job` is ITSELF atomic (its own
-        # docstring: `create_bid` + `grant_matches` share one
-        # `db.transaction()`), so a "skipped" response below is never
+        # anything `route_submitted_job`/`plan_pool_routing` raises — leaves
+        # the submit itself untouched. `route_submitted_job` is ITSELF
+        # atomic (its own docstring: `create_bid` + `grant_matches` share
+        # one `db.transaction()`), so a "skipped" response below is never
         # describing a book with an orphaned bid in it — this block does not
         # need to, and does not, undo routing's writes; there are none left
         # to undo. A GPU-priced job never reaches here: `_parse_and_preflight_tree`
@@ -6631,14 +6638,47 @@ def create_cloud_app(
                         "size the routing bid"
                     )
                 task_count = len(list(expand_tasks(job_id, candidate_spec))) or 1
-                routing_block = routingmod.route_submitted_job(
-                    db,
-                    user_id=user_id,
-                    job_id=job_id,
-                    config=config,
-                    task_count=task_count,
-                )
-            except Exception:
+                if pool is not None:
+                    # Pool-scoped priced jobs create NO bid (C1 part 2, final
+                    # review). The coordinator's own pool gate already
+                    # confines this job to machines bound to `pool`, which
+                    # are free to every member (M1/M12) — a bid here could
+                    # only ever charge a pool-mate wrongly for capacity they
+                    # already have for free, or sit open and inert against
+                    # non-members who can never pass the coordinator's gate
+                    # to claim it (`marketplace.live_matches_for_machine` has
+                    # no production caller, so a grant to a non-member would
+                    # never even be read). The explain still runs — read-only,
+                    # no `create_bid`, no `grant_matches` — so the response
+                    # shows exactly what a bid would have seen: the pool's
+                    # own members, labelled `workspace-free` the same as any
+                    # other workspace exclusion.
+                    klass = routingmod.job_capability_class(config.resources)
+                    planned = routingmod.plan_pool_routing(
+                        db,
+                        capability_class=klass,
+                        max_zc_per_hour=config.price["max_zc_per_hour"],
+                        tasks_wanted=task_count,
+                        workspace_machine_ids=routingmod.workspace_machine_ids_for(
+                            db, user_id
+                        ),
+                    )
+                    routing_block = {
+                        "state": "skipped",
+                        "reason": "pool-capacity-is-free",
+                        "book": planned["book"],
+                        "capability_class": planned["capability_class"],
+                        "tasks_wanted": planned["tasks_wanted"],
+                    }
+                else:
+                    routing_block = routingmod.route_submitted_job(
+                        db,
+                        user_id=user_id,
+                        job_id=job_id,
+                        config=config,
+                        task_count=task_count,
+                    )
+            except Exception as exc:
                 # Belt-and-braces, not the atomicity guarantee: under
                 # autocommit (this deployment's current mode) every
                 # statement inside `route_submitted_job`'s own
@@ -6657,8 +6697,16 @@ def create_cloud_app(
                     db.rollback()
                 except Exception:
                     pass
+                # `repr(exc)` (I3, final review): "routing failed open" alone
+                # cannot tell a broken market path (a bug worth paging on)
+                # from ordinary no-priced-traffic quiet — the two produce the
+                # identical log line otherwise.
                 log.warning(
-                    json.dumps({"text": "routing failed open", "job_id": job_id})
+                    json.dumps({
+                        "text": "routing failed open",
+                        "job_id": job_id,
+                        "error": repr(exc),
+                    })
                 )
                 routing_block = {"state": "skipped", "reason": "routing-error"}
 
@@ -7710,6 +7758,16 @@ def create_cloud_app(
         Read-only: no bid is created, no match is granted, nothing is
         written. ``plan_pool_routing``'s ``"plan"`` key (a ``MatchPlan``
         dataclass, not JSON-safe) never leaves this handler.
+
+        ``workspace_machine_ids`` is re-derived for the BID'S owner
+        (``row["owner_id"]``, same as the bid lookup above), not the
+        caller — the same distinction the bid lookup itself draws — so a
+        pool-mate inspecting a teammate's routed job sees the same
+        ``workspace-free`` labels the submitter's own submit response did,
+        never a stranger's recomputation of "whose workspace is this".
+        Without this the recomputation here would silently diverge from
+        ``route_submitted_job``'s (C1, final review) the moment the
+        submitter has any workspace machine in the book.
         """
         row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
         if row is None:
@@ -7725,6 +7783,9 @@ def create_cloud_app(
             capability_class=bid["capability_class"],
             max_zc_per_hour=bid["max_zc_per_hour"],
             tasks_wanted=bid["tasks_wanted"],
+            workspace_machine_ids=routingmod.workspace_machine_ids_for(
+                db, row["owner_id"]
+            ),
         )
         live_book.pop("plan", None)
 

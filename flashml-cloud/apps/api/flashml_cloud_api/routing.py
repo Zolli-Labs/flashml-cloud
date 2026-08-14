@@ -7,7 +7,8 @@ matching stays `marketplace`'s. Everything here is orchestration and reasons.
 """
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Collection, Mapping
+from typing import Any
 
 import psycopg
 
@@ -26,6 +27,19 @@ class GpuRoutingUnavailable(ValueError):
     """
 
 
+class UnroutableResources(ValueError):
+    """`resources` names a `cpus`/`gpus` value `job_capability_class` cannot
+    read as a count — a string, a list, a dict, anything `int()`/`float()`
+    itself refuses.
+
+    Sibling to :class:`GpuRoutingUnavailable`, and refused the same way:
+    loudly and by name, rather than letting a bare `TypeError`/`ValueError`
+    from the coercion escape to a caller that only expects the GPU refusal.
+    The submit hook's pre-coordinator validation catches both, turning
+    either into a 400 instead of this one surfacing as an unhandled 500.
+    """
+
+
 def job_capability_class(resources: Mapping[str, Any] | None) -> str:
     """The class the JOB needs — a property of the work (marketplace.py:1639)."""
     res = dict(resources or {})
@@ -37,9 +51,14 @@ def job_capability_class(resources: Mapping[str, Any] | None) -> str:
     # old guard caught one bool value and not the other. Checking the raw
     # value first makes both explicit and symmetric.
     raw_gpus = res.get("gpus")
-    wants_gpu = raw_gpus is True or (
-        not isinstance(raw_gpus, bool) and int(raw_gpus or 0) > 0
-    )
+    try:
+        wants_gpu = raw_gpus is True or (
+            not isinstance(raw_gpus, bool) and int(raw_gpus or 0) > 0
+        )
+    except (TypeError, ValueError):
+        raise UnroutableResources(
+            f"price: resources.gpus must be a number, got {raw_gpus!r}"
+        ) from None
     if wants_gpu:
         raise GpuRoutingUnavailable(
             "price: routing for gpus > 0 is not available yet — the pinned "
@@ -47,9 +66,36 @@ def job_capability_class(resources: Mapping[str, Any] | None) -> str:
             "gpus: 0 until the 0.6.1 pin bump."
         )
     cpus = res.get("cpus") or 0
-    if float(cpus) >= marketplace.CPU_LARGE_MIN_CORES:
+    try:
+        cpu_count = float(cpus)
+    except (TypeError, ValueError):
+        raise UnroutableResources(
+            f"price: resources.cpus must be a number, got {cpus!r}"
+        ) from None
+    if cpu_count >= marketplace.CPU_LARGE_MIN_CORES:
         return "cpu-large"
     return "cpu-small"
+
+
+def workspace_machine_ids_for(db: psycopg.Connection, user_id: str) -> set[str]:
+    """Every machine withheld from ``user_id``'s priced bids because it is
+    already theirs for free — the ``workspace_machine_ids`` set
+    :func:`plan_pool_routing` passes to :func:`marketplace.match_bid` as
+    ``workspace_reserved`` (M12: workspace demand takes priority over the
+    open book, C1 final review).
+
+    Reuses :func:`db.router_candidates_for_owner` rather than re-deriving
+    the pool-membership query: that function already computes exactly this
+    set as its ``venue == "workspace"`` rows — the account's own machines,
+    plus every machine bound to a pool it is a live member of — for the
+    routing/cost-preview surface. A second, hand-rolled membership query
+    here would be the same drift ``tests/test_router_evidence.py`` polices
+    for acceptance-rate rows (see :func:`plan_pool_routing`'s own
+    docstring): one owner for "which machines are this account's
+    workspace", not two.
+    """
+    candidates = dbmod.router_candidates_for_owner(db, user_id)
+    return {c["machine_id"] for c in candidates if c["venue"] == "workspace"}
 
 
 def plan_pool_routing(
@@ -58,6 +104,7 @@ def plan_pool_routing(
     capability_class: str,
     max_zc_per_hour: int,
     tasks_wanted: int,
+    workspace_machine_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Rank the open book for one class, match a bid against it, and explain
     every listing's place in the outcome — matched or not.
@@ -90,8 +137,17 @@ def plan_pool_routing(
     plan's own fills and its own ``unproven_task_cap`` (never a locally
     recomputed one) to attribute a reason to whatever did not fill:
 
+    - **``"workspace-free"``** — the machine is in ``workspace_machine_ids``:
+      bound to a pool the caller belongs to, and withheld from this bid
+      entirely by :func:`marketplace.match_bid`'s ``workspace_reserved``
+      exclusion (M12: workspace demand takes priority over the open book).
+      Checked first, and unconditionally: a reserved machine was never
+      actually offered to this bid, so describing it as too expensive or out
+      of tasks would describe a negotiation that never happened. It is FREE
+      to the caller for exactly the same reason it is withheld — not priced
+      out, priced at zero, elsewhere (M1).
     - **``"ask-above-cap"``** — its effective price does not clear the bid at
-      all (unclearable counts as this too). Checked first, and independent of
+      all (unclearable counts as this too). Checked next, and independent of
       how much of the bid was already spent: a listing that could never have
       cleared this bid is a more useful answer than "there was nothing left to
       buy", even when both happen to be true of the same listing.
@@ -101,7 +157,15 @@ def plan_pool_routing(
     - **``"unproven-cap"``** — it would have cleared and tasks remained, but
       it is unproven and the plan's own unproven share was already spent by
       unproven listings ranked ahead of it.
+
+    ``workspace_machine_ids`` is the caller's to derive — see
+    :func:`workspace_machine_ids_for` for the one sanctioned way to compute
+    "which machines are this account's workspace" — and defaults to empty,
+    so an existing caller that never passes it (the routing-inspection GET
+    route re-explaining a bid that predates this parameter) sees no change.
     """
+    reserved = {str(machine_id) for machine_id in workspace_machine_ids}
+
     unrated = marketplace.open_asks(db, capability_class)
     machine_ids = [ask.machine_id for ask in unrated]
     rate_rows = metrics.acceptance_rates(
@@ -117,6 +181,7 @@ def plan_pool_routing(
         max_zc_per_hour=max_zc_per_hour,
         tasks_wanted=tasks_wanted,
         asks=asks,
+        workspace_reserved=reserved,
     )
 
     fills_by_listing = {fill.listing_id: fill for fill in plan.fills}
@@ -137,20 +202,33 @@ def plan_pool_routing(
             remaining -= fill.tasks
             if fill.unproven_host:
                 unproven_used += fill.tasks
+        elif str(ask.machine_id) in reserved:
+            # `match_bid` already withheld this machine from `asks` via
+            # `workspace_reserved`, so it can never appear in
+            # `fills_by_listing` — label it here rather than let it fall
+            # through the price/cap reasons below, which would describe a
+            # machine that was never actually offered to this bid.
+            tasks_assigned = 0
+            excluded = "workspace-free"
         else:
             tasks_assigned = 0
             above_cap = price is None or price > max_zc_per_hour
             if above_cap:
                 excluded = "ask-above-cap"
-            elif remaining <= 0:
-                excluded = "no-tasks-left"
-            elif ask.unproven and unproven_used >= plan.unproven_task_cap:
+            elif ask.unproven and remaining > 0 and unproven_used >= plan.unproven_task_cap:
                 excluded = "unproven-cap"
             else:
-                # Every listing with capacity, room under the cap and an
-                # untapped unproven budget should have been a fill; reaching
-                # here means a candidate's own capacity was zero rather than
-                # one of the three named reasons.
+                # `remaining <= 0` is the common way here: higher-ranked
+                # listings already filled every task wanted. The only other
+                # path into this branch is a listing with capacity, headroom
+                # under the cap and an untapped unproven budget — which
+                # `match_bid` would already have matched it. `max_concurrent_
+                # tasks > 0` is a CHECK constraint (migration
+                # 0018_marketplace.sql), so a live listing can never carry
+                # zero capacity: that second path is provably unreachable,
+                # leaving exactly one live reason to report here — collapsed
+                # into a single emission point rather than a second, silent
+                # catch-all guessing at a fourth reason that cannot occur.
                 excluded = "no-tasks-left"
 
             if nearest_miss is None and price is not None and price > max_zc_per_hour:
@@ -256,6 +334,17 @@ def route_submitted_job(
     reads "what class does this job's resources need" — a caller passing a
     stale or hand-computed class is exactly the drift a second argument
     would invite.
+
+    The book must respect pools/workspace (C1, final review): every priced
+    job — not only pool-scoped ones — withholds ``user_id``'s own workspace
+    machines from the bid it posts, via :func:`workspace_machine_ids_for`.
+    An unpooled submitter with a teammate's cheap listing in the book must
+    not have that machine matched and charged against when the same
+    capacity is theirs for free through the pool; the label the caller sees
+    for it is ``"workspace-free"`` (:func:`plan_pool_routing`). This
+    derivation is itself inside the caller's fail-open guard: it happens
+    here, before the write transaction below, exactly where
+    ``plan_pool_routing``'s own read already sits.
     """
     price = config.price
     klass = job_capability_class(config.resources)
@@ -265,6 +354,7 @@ def route_submitted_job(
         capability_class=klass,
         max_zc_per_hour=price["max_zc_per_hour"],
         tasks_wanted=task_count,
+        workspace_machine_ids=workspace_machine_ids_for(db, user_id),
     )
 
     # One transaction for both writes. psycopg3's `transaction()` nests via
@@ -301,7 +391,6 @@ def route_submitted_job(
         {
             "state": "routed",
             "bid_id": str(bid["id"]),
-            "objective": price["objective"],
         }
     )
     return out

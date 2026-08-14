@@ -23,34 +23,39 @@ def test_absent_price_is_none_and_nothing_else_changes():
 
 def test_price_parses_decimal_zc_into_the_ledger_unit():
     config = _parse("price:\n  max_per_hour: 2.00\n")
-    assert config.price == {
-        "max_zc_per_hour": 2 * ZC_PER_HOUR_UNIT,
-        "objective": "balanced",
-        "budget_zc": None,
-    }
+    assert config.price == {"max_zc_per_hour": 2 * ZC_PER_HOUR_UNIT}
 
 
-def test_objective_is_validated_and_defaulted():
-    config = _parse("price:\n  max_per_hour: 1.5\n  objective: cheapest\n")
-    assert config.price["objective"] == "cheapest"
-    with pytest.raises(ConfigError, match="objective"):
-        _parse("price:\n  max_per_hour: 1.5\n  objective: fanciest\n")
+def test_objective_is_refused_as_an_unenforced_knob():
+    """Final review I2: `objective` is not wired to any real behavior in
+    Phase 1 (objective-driven plan selection is Phase 2), so it is refused
+    outright when present — never parsed, defaulted, or silently ignored —
+    whether or not the value itself would have been a legal one."""
+    with pytest.raises(ConfigError, match="objective") as exc_info:
+        _parse("price:\n  max_per_hour: 1.5\n  objective: cheapest\n")
+    message = str(exc_info.value)
+    assert "Phase 2" in message or "not yet" in message
 
 
 def test_zero_and_negative_and_absent_max_are_refused():
     with pytest.raises(ConfigError, match="max_per_hour"):
-        _parse("price:\n  objective: balanced\n")
+        _parse("price: {}\n")
     with pytest.raises(ConfigError, match="max_per_hour"):
         _parse("price:\n  max_per_hour: 0\n")
     with pytest.raises(ConfigError, match="max_per_hour"):
         _parse("price:\n  max_per_hour: -1\n")
 
 
-def test_budget_must_cover_at_least_one_hour_at_the_cap():
-    config = _parse("price:\n  max_per_hour: 2.0\n  budget: 25\n")
-    assert config.price["budget_zc"] == 25 * ZC_PER_HOUR_UNIT
-    with pytest.raises(ConfigError, match="budget"):
-        _parse("price:\n  max_per_hour: 2.0\n  budget: 1\n")
+def test_budget_is_refused_as_an_unenforced_knob():
+    """Same reasoning as `objective` above, and the same ruling (Ruling 1,
+    2026-08-13 final review): `budget` is validated-and-stored-but-
+    unenforced was the OLD Phase 1 design; the final review refused that
+    outright rather than ship a cap users would reasonably believe is
+    live. Enforcement needs a claim-side spend guard, which is Phase 2."""
+    with pytest.raises(ConfigError, match="budget") as exc_info:
+        _parse("price:\n  max_per_hour: 2.0\n  budget: 25\n")
+    message = str(exc_info.value)
+    assert "Phase 2" in message or "not yet" in message
 
 
 def test_unknown_price_keys_are_refused_by_name():

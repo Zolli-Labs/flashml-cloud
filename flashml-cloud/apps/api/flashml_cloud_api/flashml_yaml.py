@@ -286,10 +286,14 @@ class FlashmlConfig:
     #: build (see PYTHON_PARAM for the live evidence).
     python: str | None = None
     #: Market opt-in pricing. ``None`` (default) means today's behavior:
-    #: workspace only, free. A price block declares max_per_hour (decimal ZC,
-    #: converted to millicredits), optional objective (cheapest/balanced/fastest,
-    #: default balanced), and optional budget (millicredits, must cover at least
-    #: one hour at the cap).
+    #: workspace only, free. A price block declares ``max_per_hour`` (decimal
+    #: ZC, converted to millicredits) — the ONLY key Phase 1 enforces.
+    #: ``objective`` and ``budget`` are refused outright if present, not
+    #: parsed and quietly ignored: neither is wired to real behavior yet
+    #: (objective-driven plan selection and the claim-side spend guard that
+    #: would enforce a budget are both Phase 2), and accepting either would
+    #: let a submitter believe a knob does something it cannot yet do.
+    #: Shape: ``{"max_zc_per_hour": int}``.
     price: dict | None = None
 
     @property
@@ -876,9 +880,6 @@ def _validate_timeout_seconds(value: object) -> int | None:
     return value
 
 
-_OBJECTIVES = ("cheapest", "balanced", "fastest")
-
-
 def _validate_price(value: object) -> dict:
     """The market opt-in. Absent means today's behavior: workspace only, free.
 
@@ -886,9 +887,32 @@ def _validate_price(value: object) -> dict:
     the ledger's integer unit; a value the unit cannot represent exactly
     (more decimal places than the unit carries) is refused rather than
     rounded — a price the user typed must be the price the bid carries.
+
+    ``objective`` and ``budget`` are refused when present — final review I2:
+    neither is enforced in Phase 1 (objective-driven plan selection and the
+    claim-side spend guard a budget needs are both Phase 2), so accepting
+    either and silently doing nothing with it would tell a submitter their
+    job is protected by a cap or steered by an objective when it is not.
+    They are checked, and refused by name, BEFORE the generic unknown-key
+    check below for the same reason ``REMOVED_FEDERATED_KEYS`` is: "price:
+    unknown key(s) ['budget']" sends someone hunting for a typo in a key
+    that is spelled exactly right.
     """
     raw = _validate_mapping(value, "price")
-    allowed = {"max_per_hour", "objective", "budget"}
+    if "objective" in raw:
+        raise ConfigError(
+            "price.objective: not enforced yet — Phase 2 wires objective-"
+            "driven plan selection to this field; remove it until then "
+            f"(got {raw['objective']!r})"
+        )
+    if "budget" in raw:
+        raise ConfigError(
+            "price.budget: not enforced yet — Phase 2 adds the claim-side "
+            "spend guard that would enforce it; remove it until then "
+            f"(got {raw['budget']!r})"
+        )
+
+    allowed = {"max_per_hour"}
     unknown = set(raw) - allowed
     if unknown:
         raise ConfigError(
@@ -915,15 +939,4 @@ def _validate_price(value: object) -> dict:
         raise ConfigError("price: max_per_hour is required")
     max_zc = to_unit("max_per_hour", raw["max_per_hour"], minimum_units=1)
 
-    objective = raw.get("objective", "balanced")
-    if objective not in _OBJECTIVES:
-        raise ConfigError(
-            f"price.objective: {objective!r} is not one of {_OBJECTIVES}"
-        )
-
-    budget = None
-    if raw.get("budget") is not None:
-        budget = to_unit("budget", raw["budget"], minimum_units=max_zc)
-
-    return {"max_zc_per_hour": max_zc, "objective": objective,
-            "budget_zc": budget}
+    return {"max_zc_per_hour": max_zc}
