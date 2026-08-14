@@ -41,8 +41,14 @@ function ms(iso: string): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-/** Events that close an open attempt, and what they close it as. */
-const CLOSERS: Record<string, AttemptOutcome> = {
+/** Events that close an open attempt, and what they close it as.
+ *
+ * Exported because `lib/task-detail.ts` reconstructs the same attempts at a
+ * different granularity (one task, including the events with no `node_id`
+ * that the fleet-wide walk below drops) and the two must agree on what
+ * "accepted" means by construction rather than by two copies of this table
+ * drifting apart. */
+export const ATTEMPT_CLOSERS: Record<string, AttemptOutcome> = {
   TASK_COMMIT_ACCEPTED: "accepted",
   TASK_COMMIT_REJECTED: "rejected",
   TASK_ATTEMPT_FAILED: "failed",
@@ -92,7 +98,7 @@ export function deriveAttempts(events: JobEvent[]): Attempt[] {
       continue;
     }
 
-    const outcome = CLOSERS[e.type];
+    const outcome = ATTEMPT_CLOSERS[e.type];
     if (!outcome) continue;
     const cur = open.get(key);
     if (!cur) continue; // a close with no open: ledger truncated, skip
@@ -139,6 +145,57 @@ export function deriveProgress(
     total: tasks.length,
     attemptsSpent: attempts.length,
     wasted,
+  };
+}
+
+export interface AttemptCoverage {
+  /** Where the number on screen came from. */
+  source: "ledger" | "tasks" | "none";
+  /** Attempts spent, from whichever source could answer. */
+  spent: number;
+  /** How many tasks that total is spread across. Zero for `"ledger"`, which
+   * counts reconstructed attempts rather than tasks. */
+  tasks: number;
+  /** Set ONLY for `"tasks"` — the fallback needs to say it is a fallback.
+   * Null otherwise: the ledger answering is the normal case and does not
+   * need a sentence about itself. */
+  note: string | null;
+}
+
+/**
+ * The attempt count the Placement view can honestly show, and where it came
+ * from.
+ *
+ * `deriveAttempts` above drops every event that carries no `node_id`, which
+ * is correct for the per-machine views — an attempt with no machine has no
+ * lane to draw it in. But when the ledger carries ONLY such events, the
+ * swimlanes, the topology and the progress bar's "attempts spent" all go to
+ * zero at once, and the Placement view then says nothing about attempts at
+ * all while the task table beside it plainly shows `3/4`. That reads as a
+ * console that has lost the run.
+ *
+ * The coordinator's task view carries its own tally, so the fallback is a
+ * different SOURCE for the same question rather than a guess. It is used only
+ * when the ledger produced nothing, and it says which of the two it is —
+ * silently swapping sources is how two numbers that disagree end up on one
+ * page with no explanation.
+ */
+export function deriveAttemptCoverage(
+  tasks: JobTask[],
+  attempts: Attempt[]
+): AttemptCoverage {
+  if (attempts.length > 0) {
+    return { source: "ledger", spent: attempts.length, tasks: 0, note: null };
+  }
+  const spent = tasks.reduce((n, t) => n + (t.attempts ?? 0), 0);
+  if (spent === 0) return { source: "none", spent: 0, tasks: 0, note: null };
+  return {
+    source: "tasks",
+    spent,
+    tasks: tasks.length,
+    note: `${spent} attempt${spent === 1 ? "" : "s"} across ${tasks.length} task${
+      tasks.length === 1 ? "" : "s"
+    }, counted by the coordinator. No event in this job's ledger could be placed on a machine, so there is no per-machine history to draw from it — open a task below for what the ledger does say.`,
   };
 }
 

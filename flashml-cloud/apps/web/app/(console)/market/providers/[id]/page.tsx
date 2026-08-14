@@ -5,6 +5,7 @@ import { use, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowClockwise, Warning } from "@phosphor-icons/react";
 
+import { OfficialChip } from "@/components/network/OfficialChip";
 import { ProviderDetailView } from "@/components/network/ProviderDetailView";
 import { TrustBadge } from "@/components/network/TrustBadge";
 import { PageHeader } from "@/components/shell/PageHeader";
@@ -111,6 +112,7 @@ export default function ProviderDetailPage({
         actions={
           provider ? (
             <div className="flex items-center gap-2">
+              <OfficialChip provider={provider} />
               <TrustBadge badge={provider.badge} />
               <Button
                 variant="ghost"

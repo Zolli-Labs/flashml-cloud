@@ -54,6 +54,18 @@ quote one in a support conversation, not enough to enrol as, look up, or
 attribute to a person. ``own`` says which rows are the viewer's own, and the
 owner-only block on the detail read is the only place identity appears at all.
 
+There is exactly ONE exception, and it is a column rather than a convention:
+``machines.official`` (migration 0030) marks PLATFORM-OPERATED ANCHOR CAPACITY
+— a machine Zolli Labs runs itself — and such a machine shows its real ``name``
+to everyone, owner and stranger alike, alongside ``official: true`` so the
+console can render it as what it is. That is not a hole in the rule above, it
+is the rule's own reasoning applied honestly: a name is withheld because it is
+routinely a private person's name, and these machines have an accountable
+operator who has published theirs. The exception buys nothing else — the full
+``node_id`` and ``owner_id`` stay unemitted for an official machine exactly as
+for any other, and an official machine with no name falls back to the ordinary
+``prov…`` handle rather than leaking the node id in the name's place.
+
 The anonymisation is applied where the row is built (``_provider``), not by a
 caller remembering to strip fields afterwards. A field that has to be removed
 downstream is a field that leaks the day somebody adds a second caller.
@@ -104,6 +116,13 @@ class InvalidLocation(ValueError):
     tell a caller their own input was fine when it was not."""
 
 
+class InvalidOfficial(ValueError):
+    """An ``official`` that is not a boolean. Same 400-versus-404 split as
+    ``InvalidLocation``, for the same reason: a body this API cannot read is
+    the caller's problem to fix, and answering 404 to it would send them
+    hunting for a machine that is sitting right there."""
+
+
 # ---------------------------------------------------------------------------
 # small shared shapes
 # ---------------------------------------------------------------------------
@@ -121,13 +140,30 @@ def _label(row: Mapping[str, Any], *, own: bool) -> str:
     not an identity. Six because it is enough to distinguish the rows a person
     is actually looking at while being far too little to enumerate a fleet or
     to recognise a machine somebody mentioned elsewhere.
+
+    **``official`` is the one exception** (migration 0030): a platform-operated
+    anchor machine shows its real name to EVERYONE, because the whole point of
+    the flag is that this capacity has a named, accountable operator. Two
+    things it deliberately does not do:
+
+    * It does not unlock the node id. An official machine that was never named
+      falls back to the ordinary ``prov…`` handle for a stranger — publishing
+      the enrolment handle in a missing name's place would be a leak the flag
+      was never asked for, and it would be the strangers-only branch that
+      leaked, so nobody looking at their own console would ever see it.
+    * It does not change what the OWNER sees. An owner already sees their own
+      name, and the ``official`` branch running first for them would only make
+      the two paths diverge on the blank-name case for no reason.
     """
     node_id = str(row.get("node_id") or "")
+    name = row.get("name")
+    # Blank-or-absent is one state ("never named"), and it is tested once
+    # here so the owner branch and the official branch cannot drift on it.
+    named = isinstance(name, str) and bool(name.strip())
     if own:
-        name = row.get("name")
-        if isinstance(name, str) and name.strip():
-            return name
-        return node_id or "unnamed machine"
+        return name if named else (node_id or "unnamed machine")
+    if named and row.get("official"):
+        return name
     return f"prov…{node_id[-6:]}" if node_id else "prov…"
 
 
@@ -156,11 +192,28 @@ def _badge(row: Mapping[str, Any]) -> str:
 
 
 def _location(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Where the owner (or the venue) says this machine is.
+    """Where this machine is, and ON WHOSE AUTHORITY.
 
-    Never inferred from an address, a timezone, or anything else this API can
-    observe: geo is DECLARED, NEVER DETECTED. Migration 0029's header carries
-    the argument; ``geo_source`` is the enforcement.
+    ``source`` is passed through verbatim and is the whole point of the shape:
+    it is one of ``declared`` (the owner typed it), ``venue`` (copied from the
+    record of a machine this control plane rented), ``detected`` (inferred from
+    the machine's public egress address by ``geoip``, migration 0031) or
+    ``None``. In DESCENDING order of authority, and the ordering is enforced by
+    the writers — ``geoip.sweep`` fills a NULL source and never overwrites one
+    of the first two.
+
+    **Nothing here may collapse those into a boolean, and no consumer may treat
+    a missing ``source`` as equivalent to any of them.** Migration 0029 shipped
+    with only two legal values and its own header said a third would never
+    exist; 0031 added one, and the code that survived the change unmodified is
+    exactly the code that read ``geo_source`` as an opaque label instead of
+    branching on it.
+
+    ``city`` is present for the same pass-through reason and is ALWAYS ``None``
+    on a detected row — the detection path is forbidden from writing it (0031:
+    a country is a fact about a network, a city is a fact about a person). A
+    non-null city therefore means a human typed it, which is a distinction a
+    renderer may rely on.
     """
     lat = row.get("geo_lat")
     lon = row.get("geo_lon")
@@ -303,7 +356,8 @@ def _display_acceptance_rate(records: Sequence[Mapping[str, Any]]) -> float | No
 _PROVIDER_COLUMNS = """
     m.id, m.node_id, m.name, m.owner_id, m.capabilities, m.last_seen_at,
     m.geo_country, m.geo_region, m.geo_city, m.geo_lat, m.geo_lon, m.geo_source,
-    m.sandbox_capable, m.argv_capable, m.unsandboxed_argv_capable
+    m.sandbox_capable, m.argv_capable, m.unsandboxed_argv_capable,
+    m.official
 """
 
 
@@ -439,6 +493,11 @@ def _provider(
         "id": str(row["id"]),
         "label": _label(row, own=own),
         "own": own,
+        # Emitted for every provider, not only the official ones: a key that
+        # appears only when true is a key the console has to remember is
+        # optional, and `official === true` is a cheaper contract than
+        # `official ?? false`. See `_label` for what the flag actually does.
+        "official": bool(row.get("official")),
         "online": bool(row.get("online")),
         "last_seen_at": _iso(row.get("last_seen_at")),
         "location": _location(row),
@@ -857,11 +916,19 @@ def set_machine_location(
     obviously changing.
 
     ``geo_source`` is set to ``'declared'`` here and is never a parameter. This
-    function is the declared path by definition — the only other legal value,
-    ``'venue'``, belongs to whatever copies a rented machine's data centre from
-    the venue record, and letting a caller name its own source would make the
-    column's whole purpose (0029: geo is DECLARED, NEVER DETECTED) a matter of
-    trust in the caller rather than a property of the writer.
+    function is the declared path by definition; the other legal values belong
+    to their own writers — ``'venue'`` to whatever copies a rented machine's
+    data centre from the venue record, and ``'detected'`` to ``geoip.sweep``
+    (migration 0031) — and letting a caller name its own source would make the
+    column's whole purpose a matter of trust in the caller rather than a
+    property of the writer.
+
+    **This write is also what makes detection back off for ever.**
+    ``geoip.sweep`` selects on ``geo_source is null``, so the moment a host
+    declares anything, that machine leaves the sweep's candidate set
+    permanently — a declaration is never overwritten by a later guess, and no
+    "prefer the human answer" logic is needed anywhere downstream because the
+    weaker writer simply never runs on that row.
 
     **Both coordinates or neither.** Half a pair pins nothing and would render
     as a marker on a meridian; refusing is the honest answer and the fix is
@@ -914,4 +981,55 @@ def set_machine_location(
     except psycopg.errors.InvalidTextRepresentation:
         # Not a uuid: the same "no such machine of yours" answer, for the same
         # reason `app.py` folds this case everywhere else.
+        return False
+
+
+def set_machine_official(
+    db: psycopg.Connection,
+    machine_id: str,
+    owner_id: str,
+    official: bool,
+) -> bool:
+    """Mark one of your own ACTIVE machines as platform-operated anchor
+    capacity, or unmark it. Returns whether it wrote.
+
+    **This PUBLISHES the machine's name.** ``official = true`` is the single
+    documented exception to the anonymisation contract at the top of this
+    module — see ``_label`` — so it is a disclosure, per machine, made
+    deliberately. Migration 0030's header carries the argument for why it is a
+    column rather than "whichever machines the Zolli Labs account happens to
+    own".
+
+    Everything about the authorisation is copied from
+    ``set_machine_location``, deliberately and not by accident:
+
+    * ``False`` means the machine is not this caller's, does not exist, or is
+      not ``active`` — one answer for all three, so the route's 404 cannot be
+      used to discover which machine ids exist or which are somebody else's.
+    * **The ownership test is in the WHERE clause**, not an ``if`` above it. A
+      check-then-write is a race and a thing somebody can forget to write.
+    * A malformed uuid is that same ``False``, not a crash.
+
+    Bad INPUT stays separate: a non-boolean raises ``InvalidOfficial`` and the
+    route answers 400. ``"true"`` the string and ``1`` the integer are refused
+    rather than coerced — this flag decides whether a name is public, and a
+    truthiness rule is how ``official: "false"`` ends up publishing one.
+    """
+    if not isinstance(official, bool):
+        raise InvalidOfficial("official must be true or false")
+
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                update public.machines
+                   set official = %s
+                 where id = %s::uuid
+                   and owner_id = %s::uuid
+                   and status = 'active'
+                """,
+                (official, machine_id, owner_id),
+            )
+            return cur.rowcount > 0
+    except psycopg.errors.InvalidTextRepresentation:
         return False

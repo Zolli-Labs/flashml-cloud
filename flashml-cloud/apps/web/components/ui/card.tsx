@@ -11,8 +11,13 @@ function Card({
     <div
       data-slot="card"
       data-size={size}
+      // `rounded-lg`/`rounded-t-lg`/`rounded-b-lg` (was a hardcoded
+      // `rounded-[10px]`/`rounded-t-[10px]`/`rounded-b-[10px]`, which was
+      // always just the old `--radius-lg` written as a literal). Now on the
+      // token, so it moves with `--radius` in app/globals.css — same
+      // treatment `.panel` already gets via `border-radius: var(--radius)`.
       className={cn(
-        "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-[10px] border border-border bg-card py-(--card-spacing) text-sm text-card-foreground [--card-spacing:--spacing(4)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-[10px] *:[img:last-child]:rounded-b-[10px]",
+        "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-lg border border-border bg-card py-(--card-spacing) text-sm text-card-foreground [--card-spacing:--spacing(4)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-lg *:[img:last-child]:rounded-b-lg",
         className
       )}
       {...props}

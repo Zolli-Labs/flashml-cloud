@@ -17,6 +17,7 @@ import {
   mapMarkers,
   matchesSearch,
   maxCpuCores,
+  officialChip,
   project,
   providerShareDonuts,
   sortProviders,
@@ -423,6 +424,33 @@ describe("the trust badge is the console's one badge", () => {
     expect(badgeLabel("sandboxed")).toBe("Sandboxed");
     expect(badgeLabel("trusted")).toBe("Trusted");
     expect(badgeLabel("modules-only")).toBe("Modules only");
+  });
+});
+
+describe("the 'Official' chip is a fact about ownership, not trust", () => {
+  it("returns the chip's data when the provider is official", () => {
+    expect(officialChip(provider({ official: true }))).toEqual({
+      label: "Official",
+    });
+  });
+
+  it("returns null when the provider is not official", () => {
+    expect(officialChip(provider({ official: false }))).toBeNull();
+  });
+
+  it("returns null when the API has not started sending the field yet", () => {
+    // The base fixture never sets `official` — this is the shape of every
+    // response the console reads today.
+    expect(officialChip(provider())).toBeNull();
+  });
+
+  it("is findable by search", () => {
+    const official = provider({ id: "o", label: "alibaba-sgp-1", official: true });
+    const ordinary = provider({ id: "x", label: "box-two", official: false });
+    expect(matchesSearch(official, "official")).toBe(true);
+    expect(matchesSearch(ordinary, "official")).toBe(false);
+    // Still findable by its own label, exactly as before.
+    expect(matchesSearch(official, "alibaba")).toBe(true);
   });
 });
 

@@ -17,6 +17,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Disclosure } from "@/components/jobs/Disclosure";
+import { KIND_ICON } from "@/components/machines/MachineCard";
+import { machineKind } from "@/lib/machine-kind";
 import {
   deleteNotice,
   machineLabel,
@@ -85,18 +87,28 @@ export function RevokedMachines({
             {notice}
           </p>
         )}
-        <ul className="divide-y divide-border">
+        {/* Cards, like the enrolled grid above — dimmed, since a retired
+            machine is a record of what a device used to be rather than
+            live fleet state. Same responsive columns as `MachineCard`'s
+            grid so the fold reads as the same instrument rather than a
+            second layout. */}
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {machines.map((m) => (
             <RevokedRow key={m.id} machine={m} onDelete={remove} />
           ))}
-        </ul>
+        </div>
       </Disclosure>
     </div>
   );
 }
 
 /** One retired machine: what it was called, when it stopped, and the two
- * things that can still be done about it. */
+ * things that can still be done about it. Same card shell `MachineCard`
+ * uses (icon cell, hairline-separated footer) so the fold reads as the
+ * same instrument dimmed down, not a different component — but not a
+ * `<Link>`: a revoked machine has no live state worth a detail view, and
+ * its two actions (Delete, Add it back) are the whole of what this row is
+ * for, so they stay directly reachable rather than moving behind a click. */
 function RevokedRow({
   machine,
   onDelete,
@@ -106,6 +118,7 @@ function RevokedRow({
 }) {
   const [deleting, setDeleting] = useState(false);
   const label = machineLabel(machine);
+  const Icon = KIND_ICON[machineKind(machine)];
 
   // The same modal the Revoke button on the enrolled table uses, for the same
   // reason: this one is terminal from this screen, and an inline swap where a
@@ -121,14 +134,23 @@ function RevokedRow({
   }
 
   return (
-    <li className="flex items-center gap-3 py-1.5">
-      <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
-        {label}
-      </span>
-      <span className="meta shrink-0 whitespace-nowrap">
-        {revokedLabel(machine)}
-      </span>
-      <span className="flex shrink-0 items-center gap-1">
+    <div className="rounded-md border border-border/60 bg-surface/60 p-4 opacity-70">
+      <div className="flex items-start gap-3">
+        <Icon
+          size={18}
+          weight="regular"
+          className="mt-0.5 shrink-0 text-muted-foreground"
+          aria-hidden="true"
+        />
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-mono text-xs text-muted-foreground">
+            {label}
+          </p>
+          <p className="meta mt-0.5 truncate">{revokedLabel(machine)}</p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center justify-end gap-1 border-t border-border/60 pt-3">
         <AlertDialog>
           <AlertDialogTrigger
             render={
@@ -181,7 +203,7 @@ function RevokedRow({
         >
           Add it back
         </Button>
-      </span>
-    </li>
+      </div>
+    </div>
   );
 }

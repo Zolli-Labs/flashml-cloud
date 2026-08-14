@@ -132,8 +132,23 @@ export type ProviderBadge = MachineBadge;
 export interface Provider {
   id: string;
   /** The public, truncated name. Never the machine's own hostname unless the
-   * caller owns it — see `owner.name` on the detail response. */
+   * caller owns it — see `owner.name` on the detail response.
+   *
+   * EXCEPT when `official` is true: an official machine's `label` is already
+   * its real name — e.g. `"alibaba-sgp-1"` — for every viewer, not the
+   * anonymized `prov…XXXXXX` handle a non-owner sees on everyone else's box.
+   * The API decides which string to send; this console never anonymizes or
+   * un-anonymizes a label itself. */
   label: string;
+  /** Whether Zolli Labs itself operates this machine, as opposed to a
+   * volunteer's box or a rented anchor a third party runs. OPTIONAL and
+   * absent on any response the console reads before the API starts sending
+   * it — same shape of gap as `NetworkTotals.storage_bytes` above, and
+   * absence reads the same as `false` everywhere this is used (see
+   * `lib/network/providers.ts`'s `officialChip`). Orthogonal to `badge`:
+   * `badge` states what a machine PROVES about itself, this states who OWNS
+   * it, and an official machine can carry any trust tier. */
+  official?: boolean;
   /** Whether the signed-in account owns this machine. Gates the owner-only
    * panels and nothing else: everything they reveal is re-checked server
    * side, so a client that lied to itself here would gain a 403. */

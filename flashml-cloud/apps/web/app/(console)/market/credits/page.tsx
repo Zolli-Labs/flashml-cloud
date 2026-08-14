@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { CreditsPanel } from "@/components/market/CreditsPanel";
 import { MatchesPanel } from "@/components/market/MatchesPanel";
+import { PageHeader } from "@/components/shell/PageHeader";
 import {
   NotAuthenticated,
   getCredits,
@@ -126,12 +127,10 @@ export default function MarketPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <h1 className="title">Credits</h1>
-      <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted-foreground">
-        Your Zolli Credits and the double-entry ledger behind them — every
-        movement shown with its counterparty, because a balance change
-        without a cause is not a ledger.
-      </p>
+      <PageHeader
+        title="Credits"
+        description="Your Zolli Credits and the double-entry ledger behind them — every movement shown with its counterparty, because a balance change without a cause is not a ledger."
+      />
 
       <div className="mt-6 space-y-6">
         <CreditsPanel

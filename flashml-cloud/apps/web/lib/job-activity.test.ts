@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveAttemptCoverage,
   deriveAttempts,
   deriveProgress,
   deriveStallReason,
@@ -105,6 +106,61 @@ describe("deriveProgress", () => {
       attemptsSpent: 3,
       wasted: 1,
     });
+  });
+});
+
+describe("deriveAttemptCoverage", () => {
+  const task = (over: Partial<JobTask> = {}): JobTask => ({
+    task_id: "t1",
+    state: "COMPLETED",
+    attempts: 3,
+    max_attempts: 4,
+    node_id: "fn-1af2567e03d744e8",
+    deadline: null,
+    ...over,
+  });
+
+  it("uses the ledger whenever the ledger answered", () => {
+    const attempts = deriveAttempts([
+      ev("LEASE_CLAIMED", T(1), { task_id: "t1", node_id: "n1" }),
+    ]);
+    expect(deriveAttemptCoverage([task()], attempts)).toEqual({
+      source: "ledger",
+      spent: 1,
+      tasks: 0,
+      note: null,
+    });
+  });
+
+  // The case this exists for: a job whose lease events carry no `node_id`, so
+  // `deriveAttempts` drops every one of them and the placement view would
+  // otherwise say nothing about attempts while the table beside it shows 3/4.
+  it("falls back to the coordinator's own tally, and says it is doing so", () => {
+    const coverage = deriveAttemptCoverage(
+      [task()],
+      deriveAttempts([ev("TASK_REQUEUED", T(2), { task_id: "t1" })])
+    );
+    expect(coverage.source).toBe("tasks");
+    expect(coverage.spent).toBe(3);
+    expect(coverage.tasks).toBe(1);
+    expect(coverage.note).toContain("3 attempts across 1 task");
+    expect(coverage.note).toContain("counted by the coordinator");
+  });
+
+  it("adds up attempts across every task", () => {
+    const coverage = deriveAttemptCoverage(
+      [task(), task({ task_id: "t2", attempts: 2 })],
+      []
+    );
+    expect(coverage.spent).toBe(5);
+    expect(coverage.note).toContain("5 attempts across 2 tasks");
+  });
+
+  it("says nothing at all when nothing has been attempted", () => {
+    expect(
+      deriveAttemptCoverage([task({ attempts: 0, state: "PENDING" })], [])
+    ).toEqual({ source: "none", spent: 0, tasks: 0, note: null });
+    expect(deriveAttemptCoverage([], [])).toMatchObject({ source: "none" });
   });
 });
 

@@ -142,9 +142,148 @@
   --cyan-dim: rgb(243 107 50 / 0.14);
 
   --shadow-sm: 0 1px 2px rgb(17 20 22 / 0.06);
-  --shadow-md: 0 12px 28px -18px rgb(17 20 22 / 0.22);
-  --shadow-lg: 0 24px 52px -28px rgb(17 20 22 / 0.3);
-  --radius: 0.625rem;
+  --shadow-md: 0 8px 20px -16px rgb(17 20 22 / 0.18);
+  --shadow-lg: 0 16px 36px -24px rgb(17 20 22 / 0.24);
+  /* The sharpness dial for the whole console — every `rounded-sm/md/lg/xl`
+     utility and every hand-written `border-radius: var(--radius*)` follows
+     this one number (`@theme inline` above derives sm/md/lg/xl from it).
+     0.375rem (6px) is deliberate: sharper and more machine-precise than the
+     old 0.625rem (10px), which read as soft/toy against the flat, hairline-
+     bordered register this console is going for. Zero (true brutalist,
+     square corners everywhere) was considered and rejected — it would fight
+     the warm mineral / warm-black identity this palette keeps, which wants
+     precision, not starkness. 6px is the Akash-adjacent dev-tool register:
+     enough radius to still read as a friendly surface, not enough to read
+     as a bubble. */
+  --radius: 0.375rem;
+}
+
+/* ─── Console dark register ───────────────────────────────────────
+   Same warm family as the light `:root` above (this is its warm-black,
+   orange-warmed-border dark sibling, not the cool `.marketing-dark`
+   graphite below — the console and the marketing route are allowed to
+   diverge). Chosen from three real renders — `.preview/console-dark-a.html`
+   (warm charcoal), `-b.html` (lifted cool graphite) and `-c.html` (this
+   one) — after the user rejected an initial near-black pass as too cold and
+   characterless; see `preview/console-dark.render.tsx`.
+
+   THE SELECTOR MUST BE `html.dark:has(...)`, NOT `body:has(...)` — this is
+   not a styling preference, it is the only place this override can work.
+   CSS custom properties are substituted at COMPUTED-VALUE time, on the
+   element where they are declared (css-variables-1). `:root { --surface:
+   var(--z-app-surface); }` resolves `--surface` to the LIGHT hex on
+   `<html>` the moment `:root` is evaluated; every descendant then inherits
+   that already-resolved value. Overriding `--z-app-surface` lower in the
+   tree — on `<body>`, say — cannot retroactively change what `<html>`
+   already computed for `--surface`: the override compiles, the selector
+   matches, and it does precisely nothing. That was this block's first
+   version, and it shipped a console whose page background went dark while
+   every semantic-token surface (`--surface`, `--ink`, `--background`, the
+   top bar, panels, table rows, headings) stayed on the light values it had
+   already resolved. The fix is to put the primitive overrides on `<html>`
+   itself, the same element `:root` targets, so the semantic mappings
+   re-resolve against them on that element and every descendant inherits
+   the DARK result instead. `html.dark:has(...)` also outranks a bare
+   `:root` by specificity and by appearing later in source, so it wins
+   there too — but the specificity win was never the load-bearing part;
+   being the SAME ELEMENT is.
+
+   `:has(.console-theme)` is still what makes this CONSOLE-ONLY. `.dark` on
+   `<html>` is set by next-themes for the whole document — marketing pages
+   and auth pages get it too, styled instead by `.marketing-dark` — so
+   without `:has` this block would relight every page the moment dark mode
+   was on anywhere. `:has(.console-theme)` only matches while a
+   `.console-theme` element (`ConsoleShell`'s root) is mounted somewhere
+   inside `<html>`, which is true exactly on console routes. Portals still
+   work despite the overrides sitting on `<html>` and not on the portal's
+   own ancestor: `components/ui/sonner.tsx`'s Toaster and Base UI's popups
+   render into `<body>`, and `<body>` is a descendant of `<html>` like
+   everything else — it inherits the same re-resolved tokens this block
+   produces, it does not need its own copy of them. */
+html.dark:has(.console-theme) {
+  color-scheme: dark;
+  --z-app-bg: #131110;
+  --z-app-canvas: #171412;
+  --z-app-surface: #1b1815;
+  --z-app-surface-hover: #262019;
+  --z-app-border: #362c22;
+  --z-app-border-strong: #4b3d2e;
+  --z-app-text: #f3ece2;
+  --z-app-text-secondary: #a89e8f;
+  --z-app-text-dim: #746a5c;
+  /* `--primary-foreground` (dark text on the orange button) is deliberately
+     NOT overridden here — dark-on-orange is correct in both themes, and the
+     semantic tokens below all resolve through the `--z-app-*` primitives
+     above, so overriding those flips every surface, border and text colour
+     the console uses without needing its own copy of `:root`'s mapping.
+     `--bg-rail` is included here (not left to `:root`'s value) so
+     `.console-rail` — which keeps its own explicit graphite in LIGHT mode,
+     see the block beside it — has a warm anchor to track in dark mode via
+     the sibling override below. */
+  --bg-rail: var(--z-app-canvas);
+  --brand-foreground: #ff7427;
+  --warning-foreground: #e0b35c;
+  --accent-text: #ff7427;
+  --skeleton: #241e18;
+  --cyan-dim: rgb(255 116 39 / 0.16);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  /* Flatter, tighter spread than the pre-redesign values — matches the
+     light register's md/lg above, part of the same "premium comes from
+     precision" pass: elevation reads as a hairline lift, not a soft glow. */
+  --shadow-md: 0 8px 20px -16px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 16px 36px -24px rgb(0 0 0 / 0.6);
+}
+
+/* The canvas behind the console. Scroll-lock gutters, the shrunken body
+   box, and macOS rubber-band overscroll all expose <html> itself, which
+   otherwise paints as the browser's default canvas — a white/gray flash
+   next to a dark rail (or, in light mode, next to the dark rail on the
+   left and the app's own page colour everywhere else — see the reported
+   bug: a gray strip down the scrollbar gutter and a gray band under the
+   displaced rail). Continue the shell onto the canvas: rail colour under
+   the rail column, page colour elsewhere. Tokens resolve on <html> in both
+   themes — the dark register above lives on `html.dark:has(...)`, so
+   `--background` and `--bg-rail` are already the right values for whichever
+   theme is active by the time this rule reads them.
+
+   232px matches `ConsoleShell`'s rail width (`w-[232px]`, both the sticky
+   desktop rail and the mobile drawer) and `lg:` matches its `lg:flex`
+   breakpoint — below that the rail is a drawer overlay, not a column, so
+   the canvas is just the page colour edge to edge. If `ConsoleShell` ever
+   changes the rail's width or breakpoint, update both this rule and that
+   className together; the width is deliberately not a variable that could
+   drift silently between the two. */
+html:has(.console-theme) {
+  background: var(--background);
+}
+@media (min-width: 1024px) {
+  html:has(.console-theme) {
+    background: linear-gradient(
+      90deg,
+      var(--bg-rail) 0 232px,
+      var(--background) 232px
+    );
+  }
+}
+
+/* The "instrument panel" register's typeface. Console pages read as an
+   instrument panel — data-first, hairline-partitioned — and Geist Sans is
+   part of that: tighter and more mechanical than Instrument Sans, which
+   stays the marketing/auth face (`body`'s own `font-sans` below, and
+   `.marketing-dark` pages, are untouched). Set on `.console-theme` itself
+   (`ConsoleShell`'s root), not on `html:has(...)` the way the dark-mode
+   tokens above are — `font-family` is an ordinary inherited CSS property,
+   not a custom property substituted at declaration time, so a descendant
+   here needs no special element to inherit from correctly; every console
+   page under this class picks it up. Anything that portals OUTSIDE this
+   subtree (the Toaster, Base UI popups render into `<body>`, a sibling of
+   this element, not a descendant of it) keeps inheriting `body`'s own
+   Instrument Sans instead — a known, accepted gap: a toast shown while
+   looking at a console page renders in the marketing face, which is a minor
+   typeface mismatch, not the colour-contrast failure the dark-token bug
+   was. */
+.console-theme {
+  font-family: var(--font-geist-sans), var(--font-instrument-sans), sans-serif;
 }
 
 .marketing-dark {
@@ -183,6 +322,16 @@
   --brand-foreground: var(--z-orange-bright);
 }
 
+/* Explicit values, not `--z-app-*` references — the rail is a permanently
+   dark column regardless of the page theme (see `--z-app-rail` in `:root`
+   above), so in LIGHT mode it must keep its own cool graphite rather than
+   inherit anything from the warm mineral page around it. That independence
+   is exactly what would make it clash once the PAGE goes dark too: a warm
+   dark console around a cool graphite rail reads as two different products
+   stitched together. The sibling rule below is what keeps them one family
+   — it only fires when `.dark:has(.console-theme)` is true, so light mode
+   is untouched and renders pixel-identical to before this file's dark
+   register existed. */
 .console-rail {
   --background: var(--z-app-rail);
   --foreground: #f3f1ec;
@@ -194,6 +343,25 @@
   --border: #292e33;
   --input: #3a4046;
   --brand-foreground: var(--z-orange-bright);
+}
+
+/* In dark mode, follow the warm `--z-app-*` primitives `html.dark:has(...)`
+   above already re-resolved on `<html>` — so the rail tracks whichever
+   variant is active automatically, with no variant-specific values of its
+   own to keep in sync. This resolves on the rail element itself, which
+   inherits the DARK primitives from `<html>` exactly like every other
+   descendant; that inheritance is the same mechanism the root block's
+   comment documents, just one property hop further down the tree. */
+.dark:has(.console-theme) .console-rail {
+  --background: var(--z-app-canvas);
+  --foreground: var(--z-app-text);
+  --surface: var(--z-app-surface);
+  --surface-2: var(--z-app-surface-hover);
+  --surface-elevated: var(--z-app-surface);
+  --ink: var(--z-app-text);
+  --muted-foreground: var(--z-app-text-secondary);
+  --border: var(--z-app-border);
+  --input: var(--z-app-border-strong);
 }
 
 /* Landing-only aliases preserve the console and public-information palette.
@@ -677,6 +845,24 @@
   html {
     @apply antialiased;
     color-scheme: light;
+    /* Visually a no-op — `body`'s own overflow already drives the viewport
+       scrollbar, so nothing about normal scrolling changes. It is NOT a
+       no-op for @base-ui/react: `useScrollLock` picks its lock target with
+       `isOverflowElement(html) ? html : body`, and with no overflow style
+       here that check was always false, so every Base UI dialog/popup
+       (AlertDialog, Select, …) locked scroll by mutating `body` instead —
+       `overflow: hidden`, and in the no-scrollbar-gutter fallback
+       `position: relative; height: 100dvh`. The console rail is
+       `position: sticky` INSIDE `body`, and Base UI's own comment in
+       `useScrollLock.js` ("sticky elements shift otherwise") is exactly the
+       failure that caused: opening the Revoke dialog on /machines bumped
+       the rail out of place with a gray gutter/gap around it. Declaring
+       `overflow-y: auto` here makes `isOverflowElement(html)` true, so the
+       lock lands on `<html>` and `body` — and the sticky rail inside it —
+       is never touched. Load-bearing: removing this silently reintroduces
+       the rail bump the next time a dialog opens.
+       `lib/canvas-and-scroll-lock.test.ts` asserts it survives compilation. */
+    overflow-y: auto;
   }
 
   /* Respect the OS setting — vestibular disorders are the reason this
@@ -800,6 +986,16 @@
   box-shadow: var(--shadow-lg);
 }
 
+/* The light rule above hardcodes a warm hex rather than reading a token, so
+   it needs its own dark answer rather than following `--border`
+   automatically. Reads `--z-app-border-strong` (not a literal hex) so this
+   tracks whichever dark variant is active — including the inline
+   variant-B/C overrides `preview/console-dark.render.tsx` sets on `<html>`
+   for comparison renders. */
+.dark:has(.console-theme) .card-hover:hover {
+  border-color: var(--z-app-border-strong);
+}
+
 /* Keyboard focus must be unmistakable and must not depend on the accent
    alone — a 1px tinted ring on a tinted surface is invisible to plenty
    of people. Two rings, one dark, one bright. */
@@ -912,6 +1108,33 @@ body [class~="hover:bg-white/[0.08]"]:hover {
   white-space: nowrap;
 }
 
+/* The console's own heading scale — NOT `.title`/`.display` above, which
+   stay exactly as they are for marketing and auth. A console page name
+   ("Machines", "Jobs") is a LABEL for the screen a reader is already on,
+   not a headline competing for attention the way a landing page's hero
+   does — 20px says that, where `.title` clamps up to 44px.
+
+   Declared inside `@layer components`, unlike `.title`/`.title-mono`
+   above: `.title-mono`'s own doc comment explains that `.title` is
+   UNLAYERED, so a plain `font-mono`/`truncate` utility loses to it
+   regardless of specificity, and fixing that for `.title` itself needed
+   "a reviewed commit with someone looking, not a drive-by in a sweep."
+   `.page-title` is a new class, not a change to `.title`, so it can start
+   inside `components` rather than inherit that problem: Tailwind v4's
+   generated layer order puts `utilities` after `components`, so
+   `class="page-title font-mono truncate"` — exactly what `PageHeader`'s
+   `titleTone="identifier"` needs — wins normally, with no `!important`
+   escape hatch required. */
+@layer components {
+  .page-title {
+    font-family: var(--font-geist-sans), var(--font-instrument-sans), sans-serif;
+    font-size: 1.25rem;
+    line-height: 1.3;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+}
+
 /* Machine-emitted supporting text: ids, counts, states. Small enough to
    read as annotation rather than as content competing with the heading. */
 .meta {
@@ -1005,6 +1228,18 @@ body [class~="hover:bg-white/[0.08]"]:hover {
   animation: shimmer 1.6s infinite;
 }
 
+/* The light shimmer is a cream bloom at 0.84 alpha, tuned to lift off a warm
+   surface. At the same alpha on graphite it does not lift, it glares — so
+   the dark register gets a dimmer, white-based sweep instead. */
+.dark:has(.console-theme) .skeleton::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.07),
+    transparent
+  );
+}
+
 /* ─── Flow canvas ─────────────────────────────────────────────────── */
 @keyframes flow-dash {
   from {
@@ -1048,6 +1283,23 @@ body [class~="hover:bg-white/[0.08]"]:hover {
   background: rgb(255 253 249 / 0.94);
 }
 
+/* React Flow's own control panel reads its colours from these
+   `--xy-controls-*` custom properties rather than from this app's semantic
+   tokens, so it needs an explicit dark answer the way the rest of this
+   component's tokens do not. */
+.dark:has(.console-theme) .flashml-flow {
+  --xy-controls-button-background-color: rgb(17 20 22 / 0.94);
+  --xy-controls-button-background-color-hover: var(--surface-2);
+  --xy-controls-button-color: var(--muted-foreground);
+  --xy-controls-button-color-hover: var(--ink);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: 0 0 0 1px rgb(0 0 0 / 0.5), var(--shadow-md);
+}
+
+.dark:has(.console-theme) .flashml-flow .react-flow__controls {
+  background: rgb(17 20 22 / 0.94);
+}
+
 /* ─── Progress ────────────────────────────────────────────────────── */
 .progress-cyan [data-slot="progress-indicator"] {
   background: var(--primary);
@@ -1066,6 +1318,18 @@ body [class~="hover:bg-white/[0.08]"]:hover {
     transparent,
     rgb(115 90 69 / 0.24) 15%,
     rgb(115 90 69 / 0.24) 85%,
+    transparent
+  );
+}
+
+/* The light rule tints a warm brown into the mineral page; on graphite that
+   reads as a dirt smudge rather than an edge. White-based, same stops. */
+.dark:has(.console-theme) .rule-fade {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.14) 15%,
+    rgb(255 255 255 / 0.14) 85%,
     transparent
   );
 }
@@ -1089,5 +1353,22 @@ body [class~="hover:bg-white/[0.08]"]:hover {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #b79f8b;
+  background-clip: content-box;
+}
+
+/* The light thumb is a warm tan tuned to the mineral page; on a dark page it
+   would sit there looking like a stray beige smear. Reads
+   `--z-app-border-strong` (not a literal hex) so it tracks whichever dark
+   variant is active; the hover step is that same token lightened toward
+   white via `color-mix`, rather than a second hand-picked hex, so hover
+   stays "one step lighter than the border" under every variant instead of
+   being calibrated to one specific hex and drifting from it under another. */
+.dark:has(.console-theme) ::-webkit-scrollbar-thumb {
+  background: var(--z-app-border-strong);
+  background-clip: content-box;
+}
+
+.dark:has(.console-theme) ::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--z-app-border-strong) 80%, white);
   background-clip: content-box;
 }

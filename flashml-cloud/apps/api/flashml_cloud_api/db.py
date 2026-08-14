@@ -731,7 +731,9 @@ def insert_machine(
         return row["id"]
 
 
-def touch_machine_last_seen(db: psycopg.Connection, machine_id: str) -> None:
+def touch_machine_last_seen(
+    db: psycopg.Connection, machine_id: str, *, ip: str | None = None
+) -> None:
     """Record that this machine just spoke to us.
 
     `machines.last_seen_at` is the ONLY thing the console renders
@@ -798,13 +800,59 @@ def touch_machine_last_seen(db: psycopg.Connection, machine_id: str) -> None:
     `capacity.reconcile`. A missing table is the expected case (an API deployed
     before 0029 lands) and is logged at debug; anything else is a real fault
     and is logged as one — but neither is allowed to propagate.
+
+    **`ip` IS OPTIONAL AND CHANGES NOTHING WHEN OMITTED.** Passed, it rides the
+    SAME UPDATE — one statement, one row version, no extra hop — and records
+    `machines.last_seen_ip` (migration 0031), which `geoip.sweep` later
+    resolves to a coarse location on a background timer. It is the CALLER's job
+    to have filtered it: `geoip.client_ip` answers `None` for a private,
+    loopback or unparseable address, and `None` here means the column is simply
+    not written — never cleared, because a machine that beats once through a
+    proxy that strips the header has not moved.
+
+    **NO LOOKUP HAPPENS HERE, and none may ever be added.** This function is on
+    the heartbeat path; a third-party HTTP call in front of the write that
+    `capacity.reconcile` destroys rented GPUs for not seeing would make a
+    geolocation provider's outage indistinguishable from a fleet going dark.
+    The hot path records an address, the sweep spends the time.
+
+    The IP-bearing form runs inside its own nested `transaction()` — a
+    savepoint — for exactly the reason the uptime write does, one migration
+    later: an API deployed BEFORE 0031 lands would otherwise name a column that
+    does not exist and lose `last_seen_at` with it. On `UndefinedColumn` it
+    falls back to the original statement, which is 0029's degradation again
+    (the feature records nothing, the heartbeat is untouched). That savepoint
+    is paid only when an ip is actually passed — so every caller with none, and
+    every local run, where the address is loopback and filtered to `None`,
+    issues byte-identically what it issued before.
     """
     with db.transaction():
-        with db.cursor() as cur:
-            cur.execute(
-                "update public.machines set last_seen_at = now() where id = %s",
-                (machine_id,),
-            )
+        wrote_ip = False
+        if ip is not None:
+            try:
+                with db.transaction():
+                    with db.cursor() as cur:
+                        cur.execute(
+                            "update public.machines"
+                            "   set last_seen_at = now(), last_seen_ip = %s"
+                            " where id = %s",
+                            (ip, machine_id),
+                        )
+                wrote_ip = True
+            except psycopg.errors.UndefinedColumn:
+                # Pre-0031. Falls through to the original statement below: the
+                # heartbeat is unaffected and records no address.
+                log.debug(
+                    "no machines.last_seen_ip column; skipping the address for "
+                    "machine %s (migration 0031 has not been applied)",
+                    machine_id,
+                )
+        if not wrote_ip:
+            with db.cursor() as cur:
+                cur.execute(
+                    "update public.machines set last_seen_at = now() where id = %s",
+                    (machine_id,),
+                )
         try:
             with db.transaction():
                 with db.cursor() as cur:
@@ -956,6 +1004,7 @@ def set_machine_capabilities(
     module_capable: bool,
     dataset_cache_bytes: int = 0,
     reported: Mapping[str, Any] | None = None,
+    last_seen_ip: str | None = None,
 ) -> None:
     """Overwrite the capability snapshot from the latest registration
     (register proxy, best-effort — see migration 0008's header). A single
@@ -1001,26 +1050,73 @@ def set_machine_capabilities(
     designed for: a host who lies about VRAM sells a promise their machine
     cannot keep and the buyer's task OOMs. Nothing here makes that better or
     worse; it makes the honest reading reach the ladder at all.
+
+    ``last_seen_ip`` (migration 0031) rides this same UPDATE when the register
+    proxy has an address to record, and is omitted from the statement entirely
+    when it is ``None`` — so a caller that passes nothing issues exactly the
+    statement this function has always issued. REGISTRATION IS THE EARLIEST
+    MOMENT an address can be recorded, and it matters because a machine that
+    enrols and then works for hours without returning to the node-heartbeat
+    route (``flashnode`` blocks inside ``execute_one``; see
+    ``touch_machine_last_seen``) would otherwise have no address for the geo
+    sweep to resolve until its first idle beat.
+
+    Same filtering contract as the heartbeat: ``geoip.client_ip`` has already
+    answered ``None`` for a private, loopback or unparseable address, and
+    ``None`` never clears a value that is already there. Same best-effort
+    posture too — this whole call sits inside the register proxy's own
+    ``try``, because a display column must never fail a registration — and, on
+    a database where 0031 has not been applied, the same
+    ``UndefinedColumn`` fallback: the snapshot is retried WITHOUT the address
+    rather than lost, since losing it would file a 4090 rig as ``cpu-small``
+    for the life of the enrolment.
     """
-    with db.cursor() as cur:
+    def _update(cur: psycopg.Cursor, *, with_ip: bool) -> None:
         cur.execute(
-            """
+            f"""
             update public.machines
                set sandbox_capable = %s,
                    argv_capable = %s,
                    unsandboxed_argv_capable = %s,
                    module_capable = %s,
-                   capabilities = coalesce(capabilities, '{}'::jsonb)
+                   {"last_seen_ip = %s," if with_ip else ""}
+                   capabilities = coalesce(capabilities, '{{}}'::jsonb)
                                   || %s::jsonb
                                   || jsonb_build_object(
                                          'dataset_cache_bytes', %s::bigint
                                      )
              where id = %s
             """,
-            (sandbox_capable, argv_capable, unsandboxed_argv_capable,
-             module_capable, Json(_reported_capabilities(reported)),
-             int(dataset_cache_bytes), machine_id),
+            (
+                sandbox_capable, argv_capable, unsandboxed_argv_capable,
+                module_capable,
+                *((last_seen_ip,) if with_ip else ()),
+                Json(_reported_capabilities(reported)),
+                int(dataset_cache_bytes), machine_id,
+            ),
         )
+
+    if last_seen_ip is None:
+        with db.cursor() as cur:
+            _update(cur, with_ip=False)
+        return
+
+    try:
+        # A savepoint (or a plain transaction on the autocommit connections
+        # `connect` hands out), so a pre-0031 database costs the address and
+        # not the snapshot.
+        with db.transaction():
+            with db.cursor() as cur:
+                _update(cur, with_ip=True)
+    except psycopg.errors.UndefinedColumn:
+        log.debug(
+            "no machines.last_seen_ip column; recording the capability "
+            "snapshot for machine %s without it (migration 0031 has not been "
+            "applied)",
+            machine_id,
+        )
+        with db.cursor() as cur:
+            _update(cur, with_ip=False)
 
 
 def fetch_machine_by_token_hash(

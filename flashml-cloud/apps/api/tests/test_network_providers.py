@@ -8,7 +8,11 @@ could ship a plausible lie:
   owner typed — routinely their own name — and its ``node_id`` is the handle
   enrolment matches on. Neither may leave the API for a machine the viewer does
   not own, and "the console does not render it" is not the same guarantee as
-  "the API does not send it".
+  "the API does not send it". ``machines.official`` (migration 0030) is the ONE
+  documented exception — platform-operated anchor capacity shows its real name
+  to everyone — so it is pinned from both sides here: that the exception opens
+  where it should, and that it opens nowhere else (not by default, not for an
+  official machine nobody named, and never for the node id).
 
 * **THE DENOMINATOR.** ``attempts.outcome IS NULL`` means in flight, or a row
   predating migration 0015 that nothing can classify. Counting one as a failure
@@ -45,8 +49,12 @@ from flashml_cloud_api import migrate
 from flashml_cloud_api import network
 
 from test_jobs_from_repo import (  # noqa: F401 - fixtures
+    _jwt,
     _new_user,
     db,
+    make_client,
+    settings,
+    transport,
 )
 from test_migrate import AUTH_STUB, connected, scratch_database  # noqa: F401
 
@@ -805,8 +813,9 @@ def test_the_database_refuses_an_impossible_coordinate_even_without_the_api(db):
 
 
 def test_the_database_refuses_a_geo_source_it_has_never_heard_of(db):
-    """There is deliberately no value meaning "we worked it out from the
-    network"."""
+    """Since 0031 'detected' IS a legal value — this pins that the constraint
+    was widened to exactly three values, never removed: an arbitrary string
+    still bounces. test_geoip.py owns the 'detected' side."""
     owner = _new_user(db)
     machine_id = _machine(db, owner)
 
@@ -816,6 +825,276 @@ def test_the_database_refuses_a_geo_source_it_has_never_heard_of(db):
                 "update public.machines set geo_source = 'geoip' where id = %s",
                 (machine_id,),
             )
+
+
+# ---------------------------------------------------------------------------
+# official providers: the one machine that says its own name
+# ---------------------------------------------------------------------------
+#
+# `machines.official` (migration 0030) marks PLATFORM-OPERATED ANCHOR CAPACITY,
+# and it is the single documented hole in the anonymisation contract this file
+# opens with. So it is pinned from both directions: that the hole opens where
+# it is supposed to (a named official machine is named to a stranger), and that
+# it opens NOWHERE ELSE — not for an ordinary machine, not for an official one
+# whose owner never named it, and never for the node id.
+
+
+def test_a_machine_is_not_official_by_default_and_stays_anonymous(db):
+    """The default is the behaviour every machine already had. A flag that
+    defaults to "publish the name" would de-anonymise the fleet on migration."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Phong's 4090")
+    node_id = _node_id(db, machine_id)
+
+    provider = _find(network.providers_overview(db, stranger), machine_id)
+
+    assert provider["official"] is False
+    assert provider["label"] == f"prov…{node_id[-6:]}"
+    assert "Phong's 4090" not in json.dumps(provider)
+
+
+def test_an_official_machine_shows_its_real_name_to_a_stranger(db):
+    """The whole point of the flag: anchor capacity has a named, accountable
+    operator, and a network of unidentifiable handles gives a buyer nothing to
+    start from."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Zolli Labs anchor-01")
+    assert network.set_machine_official(db, machine_id, owner, True) is True
+
+    provider = _find(network.providers_overview(db, stranger), machine_id)
+
+    assert provider["official"] is True
+    assert provider["label"] == "Zolli Labs anchor-01"
+
+
+def test_an_official_machine_is_named_on_the_detail_read_too(db):
+    """Both reads or neither: a console that renders the overview from one and
+    the profile page from the other would show two different providers."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Zolli Labs anchor-02")
+    network.set_machine_official(db, machine_id, owner, True)
+
+    detail = network.provider_detail(db, machine_id, stranger)
+
+    assert detail["official"] is True
+    assert detail["label"] == "Zolli Labs anchor-02"
+    assert detail["own"] is False
+    assert "owner" not in detail, "official publishes a NAME, not the owner block"
+
+
+def test_an_official_machine_never_leaks_its_node_id_or_its_owner(db):
+    """`official` buys exactly one field. The node id is what enrolment matches
+    on and it stays unemitted, official or not."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Zolli Labs anchor-03")
+    node_id = _node_id(db, machine_id)
+    network.set_machine_official(db, machine_id, owner, True)
+
+    blob = json.dumps(
+        [
+            _find(network.providers_overview(db, stranger), machine_id),
+            network.provider_detail(db, machine_id, stranger),
+        ]
+    )
+
+    assert node_id not in blob
+    assert owner not in blob
+
+
+@pytest.mark.parametrize("name", [None, "   "])
+def test_an_official_machine_with_no_name_stays_anonymous(db, name):
+    """The dangerous fallback, and the reason `_label` tests the name before it
+    tests the flag: publishing the node id in a missing name's place would be a
+    leak nobody asked for, on the stranger-only branch, where the owner would
+    never see it."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name=name)
+    node_id = _node_id(db, machine_id)
+    network.set_machine_official(db, machine_id, owner, True)
+
+    provider = _find(network.providers_overview(db, stranger), machine_id)
+
+    assert provider["official"] is True
+    assert provider["label"] == f"prov…{node_id[-6:]}"
+    assert node_id not in json.dumps(provider)
+
+
+def test_the_owner_of_an_official_machine_sees_it_exactly_as_before(db):
+    owner = _new_user(db)
+    machine_id = _machine(db, owner, name="Zolli Labs anchor-04")
+    network.set_machine_official(db, machine_id, owner, True)
+
+    provider = _find(network.providers_overview(db, owner), machine_id)
+
+    assert provider["own"] is True
+    assert provider["official"] is True
+    assert provider["label"] == "Zolli Labs anchor-04"
+
+
+def test_unsetting_official_re_anonymises_the_machine(db):
+    """The flag is a disclosure, and a disclosure that cannot be withdrawn is a
+    one-way door nobody agreed to."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Zolli Labs anchor-05")
+    node_id = _node_id(db, machine_id)
+    network.set_machine_official(db, machine_id, owner, True)
+
+    assert network.set_machine_official(db, machine_id, owner, False) is True
+
+    provider = _find(network.providers_overview(db, stranger), machine_id)
+    assert provider["official"] is False
+    assert provider["label"] == f"prov…{node_id[-6:]}"
+
+
+def test_a_stranger_cannot_make_somebody_elses_machine_official(db):
+    """The ownership test is in the WHERE clause, so this cannot be forgotten.
+    False rather than an exception, and the same False a missing machine gets —
+    the route's 404 must not confirm which ids exist."""
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Phong's 4090")
+
+    assert network.set_machine_official(db, machine_id, stranger, True) is False
+
+    provider = _find(network.providers_overview(db, stranger), machine_id)
+    assert provider["official"] is False
+    assert "Phong's 4090" not in json.dumps(provider), "the write must not have landed"
+
+
+def test_a_machine_that_is_not_active_cannot_be_made_official(db):
+    owner = _new_user(db)
+    revoked = _machine(db, owner, status="revoked")
+    deleted = _machine(db, owner, status="deleted")
+
+    assert network.set_machine_official(db, revoked, owner, True) is False
+    assert network.set_machine_official(db, deleted, owner, True) is False
+
+
+def test_an_unknown_or_malformed_machine_id_is_refused_not_crashed_for_official(db):
+    owner = _new_user(db)
+
+    assert network.set_machine_official(db, str(uuid.uuid4()), owner, True) is False
+    assert network.set_machine_official(db, "not-a-uuid", owner, True) is False
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0, None, [], {}])
+def test_official_must_be_a_real_boolean_and_is_never_coerced(db, value):
+    """``InvalidOfficial``, not ``False``, and no truthiness. This flag decides
+    whether a machine's name is public, and a truthiness rule is how
+    ``official: "false"`` publishes one."""
+    owner = _new_user(db)
+    machine_id = _machine(db, owner)
+
+    with pytest.raises(network.InvalidOfficial):
+        network.set_machine_official(db, machine_id, owner, value)
+
+
+# ---------------------------------------------------------------------------
+# PATCH /v1alpha1/machines/{machine_id}/official
+# ---------------------------------------------------------------------------
+#
+# Route level, because the 400/404 split is a property of the HTTP surface the
+# console consumes: 400 is "your body is wrong and you can fix it", 404 is the
+# single answer that covers unknown, not-yours, not-active and not-a-uuid, so
+# ownership never confirms which ids exist.
+
+
+def _patch_official(client, user_id: str, machine_id: str, body: dict):
+    return client.patch(
+        f"/v1alpha1/machines/{machine_id}/official",
+        json=body,
+        headers={"Authorization": f"Bearer {_jwt(user_id)}"},
+    )
+
+
+def test_the_route_lets_an_owner_turn_official_on_and_off(db, make_client):
+    client = make_client()
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Zolli Labs anchor-06")
+
+    r = _patch_official(client, owner, machine_id, {"official": True})
+    assert r.status_code == 200
+    assert r.json() == {"machine_id": str(machine_id), "official": True}
+    assert _find(network.providers_overview(db, stranger), machine_id)["label"] == (
+        "Zolli Labs anchor-06"
+    )
+
+    r = _patch_official(client, owner, machine_id, {"official": False})
+    assert r.status_code == 200
+    assert r.json() == {"machine_id": str(machine_id), "official": False}
+    assert _find(network.providers_overview(db, stranger), machine_id)["official"] is (
+        False
+    )
+
+
+def test_the_route_answers_404_to_a_stranger_and_writes_nothing(db, make_client):
+    """404 and not 403: "that machine is not yours" must read identically to
+    "no such machine"."""
+    client = make_client()
+    owner = _new_user(db)
+    stranger = _new_user(db)
+    machine_id = _machine(db, owner, name="Phong's 4090")
+
+    r = _patch_official(client, stranger, machine_id, {"official": True})
+
+    assert r.status_code == 404
+    assert r.json()["detail"] == "unknown machine"
+    assert _find(network.providers_overview(db, owner), machine_id)["official"] is False
+
+
+def test_the_route_answers_404_for_an_unknown_or_malformed_machine(db, make_client):
+    client = make_client()
+    owner = _new_user(db)
+
+    for target in (str(uuid.uuid4()), "not-a-uuid"):
+        r = _patch_official(client, owner, target, {"official": True})
+        assert r.status_code == 404, target
+        assert r.json()["detail"] == "unknown machine"
+
+
+@pytest.mark.parametrize("body", [{"official": "true"}, {"official": 1}, {}])
+def test_the_route_answers_400_to_a_body_that_is_not_a_boolean(db, make_client, body):
+    """The caller's own input, and distinguishable from 404 on purpose — a 404
+    here would send them hunting for a machine that is sitting right there."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id = _machine(db, owner)
+
+    r = _patch_official(client, owner, machine_id, body)
+
+    assert r.status_code == 400
+    assert _find(network.providers_overview(db, owner), machine_id)["official"] is False
+
+
+def test_the_route_refuses_an_unauthenticated_caller(db, make_client):
+    client = make_client()
+    owner = _new_user(db)
+    machine_id = _machine(db, owner)
+
+    r = client.patch(
+        f"/v1alpha1/machines/{machine_id}/official", json={"official": True}
+    )
+
+    assert r.status_code == 401
+
+
+def test_the_route_is_gated_on_admission_not_merely_on_sign_in(db, make_client):
+    """`admitted_user`, not `current_user`: this writes state, and publishing a
+    name is exactly the kind of write that line exists to hold."""
+    client = make_client()
+    pending = _new_user(db, admitted=False)
+    machine_id = _machine(db, pending)
+
+    r = _patch_official(client, pending, machine_id, {"official": True})
+
+    assert r.status_code == 403
 
 
 # ---------------------------------------------------------------------------

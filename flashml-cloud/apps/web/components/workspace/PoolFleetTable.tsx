@@ -33,10 +33,11 @@ export function PoolFleetTable({ machines }: { machines: PoolMachine[] }) {
     <Table className="min-w-[640px]">
       <TableHeader>
         <TableRow>
+          {/* No `label-caps` here — `TableHead`'s own default now supplies
+              the identical machine-register treatment (plus mono, which
+              `.label-caps` alone did not). */}
           {COLUMNS.map((h) => (
-            <TableHead key={h} className="label-caps">
-              {h}
-            </TableHead>
+            <TableHead key={h}>{h}</TableHead>
           ))}
         </TableRow>
       </TableHeader>

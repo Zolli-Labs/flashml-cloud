@@ -4,11 +4,12 @@ import { cn } from "@/lib/utils";
 /**
  * The content column of a console page.
  *
- * Replaces `mx-auto max-w-6xl px-4 py-8 sm:px-6`, hand-written in thirteen
+ * Replaced `mx-auto max-w-6xl px-4 py-8 sm:px-6`, hand-written in thirteen
  * page files, plus four pages that differ from it with nothing recorded
- * about why. The padding here is that string exactly, so adopting this is a
- * swap and not a reflow; the only thing that changes is that the width
- * becomes a word with a reason behind it (`lib/console/page-width.ts`).
+ * about why. `py-6`, not the original `py-8`: part of the instrument-panel
+ * pass tightening the console's vertical rhythm to match its now-denser
+ * chrome (`h-12` bars, `.page-title`'s 20px). Horizontal padding and the
+ * width vocabulary are unchanged.
  *
  * NO DEFAULT WIDTH, deliberately. `lib/console/page-width.ts` has one —
  * `DEFAULT_CONSOLE_WIDTH`, for answering about a route nobody has filed yet
@@ -42,7 +43,7 @@ export function PageShell({
     <div
       data-console-width={width}
       className={cn(
-        "mx-auto px-4 py-8 sm:px-6",
+        "mx-auto px-4 py-6 sm:px-6",
         CONSOLE_WIDTH_CLASS[width],
         className
       )}

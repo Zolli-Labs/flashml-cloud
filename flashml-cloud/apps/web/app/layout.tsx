@@ -1,11 +1,22 @@
 import type { Metadata } from "next";
-import { Geist_Mono, Instrument_Sans } from "next/font/google";
+import { Geist, Geist_Mono, Instrument_Sans } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ThemeProvider } from "@/components/shared/ThemeProvider";
 
 const instrumentSans = Instrument_Sans({
   variable: "--font-instrument-sans",
+  subsets: ["latin"],
+  display: "swap",
+});
+
+// The console's own face — see `.console-theme` in app/globals.css, which
+// sets this as the inherited font-family for every console page. Marketing
+// and auth keep Instrument Sans; loading both is the cost of that split, the
+// same tradeoff `geistMono` already made for the mono face used everywhere.
+const geistSans = Geist({
+  variable: "--font-geist-sans",
   subsets: ["latin"],
   display: "swap",
 });
@@ -86,7 +97,14 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${instrumentSans.variable} ${geistMono.variable}`}
+      className={`${instrumentSans.variable} ${geistSans.variable} ${geistMono.variable}`}
+      // next-themes reads localStorage/`prefers-color-scheme` and sets
+      // `.dark` on this element before React hydrates, so the class React
+      // rendered on the server and the class the browser is now showing
+      // legitimately disagree for one frame. Without this, React logs a
+      // hydration-mismatch warning for a difference next-themes introduces
+      // on purpose.
+      suppressHydrationWarning
     >
       <body className="min-h-dvh flex flex-col antialiased">
         {/* Keyboard and screen-reader users otherwise tab through the whole
@@ -104,24 +122,27 @@ export default function RootLayout({
         {/* `delay`, not `delayDuration`. This project's shadcn style is
             base-nova, which builds on Base UI rather than Radix, and the two
             libraries name this prop differently. */}
-        <TooltipProvider delay={250}>{children}</TooltipProvider>
+        <ThemeProvider>
+          <TooltipProvider delay={250}>{children}</TooltipProvider>
 
-        {/* Toasts. Until now every async action was silent or reported
-            itself with inline text that vanished on the next poll: cancel a
-            job, revoke a machine, save a display name, and the only way to
-            know it worked was to notice a row change. `richColors` is off
-            deliberately — sonner's own palette would introduce a second
-            green and a second red alongside the semantic ones this app
-            already defines. */}
-        <Toaster
-          theme="light"
-          position="bottom-right"
-          closeButton
-          toastOptions={{
-            className:
-              "!bg-surface !text-ink !border !border-border !font-sans !shadow-lg",
-          }}
-        />
+          {/* Toasts. Until now every async action was silent or reported
+              itself with inline text that vanished on the next poll: cancel
+              a job, revoke a machine, save a display name, and the only way
+              to know it worked was to notice a row change. `richColors` is
+              off deliberately — sonner's own palette would introduce a
+              second green and a second red alongside the semantic ones this
+              app already defines. No `theme` prop here: `components/ui/sonner.tsx`
+              calls `useTheme()` itself and drives its own `theme`, which a
+              prop here would only override. */}
+          <Toaster
+            position="bottom-right"
+            closeButton
+            toastOptions={{
+              className:
+                "!bg-surface !text-ink !border !border-border !font-sans !shadow-lg",
+            }}
+          />
+        </ThemeProvider>
       </body>
     </html>
   );

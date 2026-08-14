@@ -22,6 +22,7 @@ import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { Shortcuts } from "@/components/shell/Shortcuts";
 import { StorageWarningBanner } from "@/components/shell/StorageWarningBanner";
+import { ThemeSwitcher } from "@/components/shell/ThemeSwitcher";
 import { WorkspaceHintProvider } from "@/components/shell/WorkspaceHint";
 import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { Wordmark } from "@/components/brand/Mark";
@@ -78,23 +79,34 @@ function NavItem({
   label,
   icon: Icon,
   active,
+  compact = false,
 }: {
   href: string;
   label: string;
   icon: Icon;
   active: boolean;
+  /** The footer's Help link reads a step quieter than the section items
+   * above it — `text-xs`, matching the hand-rolled Source link beside it —
+   * rather than the general `text-[13px]` nav size. */
+  compact?: boolean;
 }) {
   return (
     <Link
       href={href}
       aria-current={active ? "page" : undefined}
-      className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${
+      // `before:-left-3` is not a magic number: it pairs with the nav
+      // container's own `px-3` below (`<nav className="... px-3 ...">`),
+      // which is exactly 0.75rem — so the bar escapes this item's padding
+      // and lands flush against the RAIL's own left edge rather than
+      // floating inset from it. If that container's padding ever changes,
+      // this offset has to change with it.
+      className={`relative flex items-center gap-2.5 rounded-md px-2.5 py-1.5 ${compact ? "text-xs" : "text-[13px]"} transition-colors ${
         active
-          ? "bg-primary/10 font-medium text-brand-foreground"
+          ? "bg-primary/8 text-foreground before:absolute before:-left-3 before:top-0 before:bottom-0 before:w-0.5 before:bg-primary before:content-['']"
           : "text-muted-foreground hover:bg-surface hover:text-foreground"
       }`}
     >
-      <Icon size={17} weight={active ? "fill" : "regular"} />
+      <Icon size={16} weight={active ? "fill" : "regular"} />
       {label}
     </Link>
   );
@@ -175,7 +187,11 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
 
   const rail = (
     <>
-      <div className="flex h-16 items-center px-4">
+      {/* `h-12`, matching the top bar's own `h-12` below — the rail and the
+          content column share one horizontal seam across the whole console,
+          and the two used to disagree by 14px (`h-16` here against the old
+          `h-[62px]` top bar). */}
+      <div className="flex h-12 items-center px-4">
         <Link href="/" aria-label="Zolli Cloud home">
           <Wordmark product tone="dark" />
         </Link>
@@ -204,7 +220,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                   new KeyboardEvent("keydown", { key: "k", metaKey: true })
                 );
               }}
-              className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 text-left text-sm text-muted-foreground shadow-sm transition-colors hover:border-primary/30 hover:bg-surface-2 hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1 text-left text-[13px] text-muted-foreground transition-colors hover:border-primary/30 hover:bg-surface-2 hover:text-foreground"
             >
               <MagnifyingGlass size={14} />
               <span className="flex-1">Search</span>
@@ -290,7 +306,13 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
                 · Credits; My machines · Add) are in-page tabs, not rail
                 items. */}
             <div className="mt-5 space-y-0.5">
-              <p className="label-caps px-2.5 pb-1">Global</p>
+              {/* Not `.label-caps` (11px, `--muted-foreground`/secondary
+                  tone) — the instrument-panel register's section labels are
+                  a step smaller and a step dimmer, `--z-app-text-dim`,
+                  which has no bare Tailwind colour utility of its own. */}
+              <p className="px-2.5 pb-1 text-[10px] uppercase tracking-[0.07em] text-[var(--z-app-text-dim)]">
+                Global
+              </p>
               <NavItem
                 href="/market/prices"
                 label="Market"
@@ -327,14 +349,15 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           label="Help"
           icon={BookOpen}
           active={isActive("/docs")}
+          compact
         />
         <a
           href={REPO}
           target="_blank"
           rel="noreferrer"
-          className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+          className="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
         >
-          <GithubLogo size={17} />
+          <GithubLogo size={16} />
           Source
         </a>
       </div>
@@ -342,7 +365,15 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <div className="flex min-h-dvh">
+    // `console-theme` is the marker `body:has(.console-theme)` in
+    // globals.css looks for — see that block for why the dark tokens live on
+    // `body` rather than on this element directly (the Toaster and Base UI's
+    // popups portal past it). This root wraps every screen this component
+    // renders, including the three access-gate states below (loading /
+    // onboarding / pending / declined), so those follow the theme too rather
+    // than staying stuck light while the console around a first-time visitor
+    // goes dark.
+    <div className="console-theme flex min-h-dvh">
       <CommandPalette />
       <Shortcuts />
       {/* `sticky top-0 self-start h-dvh`: the rail is pinned to the viewport
@@ -372,7 +403,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-[62px] items-center justify-between gap-3 border-b border-border bg-surface px-4 sm:px-6">
+        <header className="sticky top-0 z-30 flex h-12 items-center justify-between gap-3 border-b border-border bg-surface px-4 sm:px-6">
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
@@ -385,6 +416,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           </div>
           <div className="flex items-center gap-3">
             <FleetPill />
+            <ThemeSwitcher />
             <UserMenu />
           </div>
         </header>
@@ -398,18 +430,18 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             // same treatment `app/(auth)/sign-in/page.tsx` gives its card, so
             // signing up and being asked to wait look like one flow rather
             // than two unrelated screens.
-            // `min-h-[calc(100dvh-3.5rem)]`, NOT `min-h-full`: a percentage
+            // `min-h-[calc(100dvh-3rem)]`, NOT `min-h-full`: a percentage
             // min-height resolves against the parent's height, and `<main>`
             // is `flex-1` with no definite height — so `min-h-full` computed
             // to nothing, and a form taller than the viewport overflowed
-            // with its end unreachable. 3.5rem is the `h-14` header above.
+            // with its end unreachable. 3rem is the `h-12` header above.
             //
             // `min-h-*` and not `h-*`: with a fixed height plus
             // `items-center`, content taller than the box overflows in both
             // directions and the overflow cannot be scrolled to. A minimum
             // lets the container grow instead, so short cards centre and
             // tall ones simply make the page scroll.
-            <div className="flex min-h-[calc(100dvh-3.5rem)] items-center justify-center px-4 py-12">
+            <div className="flex min-h-[calc(100dvh-3rem)] items-center justify-center px-4 py-12">
               {screen === "loading" ? (
                 // Admin routes only — see ADMIN_ROUTE in lib/access-screen.
                 // Deliberately says nothing about the page behind it: the

@@ -65,6 +65,14 @@ export function GeneralInfoCard({ provider }: { provider: ProviderDetail }) {
         mono
       />
       <Row label="Location source" value={location.source} />
+      {/* Not counted in `missing`: this is not data a machine failed to
+          report, it is a fact that only applies to Zolli Labs' own
+          machines. A row that never renders for the other kind is not a
+          gap in what the other kind sent. */}
+      <Row
+        label="Operator"
+        value={provider.official ? "Zolli Labs (official)" : null}
+      />
       <Row label="Trust tier" value={badgeLabel(provider.badge)} />
     </Card>
   );

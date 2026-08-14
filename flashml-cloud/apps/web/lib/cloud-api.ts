@@ -269,13 +269,23 @@ export type JobState =
   | "FAILED"
   | "CANCELLED";
 
+/** A submitted job spec, as the coordinator stored it.
+ *
+ * EVERY BLOCK IS OPTIONAL, for the reason `JobRecord` below spells out at
+ * length: a type cannot constrain what a server sends, and declaring a field
+ * required does not make it arrive — it only moves the failure from a build
+ * error to a `TypeError` mid-render, in front of a user. The spec surface has
+ * grown blocks over releases and the API stores whatever was submitted, so a
+ * job from an older submitter really can come back without an `image` or an
+ * `isolation`. Reading one unguarded took the whole job page down; the Spec
+ * card now prints an em dash for anything the spec did not carry. */
 export interface JobSpec {
-  metadata: { name: string };
-  spec: {
-    image: { repository: string; tag: string };
-    workload: { type: string; parameters: Record<string, unknown> };
-    resources: { minimumWorkers: number; maximumWorkers: number };
-    isolation: { tier: string; allowFallback: boolean };
+  metadata?: { name?: string };
+  spec?: {
+    image?: { repository?: string; tag?: string };
+    workload?: { type?: string; parameters?: Record<string, unknown> };
+    resources?: { minimumWorkers?: number; maximumWorkers?: number };
+    isolation?: { tier?: string; allowFallback?: boolean };
   };
 }
 
