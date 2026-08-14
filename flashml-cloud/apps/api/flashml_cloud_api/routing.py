@@ -773,14 +773,16 @@ def refill_open_bids(
       and the bid is skipped rather than matched for nothing.
     - **The JOB's unproven allowance, not a fresh one.**
       :data:`marketplace.UNPROVEN_TASK_SHARE` bounds how much of ONE JOB may
-      be lost to newcomers, so the budget is computed over the summed
-      ``tasks_wanted`` of every bid this job posted
+      be lost to newcomers, so the budget is computed over the job's own task
+      total — the LARGEST ``tasks_wanted`` among the bids it posted
       (:func:`marketplace.bids_for_job` — a job spilling across classes has
-      several) and drawn down by what those bids have already spent on
-      unproven hosts. Letting each refill compute a budget from its own
-      remainder would hand the job a new quarter-share every time a listing
-      appeared, which is the same amplification
-      :func:`plan_pool_routing` removes across classes, one axis over.
+      several, and they are nested remainders rather than disjoint parts, so
+      summing them over-counts; see the ``job_tasks`` comment below) — and
+      drawn down by what those bids have already spent on unproven hosts.
+      Letting each refill compute a budget from its own remainder would hand
+      the job a new quarter-share every time a listing appeared, which is the
+      same amplification :func:`plan_pool_routing` removes across classes,
+      one axis over.
     - **The bid's STORED objective** (``bids.objective``, migration 0032) and
       its stored cap. A refill that fell back to the engine's ``cheapest`` —
       all it could have done before that column — would buy a ``fastest``
@@ -840,8 +842,22 @@ def refill_open_bids(
             if remainder <= 0:
                 continue
 
-            job_tasks = sum(int(row["tasks_wanted"]) for row in siblings) or int(
-                bid["tasks_wanted"]
+            # MAX, never SUM. A spilled job's bids are NESTED, not disjoint:
+            # `plan_pool_routing` enters its first class with the whole job
+            # and asks each later class for the REMAINDER only, so an
+            # eight-task job that fills three in its first class posts
+            # `tasks_wanted` 8 and 5 for the same eight tasks. Summing counts
+            # the un-filled part once per class the walk touched — 13 here,
+            # `unproven_task_budget(13)` == 3 against a true allowance of 2 —
+            # and grows with the LENGTH of the accept list, which is exactly
+            # the amplification `plan_pool_routing` removes at submit time.
+            # The first (oldest) bid always carries the whole job want, so
+            # the max across the job's bids IS the job's task total; max
+            # rather than `siblings[0]` because it survives `bids_for_job`
+            # ever returning another order.
+            job_tasks = max(
+                (int(row["tasks_wanted"]) for row in siblings),
+                default=int(bid["tasks_wanted"]),
             )
             unproven_remaining = max(
                 0,

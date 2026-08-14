@@ -1166,6 +1166,91 @@ def test_a_refill_spends_the_jobs_unproven_share_not_a_fresh_one(db, _clean_book
     assert _assigned(db, bid["id"]) == 4
 
 
+def test_a_spilled_jobs_refill_budget_is_the_job_want_not_the_sum_of_its_bids(
+    db, _clean_books
+):
+    """The allowance is the JOB's, and a spilled job's bids do not add up to
+    the job.
+
+    `plan_pool_routing` asks each class for the REMAINDER, so the bids a walk
+    leaves behind are nested rather than disjoint: an eight-task job that
+    fills three in its first class posts `tasks_wanted` 8 there and 5 in the
+    second, and the same three tasks are inside both numbers. Their sum is 13,
+    and `unproven_task_budget(13)` is 3 — half again the 2 the submit path
+    computed from the single total, granted for nothing but the accident of
+    having spilled. Summing is also monotonic in how MANY books the job
+    touched, which is the exact amplification `plan_pool_routing` exists to
+    remove, arriving one path over.
+
+    One of the job's two allowed newcomer tasks is already spent (in the
+    second class), a cheap unproven listing then appears in the first, and the
+    refill may place exactly ONE more task on it. The total granted is five
+    either way; WHERE the five land is what separates a correct budget from a
+    summed one.
+    """
+    assert mk.unproven_task_budget(8) == 2   # the job's true allowance
+    assert mk.unproven_task_budget(13) == 3  # what summing the bids would buy
+
+    buyer, host = make_user(db), make_user(db)
+    job_id = f"job-spill-{uuid.uuid4().hex[:10]}"
+
+    # The shape a two-class walk leaves behind: the first class was asked for
+    # the whole job and could fill three of it, the second for the five it
+    # could not — both bids under one `job_id`, as `route_submitted_job` posts
+    # them.
+    held = _proven_listing(db, host, CLASS, ask=100, capacity=3)
+    first = _bid_for(db, buyer, CLASS, cap=250, tasks=8, job_id=job_id)
+    _grant_from_the_live_book(db, first, tasks=8)
+    assert _assigned(db, first["id"]) == 3
+    assert _bid_row(db, first["id"])["state"] == "partial"
+
+    spill = _bid_for(db, buyer, SECOND, cap=250, tasks=5, job_id=job_id)
+    newcomer = make_machine(db, host, capabilities={"gpus": [A100]})
+    spent_on = mk.create_listing(
+        db, machine_id=newcomer, owner_id=host, ask_zc_per_hour=100,
+        max_concurrent_tasks=4,
+    )
+    assert spent_on["capability_class"] == SECOND
+    # `unproven_task_budget(5)` is 1, so one of the job's two lands here.
+    _grant_from_the_live_book(db, spill, tasks=5, klass=SECOND)
+    assert [m["unproven_host"] for m in _matches(db, spill["id"])] == [True]
+    assert _assigned(db, spill["id"]) == 1
+
+    # New supply in the first class. The newcomer is the cheapest thing in the
+    # book, so it takes everything the remaining allowance permits and the
+    # proven machine takes the rest.
+    fresh_machine = make_machine(db, host, capabilities={"gpus": [H100]})
+    cheap_newcomer = mk.create_listing(
+        db, machine_id=fresh_machine, owner_id=host, ask_zc_per_hour=50,
+        max_concurrent_tasks=8,
+    )
+    assert cheap_newcomer["capability_class"] == CLASS
+    proven = _proven_listing(db, host, CLASS, ask=200, capacity=8)
+
+    summary = refill_open_bids(db, capability_class=CLASS)
+
+    assert summary == [{"bid_id": str(first["id"]), "tasks_granted": 5}]
+    by_listing = {
+        str(m["listing_id"]): int(m["tasks_assigned"])
+        for m in _matches(db, first["id"])
+        if m["state"] != "expired"
+    }
+    assert by_listing == {
+        str(held["id"]): 3,
+        # budget(8) == 2 and the spill already spent one: exactly one left.
+        # A summed budget would put two here and three on `proven`.
+        str(cheap_newcomer["id"]): 1,
+        str(proven["id"]): 4,
+    }
+    assert _assigned(db, first["id"]) == 8 == int(first["tasks_wanted"])
+    # The job's whole newcomer exposure, across every bid it posted, is the
+    # number the submit path would have allowed a single-class job of the same
+    # size — which is the entire point of the cap.
+    assert routing._unproven_tasks_spent(
+        db, [str(first["id"]), str(spill["id"])]
+    ) == mk.unproven_task_budget(8)
+
+
 def test_a_filled_bid_is_never_refilled(db, _clean_books):
     """`open_bids` selects `open`/`partial` and `grant_matches` refuses
     anything else, so this is belt and braces — but it is the invariant a
