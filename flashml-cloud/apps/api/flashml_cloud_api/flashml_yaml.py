@@ -118,7 +118,8 @@ REQUIRED_KEYS = {"version", "name", "image", "entrypoint"}
 OPTIONAL_KEYS = {"args", "sweep", "resources", "timeout_seconds",
                  "mode", "epochs", "sync_every",
                  "local_inputs", "partition", "validators", "reduce",
-                 "allow_partial", "dependencies", "datasets", "python", "price"}
+                 "allow_partial", "dependencies", "datasets", "python", "price",
+                 "placement"}
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 
 #: The shape a ``python:`` declaration may take: CPython ``major.minor``.
@@ -295,6 +296,25 @@ class FlashmlConfig:
     #: let a submitter believe a knob does something it cannot yet do.
     #: Shape: ``{"max_zc_per_hour": int}``.
     price: dict | None = None
+    #: Where this job is willing to run. ``None`` (default) means "let the
+    #: router derive it from ``resources``", which is what every config
+    #: written before this key existed keeps doing.
+    #:
+    #: Shape: ``{"accept": [str, ...]}`` — an ORDERED, non-empty, duplicate-
+    #: free list of capability-class names. The order is the order the router
+    #: walks: it bids in the first class, and only spills into the next with
+    #: whatever tasks the first could not fill.
+    #:
+    #: **The names are not validated here.** This module knows nothing about
+    #: the capability ladder and must not learn: ``marketplace`` owns it, and
+    #: importing ``marketplace`` from a config parser would put the market's
+    #: vocabulary on the import path of every yaml parse (including the ones
+    #: that never price anything). ``routing.job_accept_classes`` is the one
+    #: place a class name is checked against the real ladder, and it refuses
+    #: an unknown one by name. So a shape-valid ``accept`` is not a
+    #: routable one, and this key's presence proves only that the submitter
+    #: wrote a well-formed list.
+    placement: dict | None = None
 
     @property
     def is_federated(self) -> bool:
@@ -394,6 +414,11 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
     datasets = _validate_datasets(raw.get("datasets"))
     python = _validate_python(raw.get("python"))
     price = _validate_price(raw.get("price")) if raw.get("price") is not None else None
+    placement = (
+        _validate_placement(raw.get("placement"))
+        if raw.get("placement") is not None
+        else None
+    )
     mode, epochs, sync_every = _validate_mode(raw, version)
 
     return FlashmlConfig(
@@ -417,6 +442,7 @@ def parse_flashml_yaml(text: str) -> FlashmlConfig:
         datasets=datasets,
         python=python,
         price=price,
+        placement=placement,
     )
 
 
@@ -940,3 +966,103 @@ def _validate_price(value: object) -> dict:
     max_zc = to_unit("max_per_hour", raw["max_per_hour"], minimum_units=1)
 
     return {"max_zc_per_hour": max_zc}
+
+
+#: The one key ``placement:`` takes today. A constant rather than a literal
+#: inside the validator for the same reason ``DATASET_KEYS`` is one: the
+#: message that refuses an unknown key has to list what IS allowed, and a
+#: list that drifts from the check is worse than no list at all.
+PLACEMENT_KEYS = ("accept",)
+
+
+def _validate_placement(value: object) -> dict:
+    """Where a job is willing to run. SHAPE only — see ``FlashmlConfig.placement``.
+
+    ``accept`` is an ordered, non-empty, duplicate-free list of non-empty
+    strings, and every one of those four words is a rule this function
+    enforces and the router relies on:
+
+    - **ordered** — the router bids in the first class and spills into the
+      next only with the tasks the first could not fill, so the list is a
+      preference, not a set. It is therefore returned as a ``list`` in the
+      order written, never sorted or normalised.
+    - **non-empty** — ``accept: []`` reads as "run nowhere", which is not a
+      constraint anybody means to write; it is a list somebody meant to fill
+      in. Refused rather than silently routed as if the key were absent,
+      which would do the OPPOSITE of what it says.
+    - **duplicate-free** — the router walks one class per entry and re-reads
+      the same open book each time, with nothing written between the reads.
+      A class named twice would plan the same listing's capacity twice and
+      report a fill that only one machine can honour. Refused here, and
+      refused again in ``routing.job_accept_classes`` for the callers that
+      never came through a yaml file.
+    - **strings** — a class name is a name. ``4`` and ``[cpu-small]`` are
+      typos, and coercing either would hand ``routing`` a value it can only
+      answer with "unknown capability class ``'4'``", naming the symptom
+      instead of the mistake.
+
+    ``countries`` and ``pool`` are refused BY NAME, before the generic
+    unknown-key check, for the reason ``_validate_price`` refuses
+    ``objective``/``budget`` there: "unknown key(s) ['pool']" sends someone
+    hunting for a typo in a key that is spelled exactly right. They are two
+    different kinds of not-here, and the messages say which — ``countries``
+    is a real future key that nothing enforces yet, while ``pool`` exists
+    TODAY, at submit, as a request parameter, so the fix is to move one line
+    rather than to drop a constraint the submitter still wants.
+
+    What is deliberately NOT checked here: whether an entry names a real
+    capability class, and whether the list is consistent with
+    ``resources.gpus``/``resources.cpus``. Both need the marketplace ladder,
+    this module never imports ``marketplace``, and
+    ``routing.job_accept_classes`` is the single place that owns those
+    answers.
+    """
+    raw = _validate_mapping(value, "placement")
+    if "countries" in raw:
+        raise ConfigError(
+            "placement.countries: not supported yet — nothing filters "
+            f"placement by country today; remove it until then "
+            f"(got {raw['countries']!r})"
+        )
+    if "pool" in raw:
+        raise ConfigError(
+            "placement.pool: pool is chosen at submit, not in the yaml — "
+            "pass it as the submit request's `pool` parameter (or pick the "
+            f"workspace in the console); remove it here (got {raw['pool']!r})"
+        )
+
+    unknown = set(raw) - set(PLACEMENT_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"placement: unknown key(s) {sorted(unknown)!r}; "
+            f"allowed: {sorted(PLACEMENT_KEYS)!r}"
+        )
+
+    if "accept" not in raw:
+        raise ConfigError(
+            "placement: accept is required — it is the only key placement "
+            f"takes today, so a block without it constrains nothing"
+        )
+
+    accept = raw["accept"]
+    if not isinstance(accept, list) or not accept:
+        raise ConfigError(
+            "placement.accept must be a non-empty list of capability class "
+            f"names, got {accept!r}"
+        )
+
+    seen: list[str] = []
+    for entry in accept:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigError(
+                "placement.accept entries must be non-empty strings, got "
+                f"{entry!r}"
+            )
+        if entry in seen:
+            raise ConfigError(
+                f"placement.accept lists {entry!r} twice; a duplicate class "
+                "would plan the same machines' capacity twice"
+            )
+        seen.append(entry)
+
+    return {"accept": seen}
