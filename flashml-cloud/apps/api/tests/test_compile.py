@@ -448,15 +448,18 @@ def test_a_nonsensical_cpu_count_is_refused(bad):
 #
 # ``compile_to_jobspec`` returns ``JobSpec.model_validate(...).model_dump()``,
 # so its output carries only the fields the PINNED flashruntime declares.
-# ``ResourcesSpec.gpuPerTask`` lands in flashruntime 0.5.0 (plan Task 1); the
-# pin is still 0.4.0 (plan Task 10 moves it). Pydantic's default
-# ``extra="ignore"`` means the field is dropped SILENTLY in between — no
-# error, no warning, just a GPU job that compiles to a CPU spec.
+# ``ResourcesSpec.gpuPerTask`` landed in flashruntime 0.5.0 and the pin is
+# 0.6.0, so the round-trip keeps it today. It did NOT between 0.4.0 and the
+# re-pin: pydantic's default ``extra="ignore"`` dropped the field silently —
+# no error, no warning, just a GPU job that compiled to a CPU spec.
 #
-# So the emission is asserted against ``_resources``, the function that owns
-# the translation, and the survival through the round-trip is asserted
-# separately and gated on the pin, where it becomes visible the moment the pin
-# moves instead of being quietly untested.
+# The split below survives that history on purpose. The emission is asserted
+# against ``_resources``, the function that owns the translation and whose
+# contract holds whatever the pin says; the survival through the round-trip is
+# asserted separately and gated on the pin, so it turns itself on when the pin
+# carries the field and off when it does not, instead of failing as if this
+# repo had broken something it cannot fix (hard rule 2: the protocol is
+# upstream's).
 
 
 def _gpu_pin_supports_gpu_per_task() -> bool:
@@ -526,17 +529,19 @@ def test_a_nonsensical_gpu_count_is_refused(bad):
 
 
 def test_a_gpu_request_survives_the_jobspec_round_trip():
-    """The hop that is currently broken by the pin, and will not announce it.
+    """The hop that was broken by the pin and would not have announced it.
 
-    Plan Task 10 bumps the pin to flashruntime 0.5.0. Until then this skips;
-    after it, it is the assertion that catches the field being dropped again.
+    Live since the pin moved to a flashruntime that declares ``gpuPerTask``
+    (0.5.0; the pin is 0.6.0). It is the assertion that catches the field
+    being dropped again — by a pin that goes backwards, or by a
+    ``compile_to_jobspec`` that stops emitting it.
     """
     if not _gpu_pin_supports_gpu_per_task():
         pytest.skip(
             "pinned flashruntime has no ResourcesSpec.gpuPerTask, so the "
             "JobSpec round-trip in compile_to_jobspec drops it silently. "
-            "Unblocked by plan Task 10 (release flashruntime 0.5.0 and re-pin "
-            "in apps/api/pyproject.toml, render.yaml, and Makefile FLASHML_PIN)."
+            "Fixed by pinning a runtime that declares it — all four pin "
+            "sites move together (see the repo CLAUDE.md's table)."
         )
     spec = compile_to_jobspec(
         _config(resources={"gpus": 1}), PYTORCH, CODE_URI, "demo"
@@ -545,10 +550,14 @@ def test_a_gpu_request_survives_the_jobspec_round_trip():
 
 
 def test_the_pin_gap_is_a_silent_drop_and_not_a_validation_error():
-    """Documents WHY the test above skips, so the gap cannot be misread.
+    """Documents WHY the test above would skip, so the gap cannot be misread.
 
-    If this ever fails, the pin has moved and
-    ``test_a_gpu_request_survives_the_jobspec_round_trip`` has taken over.
+    This one is the skip today — the pin carries the field and
+    ``test_a_gpu_request_survives_the_jobspec_round_trip`` has taken over. It
+    stays because a pin that goes backwards must produce a described,
+    understood failure mode rather than a mystery, and because "the field
+    vanishes instead of raising" is the fact that made the gap invisible in
+    the first place.
     """
     if _gpu_pin_supports_gpu_per_task():
         pytest.skip("pin now carries gpuPerTask; the round-trip test asserts it")
