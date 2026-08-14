@@ -703,6 +703,66 @@ def test_the_nearest_miss_is_the_cheapest_across_every_walked_class(
     }
 
 
+def test_the_nearest_miss_is_the_cheapest_under_fastest_too(db, _clean_books):
+    """The miss is defined by PRICE, and only under `cheapest` is rank order
+    price order.
+
+    Both listings are timed, so `fastest` ranks the quick-and-dear one FIRST
+    and the slow-and-cheap one second. A per-class "first above the cap wins"
+    latch therefore answers 500 — the dearest thing in the book — to a
+    question whose contract (`plan_pool_routing`'s docstring, and the
+    cross-class `min()` that consumes it) says "the cheapest EFFECTIVE price
+    above the cap". Rate 1.0 on both, so effective price is the ask.
+    """
+    host = make_user(db)
+    _proven_timed_listing(db, host, CLASS, ask=500, capacity=4, seconds=5)
+    cheaper_miss = _proven_timed_listing(
+        db, host, CLASS, ask=120, capacity=4, seconds=90
+    )
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS,), max_zc_per_hour=100, tasks_wanted=2,
+        objective="fastest",
+    )
+
+    # The dear machine really is ranked first — the ordering is not the bug.
+    assert [row["ask_zc_per_hour"] for row in result["book"]] == [500, 120]
+    assert result["tasks_unfilled"] == 2
+    assert result["nearest_miss"] == {
+        "ask_zc_per_hour": 120,
+        "listing_id": str(cheaper_miss["id"]),
+        "capability_class": CLASS,
+    }
+
+
+def test_the_nearest_miss_is_the_cheapest_under_balanced_too(db, _clean_books):
+    """Same argument under `balanced`, where the order is price SCALED by the
+    machine's own speed and so is price order only by accident.
+
+    Class median over the two is 47.5s. The dear machine's factor clamps at
+    1/2 (500 -> 250); the cheap one's is 90/47.5 (200 -> ~379), so `balanced`
+    ranks the dear one first and a latch would report 500 again.
+    """
+    host = make_user(db)
+    _proven_timed_listing(db, host, CLASS, ask=500, capacity=4, seconds=5)
+    cheaper_miss = _proven_timed_listing(
+        db, host, CLASS, ask=200, capacity=4, seconds=90
+    )
+
+    result = plan_pool_routing(
+        db, accept_classes=(CLASS,), max_zc_per_hour=100, tasks_wanted=2,
+        objective="balanced",
+    )
+
+    assert [row["ask_zc_per_hour"] for row in result["book"]] == [500, 200]
+    assert result["tasks_unfilled"] == 2
+    assert result["nearest_miss"] == {
+        "ask_zc_per_hour": 200,
+        "listing_id": str(cheaper_miss["id"]),
+        "capability_class": CLASS,
+    }
+
+
 def test_a_fully_filled_walk_reports_no_nearest_miss(db, _clean_books):
     """`nearest_miss` answers "why did this not fill" — a filled plan has no
     such question, so an above-cap listing in a walked class is reported in

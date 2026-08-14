@@ -495,7 +495,22 @@ def _plan_one_class(
                 # catch-all guessing at a fourth reason that cannot occur.
                 excluded = "no-tasks-left"
 
-            if nearest_miss is None and price is not None and price > max_zc_per_hour:
+            # The CHEAPEST above the cap, tracked as a running minimum over
+            # the whole walk — never the first one the rank order happens to
+            # reach. Only under `cheapest` is rank order price order: under
+            # `fastest` the book leads on measured duration and under
+            # `balanced` on price scaled by it, so the first above-cap row of
+            # either is simply the quickest (or best-scaled) machine that did
+            # not clear, which is not the number `plan_pool_routing` promises
+            # ("the cheapest EFFECTIVE price above the cap") nor the one its
+            # cross-class `min()` can safely compare against another class.
+            # Ties keep the first in rank order, which is deterministic
+            # (`marketplace._rank_key_for` ends every key in ask + listing id).
+            if (
+                price is not None
+                and price > max_zc_per_hour
+                and (nearest_miss_price is None or price < nearest_miss_price)
+            ):
                 nearest_miss = {
                     "ask_zc_per_hour": int(ask.ask_zc_per_hour),
                     "listing_id": ask.listing_id,
