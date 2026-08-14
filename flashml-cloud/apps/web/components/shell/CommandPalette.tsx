@@ -226,11 +226,14 @@ export function CommandPalette() {
         onClick={() => setOpen(false)}
         className="absolute inset-0 bg-black/60"
       />
+      {/* `rounded-lg` (was a hardcoded `rounded-[10px]`, always just the old
+          `--radius-lg` written as a literal) — on the token system now,
+          same treatment `.panel` and `Card` get. */}
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        className="relative w-full max-w-lg overflow-hidden rounded-[10px] border border-border bg-surface shadow-lg"
+        className="relative w-full max-w-lg overflow-hidden rounded-lg border border-border bg-surface shadow-lg"
       >
         <div className="flex items-center gap-2.5 border-b border-border px-4">
           <MagnifyingGlass size={15} className="shrink-0 text-muted-foreground" />

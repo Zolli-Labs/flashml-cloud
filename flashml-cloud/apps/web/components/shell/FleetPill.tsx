@@ -61,7 +61,9 @@ export function FleetPill() {
   const live = fleet.online > 0;
 
   return (
-    <div className="hidden items-center gap-2 rounded-[4px] border border-border bg-surface px-3 py-1.5 sm:inline-flex">
+    // `rounded-sm` (was a hardcoded `rounded-[4px]`) — on the token system
+    // now, part of the console-wide sharper/premium pass.
+    <div className="hidden items-center gap-2 rounded-sm border border-border bg-surface px-3 py-1.5 sm:inline-flex">
       <span
         className="status-dot"
         data-state={live && fleet.running > 0 ? "live" : undefined}

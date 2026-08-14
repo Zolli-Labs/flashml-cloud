@@ -196,10 +196,15 @@ export default function WorkspaceJobsPage() {
             <Table className="min-w-[640px]">
               <TableHeader>
                 <TableRow>
+                  {/* No `label-caps` here — `TableHead`'s own default now
+                      supplies the identical machine-register treatment
+                      (plus mono, which `.label-caps` alone did not); only
+                      the per-column `text-right` alignment is still this
+                      page's own decision. */}
                   {COLUMNS.map((h, i) => (
                     <TableHead
                       key={h}
-                      className={cn("label-caps", i === 4 && "text-right")}
+                      className={cn(i === 4 && "text-right")}
                     >
                       {h}
                     </TableHead>

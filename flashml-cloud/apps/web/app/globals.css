@@ -142,9 +142,20 @@
   --cyan-dim: rgb(243 107 50 / 0.14);
 
   --shadow-sm: 0 1px 2px rgb(17 20 22 / 0.06);
-  --shadow-md: 0 12px 28px -18px rgb(17 20 22 / 0.22);
-  --shadow-lg: 0 24px 52px -28px rgb(17 20 22 / 0.3);
-  --radius: 0.625rem;
+  --shadow-md: 0 8px 20px -16px rgb(17 20 22 / 0.18);
+  --shadow-lg: 0 16px 36px -24px rgb(17 20 22 / 0.24);
+  /* The sharpness dial for the whole console — every `rounded-sm/md/lg/xl`
+     utility and every hand-written `border-radius: var(--radius*)` follows
+     this one number (`@theme inline` above derives sm/md/lg/xl from it).
+     0.375rem (6px) is deliberate: sharper and more machine-precise than the
+     old 0.625rem (10px), which read as soft/toy against the flat, hairline-
+     bordered register this console is going for. Zero (true brutalist,
+     square corners everywhere) was considered and rejected — it would fight
+     the warm mineral / warm-black identity this palette keeps, which wants
+     precision, not starkness. 6px is the Akash-adjacent dev-tool register:
+     enough radius to still read as a friendly surface, not enough to read
+     as a bubble. */
+  --radius: 0.375rem;
 }
 
 /* ─── Console dark register ───────────────────────────────────────
@@ -216,8 +227,11 @@ html.dark:has(.console-theme) {
   --skeleton: #241e18;
   --cyan-dim: rgb(255 116 39 / 0.16);
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
-  --shadow-md: 0 12px 28px -18px rgb(0 0 0 / 0.55);
-  --shadow-lg: 0 24px 52px -28px rgb(0 0 0 / 0.65);
+  /* Flatter, tighter spread than the pre-redesign values — matches the
+     light register's md/lg above, part of the same "premium comes from
+     precision" pass: elevation reads as a hairline lift, not a soft glow. */
+  --shadow-md: 0 8px 20px -16px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 16px 36px -24px rgb(0 0 0 / 0.6);
 }
 
 /* The canvas behind the console. Scroll-lock gutters, the shrunken body

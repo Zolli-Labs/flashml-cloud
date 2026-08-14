@@ -87,13 +87,33 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
  * `components/` use exactly this, more than any other value. The stock
  * `h-10 px-2` matched none of them, and `h-10` in particular forced a 40px
  * header row that the console's 11px `.label-caps` labels do not fill.
+ *
+ * MACHINE REGISTER, matching `.label-caps`'s own values (`font-size:
+ * 0.6875rem`, `font-weight: 500`, `letter-spacing: 0.07em`, `text-transform:
+ * uppercase`, `color: var(--muted-foreground)`) plus `font-mono` — a column
+ * name is metadata about the row, the same category as a job id or a
+ * machine name, not prose, so it gets the same mono treatment those do.
+ * `.label-caps` itself does not set `font-family`, which is why call sites
+ * that merely apply `className="label-caps"` to `TableHead` — `MemberTable`,
+ * `PoolFleetTable`, the pool jobs page — used to render sans headers; this
+ * default now supplies the mono face directly, and this file's own uses of
+ * `.label-caps` on that primitive are removed as redundant (`.label-caps`
+ * is declared UNLAYERED in globals.css, so for the properties it does share
+ * with this default it would win the cascade anyway — same values, so no
+ * visible change, just one fewer source of the same rule to reconcile).
+ * `font-medium` replaces the old plain `font-medium` — checked against 2–3
+ * hand-rolled `<th>` call sites (`app/(console)/account/machines/page.tsx`,
+ * `components/jobs/TasksTable.tsx`) that do NOT use this primitive at all —
+ * they hand-write `<table>`/`<th>` and apply `.label-caps` themselves, so
+ * this default reaching them is not a risk; they simply stay outside this
+ * primitive's reach, same as before.
  */
 function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   return (
     <th
       data-slot="table-head"
       className={cn(
-        "px-3 py-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0",
+        "px-3 py-2 text-left align-middle whitespace-nowrap font-mono text-[11px] font-medium uppercase tracking-[0.07em] text-muted-foreground [&:has([role=checkbox])]:pr-0",
         className
       )}
       {...props}

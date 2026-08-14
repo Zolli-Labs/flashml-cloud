@@ -23,6 +23,7 @@ import { it } from "vitest";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -196,7 +197,10 @@ function TopBar({ theme }: { theme: "light" | "dark" }) {
         <SidebarSimple size={18} className="text-muted-foreground lg:hidden" />
       </div>
       <div className="flex items-center gap-3">
-        <div className="hidden items-center gap-2 rounded-[4px] border border-border bg-surface px-3 py-1.5 sm:inline-flex">
+        {/* `rounded-sm`, matching `components/shell/FleetPill.tsx`'s own
+            update (was `rounded-[4px]`) — this stand-in is a copy of its
+            classes, not an import, so it has to be kept in sync by hand. */}
+        <div className="hidden items-center gap-2 rounded-sm border border-border bg-surface px-3 py-1.5 sm:inline-flex">
           <span
             className="status-dot"
             data-state="live"
@@ -349,6 +353,72 @@ function Content() {
             className="status-dot"
             style={{ background: "var(--muted-foreground)" }}
           />
+        </div>
+        {/* `components/jobs/StateBadge.tsx`'s exact treatment — `Badge
+            variant="outline"` plus `font-mono text-xs` and a per-state
+            colour — reproduced rather than imported, since that component
+            takes a `JobState` from `lib/cloud-api` and this harness invents
+            no fixture-shaped literals from that module. This is the squared
+            tag shape doing the real work: four job states, one row. */}
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.5rem",
+            marginTop: "0.75rem",
+          }}
+        >
+          <Badge
+            variant="outline"
+            className="font-mono text-xs text-brand-foreground border-brand/40"
+          >
+            RUNNING
+          </Badge>
+          <Badge
+            variant="outline"
+            className="font-mono text-xs text-evergreen border-evergreen/40"
+          >
+            SUCCEEDED
+          </Badge>
+          <Badge
+            variant="outline"
+            className="font-mono text-xs text-warning-foreground border-warning/50"
+          >
+            PARTIAL
+          </Badge>
+          <Badge
+            variant="outline"
+            className="font-mono text-xs text-destructive border-destructive/40"
+          >
+            FAILED
+          </Badge>
+        </div>
+      </section>
+
+      <section style={{ marginBottom: "2.5rem" }}>
+        <h2 className="label-caps" style={{ marginBottom: "0.75rem" }}>
+          Input
+        </h2>
+        <div style={{ maxWidth: "24rem" }}>
+          <Input placeholder="job_01H9QK…" />
+        </div>
+      </section>
+
+      {/* `.elevated` applies `box-shadow: var(--shadow-md)` — see
+          `app/globals.css` — so this panel exercises the flattened
+          elevation directly rather than only through the ambient shadow a
+          `.panel` alone does not carry. */}
+      <section style={{ marginBottom: "2.5rem" }}>
+        <h2 className="label-caps" style={{ marginBottom: "0.75rem" }}>
+          Elevated panel (--shadow-md)
+        </h2>
+        <div className="panel elevated" style={{ maxWidth: "24rem", padding: "1rem" }}>
+          <p className="text-sm font-medium text-foreground">
+            Machine revoked
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            node-a will stop accepting new leases immediately.
+          </p>
         </div>
       </section>
 

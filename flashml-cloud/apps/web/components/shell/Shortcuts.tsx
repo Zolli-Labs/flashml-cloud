@@ -99,11 +99,14 @@ export function Shortcuts() {
         onClick={() => setOpen(false)}
         className="absolute inset-0 bg-black/60"
       />
+      {/* `rounded-lg` (was a hardcoded `rounded-[10px]`, always just the old
+          `--radius-lg` written as a literal) — on the token system now,
+          same treatment `.panel` and `Card` get. */}
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Keyboard shortcuts"
-        className="relative w-full max-w-sm rounded-[10px] border border-border bg-surface p-5 shadow-lg"
+        className="relative w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-lg"
       >
         <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
         <dl className="mt-4 space-y-2.5">
