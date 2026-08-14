@@ -16,7 +16,13 @@ the four invariants task-4-brief.md names:
 * a priced GPU job is refused with 400 naming ``gpuPerTask`` before a single
   byte reaches the coordinator — a VALIDATION failure
   (``routing.GpuRoutingUnavailable``), not a routing one, so no job row
-  exists either.
+  exists either;
+* a priced FEDERATED job submits exactly as it does without Task 4 (no
+  refusal, no bid — federated rounds are a named follow-up, not routed
+  today) but the plan's explainability rule still holds: the response
+  names the gap (``routing: {"state": "skipped", "reason":
+  "federated-unsupported"}``) rather than silently dropping the price
+  block on the floor.
 
 Fixture and coordinator-stub pattern copied from ``tests/test_jobs_from_repo.py``
 (module docstring there: GitHub is never contacted, every repo is a tarball
@@ -35,7 +41,7 @@ import tarfile
 import textwrap
 import time
 import uuid
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import httpx
 import jwt
@@ -83,6 +89,59 @@ GPU_PRICED_YAML = BASE_YAML + PRICE_BLOCK + GPU_BLOCK
 CLEAN_REPO = {"flashml.yaml": CLEAN_YAML, "train.py": CLEAN_TRAIN_PY}
 PRICED_REPO = {"flashml.yaml": PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
 GPU_PRICED_REPO = {"flashml.yaml": GPU_PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
+
+# A federated config, priced. `mode: federated` requires `version: 2` and
+# `epochs` (flashml_yaml._validate_mode); the price block is layered on top
+# exactly as PRICED_YAML layers it onto BASE_YAML above.
+FEDERATED_YAML = """
+    version: 2
+    name: routed-federated
+    image: python-slim
+    entrypoint: train.py
+    mode: federated
+    epochs: 1
+"""
+
+FEDERATED_PRICED_YAML = FEDERATED_YAML + PRICE_BLOCK
+
+#: An entrypoint that speaks the delta protocol preflight requires for a
+#: federated job (verbatim from tests/test_federated.py's FEDERATED_TRAIN_PY,
+#: copied here so this file stays self-contained rather than importing
+#: across test modules for one script). This is a STATIC scan — the
+#: preflight "federated-contract" finding greps for the literal substrings
+#: below (``/work/inputs/weights.json``, ``--shard``/``--num-shards``,
+#: ``/work/out/delta.json``, ``chunks_done``), so trimming this down to only
+#: the parts that "matter" at runtime (as an earlier draft of this fixture
+#: did) is refused before submission ever reaches the routing hook this test
+#: is about — CLEAN_TRAIN_PY does not satisfy it either.
+FEDERATED_TRAIN_PY = """
+    import argparse
+    import json
+    import os
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--round", type=int, default=0)
+    parser.add_argument("--shard", type=int, default=0)
+    parser.add_argument("--num-shards", type=int, default=1)
+    args = parser.parse_args()
+
+    weights_path = "/work/inputs/weights.json"
+    weights = None
+    if os.path.exists(weights_path):
+        with open(weights_path) as fh:
+            weights = json.load(fh)
+
+    delta = {"w": {"shape": [1], "data": [0.1]}}
+    with open("/work/out/delta.json", "w") as fh:
+        json.dump(delta, fh)
+    with open("/work/out/metrics.json", "w") as fh:
+        json.dump({"samples": 128, "loss": 0.5, "delta_file": "delta.json",
+                   "chunks_done": [args.shard]}, fh)
+"""
+
+FEDERATED_PRICED_REPO = {
+    "flashml.yaml": FEDERATED_PRICED_YAML, "train.py": FEDERATED_TRAIN_PY,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +282,50 @@ def make_client(settings, postgres_dsn, transport):
         client.__enter__()
         clients.append(client)
         client.fetch = fetch  # type: ignore[attr-defined]
+        return client
+
+    yield build
+    for client in clients:
+        client.__exit__(None, None, None)
+
+
+class _RecordingStarter:
+    """Stands in for `start_federated_job` — records the run without
+    launching a background driver thread. Same pattern
+    tests/test_federated.py's own `RecordingStarter`/`federated_client`
+    fixture uses for its from-repo submission tests: the driver's own
+    behavior is out of scope here, only whether the submit route reports
+    routing correctly for a federated + priced job."""
+
+    def __init__(self) -> None:
+        self.runs: list[Any] = []
+
+    def __call__(self, run, **kwargs):
+        self.runs.append(run)
+        return None
+
+
+@pytest.fixture
+def federated_client(settings, postgres_dsn, transport):
+    clients = []
+
+    def build(files: dict[str, str] | None = None):
+        fetch = RecordingFetch(make_tarball(files or FEDERATED_PRICED_REPO))
+
+        def connect() -> psycopg.Connection:
+            conn = psycopg.connect(postgres_dsn, row_factory=dict_row, connect_timeout=5)
+            conn.autocommit = True
+            return conn
+
+        starter = _RecordingStarter()
+        app = create_cloud_app(
+            settings, connect=connect, transport=transport, fetch_repo=fetch,
+            start_federated_job=starter,
+        )
+        client = TestClient(app)
+        client.__enter__()
+        clients.append(client)
+        client.starter = starter  # type: ignore[attr-defined]
         return client
 
     yield build
@@ -437,3 +540,35 @@ def test_a_gpu_priced_job_is_refused_before_the_coordinator(make_client, db, tra
     assert "gpuPerTask" in r.json()["detail"]
     assert _job_rows(db, alice) == []
     assert transport.job_submissions == []
+
+
+# ---------------------------------------------------------------------------
+# 5. a priced FEDERATED job submits unchanged, but says so
+# ---------------------------------------------------------------------------
+#
+# Ruling (coordinator, post-review): federated + price is not a validation
+# refusal — the run above already started by the time routing.py could ever
+# see it — and it is not silence either. The plan's explainability
+# constraint (every routing decision visible in the response) means a
+# submitter who priced a federated job must be told routing did not apply,
+# in the same shape a routing-error skip already uses, rather than the price
+# block being dropped on the floor with no trace.
+
+
+def test_a_federated_priced_job_reports_skipped_not_routed(federated_client, db):
+    client = federated_client(FEDERATED_PRICED_REPO)
+    alice = _new_user(db)
+
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    body = r.json()
+
+    assert body["mode"] == "federated"
+    assert body["routing"] == {
+        "state": "skipped", "reason": "federated-unsupported",
+    }
+    assert _bids_for_job(db, body["job_id"]) == []
+    # The run itself is untouched by the routing gap: it still started,
+    # exactly as it would have before this task existed.
+    assert len(client.starter.runs) == 1
+    assert client.starter.runs[0].job_id == body["job_id"]

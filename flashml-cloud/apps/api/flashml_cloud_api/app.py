@@ -6468,17 +6468,31 @@ def create_cloud_app(
                 settings=settings,
                 connect=request.app.state.connect,
             )
+            federated_response: dict[str, Any] = {
+                "job_id": job_id,
+                "state": "PENDING",
+                "mode": config.mode,
+                "epochs": config.epochs,
+                "sync_every": config.sync_every,
+                "rounds": config.round_count,
+                "slots": fleet.slots,
+                "findings": rendered,
+            }
+            # Priced routing does not reach federated rounds yet — this run
+            # is N coordinator jobs the driver submits itself, one per round,
+            # not the single accepted job `routing.route_submitted_job`
+            # needs. No refusal (the run above already started) and no bid,
+            # but the plan's explainability rule holds regardless: every
+            # routing decision is visible in the response, so a `price:`
+            # block here is reported skipped rather than silently ignored,
+            # same shape as a runtime routing-error skip.
+            if config.price is not None:
+                federated_response["routing"] = {
+                    "state": "skipped",
+                    "reason": "federated-unsupported",
+                }
             return Response(
-                content=json.dumps({
-                    "job_id": job_id,
-                    "state": "PENDING",
-                    "mode": config.mode,
-                    "epochs": config.epochs,
-                    "sync_every": config.sync_every,
-                    "rounds": config.round_count,
-                    "slots": fleet.slots,
-                    "findings": rendered,
-                }),
+                content=json.dumps(federated_response),
                 status_code=201,
                 media_type="application/json",
             )
