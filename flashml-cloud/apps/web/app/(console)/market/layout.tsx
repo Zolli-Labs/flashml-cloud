@@ -17,6 +17,7 @@ export default function MarketLayout({
         <SectionTabs
           tabs={[
             { href: "/market/prices", label: "Prices" },
+            { href: "/market/providers", label: "Providers" },
             { href: "/market/listings", label: "Listings" },
             { href: "/market/credits", label: "Credits" },
           ]}

@@ -97,6 +97,10 @@ export const CONSOLE_PAGE_WIDTH: Record<string, ConsoleWidth> = {
   "/market/prices/[klass]": "wide",
   "/market/listings": "wide",
   "/market/credits": "wide",
+  // The network fleet: nine columns, and one provider in full beside the
+  // same map. Same column as the rest of the market tabs.
+  "/market/providers": "wide",
+  "/market/providers/[id]": "wide",
 
   // standard — stacked panels and short lists of records
   "/admin/requests": "standard",
@@ -165,7 +169,8 @@ export function consoleRouteKey(pathname: string): string {
     .replace(/^\/w\/[^/]+/, "/w/[poolId]")
     .replace(/^\/pools\/(?!join$)[^/]+/, "/pools/[poolId]")
     .replace(/^\/jobs\/[^/]+/, "/jobs/[jobId]")
-    .replace(/^\/market\/prices\/[^/]+/, "/market/prices/[klass]");
+    .replace(/^\/market\/prices\/[^/]+/, "/market/prices/[klass]")
+    .replace(/^\/market\/providers\/[^/]+/, "/market/providers/[id]");
 }
 
 /** Which width a console route gets. Falls back to `DEFAULT_CONSOLE_WIDTH`

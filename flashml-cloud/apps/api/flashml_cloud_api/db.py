@@ -772,12 +772,62 @@ def touch_machine_last_seen(db: psycopg.Connection, machine_id: str) -> None:
     live lease deadline keeps a machine alive to the sweep even if every write
     here is lost. Anything that changes when or whether this is written belongs
     in the same conversation as `capacity/reconcile.py`.
+
+    **IT ALSO KEEPS THE UPTIME LEDGER, and this is the only place that can.**
+    `last_seen_at` is a single instant that every beat overwrites, so it can
+    say whether a machine is up NOW and can never say how much of last week it
+    was up — the previous value is gone the moment the next beat lands.
+    `public.machine_uptime_hours` (migration 0029) is that history: one row per
+    (machine, hour) the machine spoke in, upserted here. It rides on this
+    function rather than on either route because BOTH routes call this one, and
+    they cover different populations — the node route a machine between tasks,
+    the attempt route a machine on one. A ledger written from only one of them
+    would report a machine that spent the week working as a machine that spent
+    the week absent, which is the inversion this write exists to prevent.
+
+    Raw buckets, no score: see 0029's header for why an `uptime_pct` column
+    recomputed here would be a formula frozen into a migration.
+
+    **The uptime write can never cost the `last_seen_at` write.** It sits in
+    its own nested `transaction()` — a savepoint — and every failure inside it
+    rolls back to that savepoint, clears the error state, and leaves the
+    enclosing UPDATE intact to commit. That is the same trade
+    `_close_out_attempt_money` makes below, and here the asymmetry is even
+    starker than it is there: losing an hour bucket costs a pixel on a chart,
+    while losing `last_seen_at` gets live rented hardware destroyed mid-task by
+    `capacity.reconcile`. A missing table is the expected case (an API deployed
+    before 0029 lands) and is logged at debug; anything else is a real fault
+    and is logged as one — but neither is allowed to propagate.
     """
-    with db.cursor() as cur:
-        cur.execute(
-            "update public.machines set last_seen_at = now() where id = %s",
-            (machine_id,),
-        )
+    with db.transaction():
+        with db.cursor() as cur:
+            cur.execute(
+                "update public.machines set last_seen_at = now() where id = %s",
+                (machine_id,),
+            )
+        try:
+            with db.transaction():
+                with db.cursor() as cur:
+                    cur.execute(
+                        "insert into public.machine_uptime_hours"
+                        "            (machine_id, hour_ts, beats)"
+                        "     values (%s, date_trunc('hour', now()), 1)"
+                        " on conflict (machine_id, hour_ts) do update"
+                        "    set beats = machine_uptime_hours.beats + 1",
+                        (machine_id,),
+                    )
+        except psycopg.errors.UndefinedTable:
+            # Pre-0029. The heartbeat is unaffected and records nothing here.
+            log.debug(
+                "no machine_uptime_hours table; skipping the uptime bucket for "
+                "machine %s (migration 0029 has not been applied)",
+                machine_id,
+            )
+        except Exception:  # noqa: BLE001 - an hour bucket never costs a heartbeat
+            log.warning(
+                "could not record the uptime bucket for machine %s; "
+                "last_seen_at stands", machine_id,
+            )
 
 
 def reactivate_machine(

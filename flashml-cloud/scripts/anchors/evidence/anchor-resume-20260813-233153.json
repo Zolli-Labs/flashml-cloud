@@ -1,0 +1,55 @@
+{
+  "pod": {
+    "name": "zolli_anchor_gpu_a5000",
+    "id": "bu9y7n5x7dvkcu",
+    "gpu": "NVIDIA RTX A5000",
+    "cloud": "SECURE",
+    "dataCenterId": "EU-SE-1",
+    "image": "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404",
+    "containerDiskInGb": 30,
+    "volume": null
+  },
+  "running_cost_per_hr_usd": 0.27,
+  "first_boot": {
+    "created_at": "2026-08-13T23:26:44Z",
+    "runtime_ready_by": "2026-08-13T23:28:22Z",
+    "seconds_create_to_ready": 97,
+    "note": "includes image pull; not a resume measurement"
+  },
+  "cycles": [
+    {
+      "stop_issued": "2026-08-13T23:28:44Z",
+      "stop_seconds": 1,
+      "start_issued": "2026-08-13T23:29:12Z",
+      "runtime_ready_at": "2026-08-13T23:29:23Z",
+      "resume_ready_seconds": 11
+    },
+    {
+      "stop_issued": "2026-08-13T23:29:56Z",
+      "stop_seconds": 1,
+      "start_issued": "2026-08-13T23:30:21Z",
+      "runtime_ready_at": "2026-08-13T23:30:36Z",
+      "resume_ready_seconds": 15
+    },
+    {
+      "stop_issued": "2026-08-13T23:30:58Z",
+      "stop_seconds": 1,
+      "start_issued": "2026-08-13T23:31:23Z",
+      "runtime_ready_at": "2026-08-13T23:31:41Z",
+      "resume_ready_seconds": 18
+    }
+  ],
+  "method": {
+    "driver": "RunPod REST v2 via MCP (POST /pods/{id}/action stop|start), the same calls scripts/anchors/anchorctl.py measure makes",
+    "stop_seconds": "stop action responses returned status=EXITED synchronously; recorded as 1s",
+    "resume_ready_seconds": "start-issue wall clock to runtime-ready, where ready = poll_time minus the runtime.uptime counter in the first poll that showed a non-null runtime; polls at 20-30s intervals, so ready is back-computed, not poll-bounded",
+    "not_verified": [
+      "SSH-level reachability (outbound SSH blocked from the measuring sandbox)",
+      "container-disk persistence across stop: RunPod documents the container disk as ephemeral across stop/start with only volumes persisting; this pod has NO volume, so node identity would not survive a stop. Recreation with a /workspace volume is pending owner approval."
+    ]
+  },
+  "observations": {
+    "identity_across_resume": "same pod id and public IP across all three resumes; ephemeral SSH port changed each time (22139 -> 22081 -> 22142 -> 22182)",
+    "stopped_billing": "disk-only while stopped (published rate, modelled ~USD 0.008/hr for 30 GiB; reconcile against invoice before quoting)"
+  }
+}
