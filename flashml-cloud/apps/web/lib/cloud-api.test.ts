@@ -144,6 +144,30 @@ describe("cloud-api", () => {
     expect((err as PreflightRejected).findings).toEqual(findings);
   });
 
+  // A refusal that happens AFTER preflight passed still carries `findings` —
+  // it is the same (empty) preflight array, rendered onto every response by
+  // `_stage_compile_and_submit`. `_admit_datasets` is the one that bites: a
+  // workspace with no online machine advertising a dataset cache refuses any
+  // job with a `datasets:` block, and the only thing that says so is `detail`.
+  // Treating a present-but-empty array as "preflight rejected this" routed
+  // that refusal into the preflight card, which renders the findings list and
+  // nothing else — so the console showed an empty box titled "Preflight found
+  // problems with this job" and threw the one sentence explaining it away.
+  it("raises ApiError, keeping detail, when findings is present but empty", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const detail =
+      "this job's largest task would have to hold 3.9 MB of census at once, " +
+      "and the largest dataset cache advertised by an online machine in this " +
+      "workspace is 0 B.";
+    fetchMock.mockResolvedValue(jsonResponse(400, { detail, findings: [] }));
+
+    const { submitFromRepo } = await import("./cloud-api");
+    const err: unknown = await submitFromRepo("owner/repo").catch((e) => e);
+    expect(err).not.toBeInstanceOf(PreflightRejected);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).detail).toBe(detail);
+  });
+
   it("attaches the JWT and returns round history in order for a federated job", async () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     const rounds = [

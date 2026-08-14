@@ -1031,7 +1031,15 @@ async function send(path: string, init: RequestInit = {}): Promise<Response> {
   }
   if (!res.ok) {
     const { detail, findings } = await parseErrorBody(res);
-    if (findings) {
+    // `length > 0`, not merely present. Every refusal in the submit path
+    // carries the preflight findings array, including the refusals that
+    // happen well AFTER preflight passed — dataset admission, the compile,
+    // the artifact stage — where that array is empty and `detail` is the
+    // only thing that says what went wrong. Keying on presence alone routed
+    // those into the preflight card, which renders findings and nothing
+    // else: an empty box titled "Preflight found problems with this job",
+    // with the one explanatory sentence discarded on the way.
+    if (findings && findings.length > 0) {
       throw new PreflightRejected(
         detail ?? "preflight found problems with this job",
         findings
