@@ -1,5 +1,10 @@
+"use client";
+
 import { EventLedger } from "@/components/landing/EventLedger";
 import { RecoveryStack } from "@/components/landing/RecoveryStack";
+import { SectionReveal } from "@/components/landing/motion/SectionReveal";
+import { useLandingMotion } from "@/components/landing/motion/LandingMotionProvider";
+import { CountUp } from "@/components/motion/CountUp";
 import { SAMPLE_LEDGER, type LedgerEventType } from "@/lib/landing/sample-ledger";
 
 const RECOVERY_EVENT_TYPES = new Set<LedgerEventType>([
@@ -49,6 +54,8 @@ const EVIDENCE = [
 ] as const;
 
 export function RecoveryDemo() {
+  const { reduced } = useLandingMotion();
+
   return (
     <section
       id="recover"
@@ -56,7 +63,8 @@ export function RecoveryDemo() {
       className="landing-surface-light scroll-mt-20 border-b border-border py-20 md:py-28"
     >
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
-        <div className="grid gap-12 lg:grid-cols-[.85fr_1.15fr] lg:items-center lg:gap-20">
+        <SectionReveal>
+        <div data-reveal-content className="grid gap-12 lg:grid-cols-[.85fr_1.15fr] lg:items-center lg:gap-20">
           <div>
             <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
               Recovery proof
@@ -91,15 +99,21 @@ export function RecoveryDemo() {
           </div>
         </div>
 
-        <div className="mt-14 border-t border-[var(--z-border-strong)] pt-10 md:mt-20 md:pt-14">
+        <div data-reveal-content className="mt-14 border-t border-[var(--z-border-strong)] pt-10 md:mt-20 md:pt-14">
           <div className="grid gap-x-8 gap-y-10 sm:grid-cols-2 lg:grid-cols-4 lg:gap-10">
             {EVIDENCE.map(([value, label, detail]) => (
               <article key={label} className="min-w-0">
                 <p
                   data-evidence-value={value}
-                  className="font-mono text-6xl font-medium leading-none tracking-[-0.08em] tabular-nums sm:text-7xl"
+                  className="font-mono text-6xl font-medium leading-none tracking-[-0.08em] sm:text-7xl"
                 >
-                  {value}
+                  {/* Counts up on entry, once — these four figures are the
+                      curated, documented values in the comment above
+                      (`EVIDENCE`), not an API read, but "static value
+                      already rendered" is exactly what `CountUp` asks for:
+                      it never invents a number, it only animates one that
+                      is already correct. */}
+                  <CountUp value={Number(value)} reduced={reduced} />
                 </p>
                 <h3 className="mt-5 font-mono text-[11px] font-medium uppercase tracking-[0.09em] text-brand-foreground">
                   {label}
@@ -109,6 +123,7 @@ export function RecoveryDemo() {
             ))}
           </div>
         </div>
+        </SectionReveal>
       </div>
     </section>
   );

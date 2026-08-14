@@ -79,8 +79,8 @@
   --z-app-text: #1c1c1b;
   --z-app-text-secondary: #6f706d;
   --z-app-text-dim: #8a8b87;
-  --z-app-rail: #111416;
-  --z-app-rail-active: #202428;
+  --z-app-rail: #171412;
+  --z-app-rail-active: #262019;
 
   --z-orange: #f36b32;
   --z-orange-bright: #ff7427;
@@ -287,15 +287,15 @@ html:has(.console-theme) {
 }
 
 .marketing-dark {
-  --z-bg: #0b0d0e;
-  --z-surface: #111416;
-  --z-surface-raised: #171a1d;
-  --z-surface-hover: #1d2125;
-  --z-border: #292e33;
-  --z-border-strong: #3a4046;
-  --z-text: #f3f1ec;
-  --z-text-secondary: #a5a39e;
-  --z-text-dim: #6d706f;
+  --z-bg: #131110;
+  --z-surface: #171412;
+  --z-surface-raised: #1b1815;
+  --z-surface-hover: #262019;
+  --z-border: #362c22;
+  --z-border-strong: #4b3d2e;
+  --z-text: #f3ece2;
+  --z-text-secondary: #a89e8f;
+  --z-text-dim: #746a5c;
   --z-orange-muted: #2b1912;
 
   --background: var(--z-bg);
@@ -334,14 +334,14 @@ html:has(.console-theme) {
    register existed. */
 .console-rail {
   --background: var(--z-app-rail);
-  --foreground: #f3f1ec;
-  --surface: #171a1d;
+  --foreground: #f3ece2;
+  --surface: #1b1815;
   --surface-2: var(--z-app-rail-active);
-  --surface-elevated: #171a1d;
-  --ink: #f3f1ec;
-  --muted-foreground: #9da1a2;
-  --border: #292e33;
-  --input: #3a4046;
+  --surface-elevated: #1b1815;
+  --ink: #f3ece2;
+  --muted-foreground: #a89e8f;
+  --border: #362c22;
+  --input: #4b3d2e;
   --brand-foreground: var(--z-orange-bright);
 }
 
@@ -368,11 +368,11 @@ html:has(.console-theme) {
    Each chapter remaps existing semantic tokens so current utility classes stay
    legible while the landing moves between dark, ivory, sand, and orange. */
 .landing-cinematic {
-  --landing-graphite: #0b0d0e;
-  --landing-graphite-raised: #15191a;
+  --landing-graphite: #131110;
+  --landing-graphite-raised: #1b1815;
   --landing-ivory: #f2efe6;
   --landing-sand: #ded8cb;
-  --landing-ink: #111415;
+  --landing-ink: #1c1c1b;
   --landing-orange: #f36b32;
   --landing-green: #4ba77b;
   isolation: isolate;
@@ -411,27 +411,27 @@ html:has(.console-theme) {
 
 .landing-surface-dark {
   --background: var(--landing-graphite);
-  --foreground: #f3f1ec;
+  --foreground: #f3ece2;
   --cream: var(--landing-graphite);
-  --surface: #111416;
+  --surface: #171412;
   --surface-2: var(--landing-graphite-raised);
   --surface-elevated: var(--landing-graphite-raised);
-  --ink: #f3f1ec;
+  --ink: #f3ece2;
   --muted: var(--landing-graphite-raised);
-  --muted-ink: #a5a39e;
-  --muted-foreground: #a5a39e;
-  --border: #292e33;
-  --input: #3a4046;
+  --muted-ink: #a89e8f;
+  --muted-foreground: #a89e8f;
+  --border: #362c22;
+  --input: #4b3d2e;
   --ring: var(--landing-orange);
   --focus: var(--landing-orange);
-  --card: #111416;
-  --card-foreground: #f3f1ec;
+  --card: #171412;
+  --card-foreground: #f3ece2;
   --popover: var(--landing-graphite-raised);
-  --popover-foreground: #f3f1ec;
+  --popover-foreground: #f3ece2;
   --secondary: var(--landing-graphite-raised);
-  --secondary-foreground: #f3f1ec;
-  --accent: #1d2125;
-  --accent-foreground: #f3f1ec;
+  --secondary-foreground: #f3ece2;
+  --accent: #262019;
+  --accent-foreground: #f3ece2;
   --brand-foreground: #ff7427;
   background: var(--background);
   color: var(--foreground);
@@ -495,28 +495,28 @@ html:has(.console-theme) {
 
 .landing-surface-orange {
   --background: var(--landing-orange);
-  --foreground: #111415;
+  --foreground: #1c1c1b;
   --cream: var(--landing-orange);
   --surface: #ff8450;
   --surface-2: #e75f2a;
   --surface-elevated: #ff8450;
-  --ink: #111415;
+  --ink: #1c1c1b;
   --muted: #e75f2a;
   --muted-ink: #482015;
   --muted-foreground: #482015;
   --border: #b64820;
   --input: #9f3e1d;
-  --ring: #111415;
-  --focus: #111415;
+  --ring: #1c1c1b;
+  --focus: #1c1c1b;
   --card: #ff8450;
-  --card-foreground: #111415;
+  --card-foreground: #1c1c1b;
   --popover: #ff8450;
-  --popover-foreground: #111415;
+  --popover-foreground: #1c1c1b;
   --secondary: #e75f2a;
-  --secondary-foreground: #111415;
+  --secondary-foreground: #1c1c1b;
   --accent: #e75f2a;
-  --accent-foreground: #111415;
-  --brand-foreground: #111415;
+  --accent-foreground: #1c1c1b;
+  --brand-foreground: #1c1c1b;
   background: var(--background);
   color: var(--foreground);
 }
@@ -531,7 +531,7 @@ html:has(.console-theme) {
   border-radius: 10px;
   background:
     radial-gradient(circle at 50% 36%, rgb(243 107 50 / 0.08), transparent 34%),
-    #101415;
+    #171412;
   box-shadow: 0 24px 80px rgb(0 0 0 / 0.22);
 }
 
@@ -590,7 +590,7 @@ html:has(.console-theme) {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(180deg, transparent 76%, rgb(11 13 14 / 0.42));
+  background: linear-gradient(180deg, transparent 76%, rgb(19 17 16 / 0.42));
 }
 
 .workflow-scene-canvas svg {
@@ -641,7 +641,7 @@ html:has(.console-theme) {
   padding: 0.65rem 0.7rem;
   border: 1px solid rgb(255 255 255 / 0.15);
   border-radius: 7px;
-  background: rgb(21 25 26 / 0.96);
+  background: rgb(27 24 21 / 0.96);
   color: rgb(255 255 255 / 0.86);
   transform: translate(-50%, -50%);
   box-shadow: 0 10px 28px rgb(0 0 0 / 0.16);

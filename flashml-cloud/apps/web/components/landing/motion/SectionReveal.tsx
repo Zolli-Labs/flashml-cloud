@@ -5,8 +5,9 @@ import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import {
-  DURATIONS,
-  TRAVEL,
+  SECTION_REVEAL_DURATION_MS,
+  SECTION_REVEAL_STAGGER_MS,
+  SECTION_REVEAL_TRAVEL_PX,
   scrollTriggerStart,
   seconds,
 } from "@/lib/motion/timing";
@@ -41,16 +42,30 @@ export function SectionReveal({
       const rootElement = root.current;
       if (!rootElement) return;
 
-      const content = rootElement.querySelectorAll("[data-reveal-content]");
+      // Callers mark each logical group inside — headline, copy, visual —
+      // with `data-reveal-content`, in DOM order, and that order becomes the
+      // stagger order. `SectionReveal` used to auto-wrap ALL of `children`
+      // in one such div, which meant a caller could never get more than a
+      // single block arriving at once; callers now place the attribute
+      // themselves, on however many groups make sense for that section.
+      //
+      // A caller that marks nothing still gets ONE entrance rather than
+      // none — `content` falls back to the root itself — so a section can
+      // never silently ship unanimated just because nobody remembered the
+      // attribute, the same "resolve toward content being on screen"
+      // default `lib/motion/timing.ts`'s `isPastRevealLine` uses.
+      const marked = rootElement.querySelectorAll("[data-reveal-content]");
+      const content = marked.length > 0 ? marked : [rootElement];
 
       if (reduced || !desktop) {
         gsap.set(content, { y: 0, opacity: 1 });
         return;
       }
 
-      // One subtle fade-up, once: `TRAVEL.tight` (8px) over `DURATIONS.enter`
-      // (320ms — under the 400ms ceiling) on the house `settle` curve, the
-      // same reveal every other first-sight arrival on this page uses.
+      // A whole section arriving, once: `SECTION_REVEAL_TRAVEL_PX` (30px)
+      // over `SECTION_REVEAL_DURATION_MS` (700ms) on the house `settle`
+      // curve, with each marked group offset by `SECTION_REVEAL_STAGGER_MS`
+      // (70ms) so headline → copy → visual reads as an order, not a pop.
       gsap
         .timeline({
           scrollTrigger: {
@@ -60,10 +75,11 @@ export function SectionReveal({
           },
         })
         .from(content, {
-          y: TRAVEL.tight,
+          y: SECTION_REVEAL_TRAVEL_PX,
           opacity: 0,
-          duration: seconds(DURATIONS.enter),
+          duration: seconds(SECTION_REVEAL_DURATION_MS),
           ease: gsapEase("settle"),
+          stagger: seconds(SECTION_REVEAL_STAGGER_MS),
         });
     },
     { scope: root, dependencies: [reduced, desktop], revertOnUpdate: true },
@@ -71,7 +87,7 @@ export function SectionReveal({
 
   return (
     <div ref={root} className={className} data-motion="section-reveal">
-      <div data-reveal-content>{children}</div>
+      {children}
     </div>
   );
 }

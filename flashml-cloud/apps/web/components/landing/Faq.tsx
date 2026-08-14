@@ -1,3 +1,4 @@
+import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 import { MARKETING } from "@/lib/marketing";
 
 const FAQS = [
@@ -55,8 +56,8 @@ export function Faq() {
       data-surface="light"
       className="landing-surface-light scroll-mt-20 border-b border-border py-20 md:py-28"
     >
-      <div className="mx-auto grid max-w-[1240px] gap-12 px-5 sm:px-6 lg:grid-cols-[.72fr_1.28fr] lg:gap-16">
-        <div>
+      <SectionReveal className="mx-auto grid max-w-[1240px] gap-12 px-5 sm:px-6 lg:grid-cols-[.72fr_1.28fr] lg:gap-16">
+        <div data-reveal-content>
           <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
             FAQ
           </p>
@@ -75,7 +76,7 @@ export function Faq() {
           </p>
         </div>
 
-        <div className="border-t border-[var(--z-border-strong)]">
+        <div data-reveal-content className="border-t border-[var(--z-border-strong)]">
           {FAQS.map((faq, index) => (
             <details key={faq.question} className="group relative border-b border-border">
               <summary className="interactive flex min-h-16 cursor-pointer list-none items-center justify-between gap-5 py-5 text-left [&::-webkit-details-marker]:hidden">
@@ -106,7 +107,7 @@ export function Faq() {
             </details>
           ))}
         </div>
-      </div>
+      </SectionReveal>
     </section>
   );
 }

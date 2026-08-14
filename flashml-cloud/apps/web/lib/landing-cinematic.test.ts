@@ -68,7 +68,9 @@ describe("cinematic landing foundation", () => {
   it("defines all four landing surfaces and reduced-motion fallback", () => {
     const css = source("app/globals.css");
     for (const token of [
-      "--landing-graphite: #0b0d0e",
+      // Warm-black now — the landing's dark register was retinted to match
+      // the console's warm-black family (was cool graphite, #0b0d0e).
+      "--landing-graphite: #131110",
       "--landing-ivory: #f2efe6",
       "--landing-sand: #ded8cb",
       "--landing-orange: #f36b32",
@@ -197,11 +199,20 @@ describe("cinematic landing foundation", () => {
     expect(supportingSources).not.toMatch(/\bguarantee(?:d|s)?\b/i);
   });
 
-  it("gives SectionReveal a plain fade-up, once, at or under a 400ms ceiling, honoring reduced motion", () => {
+  it("gives SectionReveal a staggered fade-up, once, on the wider section-entrance scale, honoring reduced motion", () => {
+    // Superseded ceiling: the reveal used to travel `TRAVEL.tight` (8px)
+    // over `DURATIONS.enter` (320ms, "at or under a 400ms ceiling") —
+    // measured on the live page as imperceptible, which is why this test's
+    // own ceiling moved. `SECTION_REVEAL_TRAVEL_PX`/`_DURATION_MS` are a
+    // deliberately separate, larger scale (see `lib/motion/timing.ts`);
+    // `TRAVEL`'s 8-16px cap still holds for the dense-row reveals it was
+    // written for, and `lib/motion/timing.test.ts` still pins that.
     const reveal = source("components/landing/motion/SectionReveal.tsx");
 
-    expect(reveal).toContain("TRAVEL.tight");
-    expect(reveal).toContain("DURATIONS.enter");
+    expect(reveal).toContain("SECTION_REVEAL_TRAVEL_PX");
+    expect(reveal).toContain("SECTION_REVEAL_DURATION_MS");
+    expect(reveal).toContain("stagger:");
+    expect(reveal).toContain("SECTION_REVEAL_STAGGER_MS");
     expect(reveal).not.toMatch(/clipPath/);
     expect(reveal).not.toContain("data-reveal-line");
     expect(reveal).toContain("once: true");

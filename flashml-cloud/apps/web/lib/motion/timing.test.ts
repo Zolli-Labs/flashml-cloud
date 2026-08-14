@@ -8,6 +8,9 @@ import {
   MAX_TRAVEL_PX,
   MIN_TRAVEL_PX,
   REVEAL_TRIGGER_PERCENT,
+  SECTION_REVEAL_DURATION_MS,
+  SECTION_REVEAL_STAGGER_MS,
+  SECTION_REVEAL_TRAVEL_PX,
   STAGGER_BUDGET_MS,
   STAGGER_CADENCE_MS,
   TRAVEL,
@@ -248,6 +251,28 @@ describe("travel", () => {
     }
     expect(MIN_TRAVEL_PX).toBe(8);
     expect(MAX_TRAVEL_PX).toBe(16);
+  });
+});
+
+describe("the section-reveal scale", () => {
+  /** A separate, larger scale from `TRAVEL`/`DURATIONS` above — deliberately
+   * NOT capped by the 8-16px / 120-720ms rules those describe. See the doc
+   * comment on `SECTION_REVEAL_TRAVEL_PX` for why a whole section entering
+   * is not "a bigger dense-row reveal" but a different animation. */
+  it("travels 28-32px, well past the old imperceptible 8px", () => {
+    expect(SECTION_REVEAL_TRAVEL_PX).toBeGreaterThanOrEqual(28);
+    expect(SECTION_REVEAL_TRAVEL_PX).toBeLessThanOrEqual(32);
+    expect(SECTION_REVEAL_TRAVEL_PX).toBeGreaterThan(MAX_TRAVEL_PX);
+  });
+
+  it("takes 650-750ms, roughly double the old 320ms enter duration", () => {
+    expect(SECTION_REVEAL_DURATION_MS).toBeGreaterThanOrEqual(650);
+    expect(SECTION_REVEAL_DURATION_MS).toBeLessThanOrEqual(750);
+  });
+
+  it("staggers groups at 70ms, a step looser than the 45ms dense-row cadence", () => {
+    expect(SECTION_REVEAL_STAGGER_MS).toBe(70);
+    expect(SECTION_REVEAL_STAGGER_MS).toBeGreaterThan(STAGGER_CADENCE_MS);
   });
 });
 

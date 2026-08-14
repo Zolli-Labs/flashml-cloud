@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowRight } from "@phosphor-icons/react/dist/ssr";
 import { Wordmark } from "@/components/brand/Mark";
 import { CommitSignal } from "@/components/landing/CommitSignal";
+import { SectionReveal } from "@/components/landing/motion/SectionReveal";
 import { MARKETING } from "@/lib/marketing";
 
 export function ClosingCta() {
@@ -12,8 +13,8 @@ export function ClosingCta() {
         data-surface="orange"
         className="landing-surface-orange px-5 py-20 sm:px-6 md:py-28"
       >
-        <div className="mx-auto grid max-w-[1240px] gap-12 lg:grid-cols-[1.2fr_.8fr] lg:items-end lg:gap-18">
-          <div>
+        <SectionReveal className="mx-auto grid max-w-[1240px] gap-12 lg:grid-cols-[1.2fr_.8fr] lg:items-end lg:gap-18">
+          <div data-reveal-content>
             <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
               Zolli Cloud
             </p>
@@ -22,7 +23,7 @@ export function ClosingCta() {
             </h2>
           </div>
 
-          <div className="border-t border-[var(--z-border-strong)] pt-6">
+          <div data-reveal-content className="border-t border-[var(--z-border-strong)] pt-6">
             <p className="max-w-[42ch] text-[15px] leading-relaxed text-muted-foreground">
               Access compute from more sources, or make a machine available to the network.
               Zolli is currently in early access.
@@ -30,7 +31,15 @@ export function ClosingCta() {
             <div className="mt-7 flex flex-wrap items-center gap-x-5 gap-y-2.5">
               <Link
                 href={MARKETING.consolePath}
-                className="interactive inline-flex min-h-10 items-center gap-2 rounded-[7px] border border-[var(--landing-graphite)] bg-[var(--landing-graphite)] px-5 text-[13px] font-semibold text-[#f3f1ec] hover:bg-[#1b1f20]"
+                // `hover:bg-[#262019]`, not the cool `#1b1f20` this used to
+                // be: that hex predated the warm retint and was never a
+                // named token, just a hand-picked lighten step off the old
+                // graphite. `#262019` is the same "hover" role the token
+                // system already uses elsewhere (`--z-surface-hover` /
+                // `--z-app-rail-active`), so this button's hover now tracks
+                // the one warm palette instead of carrying its own leftover
+                // cool shade.
+                className="interactive inline-flex min-h-10 items-center gap-2 rounded-[7px] border border-[var(--landing-graphite)] bg-[var(--landing-graphite)] px-5 text-[13px] font-semibold text-[#f3ece2] hover:bg-[#262019]"
               >
                 I need compute
                 <ArrowRight weight="bold" className="h-4 w-4" />
@@ -47,7 +56,13 @@ export function ClosingCta() {
               Host cash payout is not live; early testing uses Zolli credits.
             </p>
           </div>
-        </div>
+        </SectionReveal>
+        {/* Not wrapped in SectionReveal: `CommitSignal` already runs its own
+            independent scroll trigger (`components/landing/CommitSignal.tsx`)
+            with the same gates, so nesting it inside another reveal would
+            animate it twice. The footer below is site chrome, not page
+            content the reader is scrolling to see arrive — left static, same
+            as a header nav would be. */}
         <div className="mx-auto max-w-[1240px]">
           <CommitSignal event="TASK_COMMIT_ACCEPTED" />
         </div>

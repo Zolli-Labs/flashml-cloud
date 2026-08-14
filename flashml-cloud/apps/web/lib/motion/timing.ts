@@ -234,6 +234,33 @@ export const TRAVEL: Readonly<Record<TravelName, number>> = Object.freeze({
 export const MIN_TRAVEL_PX = TRAVEL.tight;
 export const MAX_TRAVEL_PX = TRAVEL.loose;
 
+/** A SEPARATE, LARGER scale reserved for `SectionReveal`'s whole-section
+ * entrances — deliberately not folded into `TRAVEL`/`DURATIONS` above.
+ *
+ * Measured on the live page, the reveal travelled 8px over 320ms
+ * (`TRAVEL.tight` + `DURATIONS.enter`), which is imperceptible: only 5
+ * elements on a 7581px page had any scroll choreography at all, and the one
+ * mechanism doing the choreographing was too quiet to read as motion. Spec
+ * §2 rule 2's 8-16px ceiling is still correct for what it was written for —
+ * "dense repeating rows... twenty of these run at once" (`TRAVEL.tight`,
+ * `revealTight` in `variants.ts`) — a table row travelling 30px would
+ * wobble. A WHOLE SECTION arriving is a different animation, not a bigger
+ * version of the same one: it happens once per section, not twenty times a
+ * screen, and needs to register on a page where the reader may not be
+ * looking directly at it yet.
+ *
+ * `timing.test.ts` pins both to their stated ranges (28-32px, 650-750ms) so
+ * neither drifts back toward the old, too-quiet values. */
+export const SECTION_REVEAL_TRAVEL_PX = 30;
+export const SECTION_REVEAL_DURATION_MS = 700;
+
+/** Spec §2 rule 2's cadence (`STAGGER_CADENCE_MS`, 45ms) is for dense
+ * in-section rows; a section's own headline/copy/visual groups are fewer
+ * and larger, so they get a slightly longer 70ms cadence — close enough to
+ * read as one arrival, far enough apart that headline-then-copy-then-visual
+ * is visible as an order rather than a simultaneous pop. */
+export const SECTION_REVEAL_STAGGER_MS = 70;
+
 /** Where the reveal line sits, as a percentage of viewport height from the
  * top. 82 because `SectionReveal` already triggers at `"top 82%"`, and two
  * reveal thresholds on one page is a page where things arrive twice. */

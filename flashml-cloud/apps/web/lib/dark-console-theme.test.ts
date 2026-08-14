@@ -94,12 +94,19 @@ describe("globals.css compiled output — dark console register", () => {
   );
 
   it(
-    "leaves .marketing-dark emitting --z-bg: #0b0d0e (marketing register untouched)",
+    "leaves .marketing-dark emitting --z-bg: #131110 (marketing register untouched by the CONSOLE dark-token block)",
     async () => {
+      // #131110, not the original #0b0d0e: the landing was later retinted
+      // from cool graphite to the console's warm-black family, and
+      // `.marketing-dark`'s own values moved as part of that separate,
+      // deliberate edit. What this test guards has not changed — the
+      // `html.dark:has(.console-theme)` block above must never leak into or
+      // overwrite `.marketing-dark`'s own register — only the concrete
+      // value `.marketing-dark` itself now carries.
       const compiled = await compileGlobalsCss();
 
       expect(compiled).toMatch(
-        /\.marketing-dark\s*\{[^}]*--z-bg:\s*#0b0d0e[^}]*\}/
+        /\.marketing-dark\s*\{[^}]*--z-bg:\s*#131110[^}]*\}/
       );
     },
     20000

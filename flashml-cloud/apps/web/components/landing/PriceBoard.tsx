@@ -37,81 +37,82 @@ export async function PriceBoard() {
       className="landing-surface-sand scroll-mt-20 border-b border-border py-20 md:py-28"
     >
       <div className="mx-auto max-w-[1240px] px-5 sm:px-6">
-        <div className="grid gap-8 lg:grid-cols-[.72fr_1.28fr] lg:gap-12">
-          <div>
-            <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
-              The compute market
-            </p>
-            <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
-              Today&apos;s GPU prices. <span className="text-muted-foreground">Observed, not promised.</span>
-            </h2>
-          </div>
-          <p className="max-w-[58ch] self-end text-base leading-relaxed text-muted-foreground">
-            Every quote below carries when it was captured and whether it is stale — the same
-            discipline the price-comparison page holds itself to.
-          </p>
-        </div>
-
         <SectionReveal
-          className="mt-14 md:mt-20"
           lineClassName="h-px w-full bg-[var(--z-border-strong)]"
           bottomLineClassName="h-px w-full bg-[var(--z-border-strong)]"
         >
-          {rows.length === 0 ? (
-            <p className="py-10 text-sm leading-relaxed text-muted-foreground">
-              No market observations yet.
-            </p>
-          ) : (
-            <div className="overflow-x-auto py-2">
-              <table className="w-full min-w-[720px] border-collapse text-left">
-                <thead>
-                  <tr className="border-b border-[var(--z-border-strong)]">
-                    {["GPU", "Price", "Trend", "Tier", "Provenance"].map((heading) => (
-                      <th
-                        key={heading}
-                        scope="col"
-                        className="whitespace-nowrap px-3 py-3 font-mono text-[11px] font-medium uppercase tracking-[0.09em] text-brand-foreground first:pl-0 last:pr-0"
-                      >
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => (
-                    <PriceRow key={`${row.provider}-${row.gpu}-${row.tier}`} row={row} />
-                  ))}
-                </tbody>
-              </table>
+          <div data-reveal-content className="grid gap-8 lg:grid-cols-[.72fr_1.28fr] lg:gap-12">
+            <div>
+              <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
+                The compute market
+              </p>
+              <h2 className="mt-5 text-[clamp(2.65rem,5.4vw,4.75rem)] font-semibold leading-[0.99] tracking-[-0.052em]">
+                Today&apos;s GPU prices. <span className="text-muted-foreground">Observed, not promised.</span>
+              </h2>
             </div>
-          )}
-        </SectionReveal>
-
-        <div className="mt-10 border-t border-[var(--z-border-strong)] pt-5 sm:mt-12 sm:pt-6">
-          <div className="grid gap-8 lg:grid-cols-2">
-            <article>
-              <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
-                For demand
-              </p>
-              <p className="mt-5 max-w-[42ch] text-xl leading-relaxed tracking-[-0.025em]">
-                One request puts every source to work — your machines, community hosts, RunPod,
-                and Alibaba Cloud compete on price.
-              </p>
-            </article>
-            <article className="border-t border-border pt-8 lg:border-l lg:border-t-0 lg:pl-12 lg:pt-0">
-              <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
-                For supply
-              </p>
-              <p className="mt-5 max-w-[42ch] text-xl leading-relaxed tracking-[-0.025em]">
-                Idle machines already cost you. Connect them and earn when they complete useful
-                work.
-              </p>
-            </article>
+            <p className="max-w-[58ch] self-end text-base leading-relaxed text-muted-foreground">
+              Every quote below carries when it was captured and whether it is stale — the same
+              discipline the price-comparison page holds itself to.
+            </p>
           </div>
-          <p className="mt-8 text-sm leading-relaxed text-muted-foreground">
-            Early testing uses Zolli credits. Cash payout is not live.
-          </p>
-        </div>
+
+          <div data-reveal-content className="mt-14 md:mt-20">
+            {rows.length === 0 ? (
+              <p className="py-10 text-sm leading-relaxed text-muted-foreground">
+                No market observations yet.
+              </p>
+            ) : (
+              <div className="overflow-x-auto py-2">
+                <table className="w-full min-w-[720px] border-collapse text-left">
+                  <thead>
+                    <tr className="border-b border-[var(--z-border-strong)]">
+                      {["GPU", "Price", "Trend", "Tier", "Provenance"].map((heading) => (
+                        <th
+                          key={heading}
+                          scope="col"
+                          className="whitespace-nowrap px-3 py-3 font-mono text-[11px] font-medium uppercase tracking-[0.09em] text-brand-foreground first:pl-0 last:pr-0"
+                        >
+                          {heading}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <PriceRow key={`${row.provider}-${row.gpu}-${row.tier}`} row={row} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div data-reveal-content className="mt-10 border-t border-[var(--z-border-strong)] pt-5 sm:mt-12 sm:pt-6">
+            <div className="grid gap-8 lg:grid-cols-2">
+              <article>
+                <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
+                  For demand
+                </p>
+                <p className="mt-5 max-w-[42ch] text-xl leading-relaxed tracking-[-0.025em]">
+                  One request puts every source to work — your machines, community hosts, RunPod,
+                  and Alibaba Cloud compete on price.
+                </p>
+              </article>
+              <article className="border-t border-border pt-8 lg:border-l lg:border-t-0 lg:pl-12 lg:pt-0">
+                <p className="font-mono text-[11px] font-medium uppercase tracking-[0.13em] text-brand-foreground">
+                  For supply
+                </p>
+                <p className="mt-5 max-w-[42ch] text-xl leading-relaxed tracking-[-0.025em]">
+                  Idle machines already cost you. Connect them and earn when they complete useful
+                  work.
+                </p>
+              </article>
+            </div>
+            <p className="mt-8 text-sm leading-relaxed text-muted-foreground">
+              Early testing uses Zolli credits. Cash payout is not live.
+            </p>
+          </div>
+        </SectionReveal>
       </div>
     </section>
   );

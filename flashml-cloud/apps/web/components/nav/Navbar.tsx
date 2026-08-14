@@ -99,7 +99,7 @@ export function Navbar() {
             </a>
             <Link
               href={MARKETING.consolePath}
-              className="interactive ml-3 inline-flex min-h-10 items-center rounded-[7px] border border-white/30 bg-[#f2efe6] px-4 text-[13px] font-semibold text-[#111415] hover:bg-white"
+              className="interactive ml-3 inline-flex min-h-10 items-center rounded-[7px] border border-white/30 bg-[#f2efe6] px-4 text-[13px] font-semibold text-[#1c1c1b] hover:bg-white"
             >
               Open console
             </Link>
@@ -150,7 +150,7 @@ export function Navbar() {
             <Link
               href={MARKETING.consolePath}
               onClick={closeMenu}
-              className="interactive mt-2 inline-flex min-h-10 items-center justify-center rounded-[7px] bg-[#f2efe6] px-5 py-3 text-sm font-semibold text-[#111415] hover:bg-white"
+              className="interactive mt-2 inline-flex min-h-10 items-center justify-center rounded-[7px] bg-[#f2efe6] px-5 py-3 text-sm font-semibold text-[#1c1c1b] hover:bg-white"
             >
               Open console
             </Link>
