@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { UNREADABLE_WITHOUT_DETAIL, resolvePanel } from "./panel-state";
-import { queuePanelState } from "./queue-panel";
+import { queueBadgeCount, queuePanelState } from "./queue-panel";
 
 /** Rows are built here rather than declared as a fixture literal: the house
  * rules forbid fixture-shaped data in the repo, and nothing about these
@@ -97,5 +97,32 @@ describe("queuePanelState", () => {
     ]);
 
     expect(kinds).toEqual(new Set(["loading", "present", "empty", "unreadable"]));
+  });
+});
+
+describe("queueBadgeCount", () => {
+  it("is null while nothing has been established yet", () => {
+    expect(queueBadgeCount(queuePanelState("loading", null, rows(0)))).toBeNull();
+  });
+
+  it("is null after a failed read — a badge is a claim, and a failure earns none", () => {
+    expect(
+      queueBadgeCount(queuePanelState("error", "502", rows(0)))
+    ).toBeNull();
+  });
+
+  it("is a real 0 for a read that succeeded and found nothing pending", () => {
+    expect(queueBadgeCount(queuePanelState("ready", null, rows(0)))).toBe(0);
+  });
+
+  it("counts the rows a finished read returned", () => {
+    expect(queueBadgeCount(queuePanelState("ready", null, rows(4)))).toBe(4);
+  });
+
+  it("keeps counting stale rows through a refresh, same as the panel they came from", () => {
+    // queuePanelState keeps rows on screen while a refresh is in flight; the
+    // badge must agree with the panel it was read from rather than re-deciding
+    // on its own and going stale relative to it.
+    expect(queueBadgeCount(queuePanelState("loading", null, rows(3)))).toBe(3);
   });
 });

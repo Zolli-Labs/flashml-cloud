@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { StatTile } from "@/components/ui/stat-tile";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { PageShell } from "@/components/shell/PageShell";
 import { StatePanel } from "@/components/shell/StatePanel";
@@ -147,6 +148,24 @@ export default function GitHubAccessPage() {
             </p>
           ) : (
             <div className="mt-6 space-y-3">
+              {/* `installations.length` shown nowhere before this — the
+                  reachable branch here always has at least one (the empty
+                  read above already covers zero), so this is the headline
+                  count once there is one to show (density audit §3, gap
+                  8, lowest priority — most accounts have 0-2, so the
+                  number carries little weight, but it is a confirmed gap). */}
+              <dl>
+                <StatTile
+                  variant="bare"
+                  size="sm"
+                  label={
+                    installations.length === 1
+                      ? "Account connected"
+                      : "Accounts connected"
+                  }
+                  value={installations.length}
+                />
+              </dl>
               <ul className="space-y-2">
                 {installations.map((installation) => (
                   <li

@@ -9,13 +9,18 @@ import { PageShell } from "@/components/shell/PageShell";
 import { StatePanel } from "@/components/shell/StatePanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { StatTile } from "@/components/ui/stat-tile";
 import {
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
-import { queuePanelState, type QueueLoadState } from "@/lib/console/queue-panel";
+import {
+  queueBadgeCount,
+  queuePanelState,
+  type QueueLoadState,
+} from "@/lib/console/queue-panel";
 import {
   formatRequestedAt,
   fullNameFor,
@@ -28,6 +33,7 @@ import {
   nextCreditQueueGeneration,
   parseZcInput,
   restoreCreditRequest,
+  totalRequestedZc,
   usdForMillicredits,
 } from "@/lib/credit-requests";
 import { formatZc } from "@/lib/market-credits";
@@ -257,6 +263,19 @@ export default function AdminRequestsPage() {
   const activeState = tab === "access" ? state : creditState;
   const refresh = tab === "access" ? load : loadCredits;
 
+  // Read from the SAME panel `AccessRequestQueue`/`CreditRequestQueue` render
+  // from below, via `queueBadgeCount` — see its docblock. A badge computed
+  // any other way (e.g. `rows.length` directly) could disagree with what the
+  // panel underneath it is actually showing during a refresh.
+  const accessBadge =
+    state === "forbidden"
+      ? null
+      : queueBadgeCount(queuePanelState(state, error, rows));
+  const creditBadge =
+    creditState === "forbidden"
+      ? null
+      : queueBadgeCount(queuePanelState(creditState, creditError, creditRows));
+
   function advanceCreditQueueGeneration() {
     creditQueueGeneration.current = nextCreditQueueGeneration(
       creditQueueGeneration.current
@@ -338,15 +357,21 @@ export default function AdminRequestsPage() {
         >
           <TabsTrigger
             value="access"
-            className="px-3 py-1.5 data-active:bg-surface-2"
+            className="gap-1.5 px-3 py-1.5 data-active:bg-surface-2"
           >
             Access
+            {accessBadge !== null && (
+              <Badge variant="secondary">{accessBadge}</Badge>
+            )}
           </TabsTrigger>
           <TabsTrigger
             value="credits"
-            className="px-3 py-1.5 data-active:bg-surface-2"
+            className="gap-1.5 px-3 py-1.5 data-active:bg-surface-2"
           >
             Credits
+            {creditBadge !== null && (
+              <Badge variant="secondary">{creditBadge}</Badge>
+            )}
           </TabsTrigger>
         </TabsList>
 
@@ -449,27 +474,48 @@ function CreditRequestQueue({
 }) {
   if (state === "forbidden") return <Forbidden />;
 
+  const panel = queuePanelState(state, error, rows);
+
   return (
-    <StatePanel
-      state={queuePanelState(state, error, rows)}
-      label="the credit queue"
-      loadingRows={2}
-      empty={{ title: "Nothing waiting. New credit requests show up here." }}
-      unreadable={{ retry: onRetry }}
-    >
-      {(pending) => (
-        <div className="space-y-3">
-          {pending.map((row) => (
-            <CreditRequestCard
-              key={row.id}
-              row={row}
-              onApprove={onApprove}
-              onDecline={onDecline}
-            />
-          ))}
+    <>
+      {/* Only for a read that actually succeeded and found rows — never
+          while loading or after a failed read, and skipped on a genuine
+          empty queue too, since the panel's own "Nothing waiting." copy
+          below already says that. `totalRequestedZc` sums exactly the rows
+          this panel is about to render, not `rows` again independently, so
+          the two can never disagree. */}
+      {panel.kind === "present" && (
+        <div className="mb-4 flex gap-6">
+          <StatTile variant="header" label="Pending" value={panel.data.length} />
+          <StatTile
+            variant="header"
+            label="Requested"
+            value={`${formatZc(totalRequestedZc(panel.data))} ZC`}
+            hint={usdForMillicredits(totalRequestedZc(panel.data))}
+          />
         </div>
       )}
-    </StatePanel>
+      <StatePanel
+        state={panel}
+        label="the credit queue"
+        loadingRows={2}
+        empty={{ title: "Nothing waiting. New credit requests show up here." }}
+        unreadable={{ retry: onRetry }}
+      >
+        {(pending) => (
+          <div className="space-y-3">
+            {pending.map((row) => (
+              <CreditRequestCard
+                key={row.id}
+                row={row}
+                onApprove={onApprove}
+                onDecline={onDecline}
+              />
+            ))}
+          </div>
+        )}
+      </StatePanel>
+    </>
   );
 }
 

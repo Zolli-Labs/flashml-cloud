@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { StatTile } from "@/components/ui/stat-tile";
 import type { JobRound } from "@/lib/cloud-api";
 
 // The training-progress view for a federated run.
@@ -138,11 +139,11 @@ export function RoundProgress({
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-4">
-        <Stat
+        <StatTile
           label="Final loss"
           value={last === null ? "—" : last.toFixed(4)}
         />
-        <Stat
+        <StatTile
           label="Improvement"
           value={
             improvement === null ? "—" : `${(improvement * 100).toFixed(1)}%`
@@ -154,8 +155,8 @@ export function RoundProgress({
               : undefined
           }
         />
-        <Stat label="Rounds" value={String(rounds.length)} />
-        <Stat
+        <StatTile label="Rounds" value={String(rounds.length)} />
+        <StatTile
           label="Mean round"
           value={meanTime === null ? "—" : fmtDuration(meanTime)}
           hint={totalTime === null ? undefined : `${fmtDuration(totalTime)} total`}
@@ -383,34 +384,6 @@ export function RoundProgress({
             ))}
           </div>
         </section>
-      )}
-    </div>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  hint,
-  tone = "plain",
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: "plain" | "good";
-}) {
-  return (
-    <div className="rounded-lg border border-border bg-surface px-4 py-3">
-      <div
-        className={`metric-value text-xl ${tone === "good" ? "text-[var(--node-green)]" : ""}`}
-      >
-        {value}
-      </div>
-      <div className="label-caps mt-0.5">{label}</div>
-      {hint && (
-        <div className="mt-1 font-mono text-[10px] text-muted-foreground">
-          {hint}
-        </div>
       )}
     </div>
   );

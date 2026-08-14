@@ -47,6 +47,7 @@ function routed(over: Partial<RoutingPanel> = {}): RoutingPanel {
     kindEvidence: "sweep over lr, hidden expands to 6 independent trials",
     tasks: 6,
     venues: [],
+    candidates: [],
     plans: [],
     recommended: null,
     duration: null,

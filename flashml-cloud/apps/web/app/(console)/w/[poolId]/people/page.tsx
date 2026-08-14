@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { PageShell } from "@/components/shell/PageShell";
 import { StatePanel } from "@/components/shell/StatePanel";
+import { StatTile } from "@/components/ui/stat-tile";
 import { MemberTable } from "@/components/workspace/MemberTable";
 import { WorkspaceHeader } from "@/components/workspace/WorkspaceHeader";
 import { useWorkspace } from "@/components/workspace/WorkspaceProvider";
@@ -11,6 +12,7 @@ import {
   resolvePanelState,
   type PanelRead,
 } from "@/lib/console/panel-state";
+import { teamMachineRollup } from "@/lib/machine-scope";
 import { workspacePath } from "@/lib/workspace-scope";
 import type { PoolMember } from "@/lib/cloud-api";
 
@@ -33,10 +35,26 @@ export default function WorkspacePeoplePage() {
   // than leaving it as a fact you have to know.
   const read: PanelRead<PoolMember[]> = { status: "read", data: members };
   const panel = resolvePanelState(read, isEmptyList);
+  const rollup = teamMachineRollup(members);
 
   return (
     <PageShell width="wide">
       <WorkspaceHeader />
+
+      {/* The rollup nothing summed before (density audit §3, gap 7): every
+          row below already carries its own `machine_count`/`machines_online`,
+          and this is exactly those two columns added up — not a second,
+          separately-scoped machine read, so it cannot disagree with the
+          table underneath it. */}
+      <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        <StatTile label="Machines across your team" value={rollup.total} size="lg" />
+        <StatTile
+          label="Online now"
+          value={rollup.online}
+          total={rollup.total}
+          size="lg"
+        />
+      </div>
 
       <div className="mt-6">
         <StatePanel

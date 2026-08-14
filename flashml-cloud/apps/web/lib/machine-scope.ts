@@ -16,3 +16,59 @@ export function isMachineOnline(machine: {
 }): boolean {
   return machine.status !== "revoked" && isOnline(machine.last_seen_at);
 }
+
+/** The fleet-size breakdown `w/[poolId]/machines` shows nowhere of its own —
+ * every figure a viewer sees on that tab comes from the shared
+ * `WorkspaceHeader` (density audit §3, gap 4). `total` is the array's own
+ * length, so the four figures can never disagree with each other or with
+ * what the table below renders. `online` reuses `isMachineOnline` rather
+ * than re-deriving it, for the same reason that function itself exists: one
+ * definition, so a header count and a table's dots cannot drift apart. */
+export interface PoolFleetCounts {
+  total: number;
+  online: number;
+  pending: number;
+  revoked: number;
+}
+
+export function poolFleetCounts(
+  machines: readonly { status: string; last_seen_at: string | null }[]
+): PoolFleetCounts {
+  let online = 0;
+  let pending = 0;
+  let revoked = 0;
+  for (const machine of machines) {
+    if (isMachineOnline(machine)) online++;
+    if (machine.status === "pending") pending++;
+    if (machine.status === "revoked") revoked++;
+  }
+  return { total: machines.length, online, pending, revoked };
+}
+
+/** The workspace-wide rollup `w/[poolId]/people` showed nowhere — the
+ * per-member `machine_count`/`machines_online` columns already existed on
+ * every row `MemberTable` renders, and nothing summed them (density audit
+ * §3, gap 7).
+ *
+ * Deliberately sums the PER-MEMBER fields the People page already has
+ * rather than reusing `poolFleetCounts` over a separately-fetched machines
+ * array: the two are different reads of possibly-different scope, and this
+ * rollup's whole claim is "what this table already shows you, added up" —
+ * a number that disagrees with its own table would be worse than no rollup
+ * at all. */
+export interface TeamMachineRollup {
+  total: number;
+  online: number;
+}
+
+export function teamMachineRollup(
+  members: readonly { machine_count: number; machines_online: number }[]
+): TeamMachineRollup {
+  return members.reduce(
+    (acc, member) => ({
+      total: acc.total + member.machine_count,
+      online: acc.online + member.machines_online,
+    }),
+    { total: 0, online: 0 }
+  );
+}

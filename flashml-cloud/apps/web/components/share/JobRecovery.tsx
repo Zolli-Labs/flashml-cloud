@@ -1,3 +1,4 @@
+import { StatTile } from "@/components/ui/stat-tile";
 import { NOT_OBSERVED } from "@/lib/sandbox-session";
 import {
   clockOf,
@@ -347,12 +348,24 @@ function Counts({ job, presenter }: { job: PublicJob; presenter: boolean }) {
   return (
     <div className={presenter ? "mt-3" : "mt-6"}>
       <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
-        <Stat label="Tasks accepted" value={`${accepted} of ${total}`} />
-        <Stat
+        <StatTile
+          variant="bare"
+          size="sm"
+          className="bg-surface px-3 py-3"
+          label="Tasks accepted"
+          value={`${accepted} of ${total}`}
+        />
+        <StatTile
+          variant="bare"
+          size="sm"
+          className="bg-surface px-3 py-3"
           label="Machines that claimed work"
           value={countOrAbsent(job.machines_claiming)}
         />
-        <Stat
+        <StatTile
+          variant="bare"
+          size="sm"
+          className="bg-surface px-3 py-3"
           label="Leases handed out"
           value={countOrAbsent(job.attempts_total)}
         />
@@ -368,15 +381,6 @@ function Counts({ job, presenter }: { job: PublicJob; presenter: boolean }) {
         {countOrAbsent(job.attempts_abandoned)} abandoned ·{" "}
         {countOrAbsent(job.attempts_unresolved)} still in flight
       </p>
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-surface px-3 py-3">
-      <dt className="label-caps">{label}</dt>
-      <dd className="metric-value mt-1 text-lg">{value}</dd>
     </div>
   );
 }

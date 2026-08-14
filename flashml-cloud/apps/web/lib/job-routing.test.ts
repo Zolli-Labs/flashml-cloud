@@ -12,6 +12,7 @@ import {
 } from "./job-routing";
 import type {
   PlanPreview,
+  PreviewCandidate,
   PreviewPlan,
   PreviewVenue,
 } from "./cloud-api";
@@ -53,6 +54,28 @@ function plan(over: Partial<PreviewPlan> & { name: string }): PreviewPlan {
     dominated_by: null,
     allocations: [],
     notes: [],
+    ...over,
+  };
+}
+
+function candidate(
+  over: Partial<PreviewCandidate> & { machine_id: string }
+): PreviewCandidate {
+  return {
+    name: null,
+    venue: null,
+    currency: "ZC",
+    price_zc_per_hour: 0,
+    price_label: "free",
+    listing_id: null,
+    capability_class: null,
+    reliability_tier: "unproven",
+    acceptance_rate: null,
+    n: null,
+    max_concurrent_tasks: 1,
+    seconds_per_task: null,
+    basis: null,
+    eligible: true,
     ...over,
   };
 }
@@ -333,6 +356,84 @@ describe("summariseRouting — settlement totals plus normalized USD value", () 
   });
 });
 
+describe("summariseRouting — the priced fleet behind the plans", () => {
+  // The gap the audit found (§3.1): `preview-plans` returns a `candidates`
+  // array — the actual per-machine pricing and reliability the plans above
+  // are built from — and neither this module nor `RoutingCard` referenced it
+  // at all. This is that array, surfaced.
+  const panel = summariseRouting(
+    previewed({
+      kind: "finetune",
+      candidates: [
+        candidate({
+          machine_id: "m-1",
+          name: "rig-a",
+          venue: "owned",
+          price_zc_per_hour: 0,
+          price_label: "free",
+          reliability_tier: "gold",
+          acceptance_rate: 0.94,
+          basis: "measured",
+          n: 12,
+          eligible: true,
+        }),
+        candidate({
+          machine_id: "m-2",
+          venue: "runpod",
+          price_zc_per_hour: 4.5,
+          price_label: "4.50 ZC/hr",
+          reliability_tier: "unproven",
+          acceptance_rate: null,
+          eligible: false,
+        }),
+      ],
+    })
+  );
+
+  it("carries every candidate the route returned", () => {
+    expect(panel.candidates).toHaveLength(2);
+    expect(panel.candidates.map((c) => c.machineId)).toEqual(["m-1", "m-2"]);
+  });
+
+  it("prefers the machine's name over its id, when the route sent one", () => {
+    expect(panel.candidates[0].display).toBe("rig-a");
+  });
+
+  it("falls back to the machine id when the route sent no name", () => {
+    expect(panel.candidates[1].display).toBe("m-2");
+  });
+
+  it("carries price, reliability and acceptance untouched", () => {
+    const [rigA] = panel.candidates;
+    expect(rigA.priceLabel).toBe("free");
+    expect(rigA.reliabilityTier).toBe("gold");
+    expect(rigA.acceptanceRate).toBe(0.94);
+    expect(rigA.basis).toBe("measured");
+    expect(rigA.n).toBe(12);
+    expect(rigA.eligible).toBe(true);
+  });
+
+  it("leaves an unmeasured acceptance rate null, never a fabricated 0", () => {
+    expect(panel.candidates[1].acceptanceRate).toBeNull();
+    expect(panel.candidates[1].eligible).toBe(false);
+  });
+
+  it("is empty when the route sent no candidates", () => {
+    const empty = summariseRouting(previewed({ kind: "finetune" }));
+    expect(empty.candidates).toEqual([]);
+  });
+
+  it("is empty outside the routed state, same as venues", () => {
+    const unrouted = summariseRouting(previewed({ kind: undefined }));
+    expect(unrouted.candidates).toEqual([]);
+    const unavailable = summariseRouting({
+      status: "unavailable",
+      detail: "502",
+    });
+    expect(unavailable.candidates).toEqual([]);
+  });
+});
+
 describe("summariseRouting — unobserved is not zero", () => {
   it("leaves a null makespan null rather than reporting a zero-second plan", () => {
     const panel = summariseRouting(
@@ -533,6 +634,54 @@ describe("RoutingCard — the rendered page", () => {
     expect(planRows[0][1].match(/<td\b/g)).toHaveLength(6);
     expect(headerLabels.join(" ")).not.toMatch(/\b(cash|equivalent|total)\b/i);
     expect(table).not.toContain("$");
+  });
+
+  it("renders the priced-machines table with the machine-level figures the venue table never carries", () => {
+    const withCandidates = render(
+      summariseRouting(
+        previewed({
+          kind: "finetune",
+          candidates: [
+            candidate({
+              machine_id: "m-1",
+              name: "rig-a",
+              venue: "owned",
+              price_label: "free",
+              reliability_tier: "gold",
+              acceptance_rate: 0.94,
+              basis: "measured",
+              n: 12,
+              eligible: true,
+            }),
+            candidate({
+              machine_id: "m-2",
+              venue: "runpod",
+              price_label: "4.50 ZC/hr",
+              reliability_tier: "unproven",
+              acceptance_rate: null,
+              eligible: false,
+            }),
+          ],
+        })
+      )
+    );
+    expect(withCandidates).toContain("Priced machines");
+    expect(withCandidates).toContain("rig-a");
+    // No name sent for m-2, so its id stands in.
+    expect(withCandidates).toContain("m-2");
+    expect(withCandidates).toContain("free");
+    expect(withCandidates).toContain("4.50 ZC/hr");
+    expect(withCandidates).toContain("gold");
+    expect(withCandidates).toContain("94%");
+    // The unmeasured second machine reads "not observed", never a
+    // fabricated "0%".
+    expect(withCandidates).toContain(NOT_OBSERVED);
+    expect(withCandidates).not.toContain("0%");
+    expect(withCandidates).toContain("excluded");
+  });
+
+  it("omits the priced-machines table entirely when the route sent no candidates", () => {
+    expect(markup).not.toContain("Priced machines");
   });
 
   it("says a failed read failed, in the API's own words", () => {

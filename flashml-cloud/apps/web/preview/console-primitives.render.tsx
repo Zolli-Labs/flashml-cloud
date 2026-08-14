@@ -9,6 +9,7 @@ import { it } from "vitest";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { StatTile } from "@/components/ui/stat-tile";
 import {
   Table,
   TableBody,
@@ -186,6 +187,81 @@ function Gallery() {
               </TableRow>
             </TableBody>
           </Table>
+        </div>
+      </Section>
+
+      <Section
+        title="StatTile — the primitive"
+        note="components/ui/stat-tile.tsx. Was seven separate hand-written Stat()/CountTile()/HeaderStat() functions across metrics, market/listings, w/[poolId]/overview, RoundProgress, TradeoffCard, RoutingCard and JobRecovery — see docs/superpowers/specs/2026-08-13-console-density-audit.md §4. Six of the seven now render through this one component; w/[poolId]/overview instead joined components/shared/StatStrip, the instrument-panel hairline row, which is the register for a page-leading set of counts."
+      >
+        <div style={{ width: "100%", display: "grid", gap: "1.25rem" }}>
+          <div>
+            <p className="meta" style={{ marginBottom: "0.5rem" }}>
+              variant=&quot;card&quot; (the metrics / overview / RoundProgress shape)
+            </p>
+            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+              <StatTile label="Jobs running" value={3} total={7} size="lg" />
+              <StatTile label="Machines online" value={12} size="md" />
+              <StatTile
+                label="Improvement"
+                value="4.2%"
+                tone="good"
+                hint="0.6120 → 0.5865"
+              />
+              <StatTile label="Goodput" value={null} />
+            </div>
+          </div>
+          <div>
+            <p className="meta" style={{ marginBottom: "0.5rem" }}>
+              variant=&quot;bare&quot; (the TradeoffCard / RoutingCard / JobRecovery
+              shape — placed inside a caller-owned &lt;dl&gt;)
+            </p>
+            <dl
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: "1px",
+                maxWidth: "420px",
+                overflow: "hidden",
+                borderRadius: "0.625rem",
+                border: "1px solid var(--border)",
+                background: "var(--border)",
+              }}
+            >
+              <StatTile
+                variant="bare"
+                size="sm"
+                className="bg-surface px-3 py-3"
+                label="Tasks accepted"
+                value="18 of 20"
+              />
+              <StatTile
+                variant="bare"
+                size="sm"
+                className="bg-surface px-3 py-3"
+                label="Leases handed out"
+                value={24}
+              />
+              <StatTile
+                variant="bare"
+                size="sm"
+                className="bg-surface px-3 py-3"
+                label="Not yet measurable"
+                value={null}
+              />
+            </dl>
+          </div>
+          <div>
+            <p className="meta" style={{ marginBottom: "0.5rem" }}>
+              variant=&quot;header&quot; (the market/listings shape — right-aligned,
+              borderless)
+            </p>
+            <div style={{ display: "flex", gap: "1.5rem" }}>
+              <StatTile variant="header" label="Open asks" value={41} />
+              <StatTile variant="header" label="Classes" value={6} />
+              <StatTile variant="header" label="Your listings" value={2} />
+            </div>
+          </div>
         </div>
       </Section>
 

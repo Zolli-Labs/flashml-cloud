@@ -688,6 +688,33 @@ export interface JobContribution {
   total_duration_s: number;
 }
 
+/** `GET /v1alpha1/jobs/{id}/verifications`'s row shape — one advisory
+ * verdict `db.record_verification` wrote for one (task, slice) pair. A task
+ * can carry more than one row, one per slice that ran against it.
+ *
+ * THESE ARE OBSERVATIONS, NEVER GATES. `record_verification`'s own docstring
+ * (`apps/api/flashml_cloud_api/db.py`): "Nothing in this system reads what
+ * this writes to refuse a lease, withhold a credit, fail a commit or change
+ * placement… it is not a gate and must never become one by accident." No
+ * code anywhere may treat a `flag` here as a reason to withhold anything —
+ * see `lib/job-verifications.ts` for the display rules that keep that
+ * distinction honest once this reaches a screen.
+ *
+ * `machine_id` is nullable: a verdict can be recorded before the coordinator
+ * has resolved which machine ran the task. `detail` is nullable and, when
+ * present, is the slice's own evidence for the verdict — carried through
+ * verbatim, never summarised by this client. */
+export interface Verification {
+  id: string;
+  machine_id: string | null;
+  job_id: string;
+  task_id: string;
+  slice: "timing" | "evidence" | "redundancy";
+  verdict: "pass" | "flag" | "unknown";
+  detail: Record<string, unknown> | null;
+  created_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // the router's answer: POST /v1alpha1/jobs/preview-plans
 // ---------------------------------------------------------------------------
@@ -1585,6 +1612,22 @@ export function getJobTradeoff(jobId: string): Promise<JobTradeoff> {
 export function listJobContributions(jobId: string): Promise<JobContribution[]> {
   return request<JobContribution[]>(
     `/v1alpha1/jobs/${encodeURIComponent(jobId)}/contributions`
+  );
+}
+
+/** `GET /v1alpha1/jobs/{id}/verifications` — every advisory verdict
+ * recorded for this job, one row per (task, slice) that was checked.
+ * Visibility matches the sibling read routes above: the owner, or a member
+ * of the job's pool, may see it; a job that exists and the caller cannot
+ * see 404s here too, same as `getJob`.
+ *
+ * An empty array is the honest and common answer — most tasks carry no
+ * verification row at all, since only the settlement path that calls
+ * `verify.timing_verdict` writes one today — and must never be read as, or
+ * replaced by, a fabricated pass. See `lib/job-verifications.ts`. */
+export function listJobVerifications(jobId: string): Promise<Verification[]> {
+  return request<Verification[]>(
+    `/v1alpha1/jobs/${encodeURIComponent(jobId)}/verifications`
   );
 }
 
