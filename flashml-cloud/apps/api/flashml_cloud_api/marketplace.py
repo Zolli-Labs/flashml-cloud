@@ -1572,15 +1572,49 @@ def grant_starting_credits(db: psycopg.Connection, owner_id: str) -> int:
     migration 0003 documented on ``contributions`` and it is the same trap
     here — the grant is the one reason with no natural ref and the one reason
     that must never be written twice.
+
+    **The already-granted case is answered by the eligibility read itself**,
+    not by walking the write path to be told 0 by the index. ``GET
+    /v1alpha1/credits`` calls this on every read, and the old shape spent an
+    ``insert`` on ``credit_accounts``, an account select, a ``select ... for
+    update`` and a no-op ``insert`` on every one of them — a write path,
+    including a row lock, on a plain GET, to re-establish a fact the ledger
+    had already recorded. The ``exists`` below asks for exactly the index's
+    own key — ``(reason='grant', ref_type='account', ref_id=<the spendable
+    account>)`` — so it cannot answer "already granted" for any other
+    movement, and it is the same fact the index would enforce a moment later.
+
+    **The index is still the authority, not this check.** Two first-ever
+    reads racing both see ``already_granted`` false, both reach ``post``, and
+    the unique index makes one of them a no-op exactly as before; the
+    pre-check removes work from the settled case, it does not become the
+    guard. And 0 still means "ineligible or already granted" to every caller
+    — the short-circuit returns precisely what the second call always
+    returned.
     """
     with db.cursor() as cur:
         cur.execute(
-            "select starter_grant_eligible from public.profiles"
-            " where id = %s::uuid",
-            (owner_id,),
+            """
+            select p.starter_grant_eligible,
+                   exists (
+                       select 1
+                         from public.credit_entries e
+                         join public.credit_accounts a on a.id = e.account_id
+                        where a.owner_id = %s::uuid
+                          and a.kind = 'spendable'
+                          and e.reason = 'grant'
+                          and e.ref_type = 'account'
+                          and e.ref_id = a.id::text
+                   ) as already_granted
+              from public.profiles p
+             where p.id = %s::uuid
+            """,
+            (owner_id, owner_id),
         )
         profile = cur.fetchone()
     if profile is None or not bool(profile["starter_grant_eligible"]):
+        return 0
+    if bool(profile["already_granted"]):
         return 0
 
     accounts = ensure_accounts(db, owner_id)

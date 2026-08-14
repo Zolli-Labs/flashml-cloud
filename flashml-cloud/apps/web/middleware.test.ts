@@ -226,6 +226,48 @@ describe("signed-out redirect to /sign-in", () => {
     expect(isPublicPath(`/share/${"a".repeat(129)}`)).toBe(false);
   });
 
+  // The live-network demo page. Same two directions as the share page above,
+  // and the same reason for pinning both: it has to open for a judge with no
+  // account, and it must not have opened anything else on the way.
+  //
+  // `/demo` is a LITERAL in `PUBLIC_PATHS`, not a pattern — there is exactly
+  // one URL and no token to parameterise — so `includes` gives the exact
+  // match for free. These near-misses are what a `startsWith("/demo")` would
+  // have quietly made public instead.
+  it("serves /demo to a signed-out visitor, with no auth client at all", async () => {
+    const res = await get("http://localhost:3000/demo");
+
+    expect(res.status).not.toBe(307);
+    expect(res.headers.get("location")).toBeNull();
+    // The page polls a public API route and reads no session. Constructing a
+    // Supabase client here would make a no-login page depend on auth being
+    // reachable, which is the one thing it must not do.
+    expect(createServerClient).not.toHaveBeenCalled();
+    expect(getUser).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["/demo/x", "a nested route is a different route"],
+    ["/demos", "a sibling route must not match by resemblance"],
+    ["/demo/../jobs", "traversal must not resolve to public"],
+    ["/demo/", "a trailing slash is not this path"],
+    ["/Demo", "the match is exact, not case-folded"],
+  ])("does not make %s public (%s)", (pathname) => {
+    expect(isPublicPath(pathname)).toBe(false);
+  });
+
+  it("keeps sending a signed-out visitor from a /demo near-miss to sign-in", async () => {
+    // `isPublicPath` returning false is the judgement; this is the behaviour
+    // that judgement is supposed to produce.
+    for (const pathname of ["/demo/x", "/demos"]) {
+      const res = await get(`http://localhost:3000${pathname}`);
+      expect(res.status, pathname).toBe(307);
+      expect(new URL(res.headers.get("location")!).pathname, pathname).toBe(
+        "/sign-in"
+      );
+    }
+  });
+
   it("still checks auth on /sign-in so signed-in visitors can be redirected", async () => {
     await get("http://localhost:3000/sign-in");
 

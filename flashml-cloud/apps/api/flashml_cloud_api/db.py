@@ -48,9 +48,15 @@ than infer it from a ledger this module writes on a best-effort basis.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
-from collections.abc import Mapping, Sequence
+import os
+import select
+import threading
+import time
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -78,13 +84,25 @@ if TYPE_CHECKING:
     from flashml_cloud_api.access import OnboardingSubmission
 
 
-def connect(settings: Settings) -> psycopg.Connection:
+def connect(
+    settings: Settings,
+    *,
+    _open: Callable[..., psycopg.Connection] | None = None,
+) -> psycopg.Connection:
     """Open a new autocommit connection to the configured Postgres database.
 
     ``settings.database_url`` is a standard libpq connection string/URI,
     read from the ``DATABASE_URL`` env var. Never hardcode a connection
     string or credential here — this function only ever reads one that
     was already resolved from the environment.
+
+    ``_open`` is internal: :class:`ConnectionPool` passes
+    ``_PooledConnection.connect`` so a POOLED connection is opened by this
+    one function too, with this one set of kwargs. It exists so the
+    transaction-pooler guard below cannot drift between the pooled and the
+    unpooled path — there is still exactly ONE place that opens an app
+    connection, which is what ``test_db_connect_seam.py`` pins. Nothing
+    outside this module may pass it.
     """
     if not settings.database_url:
         raise RuntimeError(
@@ -110,13 +128,409 @@ def connect(settings: Settings) -> psycopg.Connection:
     #
     # Still a capacity patch, not the design: the real fix is a bounded
     # connection pool at the `create_app(connect=...)` seam (register
-    # 2026-08-13, §API design follow-ups). When that lands, this stays —
-    # pooled connections through a transaction pooler want it too.
-    conn = psycopg.connect(
+    # 2026-08-13, §API design follow-ups). That pool landed on 2026-08-14 as
+    # :class:`ConnectionPool` below, and this comment stays exactly as it was
+    # — pooled connections through a transaction pooler want the guard too,
+    # and the pool opens its connections THROUGH THIS FUNCTION so they get it.
+    opener = _open or psycopg.connect
+    conn = opener(
         settings.database_url, row_factory=dict_row, prepare_threshold=None
     )
     conn.autocommit = True
     return conn
+
+
+# ---------------------------------------------------------------------------
+# the connection pool
+#
+# WHY THIS EXISTS. `connect` above opened a NEW connection per request, and
+# both deployed DATABASE_URLs point at Supabase's transaction pooler in
+# `aws-0-us-east-1` while the API runs on Render in `oregon`. Every
+# authenticated request therefore paid a cross-continent TCP + TLS + Postgres
+# auth handshake before its first query. Measured against production on
+# 2026-08-14: `/v1alpha1/public/prices` (the one route that touches no
+# database) answered in 60ms while `/v1alpha1/me` took 3087ms, `/machines`
+# 3015ms and `/jobs` 5519ms. The console makes six or more such calls per
+# navigation, which is the owner's "every click takes ten seconds".
+#
+# WHY NOT `psycopg_pool`. It is not installed in this venv and adding a
+# dependency was not on the table for this change. Everything below is
+# psycopg + stdlib.
+#
+# THE SHAPE IS DICTATED BY THE SEAM. `create_cloud_app(connect=...)` hands
+# every call site a zero-argument factory returning a connection that the site
+# then `close()`s in a `finally` (or through `contextlib.closing`). So the pool
+# is that factory, and a pooled connection's `close()` RETURNS IT rather than
+# closing it. No call site changes, which means no call site can be the one
+# that was missed.
+# ---------------------------------------------------------------------------
+
+#: Ceiling on connections this process keeps. Ten, deliberately small.
+#:
+#: The API runs ONE uvicorn worker (render.yaml passes no `--workers`), and
+#: FastAPI runs its `def` routes on anyio's default 40-thread pool, so ~40 is
+#: the true concurrency ceiling and ten covers the console's six-call
+#: navigation with room for the three background loops. Small matters more
+#: than snug here: on 2026-08-13 the SESSION pooler's hard 15-client cap took
+#: dev down, and while :6543 multiplexes far more, a pool still holds real
+#: client slots — one per process, and a redeploy runs two processes at once.
+#: Exhaustion the day before a submission is far worse than a slow page, so
+#: the pool NEVER blocks: past this ceiling it falls back to an unpooled
+#: connection, which is exactly the behaviour that shipped before it.
+DEFAULT_POOL_MAX_SIZE = 10
+
+#: Recycle a connection that has been sitting idle longer than this rather
+#: than hand it out. A transaction pooler, a load balancer or an idle-session
+#: timeout may have dropped it while nobody was looking, and the cost of being
+#: wrong is a 500 on a real request; the cost of being right is one handshake
+#: on the first request after a lull, which is what every request paid before.
+DEFAULT_POOL_MAX_IDLE_S = 300.0
+
+#: What the pool is allowed to hold when the DSN still points at Supabase's
+#: SESSION pooler (:5432), whose cap is FIFTEEN CLIENTS FOR THE WHOLE PROJECT.
+#:
+#: This is not a hypothetical: the checked-in `.env.dev` and `.env.prod` both
+#: still read `aws-0-us-east-1.pooler.supabase.com:5432` on 2026-08-14, and
+#: while the deployed values on Render are believed to have moved to :6543,
+#: a repo file is the thing an operator copies. Ten retained connections
+#: against a 15-client cap is the 2026-08-13 dev outage with a pool holding
+#: the slots open instead of a request storm — permanently, and through every
+#: quiet period. So the port decides the ceiling, and the DSN that needs the
+#: pool least gets the smallest one.
+SESSION_POOLER_MAX_SIZE = 3
+
+#: Hard cap on a pooled connection's total age. Bounds the blast radius of
+#: anything that accumulates per-session server side and lets a rotated
+#: credential or a failed-over database take effect without a redeploy.
+DEFAULT_POOL_MAX_LIFETIME_S = 1800.0
+
+
+def _is_session_pooler(database_url: str | None) -> bool:
+    """True for a Supabase SESSION-pooler DSN (:5432 on ``*.pooler.supabase.*``).
+
+    Deliberately narrow. A direct Postgres on 5432 — a local test database,
+    an RDS instance — is not what this catches and does not want the clamp;
+    what it catches is the one host whose cap is fifteen clients for the whole
+    project. Anything it cannot parse answers False: a wrong guess here must
+    never be what makes the pool smaller than the operator asked for.
+    """
+    if not database_url:
+        return False
+    try:
+        info = psycopg.conninfo.conninfo_to_dict(database_url)
+    except Exception:  # noqa: BLE001 - libpq will produce the real error later
+        return False
+    host = str(info.get("host") or "")
+    port = str(info.get("port") or "")
+    return "pooler.supabase." in host and port == "5432"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
+
+
+class _PooledConnection(psycopg.Connection):
+    """A connection whose ``close()`` hands it back instead of hanging up.
+
+    Every call site in this API opens a connection and closes it in a
+    ``finally``. That contract is what makes the pool safe on the exception
+    path — a route that raises still unwinds through the same ``finally`` and
+    still calls ``close()``, so the connection is returned, not leaked — and it
+    is the reason the pool is expressed as a `close()` override rather than as
+    a context manager the call sites would have had to adopt.
+
+    ``_flashml_state`` exists because DOUBLE CLOSE IS REAL: a
+    ``contextlib.closing`` block around code that also closes explicitly, or a
+    dependency generator finalised twice, would otherwise close a connection
+    that is already sitting in the idle deque waiting for the next request.
+    The state transition happens under the pool's lock, in ``_put``, so a
+    second close is a no-op rather than a corruption.
+    """
+
+    #: ``unpooled`` — behaves exactly like a plain psycopg connection;
+    #: ``checked_out`` — a caller holds it, ``close()`` returns it;
+    #: ``idle`` — it is in the pool's deque, ``close()`` must do nothing.
+    _flashml_state: str = "unpooled"
+    _flashml_pool: "ConnectionPool | None" = None
+    _flashml_opened_at: float = 0.0
+    _flashml_returned_at: float = 0.0
+
+    def close(self) -> None:
+        pool = self._flashml_pool
+        if pool is None:
+            super().close()
+            return
+        pool._put(self)
+
+    def _flashml_hard_close(self) -> None:
+        """Really close it. Only the pool calls this."""
+        self._flashml_pool = None
+        self._flashml_state = "unpooled"
+        super().close()
+
+
+class ConnectionPool:
+    """A bounded, thread-safe pool of autocommit psycopg connections.
+
+    Callable, so it drops straight into the ``create_cloud_app(connect=...)``
+    seam: ``pool()`` is ``pool.getconn()``.
+
+    WHAT IT REFUSES TO DO. It never blocks waiting for a free connection.
+    Past ``max_size`` it opens an ordinary unpooled connection and returns
+    that, so the worst case under a burst is precisely the behaviour that
+    shipped before this class existed — never a queue, never a timeout, never
+    a 500 that the old code would not also have produced.
+
+    HYGIENE HAPPENS ON THE WAY OUT, NOT ON THE WAY IN, and that is load
+    bearing. ``db.close_when_idle`` closes a background connection while
+    HOLDING ``conn.lock``; ``rollback()`` takes that same non-reentrant lock,
+    so rolling back inside ``_put`` would deadlock the background loops
+    outright. ``_put`` therefore does no I/O at all — it files the connection —
+    and every check (closed, broken, too old, too long idle, left mid
+    transaction, socket gone) runs in ``getconn`` before a connection is handed
+    to the next caller. A connection that fails any of them is discarded and
+    replaced, so a dirty or dead connection is never anyone's second request.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        max_size: int | None = None,
+        max_idle_s: float | None = None,
+        max_lifetime_s: float | None = None,
+    ) -> None:
+        self._settings = settings
+        requested = (
+            int(_env_float("FLASHML_DB_POOL_MAX_SIZE", DEFAULT_POOL_MAX_SIZE))
+            if max_size is None
+            else int(max_size)
+        )
+        if requested > SESSION_POOLER_MAX_SIZE and _is_session_pooler(
+            getattr(settings, "database_url", None)
+        ):
+            log.warning(
+                "DATABASE_URL is Supabase's SESSION pooler (:5432, 15 clients "
+                "for the whole project); holding the connection pool to %s "
+                "instead of %s. Move DATABASE_URL to the TRANSACTION pooler "
+                "(:6543) to get the configured size.",
+                SESSION_POOLER_MAX_SIZE, requested,
+            )
+            requested = SESSION_POOLER_MAX_SIZE
+        self._max_size = requested
+        self._max_idle_s = (
+            _env_float("FLASHML_DB_POOL_MAX_IDLE_S", DEFAULT_POOL_MAX_IDLE_S)
+            if max_idle_s is None
+            else float(max_idle_s)
+        )
+        self._max_lifetime_s = (
+            _env_float("FLASHML_DB_POOL_MAX_LIFETIME_S", DEFAULT_POOL_MAX_LIFETIME_S)
+            if max_lifetime_s is None
+            else float(max_lifetime_s)
+        )
+        self._lock = threading.Lock()
+        self._idle: deque[_PooledConnection] = deque()
+        #: Connections this pool owns: idle plus checked out. Overflow
+        #: connections are NOT counted — the pool does not own them.
+        self._live = 0
+        self._closed = False
+        # Counters, for the /healthz-adjacent question "is ten enough?".
+        self.reused = 0
+        self.opened = 0
+        self.overflowed = 0
+        self.discarded = 0
+
+    # -- the seam ----------------------------------------------------------
+
+    def __call__(self) -> psycopg.Connection:
+        return self.getconn()
+
+    def getconn(self) -> psycopg.Connection:
+        """A live autocommit connection. ``close()`` it exactly as before.
+
+        ``max_size <= 0`` turns pooling OFF and restores the old
+        connection-per-request behaviour byte for byte. That is the kill
+        switch: ``FLASHML_DB_POOL_MAX_SIZE=0`` in the Render dashboard reverts
+        this change without a deploy.
+        """
+        if self._max_size <= 0 or self._closed:
+            return connect(self._settings)
+
+        while True:
+            conn: _PooledConnection | None = None
+            at_capacity = False
+            with self._lock:
+                if self._closed:
+                    return connect(self._settings)
+                if self._idle:
+                    # LIFO: keep a small set of connections hot and let the
+                    # rest age out into the idle recycle above.
+                    conn = self._idle.pop()
+                    conn._flashml_state = "checked_out"
+                elif self._live < self._max_size:
+                    self._live += 1
+                else:
+                    at_capacity = True
+                    self.overflowed += 1
+
+            if at_capacity:
+                log.info(
+                    "database pool at capacity (%s); opening an unpooled "
+                    "connection for this request", self._max_size,
+                )
+                return connect(self._settings)
+
+            if conn is None:
+                # Opened outside the lock: a cross-continent handshake must
+                # not stop every other thread from checking a connection out.
+                try:
+                    fresh = self._open()
+                except BaseException:
+                    with self._lock:
+                        self._live -= 1
+                    raise
+                with self._lock:
+                    self.opened += 1
+                return fresh
+
+            if self._is_reusable(conn):
+                with self._lock:
+                    self.reused += 1
+                return conn
+            self._discard(conn)
+            # ...and go round again: either another idle connection, or a
+            # fresh one. The caller never sees the recycle.
+
+    # -- internals ---------------------------------------------------------
+
+    def _open(self) -> _PooledConnection:
+        conn = connect(self._settings, _open=_PooledConnection.connect)
+        assert isinstance(conn, _PooledConnection)
+        now = time.monotonic()
+        conn._flashml_opened_at = now
+        conn._flashml_returned_at = now
+        conn._flashml_pool = self
+        conn._flashml_state = "checked_out"
+        return conn
+
+    def _put(self, conn: _PooledConnection) -> None:
+        """File a returned connection. NO I/O — see the class docstring."""
+        hard_close = False
+        with self._lock:
+            if conn._flashml_state != "checked_out":
+                # Already returned. A second close() is a no-op, never a close
+                # of a connection somebody else is now using.
+                return
+            if self._closed or conn.closed:
+                conn._flashml_state = "unpooled"
+                conn._flashml_pool = None
+                self._live -= 1
+                hard_close = not conn.closed
+            else:
+                conn._flashml_state = "idle"
+                conn._flashml_returned_at = time.monotonic()
+                self._idle.append(conn)
+        if hard_close:
+            with contextlib.suppress(Exception):
+                conn._flashml_hard_close()
+
+    def _discard(self, conn: _PooledConnection) -> None:
+        with self._lock:
+            self._live -= 1
+            self.discarded += 1
+        with contextlib.suppress(Exception):
+            conn._flashml_hard_close()
+
+    def _is_reusable(self, conn: _PooledConnection) -> bool:
+        """Everything that must be true before this connection runs somebody
+        else's query. Any doubt at all answers False — the cost of a false
+        negative is one handshake, the cost of a false positive is a 500."""
+        try:
+            if conn.closed or getattr(conn, "broken", False):
+                return False
+            now = time.monotonic()
+            if now - conn._flashml_opened_at > self._max_lifetime_s:
+                return False
+            if now - conn._flashml_returned_at > self._max_idle_s:
+                return False
+            if not _socket_still_quiet(conn):
+                # Readable while idle means the server spoke unbidden, and the
+                # only thing it says to a connection nobody is using is
+                # goodbye. Costs no round trip; catches the pooler recycling
+                # us, a failover, and an admin terminating the backend.
+                return False
+            status = conn.info.transaction_status
+            if status == psycopg.pq.TransactionStatus.IDLE:
+                return True
+            if status == psycopg.pq.TransactionStatus.ACTIVE:
+                # A query is still running on it. Whoever closed it did so
+                # from another thread; do not touch it.
+                return False
+            # INTRANS or INERROR: a route raised inside `db.transaction()` and
+            # something swallowed the unwind, or an autocommit statement
+            # failed. Clean it rather than hand the next request a session
+            # that will answer `current transaction is aborted` to everything.
+            conn.rollback()
+            return conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        except Exception:  # noqa: BLE001 - an unreusable connection, whatever the reason
+            return False
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def close(self) -> None:
+        """Close every idle connection and stop pooling.
+
+        Connections still checked out are closed for real when their holder
+        closes them (``_put`` sees ``_closed``). Called from the app's
+        lifespan; safe to call twice.
+        """
+        with self._lock:
+            self._closed = True
+            idle = list(self._idle)
+            self._idle.clear()
+            self._live -= len(idle)
+        for conn in idle:
+            with contextlib.suppress(Exception):
+                conn._flashml_hard_close()
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "max_size": self._max_size,
+                "live": self._live,
+                "idle": len(self._idle),
+                "opened": self.opened,
+                "reused": self.reused,
+                "overflowed": self.overflowed,
+                "discarded": self.discarded,
+            }
+
+
+def _socket_still_quiet(conn: psycopg.Connection) -> bool:
+    """True if the server has sent nothing on this idle connection.
+
+    This API never issues ``LISTEN``, so an idle connection with readable
+    bytes is a connection the server has closed (or is about to). ``select``
+    with a zero timeout answers that without a round trip, which is the whole
+    point: a ``SELECT 1`` liveness ping would put a cross-continent round trip
+    back on every request and give back a third of what the pool just won.
+    """
+    try:
+        fd = conn.fileno()
+    except Exception:  # noqa: BLE001 - no socket means no reusable connection
+        return False
+    try:
+        readable, _, _ = select.select([fd], [], [], 0)
+    except (OSError, ValueError):
+        return False
+    return not readable
 
 
 #: How long :func:`close_when_idle` waits for a connection to go idle before
@@ -314,7 +728,14 @@ def update_profile_fields(
 # ---------------------------------------------------------------------------
 
 
-def access_state_for(db: psycopg.Connection, user_id: str) -> str:
+#: "the caller did not pre-read ``admitted_at``" — distinct from having read
+#: it and found NULL, which is a real answer meaning "not admitted".
+_UNREAD = object()
+
+
+def access_state_for(
+    db: psycopg.Connection, user_id: str, *, admitted_at: Any = _UNREAD
+) -> str:
     """``needs_onboarding`` | ``pending`` | ``admitted`` | ``declined``.
 
     DERIVED, never stored.
@@ -338,6 +759,17 @@ def access_state_for(db: psycopg.Connection, user_id: str) -> str:
     ``submit_access_request`` is ever reached. Only ``pending`` is treated
     this way: a decided row says what an admin decided, and 0009's backfill
     writes ``admitted`` rows with no ``use_case`` on purpose.
+
+    ``admitted_at`` is an OPTIONAL PRE-READ, nothing more. A caller that has
+    already read the profile row for another reason (``GET /me`` reads it for
+    ``admitted`` and ``is_admin``) may hand the value in so this does not read
+    the same column a second time. **It does not change the order of the two
+    sources**: the request row is still consulted first and still wins
+    outright, and the pre-read is only ever reached on the no-row branch —
+    exactly where the query it replaces used to run. An account with a
+    pending request AND a set ``admitted_at`` therefore still reads
+    ``pending``, pre-read or not. Omit it and this reads the column itself,
+    as it always did.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -351,11 +783,13 @@ def access_state_for(db: psycopg.Connection, user_id: str) -> str:
             return row["status"]
         # No request on file. An account already carrying admitted_at is
         # admitted; anything else has not asked yet.
-        cur.execute(
-            "select admitted_at from public.profiles where id = %s", (user_id,)
-        )
-        profile = cur.fetchone()
-    return "admitted" if profile and profile["admitted_at"] else "needs_onboarding"
+        if admitted_at is _UNREAD:
+            cur.execute(
+                "select admitted_at from public.profiles where id = %s", (user_id,)
+            )
+            profile = cur.fetchone()
+            admitted_at = profile["admitted_at"] if profile else None
+    return "admitted" if admitted_at else "needs_onboarding"
 
 
 def email_for_user(db: psycopg.Connection, user_id: str) -> str | None:
@@ -376,6 +810,34 @@ def profile_is_admin(db: psycopg.Connection, user_id: str) -> bool:
         cur.execute("select is_admin from public.profiles where id = %s", (user_id,))
         row = cur.fetchone()
     return bool(row and row["is_admin"])
+
+
+def profile_gate_flags(db: psycopg.Connection, user_id: str) -> dict[str, Any]:
+    """``admitted_at`` and ``is_admin`` off ONE read of the profile row.
+
+    Purely a batching of ``profile_is_admitted`` and ``profile_is_admin``,
+    which read one column each from the same row by the same primary key.
+    Both of those stay: they are the honest shape for a gate that wants one
+    answer (``admitted_user``, ``admin_user``), and a dependency should not
+    have to know it is reading a row.
+
+    This exists for ``GET /me``, which needs BOTH answers plus the
+    ``admitted_at`` fallback ``access_state_for`` consults — three
+    single-column reads of one row on the route every page load hits. An
+    absent profile reads as not-admitted and not-admin, the same refusal
+    both single-column readers give, so nothing here is a new decision about
+    an unknown user.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select admitted_at, is_admin from public.profiles where id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    return {
+        "admitted_at": row["admitted_at"] if row else None,
+        "is_admin": bool(row and row["is_admin"]),
+    }
 
 
 def submit_access_request(

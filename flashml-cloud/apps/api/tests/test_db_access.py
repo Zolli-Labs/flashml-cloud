@@ -137,6 +137,55 @@ def test_a_request_row_wins_over_the_flag(db):
     assert dbmod.access_state_for(db, user) == "declined"
 
 
+def test_a_pre_read_admitted_at_does_not_outrank_the_request_row(db):
+    """The `admitted_at=` argument is a pre-read, not a third source.
+
+    `GET /me` reads the profile row once and hands the value in so this does
+    not read the same column again. The saving is only legitimate if the
+    argument changes nothing about WHICH source decides: the request row is
+    consulted first and wins outright, and the pre-read is reachable only on
+    the no-row branch.
+
+    Passed the most misleading value possible — a set timestamp on an account
+    whose request is still pending, which is exactly what admitting by hand
+    with SQL produces — this must still answer `pending`.
+    """
+    user = _user(db, admitted=True)
+    dbmod.submit_access_request(
+        db, user, SUBMISSION, email_domain=None, is_personal_email=None
+    )
+    assert dbmod.access_state_for(db, user) == "pending"
+    assert (
+        dbmod.access_state_for(db, user, admitted_at=datetime.now(timezone.utc))
+        == "pending"
+    )
+    # ...and a declined row is equally immune.
+    dbmod.decline_access_request(db, user, decided_by=user)
+    assert (
+        dbmod.access_state_for(db, user, admitted_at=datetime.now(timezone.utc))
+        == "declined"
+    )
+
+
+def test_a_pre_read_admitted_at_is_used_when_there_is_no_request_row(db):
+    """The other half: with no row, the pre-read stands in for the query it
+    replaces, and NULL means not admitted exactly as a missing column would.
+
+    `None` here is a real answer, not "I did not look" — that distinction is
+    why the default is a sentinel and not `None`.
+    """
+    admitted = _user(db, admitted=True)
+    assert dbmod.access_state_for(db, admitted, admitted_at=None) == "needs_onboarding"
+
+    fresh = _user(db)
+    assert (
+        dbmod.access_state_for(db, fresh, admitted_at=datetime.now(timezone.utc))
+        == "admitted"
+    )
+    # Omitting it reads the column itself, as it always did.
+    assert dbmod.access_state_for(db, fresh) == "needs_onboarding"
+
+
 def test_state_follows_the_row_status(db):
     user = _user(db)
     dbmod.submit_access_request(

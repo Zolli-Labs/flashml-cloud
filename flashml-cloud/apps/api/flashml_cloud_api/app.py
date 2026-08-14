@@ -85,6 +85,7 @@ from flashml_cloud_api import cli_auth
 from flashml_cloud_api import contributions as contribmod
 from flashml_cloud_api import datasets as dsmod
 from flashml_cloud_api import db as dbmod
+from flashml_cloud_api import demo as demomod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
 from flashml_cloud_api import geoip as geoipmod
@@ -3658,7 +3659,19 @@ def create_cloud_app(
     placement_eligible = placement_eligible or placementmod.placement_predicate()
     expand_tasks = expand_tasks or placementmod.task_expander()
 
-    connect = connect or (lambda: dbmod.connect(settings))
+    # THE CONNECTION POOL LIVES HERE, at the seam its own docstring named.
+    #
+    # Un-injected, `connect` is a bounded `db.ConnectionPool` rather than a
+    # connect-per-request lambda. Constructing one opens NOTHING — the first
+    # connection is made by the first request that needs one — so an
+    # unconfigured deployment, and every test that injects its own factory,
+    # behave exactly as they did. The pool is closed in `lifespan`.
+    #
+    # Injected wins, unchanged: every test in this suite passes its own
+    # factory against an ephemeral local Postgres, and pooling must not be
+    # something they have to opt out of.
+    db_pool = dbmod.ConnectionPool(settings) if connect is None else None
+    connect = connect or db_pool
     coordinator = CoordinatorClient(settings, transport=transport)
     # Its own transport, not the coordinator's: these are two unrelated
     # hosts, and a test fake for one must not have to answer for the other.
@@ -4024,6 +4037,13 @@ def create_cloud_app(
             for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+            # After the loops, never before: each of them holds a connection
+            # across an `await` and hands it back through `close_when_idle`,
+            # so closing the pool first would only close the connections it
+            # still had and leave theirs to be filed into a dead pool (which
+            # `_put` handles, but there is no reason to arrange it).
+            if db_pool is not None:
+                db_pool.close()
 
     app = FastAPI(title="FlashML Cloud API", version="0.2.0", lifespan=lifespan)
 
@@ -4067,9 +4087,37 @@ def create_cloud_app(
         ],
         allow_methods=["*"],
         allow_headers=["*"],
+        # 7200s = 2 hours, which is Chrome's own ceiling for a preflight cache
+        # entry (`kMaxCorsPreflightCacheTimeoutSeconds`); anything larger is
+        # silently clamped there, and Firefox's cap is 24h, so 7200 is the
+        # largest value that is honoured everywhere without being a number
+        # only one browser believes. Starlette's default is 600, so this is a
+        # 10-minute cache becoming a 2-hour one.
+        #
+        # WHAT IT DOES AND DOES NOT BUY, measured 2026-08-14. A preflight is
+        # cached per (origin, URL, method, request-headers) — the URL
+        # INCLUDING its query string — so the 13 preflights seen in front of
+        # one page's 13 GETs are 13 DIFFERENT cache keys, all cold, and no
+        # max_age can collapse them. What this removes is the SECOND visit:
+        # the same endpoint asked again inside the window is one round trip
+        # instead of two. On a console the owner clicks around for an hour,
+        # that is most of the calls.
+        #
+        # Safe to raise only because none of the three inputs to that cache
+        # key changes per request: `allow_methods`/`allow_headers` are `*`
+        # (Starlette echoes what was asked), and the origins list is read from
+        # the environment once at startup. A cached preflight therefore cannot
+        # approve a shape the console does not send. Deliberately NOT touching
+        # `allow_origins` here — it defaults to `*` in the deployed config and
+        # that is a real finding, but it is the owner's call and not a
+        # performance fix.
+        max_age=7200,
     )
     app.state.settings = settings
     app.state.connect = connect
+    # None when a factory was injected. Readable so a deployment can be asked
+    # whether ten connections is enough (`db_pool.stats()`).
+    app.state.db_pool = db_pool
     app.state.coordinator = coordinator
     # Readable so a deployment can be checked for what it can actually destroy
     # — and so a test can prove the un-injected default is the empty registry
@@ -4777,17 +4825,29 @@ def create_cloud_app(
         # read — it is how the console learns which screen to show instead
         # of the product itself.
         profile = _jsonable(dbmod.upsert_profile(db, user_id))
-        profile["admitted"] = dbmod.profile_is_admitted(db, user_id)
+        # ONE read of the profile row for all three answers below. They used
+        # to be three single-column selects of the same row by the same key —
+        # `profile_is_admitted`, `access_state_for`'s fallback, and
+        # `profile_is_admin` — on the one route every page load hits. Batching
+        # the READ changes no decision: `access_state_for` still consults the
+        # `access_requests` row first and still lets it win outright, and the
+        # pre-read value is only reached on the branch where it would have run
+        # that same query itself. A pending request with `admitted_at` set
+        # still reads `pending`.
+        flags = dbmod.profile_gate_flags(db, user_id)
+        profile["admitted"] = flags["admitted_at"] is not None
         # `access` is the four-state version `admitted` cannot express:
         # a signed-in account that has not filled the form is neither
         # admitted nor refused.
-        profile["access"] = dbmod.access_state_for(db, user_id)
+        profile["access"] = dbmod.access_state_for(
+            db, user_id, admitted_at=flags["admitted_at"]
+        )
         # Read-only, and the console's only source for whether to draw the
         # admin queue's entry in its rail. Still granted by one manual SQL
         # UPDATE and by nothing else: `PATCH /me` never writes it, and
         # the `admin_user` dependency re-checks it on every queue route, so
         # exposing it here changes what is *drawn*, never what is allowed.
-        profile["is_admin"] = dbmod.profile_is_admin(db, user_id)
+        profile["is_admin"] = flags["is_admin"]
         return profile
 
     #: Fields a user owns. Everything absent from this map is either the
@@ -7042,6 +7102,45 @@ def create_cloud_app(
         # let Bob read `acme` through our App.
         repo_token = await _installation_token_for(db, github_app, user_id, owner)
 
+        return await _fetch_repo_and_submit(
+            request, db, user_id,
+            owner=owner, name=name, ref=ref,
+            pool=pool, venue=venue, repo_token=repo_token,
+        )
+
+    async def _fetch_repo_and_submit(
+        request: Request,
+        db: psycopg.Connection,
+        user_id: str,
+        *,
+        owner: str,
+        name: str,
+        ref: str,
+        pool: str | None,
+        venue: str,
+        repo_token: str | None,
+        source_extra: Mapping[str, Any] | None = None,
+        architectures: Sequence[str] | None = None,
+    ) -> Response:
+        """Fetch a GitHub repo, preflight it, and hand the tree to
+        ``_stage_compile_and_submit``.
+
+        Split out of ``from-repo`` so the PUBLIC DEMO route can submit through
+        the identical path rather than growing a second copy of the fetch /
+        extract / preflight / compile / stage sequence. Two callers, one
+        implementation — the same argument ``_stage_compile_and_submit``'s own
+        docstring makes about the two human submit routes, extended one step
+        further up now that a third caller exists.
+
+        The demo differs from a human submit only in what it passes: the
+        repo, ref and pool are constants rather than body fields, no
+        installation token (the example repository is public), and one extra
+        key in ``source`` marking the row as a demo run so the public read can
+        find it again. Everything from the fetch onwards — the tarball limit,
+        ``extract_safely``, preflight refusal, dataset admission, the compile,
+        the artifact staging, the venue pinning and the ``jobs`` row — is
+        byte-for-byte the code a signed-in user gets.
+        """
         with tempfile.TemporaryDirectory(prefix="flashml-repo-") as tmpdir:
             dest = Path(tmpdir) / "src"
             try:
@@ -7067,11 +7166,16 @@ def create_cloud_app(
                 _parse_and_preflight_tree, repo_root
             )
 
+        source: dict[str, Any] = {
+            "type": "github", "owner": owner, "repo": name, "ref": ref,
+        }
+        if source_extra:
+            source.update(source_extra)
         return await _stage_compile_and_submit(
             request, db, user_id,
             config=config, image=image, findings=findings,
             tar_bytes=tar_bytes, pool=pool, venue=venue,
-            source={"type": "github", "owner": owner, "repo": name, "ref": ref},
+            source=source, architectures=architectures,
         )
 
     async def _stage_compile_and_submit(
@@ -7086,6 +7190,7 @@ def create_cloud_app(
         pool: str | None,
         source: dict[str, Any],
         venue: str = DEFAULT_COORDINATOR_VENUE,
+        architectures: Sequence[str] | None = None,
     ) -> Response:
         """Everything a submitted working tree gets after it has been parsed:
         the preflight refusal, dataset resolution and admission, the compile,
@@ -7222,7 +7327,7 @@ def create_cloud_app(
             else:
                 spec = compile_to_jobspec(
                     config, image, code_uri, config.name, pool=pool,
-                    manifests=manifests,
+                    manifests=manifests, architectures=architectures,
                 )
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=safe_text(exc, 500)) from None
@@ -10588,6 +10693,659 @@ def create_cloud_app(
         )
         return payload
 
+    # -- the judges' demo: NO AUTHENTICATION, ONE FIXED SPEC, TWO VENUES ----
+    #
+    # A judge with no account presses one button and watches nine independent
+    # tasks spread across the four Alibaba anchors we operate, once on each
+    # coordinator, so the two can be compared on wall-clock. `demo.py` holds
+    # the data access, the fixed spec, and the reasoning about what may be
+    # published — READ ITS DOCSTRING before changing either route. The short
+    # version:
+    #
+    # * The caller controls the VENUE and nothing else. Every other input is a
+    #   constant in `demo.py`, which is what keeps an unauthenticated POST
+    #   that spends our compute from being an arbitrary-code-execution door.
+    # * Machine names are real here — the deliberate deviation from
+    #   `job_share`'s pseudonyms — and they are real by going through
+    #   `network._label`, the same choke point every other unauthenticated
+    #   viewer already reads them through. A non-official machine in the demo
+    #   pool is anonymised by that function without this route knowing.
+    # * The GET's coordinator reads are not decoration. `jobs.finished_at` is
+    #   a cache and `_claimable_venues` gates the fleet's FC polling on it, so
+    #   a demo run left non-terminal is a permanent invocation drip across
+    #   every machine. This route refreshes the cache, and `DEMO_MAX_AGE_S` is
+    #   the backstop for the run nobody comes back to.
+
+    #: How long the demo page waits on the coordinator before rendering
+    #: without it. Same budget and same reasoning as `ledger_budget_s`: the
+    #: database half of this page — the fleet, the timings, which machine ran
+    #: what — must always render, and a coordinator that is down degrades the
+    #: page rather than breaking it.
+    demo_budget_s = 5.0
+
+    #: The demo page polls, so it gets its own read window rather than
+    #: sharing `public_limiter`'s with the price board — a judge watching a
+    #: live run must not be able to rate-limit themselves out of the rest of
+    #: the public surface. Same in-process, per-address limiter, same honest
+    #: limits (see `FixedWindowLimiter`).
+    demo_read_limiter = FixedWindowLimiter(
+        int(os.environ.get("FLASHML_DEMO_READ_LIMIT", 240)), 60.0
+    )
+
+    #: The per-IP floor under the button. The REAL rate limit is the
+    #: one-run-per-venue gate below — this only stops a loop from hammering
+    #: the submit path (a repo fetch, an extract, a preflight and a compile)
+    #: while a run is being decided.
+    demo_run_limiter = FixedWindowLimiter(
+        int(os.environ.get("FLASHML_DEMO_RUN_LIMIT", 10)), 600.0
+    )
+
+    #: The floor under the JOIN button. Its own window rather than sharing
+    #: `demo_run_limiter`'s: a judge whose first paste had a typo must not
+    #: have spent the budget that lets them press Run afterwards, and a room
+    #: of judges behind one conference NAT is one address. Higher than the run
+    #: limit because a join is a device-code lookup and one insert, not a repo
+    #: fetch and a compile — and because there is no one-at-a-time gate behind
+    #: it the way there is behind Run.
+    demo_join_limiter = FixedWindowLimiter(
+        int(os.environ.get("FLASHML_DEMO_JOIN_LIMIT", 60)), 600.0
+    )
+
+    async def _demo_coordinator_json(
+        method: str, path: str, venue: str
+    ) -> Any | None:
+        """One coordinator read for the demo page. BEST EFFORT, ALWAYS.
+
+        Every failure — transport, timeout, non-2xx, unparseable body — is
+        `None`, and the caller renders the section without it. Exactly
+        `_public_job_ledger`'s contract, for exactly its reason: this is an
+        unauthenticated page whose most important evidence comes from our own
+        Postgres, and a slow coordinator must cost it a section rather than
+        the whole response.
+        """
+        try:
+            r = await asyncio.wait_for(
+                coordinator.forward(method, path, venue=venue),
+                timeout=demo_budget_s,
+            )
+        except Exception:
+            return None
+        if r.status_code >= 300:
+            return None
+        try:
+            return r.json()
+        except ValueError:
+            return None
+
+    async def _refresh_demo_run(
+        db: psycopg.Connection,
+        row: Mapping[str, Any],
+        *,
+        reread: Callable[..., Mapping[str, Any] | None] = None,  # type: ignore[assignment]
+    ) -> Mapping[str, Any]:
+        """Ask the coordinator what this run is doing, and write it down.
+
+        ``reread`` is how the row is fetched again after a write, and it
+        defaults to ``demo.run_by_id``. The GUEST run passes
+        ``demo.guest_run_by_id`` instead: both readers filter on their own
+        marker so that neither becomes a general "any job by id" reader on an
+        unauthenticated route, which means the demo reader returns ``None``
+        for a guest row and the refresh would silently fall back to a copy
+        with no ``finished_at`` — the one column the caller cannot compute and
+        the one ``elapsed_s`` is made of.
+
+        **THIS IS THE FIX FOR THE INVOCATION DRIP, not a freshness nicety.**
+        `_claimable_venues` decides whether the whole fleet polls Function
+        Compute by looking for a non-terminal `fc` row in `public.jobs` — *no
+        FC job, no FC traffic* — and that column is a cache nothing updates
+        unless somebody's page observes the end. A demo run abandoned
+        mid-flight would therefore keep every machine invoking FC for ever
+        (measured 2026-08-14: ~167 invocations per 5 minutes). So the demo's
+        own read is the observer, and it writes.
+
+        Two writes, and only two:
+
+        * a TERMINAL state the coordinator reports is recorded through
+          `sync_observed_job_states` — the same one-statement, no-op-on-repeat
+          writer the jobs list and detail routes use;
+        * a run older than `DEMO_MAX_AGE_S` and still non-terminal is
+          CANCELLED, because at that age it is stuck rather than slow (the
+          fixed spec takes ~390 s) and leaving it is the drip above.
+
+        A NON-terminal state is deliberately NOT written. It is display-only
+        here, folded into the returned copy so the page shows RUNNING rather
+        than the PENDING recorded at submit; persisting it would add writes at
+        polling frequency for a column whose only durable meaning is "has this
+        stopped".
+        """
+        reread = reread or demomod.run_by_id
+        job_id = str(row["id"])
+        venue = _venue_of(row)
+        if is_terminal_state(row.get("status")):
+            return row
+
+        job = await _demo_coordinator_json(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}", venue
+        )
+        state = job.get("state") if isinstance(job, dict) else None
+
+        if is_terminal_state(state):
+            await run_in_threadpool(
+                dbmod.sync_observed_job_states, db, [(job_id, str(state))]
+            )
+            fresh = await run_in_threadpool(reread, db, job_id)
+            return fresh if fresh is not None else {**row, "status": state}
+
+        created = row.get("created_at")
+        if isinstance(created, datetime):
+            now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+            if (now - created).total_seconds() > demomod.DEMO_MAX_AGE_S:
+                # Best effort: a coordinator that refuses the cancel still
+                # leaves a row this deployment now calls CANCELLED, which is
+                # what takes the venue back out of `_claimable_venues`. The
+                # alternative — leaving it non-terminal because one HTTP call
+                # failed — is the exact failure this branch exists to end.
+                await _demo_coordinator_json(
+                    "POST", f"/v1alpha1/jobs/{_seg(job_id)}/cancel", venue
+                )
+                await run_in_threadpool(
+                    dbmod.set_job_status, db, job_id, "CANCELLED", finished=True
+                )
+                fresh = await run_in_threadpool(reread, db, job_id)
+                if fresh is not None:
+                    return fresh
+                return {**row, "status": "CANCELLED"}
+
+        if isinstance(state, str) and state:
+            return {**row, "status": state}
+        return row
+
+    async def _demo_run_view(
+        db: psycopg.Connection,
+        row: Mapping[str, Any],
+        fleet: Sequence[Mapping[str, Any]],
+        *,
+        reread: Callable[..., Mapping[str, Any] | None] = None,  # type: ignore[assignment]
+    ) -> dict[str, Any]:
+        """One demo run, rendered from three sources that each know one thing.
+
+        * OUR DATABASE knows when each task started, when it resolved, how
+          many attempts it took and which machine held it. Every one of those
+          values is written by this codebase (`db.record_attempt` and
+          friends), which is why they are publishable at all — `job_share`'s
+          provenance test, applied to the same rows.
+        * THE COORDINATOR knows the task LIST and each task's current state,
+          including the tasks nobody has claimed yet. Without it the page
+          would show four running tasks out of a nine-task grid and no
+          indication the other five exist.
+        * THE FLEET rows name the machines, through `demo.public_machine_name`
+          -> `network._label`.
+
+        The coordinator half is optional everywhere. Its absence costs the
+        unclaimed tasks and the live states, never the run.
+        """
+        job_id = str(row["id"])
+        venue = _venue_of(row)
+        row = await _refresh_demo_run(db, row, reread=reread)
+
+        attempts = await run_in_threadpool(demomod.task_rows, db, job_id)
+        by_task = {str(a["task_id"]): a for a in attempts}
+
+        listing = await _demo_coordinator_json(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks", venue
+        )
+        coordinator_tasks: dict[str, dict[str, Any]] = {}
+        if isinstance(listing, list):
+            for entry in listing:
+                if isinstance(entry, dict) and isinstance(entry.get("task_id"), str):
+                    coordinator_tasks[entry["task_id"]] = entry
+
+        # Only ever consulted for a task the coordinator says is held by a
+        # node we have no attempt row for yet — the few seconds between a
+        # lease being granted and the claim reaching this API.
+        by_node = {
+            str(m.get("node_id")): m for m in fleet if m.get("node_id")
+        }
+
+        tasks: list[dict[str, Any]] = []
+        for task_id in sorted(set(coordinator_tasks) | set(by_task)):
+            attempt = by_task.get(task_id)
+            entry = coordinator_tasks.get(task_id) or {}
+            state = entry.get("state")
+            if attempt is not None and attempt.get("machine_id") is not None:
+                machine = demomod.public_machine_name(attempt)
+            else:
+                node = by_node.get(str(entry.get("node_id") or ""))
+                machine = demomod.public_machine_name(node) if node else None
+            tasks.append(
+                demomod.render_task(
+                    task_id,
+                    state=state if isinstance(state, str) else None,
+                    attempt=attempt,
+                    machine_name=machine,
+                )
+            )
+
+        artifacts: list[dict[str, Any]] = []
+        listing = await _demo_coordinator_json(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts", venue
+        )
+        if isinstance(listing, list):
+            for entry in listing:
+                rendered = demomod.render_artifact(entry, job_id)
+                if rendered is not None:
+                    artifacts.append(rendered)
+
+        return demomod.render_run(
+            row, venue=venue, tasks=tasks, artifacts=artifacts
+        )
+
+    @app.get("/v1alpha1/public/demo", tags=["public"])
+    async def public_demo(
+        request: Request,
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """The demo page's whole state. NO AUTHENTICATION.
+
+        The envelope is fixed at `{"fleet", "runs", "guests", "guest_run"}`
+        and every key is always present, never conditional on there being any
+        — the same rule the sibling public routes state: a consumer that has
+        to sniff which of two shapes it received is a consumer with a branch
+        that will eventually be wrong. `runs` is `[]` and `guest_run` is
+        `null` before anybody has pressed anything, which is a state the page
+        renders, not an error.
+
+        At most two runs — the newest on each coordinator, newest first.
+
+        **`guests` is the OTHER fleet: machines a judge joined themselves.**
+        Same shape as `fleet` and built by the same two functions, over the
+        `demo-guests` pool instead of the anchor pool. Two fleets rather than
+        one list with a flag, because they are two different claims — "this is
+        the hardware we operate" and "this is your laptop, and it is online" —
+        and the second is the one a judge came to see. It is `[]` in any
+        deployment where nobody has joined, including every fresh one: the
+        pool is created on first join and never before.
+
+        Names in `guests` are `prov…` handles, not hostnames. A judge's laptop
+        is not `official`, so `render_fleet` -> `public_machine_name` ->
+        `network._label` anonymises it without this route deciding anything —
+        exactly the property `demo.py`'s docstring says keeps the anchors'
+        real-name deviation from widening. The join response hands the judge
+        their own handle so the page can highlight their row.
+        """
+        client = request.client.host if request.client else "unknown"
+        if not demo_read_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many requests")
+
+        fleet = await run_in_threadpool(demomod.fleet_rows, db)
+        rows = await run_in_threadpool(demomod.latest_run_per_venue, db)
+        runs = [await _demo_run_view(db, row, fleet) for row in rows]
+
+        guests: list[Mapping[str, Any]] = []
+        guest_run: dict[str, Any] | None = None
+        owner_id = await run_in_threadpool(demomod.demo_owner_id, db)
+        if owner_id is not None:
+            # READ-ONLY, deliberately: `guest_pool_id` rather than
+            # `ensure_guest_pool`. A GET must not create a pool for a page
+            # nobody has used — the join route is where the pool comes into
+            # existence, because joining is the thing that needs one.
+            pool_id = await run_in_threadpool(
+                demomod.guest_pool_id, db, owner_id
+            )
+            if pool_id is not None:
+                guests = await run_in_threadpool(
+                    demomod.fleet_rows, db, pool_id=pool_id
+                )
+            row = await run_in_threadpool(demomod.guest_run, db)
+            if row is not None:
+                guest_run = await _demo_run_view(
+                    db, row, guests, reread=demomod.guest_run_by_id
+                )
+
+        return {
+            "fleet": [demomod.render_fleet(m) for m in fleet],
+            "runs": runs,
+            "guests": [demomod.render_fleet(m) for m in guests],
+            "guest_run": guest_run,
+        }
+
+    @app.post("/v1alpha1/public/demo/run", status_code=201, tags=["public"])
+    async def public_demo_run(
+        request: Request,
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Start the demo on one coordinator. NO AUTHENTICATION.
+
+        **THE BODY CHOOSES THE VENUE AND NOTHING ELSE.** Repo, ref, pool and
+        owner are constants in `demo.py`; there is no branch in this handler
+        that could let a key in the body reach any of them. That is the
+        property that makes an unauthenticated submit safe to ship: the worst
+        a caller can do is ask for a run of code we publish, on machines we
+        own, that was going to happen anyway.
+
+        **ONE RUN PER COORDINATOR, AND A SECOND PRESS JOINS THE FIRST.** If a
+        demo job for this venue is already non-terminal, its `job_id` comes
+        back with **200** instead of a second submit. That is the rate limit
+        and it is also the correct behaviour: a judge who presses twice wants
+        to watch the run they started, not to start a duplicate that competes
+        with it for the same four machines. The freshness of that decision is
+        `_refresh_demo_run`'s — a finished run whose status column nobody has
+        observed must not block the button for ever.
+
+        The gate is per-VENUE on purpose: `render` and `fc` are the
+        comparison, so a live Render run must never stop somebody starting the
+        FC one.
+        """
+        client = request.client.host if request.client else "unknown"
+        if not demo_run_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many requests")
+
+        payload = await _json_object(request)
+        # The same edge validation every submit route uses: 400 for a value
+        # that is not a venue, 409 for one this deployment cannot address.
+        # Absent means the default, so a body-less press starts a Render run.
+        venue = _submitted_venue(payload.get(COORDINATOR_FIELD), coordinator)
+
+        existing = await run_in_threadpool(demomod.run_for_venue, db, venue)
+        if existing is not None:
+            existing = await _refresh_demo_run(db, existing)
+            if not is_terminal_state(existing.get("status")):
+                return Response(
+                    content=json.dumps({
+                        "job_id": str(existing["id"]),
+                        COORDINATOR_FIELD: venue,
+                        "already_running": True,
+                    }),
+                    status_code=200,
+                    media_type="application/json",
+                )
+
+        owner_id = await run_in_threadpool(demomod.demo_owner_id, db)
+        if owner_id is None:
+            # No admitted profile means no owner, and inventing one would put
+            # a job on the books for a person no admission decision was ever
+            # made about. 503: the deployment is not ready, the request was
+            # fine.
+            raise HTTPException(
+                status_code=503, detail="the demo is not configured yet"
+            )
+        if not await run_in_threadpool(demomod.demo_pool_exists, db):
+            # Same 503, same reason, and checked here rather than discovered
+            # by a foreign-key violation after the job is already running —
+            # see `demo_pool_exists`.
+            raise HTTPException(
+                status_code=503, detail="the demo is not configured yet"
+            )
+
+        # THE SAME PATH A SIGNED-IN USER'S SUBMIT TAKES, called rather than
+        # copied: fetch, extract, preflight, resolve datasets, compile, stage
+        # the artifact on this venue, submit to this venue, write the row. No
+        # installation token — the example repository is public.
+        response = await _fetch_repo_and_submit(
+            request, db, owner_id,
+            owner=demomod.DEMO_REPO_OWNER,
+            name=demomod.DEMO_REPO_NAME,
+            ref=demomod.DEMO_REF,
+            pool=demomod.DEMO_POOL_ID,
+            venue=venue,
+            repo_token=None,
+            source_extra={demomod.DEMO_SOURCE_KEY: True},
+        )
+        if response.status_code != 201:
+            # A preflight refusal, a staging failure, a coordinator that said
+            # no — passed through as it is. The submit path's answers are
+            # already sanitised for a user and none of them narrate this
+            # deployment's internals.
+            return response
+        try:
+            body = json.loads(response.body)
+            job_id = body.get("job_id") if isinstance(body, dict) else None
+        except (ValueError, AttributeError):
+            job_id = None
+        if not job_id:
+            raise HTTPException(status_code=502, detail="the demo did not start")
+        return Response(
+            content=json.dumps({"job_id": str(job_id), COORDINATOR_FIELD: venue}),
+            status_code=201,
+            media_type="application/json",
+        )
+
+    # -- the judges' demo, second half: A JUDGE HOSTS THEIR OWN MACHINE ----
+    #
+    # The two routes above are about OUR four anchors. These two are about the
+    # judge's laptop:
+    #
+    #   1. they install flashnode and run `flashnode login`, which prints a
+    #      user code — that already works today and is not touched here;
+    #   2. they paste the code into the page, which POSTs it to `join`;
+    #   3. `join` approves it with NO SIGNED-IN HUMAN, binding the machine to
+    #      the `demo-guests` pool;
+    #   4. they run `flashnode work`, and `GET /public/demo` shows them in
+    #      `guests`;
+    #   5. they press Run, which POSTs `run-mine` — a one-task job scoped to
+    #      `demo-guests`, so it can only land on a judge's machine.
+    #
+    # THE APPROVAL IS `enrolment.approve_device_code`, CALLED, NOT COPIED. No
+    # token is minted here and no `machines` row is inserted here; the agent
+    # still redeems its own device code for its own token through the same
+    # `redeem_device_code` a console approval leads to. The only difference
+    # between this and the console's `POST /v1alpha1/device/approve` is where
+    # `user_id` comes from: a verified JWT there, `demo.demo_owner_id` here.
+    # Everything the approval enforces — node_id uniqueness, the
+    # revoked/deleted re-enrolment branch, the expiry window, the
+    # already-approved short circuit — is enforced for a judge too.
+    #
+    # AND THE POOL IS THE WHOLE ARCHITECTURE. `run-mine` is scoped to
+    # `demo-guests` and the headline sweep is scoped to Test-1, so a judge's
+    # machine can never be handed a task from the measured nine-task run and
+    # the guest job can never land on an anchor. Without the split, a laptop
+    # that joins and leaves mid-sweep would corrupt the one number this page
+    # exists to publish.
+
+    @app.post("/v1alpha1/public/demo/join", status_code=201, tags=["public"])
+    async def public_demo_join(
+        request: Request,
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Approve a machine's device code with nobody signed in.
+
+        Body: ``{"user_code": "ABCDEFGH"}`` — dashes, spaces and lowercase are
+        normalised away (`demo.normalise_user_code`), because a judge is
+        retyping something off a terminal and none of those is a different
+        code.
+
+        **THE BODY CARRIES A CODE AND NOTHING ELSE.** No pool, no owner, no
+        name: which pool the machine joins is a constant of this deployment,
+        and the code itself is the only evidence anybody has of anything. A
+        `pool_id` key in the body would turn an unauthenticated route into a
+        way to move a stranger's machine into a workspace of the caller's
+        choosing — the exact attack the console route's `fetch_pool_for_member`
+        check exists to stop, and it has no counterpart here because there is
+        no caller identity to scope to. So there is no key.
+
+        **A code somebody else already approved is a 404.** `approve_device_code`
+        short-circuits on an already-approved code and hands back its
+        machine_id with no ownership check — correct there, so that
+        re-approving your own code stays a no-op, and dangerous here: without
+        the owner check below, anyone who learned a user_code that a real user
+        had already redeemed could bind that stranger's machine into the demo
+        pool. Same 404 fold the console route uses, and for the same reason: an
+        answer that distinguished "no such code" from "that code is not the
+        demo's" would tell a prober which codes are real.
+
+        404 for unknown and for expired, with different `detail` text. 400 for
+        a CLI login code, which is a different flow that mints a credential for
+        a person rather than a worker for a machine — accepting it and doing
+        something else would be worse than refusing it.
+        """
+        client = request.client.host if request.client else "unknown"
+        if not demo_join_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many requests")
+
+        payload = await _json_object(request)
+        user_code = demomod.normalise_user_code(payload.get("user_code"))
+        if not user_code:
+            raise HTTPException(status_code=400, detail="user_code required")
+
+        owner_id = await run_in_threadpool(demomod.demo_owner_id, db)
+        if owner_id is None:
+            # Same 503 and same argument as the run route: no admitted
+            # profile means no owner, and minting a synthetic one would put a
+            # machine on the books for a person no admission decision was ever
+            # made about.
+            raise HTTPException(
+                status_code=503, detail="the demo is not configured yet"
+            )
+
+        def _join() -> dict[str, Any]:
+            # Which flow this code belongs to is read off the STORED ROW, not
+            # asserted by the caller — the console route's rule, and the only
+            # one available when there is no caller to trust.
+            code_row = dbmod.fetch_device_code_by_user_code(db, user_code)
+            if code_row is None:
+                raise HTTPException(status_code=404, detail="unknown code")
+            if code_row.get("kind") == "cli":
+                raise HTTPException(
+                    status_code=400,
+                    detail="that is a CLI login code — the demo joins a "
+                           "MACHINE, so run `flashnode login` and paste the "
+                           "code it prints",
+                )
+
+            pool_id = demomod.ensure_guest_pool(db, owner_id)
+            # Approve and bind as ONE unit, exactly as the console route does:
+            # a bind that fails must roll the approval back rather than leave
+            # a machine enrolled and serving nothing, which from the judge's
+            # side looks like a machine that joined and never gets work.
+            with db.transaction():
+                machine_id = enrolment.approve_device_code(
+                    db, user_code, owner_id
+                )
+                if dbmod.fetch_machine_for_owner(
+                    db, str(machine_id), owner_id
+                ) is None:
+                    raise HTTPException(status_code=404, detail="unknown code")
+                dbmod.bind_machine_pool(
+                    db, machine_id=str(machine_id), pool_id=pool_id
+                )
+                machine = dbmod.fetch_machine_for_owner(
+                    db, str(machine_id), owner_id
+                )
+            assert machine is not None
+            return {
+                "machine": demomod.render_joined_machine(machine),
+                "pool": demomod.GUEST_POOL_NAME,
+            }
+
+        try:
+            return await run_in_threadpool(_join)
+        except enrolment.DeviceCodeNotFound:
+            raise HTTPException(status_code=404, detail="unknown code") from None
+        except enrolment.DeviceCodeExpired:
+            raise HTTPException(
+                status_code=404,
+                detail="that code has expired — run `flashnode login` again",
+            ) from None
+        except enrolment.NodeAlreadyEnrolled:
+            raise HTTPException(
+                status_code=409, detail="this machine is already enrolled"
+            ) from None
+
+    @app.post("/v1alpha1/public/demo/run-mine", status_code=201, tags=["public"])
+    async def public_demo_run_mine(
+        request: Request,
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Run one task on the JUDGES' machines. NO AUTHENTICATION.
+
+        **THE CALLER CONTROLS NOTHING.** Not even the venue, which is the one
+        knob its sibling `run` offers: the comparison between control planes
+        is the anchors' story, and asking one laptop to run the same task
+        twice would say nothing about either. Repo, ref, pool, owner and
+        architectures are constants in `demo.py`. The body is not read.
+
+        **SCOPED TO `demo-guests`, WHICH IS THE FEATURE.** `pool` reaches
+        `compile_to_jobspec`, which sets `placement.pool`, which the seventh
+        placement gate matches against the claiming node's
+        `capabilities.pools` — stamped server-side by this API's own agent
+        proxy from the machine's bindings, never from what the agent claims.
+        So this job can land on a judge's machine and on nothing else. Our
+        four anchors are in Test-1 and cannot claim a task of it.
+
+        **503 UNTIL SOMEBODY HAS JOINED.** The guest pool is created by the
+        join route, so its absence means literally nobody has plugged a
+        machine in, and a job scoped to a pool that does not exist would be a
+        foreign-key violation AFTER the coordinator had already accepted the
+        work — the same "nothing written yet" refusal `demo_pool_exists` buys
+        the other route.
+
+        **ONE RUN AT A TIME, AND A SECOND PRESS JOINS THE FIRST**, 200 with
+        the same `job_id`, exactly as `run` does it. One task on a handful of
+        laptops is not something a second concurrent copy improves.
+        """
+        client = request.client.host if request.client else "unknown"
+        if not demo_run_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many requests")
+
+        existing = await run_in_threadpool(demomod.guest_run, db)
+        if existing is not None:
+            existing = await _refresh_demo_run(
+                db, existing, reread=demomod.guest_run_by_id
+            )
+            if not is_terminal_state(existing.get("status")):
+                return Response(
+                    content=json.dumps({
+                        "job_id": str(existing["id"]),
+                        COORDINATOR_FIELD: _venue_of(existing),
+                        "already_running": True,
+                    }),
+                    status_code=200,
+                    media_type="application/json",
+                )
+
+        owner_id = await run_in_threadpool(demomod.demo_owner_id, db)
+        if owner_id is None:
+            raise HTTPException(
+                status_code=503, detail="the demo is not configured yet"
+            )
+        pool_id = await run_in_threadpool(demomod.guest_pool_id, db, owner_id)
+        if pool_id is None:
+            raise HTTPException(
+                status_code=503,
+                detail="no guest machine has joined yet — run `flashnode "
+                       "login` and paste the code above first",
+            )
+
+        venue = DEFAULT_COORDINATOR_VENUE
+        response = await _fetch_repo_and_submit(
+            request, db, owner_id,
+            owner=demomod.GUEST_REPO_OWNER,
+            name=demomod.GUEST_REPO_NAME,
+            ref=demomod.GUEST_REF,
+            pool=pool_id,
+            venue=venue,
+            repo_token=None,
+            source_extra={demomod.GUEST_SOURCE_KEY: True},
+            # THE LINE THAT DECIDES WHETHER AN APPLE SILICON JUDGE CAN RUN
+            # THIS AT ALL, once anything downstream starts reading the field.
+            # See `demo.GUEST_ARCHITECTURES`.
+            architectures=list(demomod.GUEST_ARCHITECTURES),
+        )
+        if response.status_code != 201:
+            return response
+        try:
+            body = json.loads(response.body)
+            job_id = body.get("job_id") if isinstance(body, dict) else None
+        except (ValueError, AttributeError):
+            job_id = None
+        if not job_id:
+            raise HTTPException(status_code=502, detail="the demo did not start")
+        return Response(
+            content=json.dumps({"job_id": str(job_id), COORDINATOR_FIELD: venue}),
+            status_code=201,
+            media_type="application/json",
+        )
+
     # -- agent-facing: machine token, forwarded with delegation ------------
     #
     # Every route below is tagged "agent", and test_agent_proxy enumerates
@@ -11446,21 +12204,35 @@ def create_app() -> FastAPI:
     if os.environ.get("SUPABASE_URL") and os.environ.get("COORDINATOR_URL"):
         settings = Settings.from_env()
 
-        def connect() -> psycopg.Connection:
-            # Through db.connect, NEVER a bare psycopg.connect: that seam
-            # carries prepare_threshold=None, and this closure is the one
-            # every real deployment actually calls. A second connect site
-            # here shipped without the guard and detonated the day
-            # DATABASE_URL moved to the :6543 transaction pooler —
-            # get_prices runs the same price_series statement once per
-            # class, crosses psycopg's auto-prepare threshold (5) inside a
-            # single request, and PREPARE on a PgBouncer-shared connection
-            # collides with a name another session already claimed
-            # (DuplicatePreparedStatement, observed on dev 2026-08-13).
-            # tests/test_db_connect_seam.py pins this drift class shut.
-            return dbmod.connect(settings)
-
-        return create_cloud_app(settings, connect=connect)
+        # NO FACTORY IS PASSED, AND THAT IS THE POINT OF THIS LINE.
+        #
+        # Until 2026-08-14 this built a `def connect(): return
+        # dbmod.connect(settings)` closure and injected it. That closure was
+        # the connection every real deployment actually used — which is why it
+        # carries the history below — and it opened a NEW connection per
+        # request across a continent (Render oregon -> Supabase us-east-1),
+        # putting a TCP + TLS + auth handshake in front of every authenticated
+        # route: 3.0s on /me, 5.5s on /jobs, against 60ms for the one route
+        # that touches no database.
+        #
+        # Passing nothing hands that job to `create_cloud_app`, which builds a
+        # `db.ConnectionPool` and closes it in the lifespan. AN INJECTED
+        # FACTORY WOULD SILENTLY OPT PRODUCTION OUT OF POOLING, so the
+        # deployment takes the same default the pool was written for.
+        #
+        # The guard that closure existed for is untouched: the pool opens
+        # every one of its connections through `db.connect`, the single seam
+        # that carries `prepare_threshold=None`. A second connect site here
+        # once shipped without it and detonated the day DATABASE_URL moved to
+        # the :6543 transaction pooler — get_prices runs the same
+        # price_series statement once per class, crosses psycopg's
+        # auto-prepare threshold (5) inside a single request, and PREPARE on a
+        # PgBouncer-shared connection collides with a name another session
+        # already claimed (DuplicatePreparedStatement, observed on dev
+        # 2026-08-13). tests/test_db_connect_seam.py pins that drift class
+        # shut, and tests/test_db_pool.py pins that a POOLED connection still
+        # carries the kwarg.
+        return create_cloud_app(settings)
     return _create_legacy_app()
 
 

@@ -700,6 +700,7 @@ def compile_to_jobspec(
     *,
     pool: str | None = None,
     manifests: dict[str, Manifest] | None = None,
+    architectures: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Compile a validated config into the JobSpec dict the coordinator takes.
 
@@ -709,6 +710,15 @@ def compile_to_jobspec(
 
     ``pool`` is the one exception to "fixed and not configurable" — see the
     ``isolation``/``placement`` lines below.
+
+    ``architectures`` widens ``placement.architectures`` past the protocol's
+    ``["amd64"]`` default. Omitted — which is every human submit — nothing is
+    emitted and the spec keeps the default it has always had, byte for byte.
+    It exists for the PUBLIC GUEST DEMO, whose whole premise is a stranger's
+    own laptop and whose judges are mostly on arm64: a job that declares
+    amd64-only placement is a job that is one flashruntime release away from
+    being unrunnable on the hardware the feature is about. See
+    ``demo.GUEST_ARCHITECTURES``.
 
     ``manifests`` maps a declared dataset's ``name`` to the pinned manifest
     the route resolved for it. Resolution is a network call and belongs to
@@ -814,7 +824,18 @@ def compile_to_jobspec(
             # allowFallback iff pool. CommandRecipe enforces the same rule
             # upstream, so a spec that violates it cannot even expand.
             "isolation": {"tier": "sandboxed", "allowFallback": pool is not None},
-            "placement": {"pool": pool if pool is not None else "any"},
+            "placement": {
+                "pool": pool if pool is not None else "any",
+                # Emitted only when asked for, so an omitted argument leaves
+                # every pre-existing job's placement byte for byte what it
+                # was — the same "the default stays the protocol's default"
+                # rule `retryPolicy` above follows.
+                **(
+                    {"architectures": list(architectures)}
+                    if architectures is not None
+                    else {}
+                ),
+            },
             "artifacts": {"outputPrefix": "artifact://jobs/{job_id}/"},
         },
     }

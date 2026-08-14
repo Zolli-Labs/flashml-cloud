@@ -16,6 +16,19 @@ const PUBLIC_PATHS = [
   "/terms",
   "/security",
   "/manifest.webmanifest",
+  // The live-network demo — a no-login page showing the real fleet and
+  // letting a visitor drive one run on each coordinator. Public for the
+  // same reason `/share/<token>` is: it is judged over a weekend, by people
+  // with no account and nobody around to approve one.
+  //
+  // A LITERAL HERE, NOT A PREFIX RULE. Unlike the share page, nothing about
+  // this route is parameterised — there is exactly one URL — so it belongs
+  // in this list, where `includes` gives an exact match for free and there
+  // is no pattern to get wrong. `/demo/x`, `/demos` and `/demo/../jobs` are
+  // all private, which is what a `startsWith("/demo")` would have quietly
+  // given away. See `SHARE_PATH` below for why that direction of mistake is
+  // the one worth guarding against.
+  "/demo",
 ];
 
 // The public evidence page, `/share/<share_token>` — the ONE authenticated-

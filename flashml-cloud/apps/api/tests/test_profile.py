@@ -15,6 +15,8 @@ Runs against the same migrated Postgres as the rest of the suite.
 
 from __future__ import annotations
 
+import psycopg
+
 from test_jobs_from_repo import (  # noqa: F401 - fixtures
     _jwt,
     _new_user,
@@ -151,6 +153,85 @@ def test_me_keeps_the_admitted_boolean_alongside_access(make_client, db):
     body = client.get("/v1alpha1/me", headers=_auth(_new_user(db))).json()
     assert body["admitted"] is True
     assert body["access"] == "admitted"
+
+
+def test_me_reports_pending_even_when_admitted_at_is_set(make_client, db):
+    """The case CLAUDE.md warns about, pinned at the route.
+
+    Admitting by hand-written SQL on an account that already has a request
+    row produces exactly this shape: a `pending` row AND a set `admitted_at`.
+    The row wins, so `/me` must answer `pending` — the console keeps showing
+    the waiting screen, which is the honest reading of "an admin has not
+    decided yet".
+
+    Load-bearing for the batched profile read: `/me` now hands
+    `access_state_for` the `admitted_at` it already had in hand. That is a
+    pre-read, not a new source, and this proves it did not become one — if
+    the pre-read ever short-circuited the request row, `access` would read
+    `admitted` here while `admitted` reads True beside it and nobody could
+    tell which was the bug.
+    """
+    client = make_client()
+    user = _new_user(db, admitted=False)
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.access_requests (user_id, status, use_case)"
+            " values (%s, 'pending', 'training a model')",
+            (user,),
+        )
+        cur.execute(
+            "update public.profiles set admitted_at = now() where id = %s", (user,)
+        )
+
+    body = client.get("/v1alpha1/me", headers=_auth(user)).json()
+    assert body["access"] == "pending"
+    # `admitted` reads the flag and is deliberately NOT the same question.
+    assert body["admitted"] is True
+
+
+def test_me_reads_the_profile_row_once(make_client, db):
+    """Pins the statement count of the route every page load hits.
+
+    `/me` used to issue five statements, three of which were single-column
+    reads of ONE profile row by the same primary key: `admitted_at` for
+    `admitted`, `admitted_at` AGAIN inside `access_state_for`'s fallback, and
+    `is_admin`. Now the row is read once and the three answers are derived
+    from it.
+
+    Counted on the ROUTE's connection specifically. The app's background
+    reconcile loops run on their own connections and land in a global count
+    at whatever moment they happen to tick, which would make this test fail
+    for reasons that have nothing to do with `/me`.
+    """
+    client = make_client()
+    user = _new_user(db)
+    client.get("/v1alpha1/me", headers=_auth(user))  # profile row already exists
+
+    seen: list[tuple[int, str]] = []
+    original = psycopg.Cursor.execute
+
+    def spy(self, query, *args, **kwargs):
+        seen.append((id(self.connection), str(query)))
+        return original(self, query, *args, **kwargs)
+
+    psycopg.Cursor.execute = spy  # type: ignore[method-assign]
+    try:
+        assert client.get("/v1alpha1/me", headers=_auth(user)).status_code == 200
+    finally:
+        psycopg.Cursor.execute = original  # type: ignore[method-assign]
+
+    by_conn: dict[int, list[str]] = {}
+    for conn_id, query in seen:
+        by_conn.setdefault(conn_id, []).append(query)
+    route = next(
+        qs for qs in by_conn.values()
+        if any("insert into public.profiles" in q for q in qs)
+    )
+
+    assert len(route) == 3, "\n".join(f"- {' '.join(q.split())}" for q in route)
+    # And exactly one of them touches the profile row after the upsert.
+    profile_reads = [q for q in route if "select" in q and "public.profiles" in q]
+    assert len(profile_reads) == 1, profile_reads
 
 
 def test_me_is_readable_in_every_access_state(make_client, db):

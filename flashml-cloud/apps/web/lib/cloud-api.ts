@@ -25,6 +25,10 @@
 // user's own Supabase JWT — never a service-role key, never an operator
 // token.
 
+import {
+  invalidate as invalidateApiCache,
+  through as apiCacheThrough,
+} from "./api-cache";
 import { createBrowserSupabaseClient } from "./supabase";
 import type { SandboxEvent, SandboxSession } from "./sandbox-session";
 
@@ -998,17 +1002,44 @@ export interface JobTradeoff {
 // request plumbing
 // ---------------------------------------------------------------------------
 
+/** The one outstanding `getSession()`, or null.
+ *
+ * `send` awaits `authHeader()` BEFORE it can call `fetch`, so a page that
+ * mounts six components asks Supabase for the session six times — and
+ * supabase-js serialises those behind a lock, which means six sequential
+ * acquisitions standing in front of six requests that were meant to be
+ * parallel. Collapsing them costs nothing in correctness: this is in-flight
+ * only, with NO time-based cache, so every caller is handed exactly the
+ * session a single acquisition would have returned at that instant, and the
+ * next batch re-reads. A token that expires or refreshes between batches is
+ * therefore picked up on the very next call, as before. */
+let sessionInFlight: Promise<Record<string, string>> | null = null;
+
 async function authHeader(): Promise<Record<string, string>> {
-  const supabase = createBrowserSupabaseClient();
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session) {
-    // No local session at all — skip the round trip, since the API would
-    // answer 401 anyway.
-    throw new NotAuthenticated();
+  if (sessionInFlight !== null) return sessionInFlight;
+
+  const pending = (async () => {
+    const supabase = createBrowserSupabaseClient();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!session) {
+      // No local session at all — skip the round trip, since the API would
+      // answer 401 anyway.
+      throw new NotAuthenticated();
+    }
+    return { Authorization: `Bearer ${session.access_token}` };
+  })();
+
+  sessionInFlight = pending;
+  try {
+    return await pending;
+  } finally {
+    // Cleared whether it resolved or threw, and only if this call still owns
+    // the slot. A rejection must never be retained — a signed-out blip would
+    // otherwise be replayed to every later caller.
+    if (sessionInFlight === pending) sessionInFlight = null;
   }
-  return { Authorization: `Bearer ${session.access_token}` };
 }
 
 interface ParsedErrorBody {
@@ -1041,6 +1072,16 @@ async function parseErrorBody(res: Response): Promise<ParsedErrorBody> {
  * `NotAuthenticated` and redirect to sign-in, not surface as a corrupt file).
  * A second hand-rolled fetch with its own error handling is how those two
  * drift apart. */
+/** Anything that is not a GET is assumed to change server state.
+ *
+ * `init.method` is absent on every read this client issues and present on
+ * every write, so the default matters: treating an absent method as a
+ * mutation would invalidate the cache on every read and treating an unknown
+ * verb as a read would miss one. */
+function isMutation(init: RequestInit): boolean {
+  return (init.method ?? "GET").toUpperCase() !== "GET";
+}
+
 async function send(path: string, init: RequestInit = {}): Promise<Response> {
   const auth = await authHeader();
   const headers: Record<string, string> = {
@@ -1062,6 +1103,14 @@ async function send(path: string, init: RequestInit = {}): Promise<Response> {
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : String(cause);
     throw new ApiError(0, `${reason} — could not reach ${url}`);
+  } finally {
+    // Every write drops the cached reads, here rather than at each call
+    // site: `submitJob` must not be the one place someone remembers to
+    // invalidate `/jobs`, and `revokeMachine` the one place someone forgets
+    // `/machines`. In `finally`, and not gated on `res.ok`, because a
+    // mutation that answers 500 can still have committed — the cache must
+    // not survive on the strength of a status code.
+    if (isMutation(init)) invalidateApiCache();
   }
 
   if (res.status === 401) {
@@ -1092,13 +1141,27 @@ async function send(path: string, init: RequestInit = {}): Promise<Response> {
   return res;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await send(path, init);
   if (res.status === 204) {
     return undefined as T;
   }
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
+}
+
+/** Every JSON call in this file goes through here.
+ *
+ * Reads are routed through `lib/api-cache.ts`, which collapses identical
+ * concurrent GETs into one request and answers a small allowlist of list
+ * endpoints from a 1.5s cache. That module's header explains what is
+ * cached, what is not, and why. Writes go straight to the network and
+ * invalidate the cache on the way out (see `send`). */
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (isMutation(init)) {
+    return fetchJson<T>(path, init);
+  }
+  return apiCacheThrough(path, () => fetchJson<T>(path, init));
 }
 
 // ---------------------------------------------------------------------------
