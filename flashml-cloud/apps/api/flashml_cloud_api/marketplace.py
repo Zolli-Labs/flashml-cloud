@@ -556,6 +556,14 @@ class Ask:
     ``metrics.acceptance_rates``, and ``None`` means "fewer than five resolved
     attempts". It arrives as None and stays None: nothing in this module
     replaces it, defaults it, or reports a number in its place.
+
+    ``median_seconds`` is the same entry's timing signal — the median
+    duration of that machine's ACCEPTED attempts in this class — and follows
+    the identical discipline: ``None`` means "nobody has timed this machine
+    yet", never 0. Under :data:`OBJECTIVES` ``fastest`` a 0 would put an
+    untimed machine at the head of the book on the strength of no evidence at
+    all, which is the exact mistake ``metrics.MIN_EVIDENCE`` exists to
+    prevent one field over.
     """
 
     listing_id: str
@@ -564,6 +572,7 @@ class Ask:
     ask_zc_per_hour: int
     max_concurrent_tasks: int = 1
     acceptance_rate: float | None = None
+    median_seconds: float | None = None
 
     @property
     def unproven(self) -> bool:
@@ -646,6 +655,175 @@ def effective_price(
     return Fraction(ask * 10_000, scaled)
 
 
+# ---------------------------------------------------------------------------
+# Objectives: three defensible orders over one book
+#
+# Every one of them is a RANKING. None of them excludes anybody — the same
+# rule `effective_price` obeys for a 0.0-rate host, for the same reason
+# (`scheduler/__init__.py:637`: reliability may rank and must never exclude).
+# What changes between them is only which quantity leads the sort key.
+# ---------------------------------------------------------------------------
+
+#: What a buyer may ask this engine to optimise for. Three, because these are
+#: the three a submitter can actually state an opinion about from the outside;
+#: anything finer needs measurements this market does not have yet.
+OBJECTIVES: tuple[str, ...] = ("cheapest", "balanced", "fastest")
+
+#: What every entry point here ranks by when a caller names no objective.
+#:
+#: **Not the product default.** ``flashml.yaml`` defaults ``price.objective``
+#: to ``balanced`` (owner-approved, 2026-08-13) and every submitted job
+#: therefore arrives with one named. This constant is the ENGINE's fallback,
+#: and it is ``cheapest`` because that is what this module did before
+#: objectives existed: a caller that has never heard of them — the market
+#: routes, the console's book, `attempt_settlement` — must keep getting the
+#: order it was written against.
+DEFAULT_RANK_OBJECTIVE = "cheapest"
+
+#: One human-readable line per objective, published verbatim by the routing
+#: explain surface so a buyer can check the arithmetic that ordered their
+#: book. Defined HERE, beside the code that implements it, because a formula
+#: living next to the response builder is a formula that describes what the
+#: engine used to do. ``test_marketplace_ranking`` asserts there is exactly
+#: one per objective.
+OBJECTIVE_FORMULAS: Mapping[str, str] = {
+    "cheapest": "effective_price(ask/acceptance_rate)",
+    "balanced": (
+        "effective_price(ask/acceptance_rate) x "
+        "clamp(median_seconds/class_median, 1/2, 2)"
+    ),
+    "fastest": (
+        "median_seconds asc (unmeasured last), then "
+        "effective_price(ask/acceptance_rate)"
+    ),
+}
+
+#: The register a measured median is converted through on its way from float
+#: to :class:`~fractions.Fraction`, exactly as :func:`effective_price` scales
+#: a rate by 10_000: the precision ``metrics`` actually reports (``_median``
+#: rounds to three decimal places) and not a bit more. Rounding at a fixed
+#: register is what makes two genuinely equal medians compare equal instead of
+#: ordering themselves by the last bit of a binary float.
+MEDIAN_SECONDS_SCALE = 1_000
+
+#: How far a machine's own median may move its price in the ``balanced``
+#: score: half at best, double at worst.
+#:
+#: **The clamp is an admission, not a tuning parameter.** ``median_seconds``
+#: is contaminated by JOB MIX — a machine that happened to draw the long tasks
+#: looks slow, and one that drew the short ones looks fast — because nothing
+#: records what a task was, only how long it took (``db.acceptance_rate_rows``
+#: says the same thing about the class label). So the signal is real enough to
+#: break a tie and far too noisy to move a price by an order of magnitude, and
+#: the bounds say exactly that. Phase 2's measured benchmark probes replace
+#: this signal with one that compares machines on the SAME work; when they
+#: land, this clamp is what should widen or disappear.
+BALANCED_CLAMP_LOW = Fraction(1, 2)
+BALANCED_CLAMP_HIGH = Fraction(2)
+
+
+def median_fraction(median_seconds: float | None) -> Fraction | None:
+    """A measured median as an exact Fraction, or None if there is no signal.
+
+    ``None`` in, ``None`` out — "nobody has timed this machine" is not a
+    duration. A non-positive reading answers None as well: zero seconds is
+    not a measurement of anything, and letting it through would both rank an
+    impossible machine first under ``fastest`` and divide by zero in the
+    ``balanced`` ratio.
+    """
+    if median_seconds is None:
+        return None
+    scaled = round(float(median_seconds) * MEDIAN_SECONDS_SCALE)
+    if scaled <= 0:
+        return None
+    return Fraction(scaled, MEDIAN_SECONDS_SCALE)
+
+
+def class_median_seconds(asks: Iterable[Ask]) -> Fraction | None:
+    """The typical task duration across the asks given, or None if none of
+    them has been timed.
+
+    One book is one class by construction (:func:`open_asks` reads a single
+    ``capability_class``), so the median over a book IS the class median, and
+    no caller has to pass one in from somewhere it could go stale.
+
+    Median rather than mean, for the reason ``metrics._median`` gives: one
+    machine that hung until its lease expired should move the typical
+    duration by nothing, and with a mean it moves it by a lot.
+    """
+    measured = sorted(
+        f for f in (median_fraction(a.median_seconds) for a in asks) if f is not None
+    )
+    if not measured:
+        return None
+    middle = len(measured) // 2
+    if len(measured) % 2:
+        return measured[middle]
+    return (measured[middle - 1] + measured[middle]) / 2
+
+
+def quality_factor(
+    median_seconds: float | None, class_median: Fraction | None
+) -> Fraction:
+    """How much this machine's own speed moves its price under ``balanced``.
+
+    ``clamp(median / class_median, 1/2, 2)`` — see :data:`BALANCED_CLAMP_LOW`
+    for why it is clamped at all.
+
+    **Exactly 1 whenever either side is missing.** A machine nobody has timed,
+    and a book nobody has timed, both fall back to the effective price rather
+    than to a guess: the alternative is inventing a duration, which is the
+    same mistake as inventing an acceptance rate and is refused here for the
+    same reason.
+    """
+    median = median_fraction(median_seconds)
+    if median is None or class_median is None or class_median <= 0:
+        return Fraction(1)
+    ratio = median / class_median
+    return min(max(ratio, BALANCED_CLAMP_LOW), BALANCED_CLAMP_HIGH)
+
+
+def rank_score(
+    ask: Ask,
+    *,
+    objective: str = DEFAULT_RANK_OBJECTIVE,
+    class_median: Fraction | None = None,
+) -> Fraction | None:
+    """The number this ask was ORDERED BY under ``objective``, or None when
+    the objective has nothing to score it on.
+
+    Published by the routing explain surface next to the formula that
+    produced it, which is the whole point: a buyer who can see
+    ``rank_score`` and ``formula`` together can check the engine's arithmetic
+    without reading this file.
+
+    None means two different true things depending on the objective, and both
+    are "no finite score", never "excluded": under ``cheapest``/``balanced``
+    the host has a 0.0 acceptance rate and no finite bid clears it; under
+    ``fastest`` nobody has timed it. Either way it ranks last among its peers
+    and stays in the book.
+    """
+    price = effective_price(ask.ask_zc_per_hour, ask.acceptance_rate)
+    name = _checked_objective(objective)
+    if name == "fastest":
+        return median_fraction(ask.median_seconds)
+    if price is None:
+        return None
+    if name == "balanced":
+        return price * quality_factor(ask.median_seconds, class_median)
+    return price
+
+
+def _checked_objective(objective: str) -> str:
+    name = str(objective)
+    if name not in OBJECTIVES:
+        raise ValueError(
+            f"{name!r} is not a ranking objective; the objectives are: "
+            + ", ".join(OBJECTIVES)
+        )
+    return name
+
+
 def _rank_key(ask: Ask) -> tuple[int, Fraction, int, str]:
     """Cheapest effective price first; unclearable last.
 
@@ -660,9 +838,81 @@ def _rank_key(ask: Ask) -> tuple[int, Fraction, int, str]:
     return (0, price, int(ask.ask_zc_per_hour), str(ask.listing_id))
 
 
-def rank_asks(asks: Iterable[Ask]) -> list[Ask]:
-    """The book, in the order a bid consumes it."""
-    return sorted(asks, key=_rank_key)
+def _rank_key_for(
+    objective: str, class_median: Fraction | None
+) -> Any:
+    """The sort key for one objective, over a book whose class median is
+    already known.
+
+    A factory rather than three branches inside the loop: the class median is
+    a property of the whole book and must be computed once, and a key
+    function that recomputed it per comparison would be both slow and — if
+    the book were an iterator — wrong.
+
+    **Every key ends in the same two tiebreaks**, ask then listing id, so
+    :func:`_rank_key`'s determinism guarantee holds for all three orders and
+    not only for the one it was written for. And every key puts an ask with
+    no finite effective price last, whatever the objective: a host that
+    cannot clear any bid cannot be the fastest way to get a result either.
+    """
+    name = _checked_objective(objective)
+    if name == "cheapest":
+        return _rank_key
+
+    if name == "fastest":
+
+        def fastest_key(ask: Ask) -> tuple[Any, ...]:
+            price = effective_price(ask.ask_zc_per_hour, ask.acceptance_rate)
+            median = median_fraction(ask.median_seconds)
+            return (
+                1 if price is None else 0,
+                # Unmeasured LAST, ranked rather than dropped. A machine
+                # nobody has timed follows every machine somebody has —
+                # which is also, eventually, how it gets timed.
+                1 if median is None else 0,
+                median if median is not None else Fraction(0),
+                # Within one measured duration, the cheaper result wins.
+                # A donated ask reaches this tiebreak like any other: free
+                # and slow is not fast, so a zero ask buys no head start
+                # here the way it does under the other two objectives.
+                price if price is not None else Fraction(0),
+                int(ask.ask_zc_per_hour),
+                str(ask.listing_id),
+            )
+
+        return fastest_key
+
+    def balanced_key(ask: Ask) -> tuple[Any, ...]:
+        score = rank_score(ask, objective="balanced", class_median=class_median)
+        return (
+            1 if score is None else 0,
+            score if score is not None else Fraction(0),
+            int(ask.ask_zc_per_hour),
+            str(ask.listing_id),
+        )
+
+    return balanced_key
+
+
+def rank_asks(
+    asks: Iterable[Ask],
+    *,
+    objective: str = DEFAULT_RANK_OBJECTIVE,
+    class_median: Fraction | None = None,
+) -> list[Ask]:
+    """The book, in the order a bid consumes it under ``objective``.
+
+    ``class_median`` is only read by ``balanced``, and a caller passes one
+    exactly when it needs two views of the SAME book to agree on it —
+    :func:`match_bid` takes the median before withholding workspace machines,
+    and the routing explain re-ranks the full book afterwards. Left None it is
+    computed from the asks given, which is right for every caller ranking a
+    book it holds in one piece.
+    """
+    book = list(asks)
+    if class_median is None:
+        class_median = class_median_seconds(book)
+    return sorted(book, key=_rank_key_for(objective, class_median))
 
 
 def match_bid(
@@ -671,6 +921,8 @@ def match_bid(
     tasks_wanted: int,
     asks: Iterable[Ask],
     workspace_reserved: Collection[str] = (),
+    objective: str = DEFAULT_RANK_OBJECTIVE,
+    unproven_cap: int | None = None,
 ) -> MatchPlan:
     """Pair one bid against the book. Pure policy; no database, no side effects.
 
@@ -698,17 +950,47 @@ def match_bid(
     Nothing else is excluded. A host with a terrible acceptance rate stays in
     the book and simply costs more per accepted result, which is the whole
     difference between ranking and refusing.
+
+    ``objective`` names which of :data:`OBJECTIVES` orders the book. It
+    changes the ORDER and nothing else: rule 3's cap is still compared
+    against the effective price, and rule 4 still executes at the host's own
+    ask, so a ``fastest`` bid buys the quickest machine that clears and never
+    a machine that does not.
+
+    ``unproven_cap`` overrides :func:`unproven_task_budget` for this call.
+    None — every caller that has one bid to place — computes the budget from
+    this bid's own ``tasks_wanted``, as before. A caller that places SEVERAL
+    bids for one job (``routing.plan_pool_routing``, walking a job's accepted
+    classes) must instead compute the job's budget once and thread what is
+    left into each class, or the job reaches N quarter-shares of newcomer
+    exposure for the accident of touching N books. An explicit 0 means zero:
+    ``unproven_task_budget``'s floor of one exists so a single-task job can
+    still try a newcomer, and re-applying it per class is exactly the
+    amplification the threading removes.
     """
     reserved = {str(machine_id) for machine_id in workspace_reserved}
     bid = int(max_zc_per_hour)
     wanted = max(int(tasks_wanted), 0)
-    budget = unproven_task_budget(wanted)
+    budget = (
+        unproven_task_budget(wanted) if unproven_cap is None else max(int(unproven_cap), 0)
+    )
+
+    # Taken over the WHOLE book, before the workspace exclusion below: the
+    # typical duration in a class is a fact about the class, not about which
+    # of its machines this particular buyer was allowed to use. Withholding a
+    # machine from a bid must not silently re-score every other machine in it.
+    book = list(asks)
+    class_median = class_median_seconds(book)
 
     fills: list[Fill] = []
     remaining = wanted
     unproven_used = 0
 
-    for ask in rank_asks(a for a in asks if str(a.machine_id) not in reserved):
+    for ask in rank_asks(
+        (a for a in book if str(a.machine_id) not in reserved),
+        objective=objective,
+        class_median=class_median,
+    ):
         if remaining <= 0:
             break
 
@@ -1573,6 +1855,7 @@ def open_asks(
     capability_class_name: str,
     *,
     acceptance_rates: Mapping[tuple[str, str], float | None] | None = None,
+    median_seconds: Mapping[tuple[str, str], float | None] | None = None,
 ) -> list[Ask]:
     """The live ask side of one book, as :class:`Ask` values.
 
@@ -1587,8 +1870,17 @@ def open_asks(
     unproven and its rate stays ``None``; this function will not invent one,
     and a caller that passes nothing gets a book of unproven hosts rather than
     a book of perfect ones.
+
+    ``median_seconds`` is the second half of the same entry, keyed the same
+    way, and is read under the same rule: absent means UNMEASURED (``None``),
+    never fast and never 0. The caller decides which machines have enough
+    evidence to report a median at all — ``routing._plan_one_class`` holds it
+    to ``metrics.MIN_EVIDENCE``, the same threshold that gates the rate — for
+    the same reason the rates mapping is the caller's to build: this function
+    knows about listings, not about how much evidence a number needed.
     """
     rates = acceptance_rates or {}
+    medians = median_seconds or {}
     with db.cursor() as cur:
         cur.execute(
             """
@@ -1613,6 +1905,9 @@ def open_asks(
             ask_zc_per_hour=int(row["ask_zc_per_hour"]),
             max_concurrent_tasks=int(row["max_concurrent_tasks"]),
             acceptance_rate=rates.get(
+                (str(row["machine_id"]), capability_class_name)
+            ),
+            median_seconds=medians.get(
                 (str(row["machine_id"]), capability_class_name)
             ),
         )

@@ -1242,6 +1242,39 @@ def test_an_ask_with_no_recorded_history_arrives_unproven(db):
     assert ask.acceptance_rate is None and ask.unproven
 
 
+def test_an_ask_carries_the_median_the_caller_measured_and_nothing_else(db):
+    """The timing signal reaches the book the same way the rate does: from a
+    mapping the caller built out of `metrics.acceptance_rates`, keyed by
+    `(machine_id, capability_class)`, and never invented here.
+
+    A machine absent from the mapping is UNMEASURED — None, not 0. The two
+    are opposite claims ("nobody has timed this" against "it finishes
+    instantly"), and under the `fastest` objective a 0 would put an untimed
+    machine at the head of the book on the strength of no evidence at all.
+    """
+    host = make_user(db)
+    timed = make_machine(db, host)
+    untimed = make_machine(db, host)
+    mk.create_listing(db, machine_id=timed, owner_id=host, ask_zc_per_hour=410)
+    mk.create_listing(db, machine_id=untimed, owner_id=host, ask_zc_per_hour=420)
+
+    book = mk.open_asks(
+        db,
+        "gpu-24gb",
+        acceptance_rates={(str(timed), "gpu-24gb"): 0.9},
+        median_seconds={(str(timed), "gpu-24gb"): 12.5},
+    )
+    by_machine = {a.machine_id: a for a in book}
+    assert by_machine[timed].median_seconds == 12.5
+    assert by_machine[timed].acceptance_rate == 0.9
+    assert by_machine[untimed].median_seconds is None
+
+    # A caller that passes no medians at all gets a book of unmeasured hosts,
+    # exactly as it gets a book of unproven ones.
+    plain = {a.machine_id: a for a in mk.open_asks(db, "gpu-24gb")}
+    assert plain[timed].median_seconds is None
+
+
 def test_a_bid_must_estimate_how_long_a_task_takes(db):
     """Not validation for its own sake: the hold is sized from this and the
     charge is capped at the hold, so a zero estimate is free compute for as
