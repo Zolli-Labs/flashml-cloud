@@ -819,8 +819,34 @@ WAIT_DEFAULT_TIMEOUT_S = 25
 WAIT_TIMEOUT_CAP_S = 60
 
 
+#: The control planes this API can address, and the only strings
+#: ``CoordinatorClient.forward``'s ``venue=`` accepts.
+#:
+#: ``render`` is the incumbent: a Render ``type: pserv`` private service,
+#: reached over the internal network. ``fc`` is an Alibaba Function Compute
+#: Web Function running the same coordinator, reached over the public
+#: internet. They are two DEPLOYMENTS with two databases, not two routes to
+#: one — a job lives in exactly one of them, and every subsequent call about
+#: that job has to reach the same one.
+COORDINATOR_VENUES: tuple[str, ...] = ("render", "fc")
+
+#: What every existing call site gets by leaving ``venue`` alone. Adding the
+#: second venue must not move a single byte of today's traffic.
+DEFAULT_COORDINATOR_VENUE = "render"
+
+
+class CoordinatorVenueError(RuntimeError):
+    """A venue was asked for that this deployment cannot address.
+
+    Deliberately NOT an ``HTTPException``: this is a deployment-configuration
+    fault, raised before any request leaves the process, and the caller — not
+    this class — decides what a user should see. What it must never be is
+    silence: see ``CoordinatorClient._resolve``.
+    """
+
+
 class CoordinatorClient:
-    """The only holder of the operator credential.
+    """The only holder of the operator credentials.
 
     Every outbound header is *constructed here*, from scratch. No inbound
     header is copied through — not the agent's ``Authorization`` (which
@@ -829,6 +855,13 @@ class CoordinatorClient:
     attack: the coordinator answers 400 on a duplicated delegation header
     rather than picking a winner, and building the dict here makes emitting
     two structurally impossible.
+
+    Plural credentials, since this client addresses more than one control
+    plane (``COORDINATOR_VENUES``). The property above is unchanged by that
+    and is the reason the venue selects a *pair*: base URL and token are
+    looked up together, from the same key, in one place. Nothing here reads
+    a token from one venue and a base from another, which is the mistake
+    that would send the Render operator credential to a public FC URL.
     """
 
     def __init__(
@@ -837,10 +870,84 @@ class CoordinatorClient:
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 60.0,
     ):
-        self._base = settings.coordinator_url.rstrip("/")
-        self._token = settings.coordinator_operator_token
+        # Venue-keyed, and populated for every venue whether configured or
+        # not: an empty string here is what `_resolve` turns into a refusal.
+        # Keeping the key present with an empty value beats omitting it, so
+        # "not configured" and "not a venue" stay distinguishable.
+        self._bases = {
+            "render": settings.coordinator_url.rstrip("/"),
+            "fc": settings.coordinator_url_fc.rstrip("/"),
+        }
+        self._tokens = {
+            "render": settings.coordinator_operator_token,
+            "fc": settings.coordinator_operator_token_fc,
+        }
         self._transport = transport
         self._timeout = timeout
+
+    def venue_configured(self, venue: str) -> bool:
+        """Whether ``venue`` can be addressed at all.
+
+        For callers that would rather decide before dispatching than catch
+        ``CoordinatorVenueError`` afterwards. Exists so nothing outside this
+        class has to read ``_bases``.
+        """
+        return bool(self._bases.get(venue))
+
+    def _resolve(self, venue: str) -> tuple[str, str]:
+        """The base URL and operator token for ``venue``, or raise.
+
+        THERE IS NO FALLBACK, and adding one would be the single most
+        damaging change available in this file. An FC-labelled job that
+        quietly ran on Render would produce a measurement — the entire
+        reason the second venue exists — that is a lie, and nothing
+        downstream could tell. Unconfigured fails; it never degrades.
+        """
+        if venue not in self._bases:
+            raise CoordinatorVenueError(
+                f"unknown coordinator venue {venue!r}; "
+                f"expected one of {', '.join(COORDINATOR_VENUES)}"
+            )
+        base = self._bases[venue]
+        if not base:
+            log.error(
+                json.dumps(
+                    {"text": "coordinator venue is not configured", "venue": venue}
+                )
+            )
+            raise CoordinatorVenueError(
+                f"coordinator venue {venue!r} is not configured: set "
+                f"COORDINATOR_URL_FC (and COORDINATOR_OPERATOR_TOKEN_FC) to "
+                f"use it. Refusing to fall back to "
+                f"{DEFAULT_COORDINATOR_VENUE!r} — that would run the job on "
+                f"the wrong control plane and report the wrong one."
+            )
+        token = self._tokens[venue]
+        if not token and venue != DEFAULT_COORDINATOR_VENUE:
+            # A URL without its token would send `Bearer ` and come back 401
+            # from the far end — an auth failure that reads like a bad
+            # credential when it is a missing one, on whichever control
+            # plane is newest and least familiar. Refuse here instead.
+            #
+            # Scoped to the NON-default venue on purpose. An empty
+            # `COORDINATOR_OPERATOR_TOKEN` is legitimate for the default
+            # one: `./scripts/dev.sh --all` runs a local coordinator with no
+            # tokens configured at all, which `authenticator_from_env`
+            # answers with an OpenAuthenticator. Applying this rule there
+            # would refuse the standard local dev loop.
+            log.error(
+                json.dumps(
+                    {"text": "coordinator venue has no token", "venue": venue}
+                )
+            )
+            raise CoordinatorVenueError(
+                f"coordinator venue {venue!r} has a URL but no operator "
+                f"token: set COORDINATOR_OPERATOR_TOKEN_FC. Refusing to "
+                f"send an empty credential, which the coordinator would "
+                f"reject as a 401 that looks like the wrong token rather "
+                f"than a missing one."
+            )
+        return base, token
 
     async def forward(
         self,
@@ -851,6 +958,7 @@ class CoordinatorClient:
         content: bytes | None = None,
         query: str = "",
         media_type: str | None = None,
+        venue: str = DEFAULT_COORDINATOR_VENUE,
     ) -> httpx.Response:
         """Forward one request to the coordinator with the operator token.
 
@@ -860,8 +968,16 @@ class CoordinatorClient:
         submission/list/cancel are plain operator-token operations with no
         node identity to assert, and sending an empty or made-up header
         value there would be worse than sending none.
+
+        ``venue`` picks the control plane (``COORDINATOR_VENUES``). It
+        defaults to the Render coordinator, so every call site written
+        before there was a second one keeps the behaviour it had. It selects
+        the base URL and the token TOGETHER — a request never carries one
+        venue's credential to another venue's host — and an unconfigured
+        venue raises ``CoordinatorVenueError`` rather than falling back.
         """
-        headers = {"Authorization": f"Bearer {self._token}"}
+        base, token = self._resolve(venue)
+        headers = {"Authorization": f"Bearer {token}"}
         if on_behalf_of is not None:
             if not valid_node_id(on_behalf_of):
                 # Unreachable from a well-formed enrolment; if it ever is
@@ -874,7 +990,7 @@ class CoordinatorClient:
         if media_type:
             headers["Content-Type"] = media_type
 
-        url = f"{self._base}{path}"
+        url = f"{base}{path}"
         if query:
             url = f"{url}?{query}"
 
@@ -894,7 +1010,7 @@ class CoordinatorClient:
                 log.error(
                     json.dumps(
                         {"text": "coordinator request failed",
-                         "method": method, "path": path}
+                         "method": method, "path": path, "venue": venue}
                     )
                 )
                 raise HTTPException(
@@ -933,6 +1049,89 @@ async def forward_idempotent(
         if last.status_code not in GATEWAY_STATUSES:
             return last
     return last
+
+
+#: The submit-time field, the column, and the response key — one string,
+#: because they are one concept and the console is written against it.
+COORDINATOR_FIELD = "coordinator"
+
+
+def _venue_of(row: Any) -> str:
+    """The venue a job is pinned to.
+
+    **THE ONE PLACE ``NULL`` BECOMES THE DEFAULT.** ``jobs.coordinator`` is
+    nullable (migration 0034) so that every row written before there was a
+    second control plane stays valid and keeps meaning what it meant; the fold
+    lives here rather than in a SQL ``coalesce`` so there is a single function
+    to test, and so a value the database somehow holds that this deployment
+    cannot address degrades to the default instead of raising from inside a
+    read route. The CHECK constraint makes that last branch unreachable; it is
+    written down anyway because "unreachable" is a property of today's schema.
+
+    Takes either a job row (anything with ``.get``) or the raw column value, so
+    the callers that already have the row in hand for their visibility check
+    pay nothing, and the ones that asked ``db`` for the column alone use the
+    same fold.
+
+    NOT the inverse of anything. Nothing converts a venue back to ``NULL``: a
+    job's venue is decided once, at submission, and never updated.
+    """
+    value = row.get(COORDINATOR_FIELD) if hasattr(row, "get") else row
+    if isinstance(value, str) and value in COORDINATOR_VENUES:
+        return value
+    return DEFAULT_COORDINATOR_VENUE
+
+
+def _submitted_venue(raw: Any, coordinator: CoordinatorClient) -> str:
+    """The venue a submission asked for, refused at the edge if it cannot be
+    served. Absent is the default, which is what every existing client sends.
+
+    TWO DIFFERENT REFUSALS, TWO DIFFERENT STATUSES, because they are two
+    different problems and a caller can act on exactly one of them:
+
+    * **400** — the value is not a venue at all. The request is malformed and
+      the allowed values are named in the detail, so a typo is self-correcting.
+    * **409** — the value IS a venue and this deployment cannot address it
+      (no ``COORDINATOR_URL_FC``). The request is well-formed; the
+      *deployment* is the thing that is not ready, and nothing the caller
+      changes about the request except the venue will help.
+
+    Refused HERE, at the edge, and that is the whole reason this function
+    exists. ``CoordinatorClient._resolve`` also refuses an unconfigured venue —
+    correctly, and it must keep doing so — but it raises
+    ``CoordinatorVenueError``, a deployment fault that surfaces as a 500 from
+    somewhere deep in a submit that has already fetched a repo, run preflight
+    and resolved datasets. A 4xx before any of that work is the same answer,
+    given for the same reason, at the only moment it is cheap and legible.
+
+    There is deliberately no "fall back to the default" branch. The second
+    venue exists to be measured; a job labelled ``fc`` that quietly ran on
+    Render would make that measurement a lie with nothing downstream able to
+    tell — the argument ``_resolve``'s docstring makes at length, and this is
+    the same rule stated one layer out.
+    """
+    if raw is None:
+        return DEFAULT_COORDINATOR_VENUE
+    if not isinstance(raw, str) or raw not in COORDINATOR_VENUES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{COORDINATOR_FIELD} must be one of "
+                f"{', '.join(COORDINATOR_VENUES)}"
+            ),
+        )
+    if not coordinator.venue_configured(raw):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"this deployment cannot reach the {raw!r} coordinator: "
+                f"COORDINATOR_URL_{raw.upper()} is not set. Submit without "
+                f"{COORDINATOR_FIELD} to use "
+                f"{DEFAULT_COORDINATOR_VENUE!r}; running it there and "
+                f"reporting {raw!r} is the one thing this will not do."
+            ),
+        )
+    return raw
 
 
 def _storage_gate(db: psycopg.Connection, user_id: str) -> None:
@@ -985,6 +1184,8 @@ async def _record_artifact_footprint(
     coordinator: CoordinatorClient,
     db: psycopg.Connection,
     job_id: str,
+    *,
+    venue: str = DEFAULT_COORDINATOR_VENUE,
 ) -> None:
     """Measure a finished job's disk footprint, once, and write it down.
 
@@ -1007,9 +1208,18 @@ async def _record_artifact_footprint(
     Every failure path here returns quietly *without* stamping the marker,
     so the next poll retries — a failed listing remembered as a measurement
     would make that job free for ever.
+
+    ``venue`` is the job's own (``_venue_of`` on the row the caller already
+    fetched), because the artifact listing only exists on the coordinator that
+    ran the job. Asked of the wrong one it is a 404, which this function treats
+    as "no measurement" and — correctly, given what it was told — does not
+    stamp, so the mistake would be an invisible, permanently retried no-op
+    rather than an error.
     """
     try:
-        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts")
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts", venue=venue
+        )
     except Exception:  # noqa: BLE001 - accounting must not fail the request
         return
     if r.status_code >= 300:
@@ -1037,6 +1247,8 @@ async def _mirror_job_artifacts(
     db: psycopg.Connection,
     job_id: str,
     settings: Settings,
+    *,
+    venue: str = DEFAULT_COORDINATOR_VENUE,
 ) -> None:
     """Copy a finished job's accepted artifacts to OSS, once, and write it down.
 
@@ -1066,10 +1278,16 @@ async def _mirror_job_artifacts(
     coordinator jobs under a parent id the coordinator has never heard of,
     and mirroring it means ``mirror_jobs`` over the round jobs from the
     driver that observes the run ending.
+
+    ``venue`` is the job's own, for the reason ``_record_artifact_footprint``
+    gives: the bytes exist only on the coordinator that ran the job, and
+    reading the wrong one would raise ``MirrorError`` — which this function
+    absorbs and retries for ever, so the mistake would present as a mirror
+    that never happens rather than as an error anybody sees.
     """
     try:
         result = await mirror_job(
-            job_id, CoordinatorArtifactSource(coordinator), settings
+            job_id, CoordinatorArtifactSource(coordinator, venue), settings
         )
     except MirrorError as exc:
         # Logged rather than raised, and deliberately not stamped: the next
@@ -1452,6 +1670,29 @@ def _scrub_identity(
     if pools is not None:
         _stamp_pools(parsed, pools, pools_where)
     return json.dumps(parsed).encode(), "application/json"
+
+
+#: What a coordinator says when it is refusing a claim from a node it has
+#: never been told about — `service/modea.py`'s
+#: ``403 "unregistered node — register first"``. Matched on the WORDS rather
+#: than on the bare status because 403 is also what a wrong join code and a
+#: cross-node heartbeat answer, and neither of those is fixed by registering.
+_UNREGISTERED_NODE_MARKERS = ("unregistered node", "register first")
+
+
+def _is_unregistered_node(status_code: int, body: bytes) -> bool:
+    """Whether this refusal means "I have never heard of this node".
+
+    Narrow on purpose. A false positive here spends one registration and one
+    retry on a venue that was refusing for some other reason; a false negative
+    leaves the machine unable to claim at that venue at all. Both are
+    survivable, which is why the cheap, specific test wins: the status alone
+    would be neither.
+    """
+    if status_code != 403:
+        return False
+    text = body.decode("utf-8", "replace").lower()
+    return any(marker in text for marker in _UNREGISTERED_NODE_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -1897,6 +2138,18 @@ class CoordinatorEvaluationDriver:
     ``artifact_mirror.ArtifactSource`` gives: this module imports the
     orchestrator, so importing back would close a cycle; and every ordering
     rule over there stays testable with a dictionary.
+
+    **DELIBERATELY ON THE DEFAULT VENUE, all four calls.** An evaluation job
+    is submitted by the sandbox orchestrator, not by a person, and it writes
+    no ``public.jobs`` row — so there is no ``coordinator`` column to read and
+    nothing that could have chosen a venue in the first place. Its
+    ``_job_id_named`` recovery also depends on listing every job the
+    coordinator holds, which with two control planes is per-venue: a lookup
+    aimed at the wrong one would answer "not submitted" and place a SECOND
+    evaluation on a pool holding a single machine, which is the exact failure
+    the name lookup exists to prevent. Pinning the whole driver to one venue
+    keeps submit and recovery pointed at the same place. Moving evaluations to
+    a second venue means giving them a row to record it on first.
 
     **Idempotency: a deterministic job NAME, looked up before submitting.**
     The coordinator exposes no idempotency key — ``POST /v1alpha1/jobs`` takes
@@ -3960,6 +4213,7 @@ def create_cloud_app(
         pools: list[str] | None = None,
         pools_where: Literal["capabilities", "top"] = "capabilities",
         retry_delays: tuple[float, ...] | None = None,
+        venue: str = DEFAULT_COORDINATOR_VENUE,
     ) -> Response:
         is_artifact = path.startswith("/v1alpha1/artifacts/")
         limit = max_upload_bytes if is_artifact else MAX_JSON_BODY_BYTES
@@ -3994,6 +4248,11 @@ def create_cloud_app(
             content=body if body else None,
             query=request.url.query,
             media_type=media_type,
+            # WHICH CONTROL PLANE. Defaulted, so every route that has no job
+            # to resolve one from (register, heartbeat) is byte-identical to
+            # what it was. The lease-scoped routes resolve it from the job
+            # their work belongs to and pass it here — see `_agent_venue*`.
+            venue=venue,
         )
         if retry_delays is None:
             r = await coordinator.forward(request.method, path, **forward_kwargs)
@@ -4006,6 +4265,241 @@ def create_cloud_app(
                 delays=retry_delays, **forward_kwargs,
             )
         return _passthrough(r)
+
+    # -- resolving an agent request's venue ---------------------------------
+    #
+    # AN AGENT NEVER SAYS WHICH COORDINATOR IT IS TALKING TO, and it must not
+    # start: flashnode holds one base URL (this API) and knows nothing about
+    # venues, so anything it *could* assert would be a value this API told it,
+    # round-tripped through a machine we do not control. So the venue is
+    # resolved HERE, from the work, through the `attempts` row the claim wrote
+    # — which is the same table and the same argument 0004's header makes for
+    # why the completion hop can be credited at all.
+    #
+    # ALL THREE FAIL SOFT TO THE DEFAULT, and that is deliberate rather than
+    # lazy. Every one of them can legitimately find nothing: an attempt whose
+    # best-effort accounting write failed, a federated round (whose
+    # `attempts.job_id` is a coordinator job id that is not a row in
+    # `public.jobs`), a sandbox evaluation job, or simply a lease older than
+    # migration 0034. Every one of those really is on the default venue today,
+    # and a hard failure would turn a bookkeeping gap into an agent that cannot
+    # commit its finished work.
+    #
+    # Each opens its own short-lived connection, like every other accounting
+    # read on these routes — but UNLIKE those, a failure here is not absorbed
+    # into a warning: it falls through to the default, which is the answer the
+    # route would have used before this existed.
+
+    def _venue_for_job_id(job_id: str) -> str:
+        """The venue of `job_id`, for the agent routes that carry one."""
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                return _venue_of(dbmod.job_coordinator(conn, job_id))
+        except Exception:  # noqa: BLE001 - never fail an agent on a lookup
+            log.warning("could not resolve the venue for job %s", job_id)
+            return DEFAULT_COORDINATOR_VENUE
+
+    def _venue_for_lease_id(lease_id: str) -> str:
+        """The venue of the job `lease_id` was issued for.
+
+        THE ONE THAT MATTERS MOST. A lease lives inside the coordinator that
+        issued it; sending its heartbeat, commit or failure to the other one is
+        not an error anybody sees — the far side has never heard of the lease,
+        the real holder's lease ages out in its own sweeper, and the task is
+        silently requeued somewhere else. That is the exact failure this whole
+        feature is built to avoid, and it is invisible without this lookup.
+        """
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                return _venue_of(dbmod.lease_coordinator(conn, lease_id))
+        except Exception:  # noqa: BLE001 - never fail an agent on a lookup
+            log.warning("could not resolve the venue for lease %s", lease_id)
+            return DEFAULT_COORDINATOR_VENUE
+
+    def _venue_for_machine(machine: Machine) -> str:
+        """The venue this machine's live lease belongs to.
+
+        For the artifact routes alone, which carry neither a job id nor a lease
+        id: an OUTPUT key is `jobs/<job_id>/…` but an INPUT key is
+        `uploads/<uuid>/code.tar.gz`, so the key is not a job id in general and
+        parsing it for one would work in exactly the direction that matters
+        less. What the machine is *working on* answers both.
+        """
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                return _venue_of(
+                    dbmod.machine_live_lease_coordinator(conn, machine.id)
+                )
+        except Exception:  # noqa: BLE001 - never fail an agent on a lookup
+            log.warning("could not resolve the venue for machine %s", machine.id)
+            return DEFAULT_COORDINATOR_VENUE
+
+    def _claimable_venues() -> list[str]:
+        """The venues a claim should be offered to, in order.
+
+        **THE DEFAULT IS ALWAYS IN THE LIST, AND ALWAYS LAST.** Unconditional
+        because today's entire fleet claims from it and making that conditional
+        would put every machine's ability to pick up work behind the accuracy
+        of `jobs.status`, which is a cache (`sync_observed_job_states`) that a
+        page nobody opened leaves stale. Last because a venue that is in the
+        list at all is there because it has a job waiting *right now*, and the
+        default does not need the help.
+
+        **AND NOTHING ELSE IS IN IT UNLESS IT HAS WORK.** The second venue is a
+        Function Compute app being measured on invocations and duty cycle; a
+        fleet polling it every few seconds while it holds nothing would inflate
+        that count until the number this feature exists to produce meant
+        nothing. So: no FC job, no FC traffic, enforced by a query rather than
+        by a flag somebody remembers to turn off.
+
+        One indexless `select distinct` over `public.jobs`, per claim, filtered
+        to `coordinator is not null` — which is false for essentially every row
+        — plus the venue-configured check, which is a dict lookup. See 0034's
+        header for why that is not indexed yet and what the index would be.
+
+        A failure answers the default alone: the fleet keeps working exactly as
+        it did before this function existed, which is the safe direction.
+        """
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                extra = dbmod.active_job_venues(
+                    conn,
+                    terminal_states=[s.value for s in JobState if s.terminal],
+                )
+        except Exception:  # noqa: BLE001 - a claim must never fail on this
+            log.warning("could not resolve the venues with active work")
+            extra = []
+        return [
+            v for v in extra
+            # `venue_configured` because a venue could be named on a row
+            # written by a deployment that had it and this one does not —
+            # `forward` would refuse it, and refusing a claim is worse than
+            # not offering it one.
+            if v != DEFAULT_COORDINATOR_VENUE
+            and v in COORDINATOR_VENUES
+            and coordinator.venue_configured(v)
+        ] + [DEFAULT_COORDINATOR_VENUE]
+
+    # -- lazy registration: a venue that has never heard of this machine ----
+    #
+    # A COORDINATOR'S NODE REGISTRY IS IN MEMORY. `service/modea.py` keeps it
+    # in `ModeAState.nodes` and says so — "a coordinator restart clears the
+    # registry and the record with it" — and a claim from a node that is not
+    # in it is refused `403 "unregistered node — register first"`.
+    #
+    # Every agent in the fleet registers exactly once, at startup, against
+    # whatever `register_node` forwards to: the DEFAULT venue, and only ever
+    # that one. So the second venue has never heard of any machine, and every
+    # claim `_claimable_venues` now sends it would 403 — the job sits there,
+    # the measurement never happens, and nothing in the fleet reports an error
+    # because a 403 from one venue is indistinguishable from "busy" once the
+    # claim falls through to the next.
+    #
+    # THE FIX HAS TO SELF-HEAL RATHER THAN BE A SETUP STEP. The second venue
+    # is a Function Compute app: instances have a 36-hour ceiling and are
+    # rebuilt on any config change, timeout or OOM. A registration done once by
+    # hand is correct until the next rebuild and then silently is not, which is
+    # the same failure with a longer fuse.
+    #
+    # So it is done here, on the claim that discovers the gap, and nowhere
+    # else. Not on a timer and not mirrored off the node heartbeat: FC is
+    # measured on invocations, and background chatter would corrupt the number
+    # this whole feature exists to produce. No FC work, no FC traffic — the
+    # rule `_claimable_venues` already enforces — and this rides inside it.
+
+    def _lazy_registration_body(machine: Machine) -> bytes:
+        """The registration this API states on `machine`'s behalf.
+
+        Rebuilt from `public.machines`, which is the only DURABLE copy of a
+        registration anywhere in this system — the agent said all of this once,
+        `register_node` wrote it down (`set_machine_capabilities`), and the
+        coordinator that was told it may since have been rebuilt.
+
+        **The pools are resolved here and stamped, exactly as the register
+        route does it**: `dbmod.pool_ids_for_machine` for the value and
+        `_scrub_identity(..., pools_where="capabilities")` for the stamp, the
+        same two calls with the same arguments. That is not decoration. The
+        seventh placement gate is pool membership, so a machine registered into
+        a venue with no pool bindings is refused the pool-scoped work it exists
+        to run — the venue would know the node and still never lease to it,
+        which looks exactly like having no capacity.
+
+        Fails CLOSED to no pools, in the register route's own words, for the
+        register route's own reason: a node we cannot vouch for serves no pool.
+        """
+        pools: list[str] = []
+        facts: dict[str, Any] | None = None
+        try:
+            with contextlib.closing(app.state.connect()) as conn:
+                pools = dbmod.pool_ids_for_machine(conn, machine.id)
+                facts = dbmod.machine_registration_facts(conn, machine.id)
+        except Exception:  # noqa: BLE001 - never fail a claim on a lookup
+            log.warning("could not resolve pools for machine %s", machine.id)
+            pools, facts = [], None
+
+        facts = facts or {}
+        body: dict[str, Any] = {
+            # `node_id` is restated by `_scrub_identity(force=True)` below
+            # anyway; it is here so the body is a valid registration on its
+            # own terms rather than one that depends on the scrub to be one.
+            "node_id": machine.node_id,
+            # A `NodeRegistration` requires both. Neither is read by placement
+            # — they are display, and the machine's own node_id is the most
+            # honest thing this API can say about a host whose real hostname it
+            # only ever learned as a label.
+            "kubernetes_node": machine.node_id,
+            "hostname": machine.name or machine.node_id,
+            "capabilities": dict(facts.get("capabilities") or {}),
+            # The four the placement gates actually read. Defaulting them to
+            # False rather than to the model's defaults is the same fail-closed
+            # direction the protocol takes: a machine whose snapshot we cannot
+            # read is offered nothing, never everything.
+            "sandbox_capable": bool(facts.get("sandbox_capable")),
+            "argv_capable": bool(facts.get("argv_capable")),
+            "unsandboxed_argv_capable": bool(facts.get("unsandboxed_argv_capable")),
+            "module_capable": bool(facts.get("module_capable")),
+        }
+        stamped, _media_type = _scrub_identity(
+            json.dumps(body).encode(), machine.node_id, force=True,
+            pools=pools, pools_where="capabilities",
+        )
+        return stamped
+
+    async def _register_machine_with_venue(machine: Machine, venue: str) -> bool:
+        """Register `machine` with `venue`. True iff the venue accepted it.
+
+        EVERY failure is False, never an exception. This runs inside an
+        agent's claim, and a coordinator having a bad day — refusing the
+        registration, timing out, not being configured at all — must come back
+        to that agent as "this venue did not answer 200" and nothing else. The
+        claim loop then does what it already does with any non-200: moves on.
+        """
+        try:
+            response = await coordinator.forward(
+                "POST", "/v1alpha1/nodes/register",
+                on_behalf_of=machine.node_id,
+                content=_lazy_registration_body(machine),
+                media_type="application/json",
+                venue=venue,
+            )
+        except Exception:  # noqa: BLE001 - an FC fault is not an agent's fault
+            log.warning(
+                "could not register machine %s with venue %s", machine.id, venue
+            )
+            return False
+        if response.status_code >= 400:
+            log.warning(
+                "venue %s refused the registration of machine %s (%s)",
+                venue, machine.id, response.status_code,
+            )
+            return False
+        # The line anybody debugging the demo looks for first. Venue and
+        # machine id, and nothing else — no token, no body.
+        log.info(
+            "registered machine %s with venue %s on its first claim there",
+            machine.id, venue,
+        )
+        return True
 
     # -- health -------------------------------------------------------------
 
@@ -5212,6 +5706,18 @@ def create_cloud_app(
         # owner_id is never accepted from the body — whatever the caller
         # put there (if anything) is simply not forwarded or looked at.
         payload.pop("owner_id", None)
+        # WHICH COORDINATOR SERVES THIS JOB. `pop`, not `get`: the rest of
+        # this body is a JobSpec forwarded to the coordinator verbatim, and
+        # the coordinator has no `coordinator` field — leaving it in would
+        # push an unknown key into a spec whose validator may or may not
+        # tolerate it, to say something the coordinator is in no position to
+        # act on anyway. It is addressed to THIS API and consumed here.
+        #
+        # Refused before `_storage_gate`'s sibling checks have any effect and
+        # long before anything is forwarded, so an unknown or unconfigured
+        # venue costs one dict lookup rather than a submitted job on the
+        # wrong control plane.
+        venue = _submitted_venue(payload.pop(COORDINATOR_FIELD, None), coordinator)
         # A pool waiver requires `fetch_pool_for_member` to have confirmed
         # membership first, and this route never looks the caller up in
         # `pool_members` — only /v1alpha1/jobs/from-repo does. So a raw spec
@@ -5277,6 +5783,7 @@ def create_cloud_app(
             "/v1alpha1/jobs",
             content=json.dumps(payload).encode(),
             media_type="application/json",
+            venue=venue,
         )
         if r.status_code >= 300:
             return _passthrough(r)
@@ -5310,6 +5817,11 @@ def create_cloud_app(
             # work look unrelated, which is the failure this column exists
             # to prevent.
             correlation_id=observability.new_correlation_id(),
+            # Written in the SAME statement that records ownership, because
+            # they are the same kind of fact: decided here, by this API, and
+            # unrecoverable afterwards. The row is what every later call about
+            # this job reads to find its way back to this coordinator.
+            coordinator=venue,
         )
         return _passthrough(r)
 
@@ -6357,6 +6869,19 @@ def create_cloud_app(
         payload = await _json_object(request)
         owner, name, ref = _parse_repo_ref(payload.get("repo"), payload.get("ref"))
 
+        # WHICH COORDINATOR SERVES THIS JOB — and this is the route that
+        # matters, because it is the one that can carry a POOL. The plain
+        # `/v1alpha1/jobs` route refuses a pool spec outright ("pool jobs must
+        # be submitted via /v1alpha1/jobs/from-repo"), so any job aimed at a
+        # named fleet arrives here.
+        #
+        # Read before the repo is fetched, for the same reason `pool` is: an
+        # unknown or unconfigured venue must not cost a clone, an extraction,
+        # a preflight and a dataset resolution first. `get`, not `pop` —
+        # unlike the raw-spec route, nothing in this payload is forwarded to
+        # the coordinator, so there is nothing to keep it out of.
+        venue = _submitted_venue(payload.get(COORDINATOR_FIELD), coordinator)
+
         # Optional pool scoping. Checked before a single network call: a
         # pool id the caller does not belong to (or that does not exist —
         # 404 in both cases, same doctrine as `fetch_pool_for_member`
@@ -6414,7 +6939,7 @@ def create_cloud_app(
         return await _stage_compile_and_submit(
             request, db, user_id,
             config=config, image=image, findings=findings,
-            tar_bytes=tar_bytes, pool=pool,
+            tar_bytes=tar_bytes, pool=pool, venue=venue,
             source={"type": "github", "owner": owner, "repo": name, "ref": ref},
         )
 
@@ -6429,6 +6954,7 @@ def create_cloud_app(
         tar_bytes: bytes,
         pool: str | None,
         source: dict[str, Any],
+        venue: str = DEFAULT_COORDINATOR_VENUE,
     ) -> Response:
         """Everything a submitted working tree gets after it has been parsed:
         the preflight refusal, dataset resolution and admission, the compile,
@@ -6446,8 +6972,40 @@ def create_cloud_app(
         then a single byte leaves this process. Every refusal above the
         upload leaves no artifact, no coordinator request and no ``jobs``
         row.
+
+        ``venue`` is which coordinator this job is submitted to, staged on,
+        and pinned to. It reaches THREE things here and they must agree: the
+        artifact PUT that stages the code, the job POST, and the
+        ``jobs.coordinator`` column. Staging to one venue and submitting to
+        the other is the failure that would look like a broken repo — the job
+        is accepted, the task is leased, and the executor cannot fetch an
+        ``artifact://`` URI its coordinator has never stored.
         """
         rendered = [f.as_dict() for f in findings]
+        if venue != DEFAULT_COORDINATOR_VENUE and config.is_federated:
+            # A FEDERATED RUN CANNOT PICK A VENUE, AND SAYING SO BEATS
+            # PRETENDING. It is N coordinator jobs submitted one per round by
+            # an in-process driver, and that driver talks to the coordinator
+            # through `settings.coordinator_url` directly (`fedavg.py`) — not
+            # through `CoordinatorClient`, so it has no venue to be told
+            # about. Accepting the field here would stage the code on FC,
+            # write `coordinator = 'fc'` on the parent row, and then run every
+            # round on Render: a job whose recorded venue is a lie, which is
+            # exactly the measurement corruption the no-fallback rule exists
+            # to prevent.
+            #
+            # Refused BEFORE the artifact upload, so this leaves no artifact,
+            # no coordinator request and no `jobs` row — the same three
+            # guarantees every other refusal above the upload gives.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"a federated run is submitted one coordinator job per "
+                    f"round by an in-process driver that only addresses "
+                    f"{DEFAULT_COORDINATOR_VENUE!r}, so it cannot be pinned to "
+                    f"{venue!r}. Submit it without {COORDINATOR_FIELD}."
+                ),
+            )
         if any(f.level == "error" for f in findings):
             # Refused here, before a single byte leaves this process. No
             # artifact upload, no coordinator submission, no jobs row.
@@ -6596,6 +7154,11 @@ def create_cloud_app(
             f"/v1alpha1/artifacts/{code_key}",
             content=tar_bytes,
             media_type="application/gzip",
+            # The SAME venue the job below is submitted to. `code_uri` is an
+            # `artifact://` reference the executor resolves through whichever
+            # coordinator leased it the task, so bytes staged anywhere else
+            # are bytes that job can never read.
+            venue=venue,
         )
         if upload.status_code >= 300:
             log.error(
@@ -6657,6 +7220,12 @@ def create_cloud_app(
                 # without a shared id there is nothing tying round 7 back to
                 # the submission a person made.
                 correlation_id=observability.new_correlation_id(),
+                # Always the default: the guard at the top of this function
+                # refuses a federated submit that named any other venue, and
+                # the driver below addresses `settings.coordinator_url`
+                # directly. Written explicitly rather than left NULL so the
+                # row states the fact instead of implying it.
+                coordinator=venue,
             )
             start_federated_job(
                 fedavgmod.FederatedRun(
@@ -6681,6 +7250,9 @@ def create_cloud_app(
                 "rounds": config.round_count,
                 "slots": fleet.slots,
                 "findings": rendered,
+                # Always the default here: the guard at the top of this
+                # function refuses any other venue for a federated run.
+                COORDINATOR_FIELD: venue,
             }
             # Priced routing does not reach federated rounds yet — this run
             # is N coordinator jobs the driver submits itself, one per round,
@@ -6706,6 +7278,7 @@ def create_cloud_app(
             "/v1alpha1/jobs",
             content=json.dumps(spec).encode(),
             media_type="application/json",
+            venue=venue,
         )
         if r.status_code >= 300:
             return _passthrough(r)
@@ -6733,6 +7306,10 @@ def create_cloud_app(
             status=str(job.get("state") or "PENDING"),
             pool_id=pool,
             correlation_id=observability.new_correlation_id(),
+            # The venue the two calls above already used. Recorded here so
+            # every later call about this job can find its way back to the
+            # same coordinator — see 0034.
+            coordinator=venue,
         )
 
         # Priced pool routing: a bid at submit time, matched against the
@@ -6848,7 +7425,14 @@ def create_cloud_app(
                 )
                 routing_block = {"state": "skipped", "reason": "routing-error"}
 
-        response_body: dict[str, Any] = {**job, "findings": rendered}
+        # `coordinator` in the response, always populated — the same contract
+        # the read routes hold, so a client never has to know that NULL means
+        # `render`. After `**job`, because the coordinator does not send this
+        # field and a future one that did would be describing itself, not the
+        # venue this API chose.
+        response_body: dict[str, Any] = {
+            **job, "findings": rendered, COORDINATOR_FIELD: venue,
+        }
         if routing_block is not None:
             response_body["routing"] = routing_block
         return Response(
@@ -6950,12 +7534,24 @@ def create_cloud_app(
                 # form's spooled files are released when the block exits.
                 pool = _opt_str(form.get("pool"))
                 allow_fallback = _opt_str(form.get("allow_fallback"))
+                # WHICH COORDINATOR SERVES THIS JOB. A plain form field
+                # rather than a JSON key, because this route's envelope is
+                # multipart — same shape `pool` takes, and the same values
+                # the other two routes accept. `_opt_str` folds an empty
+                # field to None, so a form built by a browser that always
+                # sends every field still means "the default".
+                venue_field = _opt_str(form.get(COORDINATOR_FIELD))
         except MultiPartException as exc:
             # A malformed envelope, not a malformed workload. Sanitised: the
             # message can quote a part name the caller chose.
             raise HTTPException(
                 status_code=400, detail=safe_text(exc, 200)
             ) from None
+
+        # Refused before the tarball is touched, exactly like `pool` below:
+        # an unknown or unconfigured venue must not cost an extraction and a
+        # preflight first.
+        venue = _submitted_venue(venue_field, coordinator)
 
         # Same check, same 404, same reason as `from-repo`: a pool the caller
         # does not belong to (or that does not exist — indistinguishable on
@@ -7019,7 +7615,7 @@ def create_cloud_app(
         return await _stage_compile_and_submit(
             request, db, user_id,
             config=config, image=image, findings=findings,
-            tar_bytes=tar_bytes, pool=pool,
+            tar_bytes=tar_bytes, pool=pool, venue=venue,
             # No owner/repo/ref: there is no repository, and inventing one
             # would make a job look reproducible from a ref that does not
             # exist. The filename is the only provenance an upload has, and
@@ -7049,13 +7645,29 @@ def create_cloud_app(
         # `list_federated_jobs_for_viewer` applies the same owner-or-member
         # predicate as `scopes`, so every id it returns is already a key
         # there — the `.get` default is belt-and-braces, not a real branch.
+        def _scope_of(job_id: str) -> dict[str, Any]:
+            """This job's scope fields, with the venue folded to a real
+            value. `coordinator` is never null in a response — the contract
+            the console is written against — so the NULL that means "the
+            default" is resolved here rather than left for a client to know
+            about."""
+            scope = dict(
+                scopes.get(
+                    job_id,
+                    {"pool_id": None, "submitted_by": None,
+                     COORDINATOR_FIELD: None},
+                )
+            )
+            scope[COORDINATOR_FIELD] = _venue_of(scope)
+            return scope
+
         federated = [
             {
                 "job_id": row["id"],
                 "name": row.get("name"),
                 "state": row.get("status"),
                 "mode": "federated",
-                **scopes.get(row["id"], {"pool_id": None, "submitted_by": None}),
+                **_scope_of(row["id"]),
             }
             for row in dbmod.list_federated_jobs_for_viewer(db, user_id)
         ]
@@ -7063,22 +7675,63 @@ def create_cloud_app(
             # Nothing to scope down to; skip the coordinator round trip
             # rather than fetch a list of jobs we would only throw away.
             return federated
-        r = await coordinator.forward("GET", "/v1alpha1/jobs")
-        if r.status_code >= 300:
-            return _passthrough(r)
-        try:
-            jobs = r.json()
-        except ValueError:
-            return _passthrough(r)
-        if not isinstance(jobs, list):
-            return _passthrough(r)
+
+        # ONE LISTING PER VENUE THIS USER ACTUALLY HAS JOBS ON, and no more.
+        # The two coordinators are separate deployments with separate
+        # databases, so neither can list the other's jobs: asking only the
+        # default would make every FC job silently vanish from the console,
+        # which is the shape of bug that gets diagnosed as "the job was never
+        # submitted". Asking every configured venue unconditionally would be
+        # the opposite mistake — it would put a request on the FC coordinator
+        # every two seconds for every open jobs page, whether or not this user
+        # has ever run anything there, which is exactly the idle traffic the
+        # duty-cycle measurement cannot survive.
+        #
+        # So the venue set is derived from the rows: `scopes` was read for the
+        # visibility filter anyway and now carries `coordinator`, so this costs
+        # no extra query. A single-venue deployment — every deployment today —
+        # sends exactly the one request it sent before.
+        venues = sorted({
+            _venue_of(scope) for job_id, scope in scopes.items() if job_id in seen
+        })
+        responses = await asyncio.gather(
+            *(coordinator.forward("GET", "/v1alpha1/jobs", venue=v) for v in venues),
+            return_exceptions=True,
+        )
+        jobs: list[Any] = []
+        first_bad: httpx.Response | None = None
+        for r in responses:
+            # One venue being down must not blank the whole page: the other's
+            # jobs are still real and still worth rendering. A failure is only
+            # passed through when NOTHING could be listed, which is the
+            # single-venue behaviour unchanged.
+            if isinstance(r, BaseException):
+                continue
+            if r.status_code >= 300:
+                first_bad = first_bad or r
+                continue
+            try:
+                listing = r.json()
+            except ValueError:
+                first_bad = first_bad or r
+                continue
+            if not isinstance(listing, list):
+                first_bad = first_bad or r
+                continue
+            jobs.extend(listing)
+        if not jobs and first_bad is not None:
+            return _passthrough(first_bad)
         # The coordinator has no notion of accounts and returns every job
         # unscoped behind the operator token; `scopes` (owned or reachable
         # through a shared pool) is the only place that filter can be
         # applied — and now also the only place the workspace label comes
         # from, since the coordinator has never heard of pools.
+        #
+        # It is also what keeps the fan-out honest: a job id is only kept if
+        # THIS user's row for it exists, so one venue happening to hold an id
+        # that collides with another's cannot smuggle a job into this answer.
         visible = [
-            {**j, **scopes[j["job_id"]]}
+            {**j, **_scope_of(j["job_id"])}
             for j in jobs
             if isinstance(j, dict) and j.get("job_id") in seen
         ]
@@ -7169,8 +7822,12 @@ def create_cloud_app(
                     None if row.get("pool_id") is None else str(row["pool_id"])
                 ),
                 "submitted_by": dbmod.display_name_for(db, row["owner_id"]),
+                COORDINATOR_FIELD: _venue_of(row),
             }
-        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}")
+        venue = _venue_of(row)
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}", venue=venue
+        )
         # Merge the workspace label in rather than passing the coordinator's
         # body straight through: the detail page renders its own breadcrumb
         # and may have been deep-linked, so it cannot rely on having loaded
@@ -7188,6 +7845,10 @@ def create_cloud_app(
             None if row.get("pool_id") is None else str(row["pool_id"])
         )
         job["submitted_by"] = dbmod.display_name_for(db, row["owner_id"])
+        # From the ROW, not from the coordinator: the coordinator does not
+        # know it is one of two, and this is the field that says which one
+        # answered. Never null — the fold lives in `_venue_of`.
+        job[COORDINATOR_FIELD] = venue
 
         # THE RECORDING HOOK, Mode A half — the place in this API where a
         # non-federated job is observed to have stopped by the POLL that a
@@ -7233,9 +7894,13 @@ def create_cloud_app(
         if is_terminal_state(job.get("state")):
             dbmod.sync_observed_job_states(db, [(job_id, str(job["state"]))])
             if row.get("artifact_bytes_recorded_at") is None:
-                await _record_artifact_footprint(coordinator, db, job_id)
+                await _record_artifact_footprint(
+                    coordinator, db, job_id, venue=venue
+                )
             if row.get("artifacts_mirrored_at") is None:
-                await _mirror_job_artifacts(coordinator, db, job_id, settings)
+                await _mirror_job_artifacts(
+                    coordinator, db, job_id, settings, venue=venue
+                )
             # A FOURTH thing, and the only one that costs money to skip: give
             # back any machine rented for this job. It needs no marker column
             # of its own — a released rental leaves the state the query selects,
@@ -7312,6 +7977,12 @@ def create_cloud_app(
         row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
         if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
+        # THE JOB'S VENUE, NOT THE REQUEST'S. Read off the row already in
+        # hand for the visibility check, so it costs nothing, and used for
+        # both branches below — a federated run's rounds are all on the
+        # parent's venue, since `_stage_compile_and_submit` refuses to pin a
+        # federated submit anywhere but the default.
+        venue = _venue_of(row)
 
         if fedavgmod.is_federated_job_id(job_id):
             # A federated run is one coordinator job PER ROUND, so there is
@@ -7335,7 +8006,9 @@ def create_cloud_app(
                 return []
             responses = await asyncio.gather(
                 *(
-                    coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(cid)}/events")
+                    coordinator.forward(
+                        "GET", f"/v1alpha1/jobs/{_seg(cid)}/events", venue=venue
+                    )
                     for _, cid in pairs
                 ),
                 return_exceptions=True,
@@ -7361,7 +8034,9 @@ def create_cloud_app(
             merged.sort(key=lambda e: e.get("round") or 0)
             return merged[max(since, 0):]
 
-        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/events")
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/events", venue=venue
+        )
         if r.status_code >= 300:
             return _passthrough(r)
         try:
@@ -7441,8 +8116,11 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown job")
         # Validated once, outside the loop: a malformed segment is a 400,
         # not a "coordinator blip" the loop below should swallow, and the
-        # segment cannot change from one poll to the next.
+        # segment cannot change from one poll to the next. Same for the
+        # venue — a job's venue is fixed at submission, so re-reading it per
+        # poll would be a database round trip per second to learn a constant.
         job_seg = _seg(job_id)
+        job_venue = _venue_of(row)
 
         def _condition_met(state: str | None) -> bool:
             if state is None:
@@ -7464,7 +8142,9 @@ def create_cloud_app(
             gracefully, not crash it).
             """
             try:
-                r = await coordinator.forward("GET", f"/v1alpha1/jobs/{job_seg}")
+                r = await coordinator.forward(
+                    "GET", f"/v1alpha1/jobs/{job_seg}", venue=job_venue
+                )
             except HTTPException:
                 return None, False
             if r.status_code >= 300:
@@ -7544,6 +8224,7 @@ def create_cloud_app(
         row = dbmod.fetch_job_for_viewer(db, job_id, user_id)
         if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
+        venue = _venue_of(row)  # the job's, off the row already fetched
 
         if fedavgmod.is_federated_job_id(job_id):
             # `row["owner_id"]`, not `user_id` — same reason as the rounds
@@ -7558,7 +8239,9 @@ def create_cloud_app(
                 return []
             responses = await asyncio.gather(
                 *(
-                    coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(cid)}/tasks")
+                    coordinator.forward(
+                        "GET", f"/v1alpha1/jobs/{_seg(cid)}/tasks", venue=venue
+                    )
                     for _, cid in pairs
                 ),
                 return_exceptions=True,
@@ -7578,7 +8261,9 @@ def create_cloud_app(
                         merged.append({**t, "round": round_no})
             return merged
 
-        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks")
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/tasks", venue=venue
+        )
         return _passthrough(r)
 
     @app.get("/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoint", tags=["browser"])
@@ -7642,6 +8327,7 @@ def create_cloud_app(
             "GET",
             f"/v1alpha1/jobs/{_seg(job_id)}/tasks/{_seg(task_id)}"
             f"/checkpoints/latest",
+            venue=_venue_of(row),
         )
         return _passthrough(r)
 
@@ -7801,7 +8487,9 @@ def create_cloud_app(
                        "not a Mode A reduction — see this job's rounds",
             )
 
-        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}/result")
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/result", venue=_venue_of(row)
+        )
         return _passthrough(r)
 
     @app.get("/v1alpha1/jobs/{job_id}/contributions", tags=["browser"])
@@ -8018,7 +8706,11 @@ def create_cloud_app(
         user_id: str = Depends(current_user),
         db: psycopg.Connection = Depends(db_conn),
     ):
-        if dbmod.fetch_job_for_owner(db, job_id, user_id) is None:
+        # The row, not just its existence: the ownership check and the venue
+        # lookup are the same read, and a cancel sent to the wrong
+        # coordinator would answer 404 for a job that is still running.
+        row = dbmod.fetch_job_for_owner(db, job_id, user_id)
+        if row is None:
             # Ownership is checked *before* the coordinator is ever
             # contacted: cancelling a job you don't own must not reach the
             # coordinator at all, let alone actually cancel it.
@@ -8035,7 +8727,9 @@ def create_cloud_app(
                        "the current round finishes and the run stops when the "
                        "API process does",
             )
-        r = await coordinator.forward("POST", f"/v1alpha1/jobs/{_seg(job_id)}/cancel")
+        r = await coordinator.forward(
+            "POST", f"/v1alpha1/jobs/{_seg(job_id)}/cancel", venue=_venue_of(row)
+        )
         return _passthrough(r)
 
     # -- minting and revoking a job's public link --------------------------
@@ -8203,7 +8897,8 @@ def create_cloud_app(
         )
 
         r = await coordinator.forward(
-            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts"
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}/artifacts",
+            venue=_venue_of(row),
         )
         live_entries: list[dict[str, Any]] | None = None
         if r.status_code < 300:
@@ -8358,7 +9053,9 @@ def create_cloud_app(
         )
         if signed is not None:
             return RedirectResponse(signed, status_code=307)
-        r = await coordinator.forward("GET", f"/v1alpha1/artifacts/{coordinator_key}")
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/artifacts/{coordinator_key}", venue=_venue_of(row)
+        )
         # Only on an answer that carries the bytes. Labelling the
         # coordinator's 404 body as an attachment would offer to save the
         # error message as if it were the file.
@@ -8366,7 +9063,12 @@ def create_cloud_app(
             return _passthrough(r)
         return _passthrough(r, headers={"Content-Disposition": disposition})
 
-    async def _require_stopped(job_id: str, db: psycopg.Connection) -> None:
+    async def _require_stopped(
+        job_id: str,
+        db: psycopg.Connection,
+        *,
+        venue: str = DEFAULT_COORDINATOR_VENUE,
+    ) -> None:
         """Refuse unless the coordinator says this job has stopped writing.
 
         THE COORDINATOR, NOT ``jobs.status``. That column is a cache written
@@ -8390,7 +9092,9 @@ def create_cloud_app(
         committed yet and produces a job that fails for a reason nobody can
         reconstruct afterwards.
         """
-        r = await coordinator.forward("GET", f"/v1alpha1/jobs/{_seg(job_id)}")
+        r = await coordinator.forward(
+            "GET", f"/v1alpha1/jobs/{_seg(job_id)}", venue=venue
+        )
         if r.status_code == 404:
             return
         if r.status_code >= 300:
@@ -8507,6 +9211,7 @@ def create_cloud_app(
         row = dbmod.fetch_job_for_owner(db, job_id, user_id)
         if row is None:
             raise HTTPException(status_code=404, detail="unknown job")
+        venue = _venue_of(row)
 
         if fedavgmod.is_federated_job_id(job_id):
             if not is_terminal_state(row.get("status")):
@@ -8526,14 +9231,17 @@ def create_cloud_app(
                 )
             targets = [cid for _round, cid in dbmod.list_round_job_ids(db, job_id)]
         else:
-            await _require_stopped(job_id, db)
+            await _require_stopped(job_id, db, venue=venue)
             targets = [job_id]
 
         deleted_files = 0
         freed_bytes = 0
         for coordinator_job_id in targets:
             r = await coordinator.forward(
-                "DELETE", f"/v1alpha1/jobs/{_seg(coordinator_job_id)}/artifacts"
+                "DELETE", f"/v1alpha1/jobs/{_seg(coordinator_job_id)}/artifacts",
+                # The parent's venue for every target, federated included: a
+                # run's rounds are all on the venue the parent was pinned to.
+                venue=venue,
             )
             if r.status_code == 404:
                 # Nothing there to delete. The contract's own words: not an
@@ -9556,7 +10264,9 @@ def create_cloud_app(
     #: that must always render.
     ledger_budget_s = 5.0
 
-    async def _public_job_ledger(job_id: str) -> list[dict[str, Any]]:
+    async def _public_job_ledger(
+        job_id: str, venue: str = DEFAULT_COORDINATOR_VENUE
+    ) -> list[dict[str, Any]]:
         """The coordinator's ledger for one job, reduced to kind and timing.
 
         BEST EFFORT BY DESIGN. A coordinator that is down, slow or answering
@@ -9578,7 +10288,7 @@ def create_cloud_app(
         try:
             r = await asyncio.wait_for(
                 coordinator.forward(
-                    "GET", f"/v1alpha1/jobs/{_seg(job_id)}/events"
+                    "GET", f"/v1alpha1/jobs/{_seg(job_id)}/events", venue=venue
                 ),
                 timeout=ledger_budget_s,
             )
@@ -9638,13 +10348,23 @@ def create_cloud_app(
             attempts = await run_in_threadpool(
                 jobsharemod.public_attempts_for_job, db, job_id
             )
+            # Read separately rather than added to `JOB_SHARE_COLUMNS`: that
+            # tuple is the PUBLISHED surface (its header states the two
+            # questions a new column has to pass), and this value is needed to
+            # ADDRESS the coordinator, not to show anybody. It stays out of
+            # the response for the same reason the operator token does — which
+            # control plane this deployment runs a job on is infrastructure,
+            # and an unauthenticated page is the last place to narrate it.
+            venue = _venue_of(
+                await run_in_threadpool(dbmod.job_coordinator, db, job_id)
+            )
             return {
                 "kind": "job",
                 "job": jobsharemod.public_job_view(job, attempts),
                 "attempts": [
                     jobsharemod.public_attempt_view(a) for a in attempts
                 ],
-                "events": await _public_job_ledger(job_id),
+                "events": await _public_job_ledger(job_id, venue),
             }
 
         # Sessions second, and gated exactly as the sibling route is: two
@@ -9902,9 +10622,58 @@ def create_cloud_app(
 
     @app.post("/v1alpha1/leases/claim", tags=["agent"])
     async def claim(request: Request, machine: Machine = Depends(current_machine)):
-        response = await proxy(
-            request, machine, "/v1alpha1/leases/claim", force_node_id=True
-        )
+        # THE ONE AGENT HOP THAT CANNOT RESOLVE ITS VENUE FROM ITS PAYLOAD. A
+        # claim is worker-initiated and carries no job id — it is the request
+        # that ASKS for one — so "which coordinator" is answered from the jobs
+        # table instead: the venues that have a non-terminal job right now,
+        # then the default. `_claimable_venues` is where both halves of that
+        # rule are argued.
+        #
+        # First 200 wins and the rest are never asked. A lease is a commitment
+        # the far side has already made by answering, so a second venue must
+        # not be offered the same claim after one has handed out work — that
+        # would be one machine holding two leases it can only work one of, in
+        # two coordinators neither of which can see the other's.
+        #
+        # 204 ("nothing claimable") falls through to the next venue, which is
+        # the entire point. Anything else — a 4xx from a venue that does not
+        # know this node, a 5xx from one that is cold — also falls through: a
+        # coordinator having a bad day must not stop a machine claiming work
+        # that is waiting for it somewhere else. What comes back to the agent
+        # if every venue declines is the LAST venue's answer, and the last
+        # venue is always the default, so a fleet with no FC work in flight
+        # sees byte-identical responses to the ones it saw before this existed.
+        #
+        # A NON-DEFAULT VENUE MAY NEVER HAVE HEARD OF THIS MACHINE, because
+        # nothing registers a node anywhere but the default. That answers 403
+        # "unregistered node — register first", so the claim registers it and
+        # asks once more; see `_register_machine_with_venue` for why this
+        # cannot be a setup step. Everything about that is confined to the two
+        # lines below and to a venue that is NOT the default: the venue check
+        # comes first so the path the whole current fleet claims on evaluates
+        # one string comparison and then does exactly what it did yesterday —
+        # no body read, no lookup, no extra hop, no new way to fail.
+        #
+        # ONE retry, on the venue that just refused. A 403 handed out no
+        # lease, so re-asking the same venue cannot produce a second one, and
+        # the "first 200 wins" rule above is untouched: the loop still breaks
+        # on the first 200 and no later venue is asked after it.
+        venues = _claimable_venues()
+        for venue in venues:
+            response = await proxy(
+                request, machine, "/v1alpha1/leases/claim",
+                force_node_id=True, venue=venue,
+            )
+            if venue != DEFAULT_COORDINATOR_VENUE and _is_unregistered_node(
+                response.status_code, response.body
+            ):
+                if await _register_machine_with_venue(machine, venue):
+                    response = await proxy(
+                        request, machine, "/v1alpha1/leases/claim",
+                        force_node_id=True, venue=venue,
+                    )
+            if response.status_code == 200:
+                break
         # Remember what this machine was handed. The completion hop reports
         # only `{"accepted": bool}` against a lease id, so THIS is the single
         # point at which the API can learn which job and task a lease covers
@@ -10014,7 +10783,8 @@ def create_cloud_app(
                 "could not record last_seen_at for machine %s", machine.id
             )
         response = await proxy(
-            request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/heartbeat"
+            request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/heartbeat",
+            venue=_venue_for_lease_id(lease_id),
         )
         # A heartbeat the coordinator ACCEPTS extends the lease, and its
         # response is the renewed `Lease`. Carrying that forward is what keeps
@@ -10049,7 +10819,8 @@ def create_cloud_app(
         lease_id: str, request: Request, machine: Machine = Depends(current_machine)
     ):
         response = await proxy(
-            request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/complete"
+            request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/complete",
+            venue=_venue_for_lease_id(lease_id),
         )
         # ACCEPTANCE IS THE BODY FIELD, NEVER THE STATUS CODE.
         #
@@ -10148,7 +10919,8 @@ def create_cloud_app(
         lease_id: str, request: Request, machine: Machine = Depends(current_machine)
     ):
         response = await proxy(
-            request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/fail"
+            request, machine, f"/v1alpha1/attempts/{_seg(lease_id)}/fail",
+            venue=_venue_for_lease_id(lease_id),
         )
         # THE ONE MOMENT THIS API IS TOLD AN ATTEMPT FAILED. Until migration
         # 0015 this route was a pure proxy and wrote nothing, so a failed
@@ -10187,9 +10959,13 @@ def create_cloud_app(
     ):
         # The coordinator confines this key to the caller's live leases —
         # against the *delegated* identity, which is why forwarding the
-        # header correctly is the whole security property here.
+        # header correctly is the whole security property here. And it is
+        # also why the venue must be the one that ISSUED those leases: to any
+        # other coordinator this machine holds nothing, so the write is
+        # refused, and a task's output would be lost at the last hop.
         return await proxy(request, machine,
-                           f"/v1alpha1/artifacts/{_artifact_key(key)}")
+                           f"/v1alpha1/artifacts/{_artifact_key(key)}",
+                           venue=_venue_for_machine(machine))
 
     @app.get("/v1alpha1/artifacts/{key:path}", tags=["agent"])
     async def get_artifact(
@@ -10198,8 +10974,15 @@ def create_cloud_app(
         # Reads stay open at the coordinator, but not open *here*: this is
         # the public door, so an anonymous internet caller must not be able
         # to enumerate artifacts through it. Per-job read scoping is Task 6.
+        #
+        # The venue matters as much on the read as on the write, and this is
+        # the direction that carries the STAGED CODE: `uploads/<uuid>/
+        # code.tar.gz` was written by the submit route to the venue that job
+        # was pinned to, and only that coordinator has the bytes. The wrong
+        # one answers 404, which flashnode reads as "the input is gone".
         return await proxy(request, machine,
-                           f"/v1alpha1/artifacts/{_artifact_key(key)}")
+                           f"/v1alpha1/artifacts/{_artifact_key(key)}",
+                           venue=_venue_for_machine(machine))
 
     @app.post("/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoints/parts",
               tags=["agent"])
@@ -10210,6 +10993,7 @@ def create_cloud_app(
         return await proxy(
             request, machine,
             f"/v1alpha1/jobs/{_seg(job_id)}/tasks/{_seg(task_id)}/checkpoints/parts",
+            venue=_venue_for_job_id(job_id),
         )
 
     @app.post("/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoints/commit",
@@ -10221,6 +11005,7 @@ def create_cloud_app(
         return await proxy(
             request, machine,
             f"/v1alpha1/jobs/{_seg(job_id)}/tasks/{_seg(task_id)}/checkpoints/commit",
+            venue=_venue_for_job_id(job_id),
         )
 
     @app.get("/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoints/latest",
@@ -10255,6 +11040,7 @@ def create_cloud_app(
             request, machine,
             f"/v1alpha1/jobs/{_seg(job_id)}/tasks/{_seg(task_id)}/checkpoints/latest",
             retry_delays=AGENT_RETRY_DELAYS,
+            venue=_venue_for_job_id(job_id),
         )
 
     @app.get("/v1alpha1/jobs/{job_id}/tasks/{task_id}/checkpoints/lost-work",
@@ -10266,6 +11052,7 @@ def create_cloud_app(
         return await proxy(
             request, machine,
             f"/v1alpha1/jobs/{_seg(job_id)}/tasks/{_seg(task_id)}/checkpoints/lost-work",
+            venue=_venue_for_job_id(job_id),
         )
 
     return app

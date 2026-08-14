@@ -308,14 +308,25 @@ class CoordinatorArtifactSource:
     Constructed from anything with ``CoordinatorClient``'s ``forward`` —
     which is what holds the operator credential. Nothing here builds a
     header; that stays in the one place the repo already keeps it.
+
+    ``venue`` is which control plane to read from, and it is fixed for the
+    life of the instance because a mirror is a mirror OF ONE JOB — every read
+    it makes (task states, the artifact listing, the bytes themselves) has to
+    reach the coordinator that ran that job, and the caller resolves that once
+    from the job's row. It is a plain string rather than an import of
+    ``app.COORDINATOR_VENUES`` for the structural reason above: ``app`` imports
+    this module, so this module cannot import ``app``. ``CoordinatorClient``
+    refuses an unknown value, which is where that check belongs anyway.
     """
 
-    def __init__(self, coordinator: Any) -> None:
+    def __init__(self, coordinator: Any, venue: str | None = None) -> None:
         self._coordinator = coordinator
+        self._venue = venue
 
     async def _get(self, path: str) -> Any:
+        kwargs = {} if self._venue is None else {"venue": self._venue}
         try:
-            r = await self._coordinator.forward("GET", path)
+            r = await self._coordinator.forward("GET", path, **kwargs)
         except Exception as exc:  # noqa: BLE001 - normalised, never swallowed
             raise MirrorError(f"coordinator unreachable for {path}") from exc
         if r.status_code >= 300:

@@ -1119,6 +1119,70 @@ def set_machine_capabilities(
             _update(cur, with_ip=False)
 
 
+def machine_registration_facts(
+    db: psycopg.Connection, machine_id: str
+) -> dict[str, Any] | None:
+    """Everything this API can say about a machine's own registration, shaped
+    the way ``NodeRegistration`` wants it. ``None`` for a machine that does
+    not exist.
+
+    THE INVERSE OF :func:`set_machine_capabilities`. That function writes what
+    an agent said about itself when it registered; this reads it back so the
+    API can re-state it to a coordinator that has never heard of the machine
+    (``app._lazy_registration_body``). A coordinator's node registry is
+    in-memory — a restart, or a Function Compute instance being rebuilt, wipes
+    it — so "register once, by hand" is not a thing that stays true, and the
+    only durable copy of a registration in this system is this row.
+
+    Only the allowlisted hardware keys travel, and ``None`` values are dropped
+    rather than sent: ``NodeCapabilities.os``/``architecture`` are ``str``, not
+    ``str | None``, so a null read back out of the jsonb would be a 422 on a
+    registration that had nothing wrong with it. A dropped key takes the
+    model's own default, which is the same "we do not know" the null meant.
+
+    ``dataset_cache_bytes`` rides along because it is stored beside them and
+    means the same thing on both sides. The four booleans come from their own
+    columns, and they are the reason this read exists at all rather than a
+    hand-built minimal body: an agent re-registered with ``argv_capable``
+    false would be placeable for argv work it cannot do, and one re-registered
+    false-for-true silently stops being placeable at the new venue.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select node_id, name, capabilities,
+                   sandbox_capable, argv_capable,
+                   unsandboxed_argv_capable, module_capable
+              from public.machines
+             where id = %s
+            """,
+            (machine_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+
+    stored = row["capabilities"] if isinstance(row["capabilities"], Mapping) else {}
+    capabilities: dict[str, Any] = {}
+    for name, _types in _REPORTED_CAPABILITY_FIELDS:
+        value = stored.get(name)
+        if value is not None:
+            capabilities[name] = value
+    cache_bytes = stored.get("dataset_cache_bytes")
+    if isinstance(cache_bytes, int) and not isinstance(cache_bytes, bool):
+        capabilities["dataset_cache_bytes"] = cache_bytes
+
+    return {
+        "node_id": row["node_id"],
+        "name": row["name"],
+        "capabilities": capabilities,
+        "sandbox_capable": bool(row["sandbox_capable"]),
+        "argv_capable": bool(row["argv_capable"]),
+        "unsandboxed_argv_capable": bool(row["unsandboxed_argv_capable"]),
+        "module_capable": bool(row["module_capable"]),
+    }
+
+
 def fetch_machine_by_token_hash(
     db: psycopg.Connection, token_hash: str
 ) -> dict[str, Any] | None:
@@ -1766,6 +1830,7 @@ def insert_job(
     status: str,
     pool_id: str | None = None,
     correlation_id: str | None = None,
+    coordinator: str | None = None,
 ) -> None:
     """Record a job as owned by ``owner_id``.
 
@@ -1791,14 +1856,24 @@ def insert_job(
     non-``None`` value that is not a uuid raises rather than being quietly
     dropped — a hostname arriving here is a caller bug, not an absence, and
     ``uuid`` in the schema would refuse it anyway.
+
+    ``coordinator`` is which control plane accepted this job (migration
+    0034), and it is **the only moment it is ever decided**. ``None`` is
+    stored as ``NULL`` and read back as the default venue, which is what
+    every row predating the second coordinator means — so a caller that does
+    not care passes nothing and gets exactly today's behaviour. Nothing
+    updates this column afterwards, and nothing should: the two venues are
+    separate deployments with separate databases, so moving a job between
+    them mid-flight abandons its leases in the coordinator that issued them
+    and silently requeues its tasks.
     """
     with db.cursor() as cur:
         cur.execute(
             """
             insert into public.jobs
                 (id, owner_id, name, source, spec, status, pool_id,
-                 correlation_id)
-            values (%s, %s, %s, %s, %s, %s, %s, %s)
+                 correlation_id, coordinator)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 job_id,
@@ -1809,8 +1884,161 @@ def insert_job(
                 status,
                 pool_id,
                 require_correlation_id(correlation_id),
+                coordinator,
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# which coordinator serves a job (migration 0034)
+# ---------------------------------------------------------------------------
+#
+# Four readers, one column. Every one of them answers the RAW column — the
+# venue string or ``None`` — and never a default, because the fold from
+# "no answer" to the default venue is a decision the API makes in one place
+# (``app._venue_of``) and this module must not make a second, quieter copy of
+# it. In particular ``None`` here is deliberately ambiguous between "this job
+# is on the default venue" and "this database has never heard of that job",
+# and both callers want the same answer for both cases.
+
+
+def job_coordinator(db: psycopg.Connection, job_id: str) -> str | None:
+    """The venue recorded for ``job_id``, or ``None``.
+
+    Deliberately NOT owner-scoped, and it is the same exception
+    ``set_job_status`` documents: the callers are agent routes acting on a
+    lease the coordinator already handed out, and there is no user in the
+    request to scope by. It is safe because it grants nothing — the answer is
+    one of a two-element allowlist and reveals nothing about a job that a
+    caller who can already name its id does not have.
+
+    A primary-key lookup, which is why the agent routes can afford it on
+    every checkpoint hop.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "select coordinator from public.jobs where id = %s", (job_id,)
+        )
+        row = cur.fetchone()
+    return None if row is None else row["coordinator"]
+
+
+def lease_coordinator(db: psycopg.Connection, lease_id: str) -> str | None:
+    """The venue of the job this lease belongs to, or ``None``.
+
+    THE ONLY WAY THE ATTEMPT ROUTES CAN KNOW. ``POST /attempts/{lease_id}/
+    heartbeat|complete|fail`` carry a lease id and nothing else — 0004's
+    header is about exactly this gap — so the venue is resolved through the
+    ``attempts`` row the claim wrote. Two primary-key lookups joined in one
+    statement.
+
+    ``None`` for a lease this API never recorded (a claim whose best-effort
+    accounting write failed), for a federated round (``attempts.job_id`` holds
+    the ROUND's coordinator job id, which is not a row in ``public.jobs``), and
+    for a sandbox evaluation job. All three really are on the default venue
+    today, so the fold the caller applies is correct for each; if a later phase
+    puts federated rounds on a second venue, this is the function that has to
+    learn about ``job_rounds`` — the same second lookup ``record_attempt``
+    already does.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select j.coordinator
+              from public.attempts a
+              join public.jobs j on j.id = a.job_id
+             where a.lease_id = %s
+            """,
+            (lease_id,),
+        )
+        row = cur.fetchone()
+    return None if row is None else row["coordinator"]
+
+
+def machine_live_lease_coordinator(
+    db: psycopg.Connection, machine_id: str
+) -> str | None:
+    """The venue of the job this machine is currently working for, or ``None``.
+
+    For the two agent routes that carry NEITHER a job id nor a lease id: the
+    artifact PUT and GET. Their key is `jobs/<job_id>/...` for an output but
+    `uploads/<uuid>/code.tar.gz` for an input, so the key cannot be parsed for
+    a job id in general — while the machine holding a live lease can only be
+    talking to the coordinator that issued it.
+
+    Most recent unresolved attempt, not any attempt: a machine that finished
+    an FC task an hour ago and is now on a Render one must not have its uploads
+    aimed at FC. ``resolved_at is null`` is 0015's own definition of "in
+    flight", and ``claimed_at desc`` breaks the tie for a machine holding more
+    than one lease at once — which is `max_concurrent_tasks > 1` and rare, and
+    is the one case this answer can get wrong. It gets it wrong only across
+    venues, which needs the same machine to hold a Render lease and an FC lease
+    simultaneously; when that becomes ordinary, the fix is for the agent to
+    send the lease id with the artifact, not a cleverer guess here.
+
+    Uses ``attempts_machine_id_idx`` (0004).
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select j.coordinator
+              from public.attempts a
+              join public.jobs j on j.id = a.job_id
+             where a.machine_id = %s
+               and a.resolved_at is null
+             order by a.claimed_at desc
+             limit 1
+            """,
+            (machine_id,),
+        )
+        row = cur.fetchone()
+    return None if row is None else row["coordinator"]
+
+
+def active_job_venues(
+    db: psycopg.Connection, *, terminal_states: Sequence[str]
+) -> list[str]:
+    """The venues that currently have a job still running.
+
+    This is what stops a lease claim being sent to an idle coordinator. The
+    second venue is a Function Compute app whose entire value is a measured
+    duty cycle, and a fleet polling it every few seconds while it holds no work
+    would inflate its invocation count until that measurement said nothing.
+
+    ``coordinator is not null`` because a NULL carries no venue to report — it
+    is a row from before 0034, which means the default. The DEFAULT VENUE MAY
+    STILL APPEAR in this answer, since every submit since 0034 records its
+    venue explicitly, ``render`` included; dropping it is the caller's job
+    (``app._claimable_venues``), which polls the default unconditionally
+    anyway. Making that conditional would put today's entire fleet behind the
+    accuracy of a status column, which is a cache (see
+    ``sync_observed_job_states``), and a stale one would stop every machine
+    claiming any work at all.
+
+    That cache is also why the predicate is deliberately generous in the safe
+    direction: ``finished_at is null`` AND a status outside ``terminal_states``.
+    A job whose end nobody has observed yet still reads RUNNING here, so its
+    venue keeps being polled for a while after it really stopped. The cost of
+    that is a few extra invocations; the cost of the opposite error is a job
+    nobody ever claims.
+
+    ``terminal_states`` is passed in rather than spelled here: which states are
+    terminal is a wire fact owned by the protocol package (``JobState.terminal``
+    — see ``app.is_terminal_state``), and a private copy of it in SQL is exactly
+    the drift that list exists to prevent.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            select distinct coordinator
+              from public.jobs
+             where coordinator is not null
+               and finished_at is null
+               and (status is null or status <> all(%s))
+            """,
+            (list(terminal_states),),
+        )
+        return [row["coordinator"] for row in cur.fetchall()]
 
 
 def fetch_job_for_owner(
@@ -3400,11 +3628,20 @@ def list_job_scopes_for_viewer(
     ``pool_id`` is None for every pre-pools job. Those rows are reachable by
     their owner alone: a null pool can never match the ``pool_members`` half
     of the check, exactly as ``fetch_job_for_viewer`` documents for itself.
+
+    ``coordinator`` rides along for the same reason ``pool_id`` does — the
+    route needs it and the row is already being read. The list route asks a
+    coordinator for its whole job listing and scopes the answer down to these
+    ids; with two venues that has to be one listing PER VENUE, and this is
+    where the route learns which venues its user's jobs are actually on.
+    ``None`` is the default venue, unfolded here on purpose (see the module
+    note above ``job_coordinator``).
     """
     with db.cursor() as cur:
         cur.execute(
             """
-            select j.id, j.pool_id, pr.display_name as submitted_by
+            select j.id, j.pool_id, j.coordinator,
+                   pr.display_name as submitted_by
               from public.jobs j
               left join public.profiles pr on pr.id = j.owner_id
              where j.owner_id = %s
@@ -3419,6 +3656,7 @@ def list_job_scopes_for_viewer(
             row["id"]: {
                 "pool_id": None if row["pool_id"] is None else str(row["pool_id"]),
                 "submitted_by": row["submitted_by"],
+                "coordinator": row["coordinator"],
             }
             for row in cur.fetchall()
         }

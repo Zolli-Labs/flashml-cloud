@@ -135,6 +135,26 @@ class Settings:
     coordinator_url: str
     coordinator_operator_token: str = dc_field(repr=False)
     require_auth: bool
+    #: The SECOND control plane: an Alibaba Function Compute Web Function
+    #: running the same coordinator. `coordinator_url` above stays the
+    #: default venue and nothing changes for a deploy that leaves these
+    #: unset — they are optional for the same reason `resend_api_key` is, and
+    #: for the same reason are NOT in the require_auth missing-secret check:
+    #: an API that refuses to boot without a second coordinator would take
+    #: the product down over a venue it does not yet use.
+    #:
+    #: THE SCHEME DEFAULT IS THE OPPOSITE OF `coordinator_url`'s, and that is
+    #: deliberate. Render's coordinator is a private service reached by bare
+    #: `host:port` over an internal network that terminates no TLS, so http is
+    #: right there. This one is a PUBLIC function URL on the open internet;
+    #: defaulting it to http would send the operator token in plaintext to an
+    #: HTTPS endpoint. See `from_env`.
+    coordinator_url_fc: str = ""
+    #: The operator credential for the FC venue. A separate secret on
+    #: purpose: the two coordinators are two deployments with two databases,
+    #: and reusing one token across them would make either one's compromise
+    #: the other's. Empty is normal — see `coordinator_url_fc`.
+    coordinator_operator_token_fc: str = dc_field(default="", repr=False)
     #: LEGACY, and optional. Only projects still issuing HS256 tokens from a
     #: shared secret need this. Our project rotated to ECC (P-256) and every
     #: newly-issued token is ES256, verified against the JWKS public key —
@@ -542,6 +562,20 @@ class Settings:
         """
         return bool(self.qwen_api_key)
 
+    @property
+    def fc_coordinator_configured(self) -> bool:
+        """Whether this deployment can address the FC control plane at all.
+
+        Gated on the URL, because that is what decides whether a request can
+        be *addressed*: with no base there is nowhere to send it, and there
+        is no safe substitute — falling back to the Render coordinator would
+        run an FC-labelled job on Render and make the comparison this second
+        venue exists to measure a lie. A URL with no token is a different and
+        louder failure (the coordinator answers 401), warned about at startup
+        rather than rounded to "off" here.
+        """
+        return bool(self.coordinator_url_fc)
+
     @classmethod
     def from_env(cls) -> "Settings":
         require_auth = os.environ.get("FLASHML_REQUIRE_AUTH", "true").strip().lower() not in (
@@ -562,6 +596,20 @@ class Settings:
             os.environ.get("COORDINATOR_URL", ""), "http"
         )
         coordinator_operator_token = os.environ.get("COORDINATOR_OPERATOR_TOKEN", "")
+        # The second venue, and https by default — the OPPOSITE of the line
+        # just above, which is the point. That one is a Render private
+        # service on an internal network with no TLS to speak of; this one is
+        # a public Alibaba Function Compute URL, so a scheme-less value must
+        # become `https://`, not `http://`. Defaulting it the other way would
+        # not fail loudly: it would send the operator token in the clear to
+        # an endpoint that serves HTTPS, which is the failure that leaves no
+        # trace. Both are optional and absent by default.
+        coordinator_url_fc = _with_default_scheme(
+            os.environ.get("COORDINATOR_URL_FC", "").strip().rstrip("/"), "https"
+        )
+        coordinator_operator_token_fc = os.environ.get(
+            "COORDINATOR_OPERATOR_TOKEN_FC", ""
+        )
         # Standard libpq connection string/URI for the Postgres database
         # (see flashml_cloud_api.db). Not included in the require_auth
         # missing-secret check below: browser/machine auth can be verified
@@ -688,6 +736,8 @@ class Settings:
             supabase_service_key=supabase_service_key,
             coordinator_url=coordinator_url,
             coordinator_operator_token=coordinator_operator_token,
+            coordinator_url_fc=coordinator_url_fc,
+            coordinator_operator_token_fc=coordinator_operator_token_fc,
             require_auth=require_auth,
             database_url=database_url,
             console_url=console_url,
@@ -802,6 +852,22 @@ class Settings:
                     "The GitHub App is half-configured: GITHUB_APP_ID, "
                     "GITHUB_APP_SLUG and GITHUB_APP_PRIVATE_KEY must all be "
                     "set. Private-repo submission stays off until they are."
+                )
+
+            # Same shape again, one venue further out. COORDINATOR_URL_FC and
+            # COORDINATOR_OPERATOR_TOKEN_FC are a pair: a URL with no token
+            # sends `Bearer ` to a real coordinator and collects 401s, and a
+            # token with no URL is a venue that cannot be addressed at all
+            # (`forward(venue="fc")` refuses rather than quietly using
+            # Render). Neither refuses to boot — the FC venue is opt-in and
+            # every existing route uses the default venue regardless.
+            fc_coordinator_values = (coordinator_url_fc, coordinator_operator_token_fc)
+            if any(fc_coordinator_values) and not all(fc_coordinator_values):
+                logging.getLogger("flashml-cloud-api").warning(
+                    "The FC coordinator is half-configured: COORDINATOR_URL_FC "
+                    "and COORDINATOR_OPERATOR_TOKEN_FC must both be set. Jobs "
+                    "routed to the FC venue will fail until they are; the "
+                    "default venue is unaffected."
                 )
 
             # Third time, same shape, and the one where silence costs money in

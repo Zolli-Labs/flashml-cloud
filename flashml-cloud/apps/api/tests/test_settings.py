@@ -144,7 +144,7 @@ def test_from_env_still_strips_a_trailing_slash_once_it_reaches_the_client(
     settings = Settings.from_env()
     client = CoordinatorClient(settings)
 
-    assert client._base == "http://flashml-coordinator:10000"
+    assert client._bases["render"] == "http://flashml-coordinator:10000"
 
 
 def test_missing_coordinator_url_still_fails_loudly_when_auth_is_required(

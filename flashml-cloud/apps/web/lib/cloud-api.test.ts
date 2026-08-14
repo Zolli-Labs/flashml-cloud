@@ -645,6 +645,31 @@ describe("cloud-api", () => {
         pool: "pool-1",
       });
     });
+
+    it("omits coordinator when left on the default (Render)", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", "main", "pool-1");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).not.toHaveProperty("coordinator");
+    });
+
+    it("includes coordinator when the picker was moved off Render", async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchMock.mockResolvedValue(jsonResponse(200, okResponse));
+
+      await submitFromRepo("owner/repo", "main", "pool-1", "fc");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        repo: "owner/repo",
+        ref: "main",
+        pool: "pool-1",
+        coordinator: "fc",
+      });
+    });
   });
 
   describe("listJobContributions", () => {

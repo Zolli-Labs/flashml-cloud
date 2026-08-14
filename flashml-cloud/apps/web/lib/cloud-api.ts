@@ -368,6 +368,21 @@ export interface JobRecord {
   submitted_by?: string | null;
   backend?: string;
   deployment_profile?: string;
+  /** Which control plane coordinated this job: `"render"` (the incumbent
+   * private Render service) or `"fc"` (Alibaba Function Compute, Singapore)
+   * — see `apps/api`'s `COORDINATOR_VENUES`. Not to be confused with every
+   * other use of the word "coordinator" in this codebase, which means the
+   * FlashRuntime service itself rather than which deployment of it ran a
+   * given job; this field is what lets two deployments be compared
+   * side by side.
+   *
+   * OPTIONAL HERE for the same reason every other field on this interface
+   * is: the API and web deploy separately, and this field landed in both at
+   * once but not atomically. The contract promises it is always populated
+   * once the API sends it — `lib/job-coordinator.ts` is where "absent"
+   * and `"render"` are treated as the same fact, so nothing else in this
+   * console needs its own fallback. */
+  coordinator?: string;
   runtime_execution_id?: string | null;
   created_at?: string;
   finished_at?: string | null;
@@ -1790,15 +1805,24 @@ export function submitJob(spec: unknown): Promise<JobRecord> {
  * omitting the key (rather than sending `pool: undefined`, which
  * `JSON.stringify` also drops, or `pool: null`, which it would not) keeps
  * the request identical to what this client sent before pools existed for
- * every submission that leaves the selector on "No pool — public queue". */
+ * every submission that leaves the selector on "No pool — public queue".
+ *
+ * `coordinator` rides the same way, for the same reason: omitting it is what
+ * makes the API's own default (`"render"`) the effective default here too,
+ * rather than this client silently pinning every submitter to a value the
+ * API might one day change. Callers pass it only when the picker on the
+ * submit form was moved off Render. */
 export function submitFromRepo(
   repo: string,
   ref?: string,
-  pool?: string
+  pool?: string,
+  coordinator?: string
 ): Promise<SubmitFromRepoResult> {
-  const body: { repo: string; ref?: string; pool?: string } = { repo };
+  const body: { repo: string; ref?: string; pool?: string; coordinator?: string } =
+    { repo };
   if (ref) body.ref = ref;
   if (pool) body.pool = pool;
+  if (coordinator) body.coordinator = coordinator;
   return request<SubmitFromRepoResult>("/v1alpha1/jobs/from-repo", {
     method: "POST",
     body: JSON.stringify(body),

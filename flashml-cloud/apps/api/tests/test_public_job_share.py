@@ -637,6 +637,16 @@ def test_the_public_view_serves_only_the_share_columns(make_client, db):
         # link-holder would hand out the correlation this column exists to make
         # possible internally.
         "correlation_id",
+        # 0034. Which of the two control planes serves this job. Ours, so it
+        # passes Rule 7's provenance question — and withheld on the second
+        # one for a different reason from `correlation_id`'s: it does not
+        # re-identify anybody, it describes OUR deployment. Which coordinator
+        # a run lands on, and therefore which of them is up, is infrastructure
+        # detail an unauthenticated link-holder has no use for and we have no
+        # reason to narrate. The API still reads it on this route — it is how
+        # the ledger below finds the right coordinator — it simply does not
+        # publish it.
+        "coordinator",
     }
     assert not (withheld & set(job)), "a withheld column reached the page"
     # `status` is published under the name `state`, and `id` under `job_id`:

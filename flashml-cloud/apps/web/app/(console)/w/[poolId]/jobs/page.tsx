@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { ArrowClockwise, Plus } from "@phosphor-icons/react";
+import { CoordinatorChip } from "@/components/jobs/CoordinatorChip";
 import { StateBadge } from "@/components/jobs/StateBadge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -38,7 +39,14 @@ const FILTERS = [
 ] as const;
 type Filter = (typeof FILTERS)[number]["id"];
 
-const COLUMNS = ["Job", "Submitted by", "Mode", "Started", "State"];
+const COLUMNS = [
+  "Job",
+  "Submitted by",
+  "Mode",
+  "Started",
+  "Coordinator",
+  "State",
+];
 
 function started(job: JobRecord): string {
   if (!job.created_at) return "—";
@@ -190,10 +198,11 @@ export default function WorkspaceJobsPage() {
           {(rows) => (
             // Hairline rows on the page, not cards. A real <thead> so the
             // columns are announced rather than being visual-only labels.
-            // `min-w-[640px]` is the floor that keeps five columns from
-            // collapsing; the primitive supplies the `overflow-x-auto`
+            // `min-w-[720px]` is the floor that keeps six columns (Coordinator
+            // joined the other five when the render/FC comparison shipped)
+            // from collapsing; the primitive supplies the `overflow-x-auto`
             // container this used to hand-write.
-            <Table className="min-w-[640px]">
+            <Table className="min-w-[720px]">
               <TableHeader>
                 <TableRow>
                   {/* No `label-caps` here — `TableHead`'s own default now
@@ -204,7 +213,7 @@ export default function WorkspaceJobsPage() {
                   {COLUMNS.map((h, i) => (
                     <TableHead
                       key={h}
-                      className={cn(i === 4 && "text-right")}
+                      className={cn(i === COLUMNS.length - 1 && "text-right")}
                     >
                       {h}
                     </TableHead>
@@ -235,6 +244,9 @@ export default function WorkspaceJobsPage() {
                       {j.mode === "federated" ? "federated" : "independent"}
                     </TableCell>
                     <TableCell className="meta">{started(j)}</TableCell>
+                    <TableCell>
+                      <CoordinatorChip coordinator={j.coordinator} />
+                    </TableCell>
                     <TableCell className="text-right">
                       <StateBadge state={j.state} />
                     </TableCell>

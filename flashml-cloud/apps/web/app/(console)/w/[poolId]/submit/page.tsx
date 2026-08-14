@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/tabs";
 import { PageShell } from "@/components/shell/PageShell";
 import { PageHeader } from "@/components/shell/PageHeader";
+import { CoordinatorPicker } from "@/components/deploy/CoordinatorPicker";
 import { FindingsList } from "@/components/deploy/FindingsList";
 import { PlanStrip } from "@/components/deploy/PlanStrip";
 import { TemplateGallery } from "@/components/deploy/TemplateGallery";
@@ -32,6 +33,10 @@ import {
   type SubmitFromRepoResult,
 } from "@/lib/cloud-api";
 import { templateById, type DeployTemplate } from "@/lib/deploy/templates";
+import {
+  DEFAULT_COORDINATOR,
+  type CoordinatorVenue,
+} from "@/lib/job-coordinator";
 import { summariseRouting, type RoutingRead } from "@/lib/job-routing";
 import { poolFleetCounts } from "@/lib/machine-scope";
 import { workspacePath } from "@/lib/workspace-scope";
@@ -61,6 +66,11 @@ export default function SubmitPage() {
 
   const [repo, setRepo] = useState("");
   const [ref, setRef] = useState("");
+  // Defaults to Render so a submitter who never touches this control gets
+  // exactly today's behaviour — the same reason `submitFromRepo` omits the
+  // key entirely rather than sending `"render"` explicitly.
+  const [coordinator, setCoordinator] =
+    useState<CoordinatorVenue>(DEFAULT_COORDINATOR);
   const [status, setStatus] = useState<Status>("idle");
   const [findings, setFindings] = useState<PreflightFinding[]>([]);
   const [result, setResult] = useState<SubmitFromRepoResult | null>(null);
@@ -183,7 +193,8 @@ export default function SubmitPage() {
       const job = await submitFromRepo(
         repo.trim(),
         ref.trim() || undefined,
-        poolId
+        poolId,
+        coordinator === DEFAULT_COORDINATOR ? undefined : coordinator
       );
       setResult(job);
       setFindings(job.findings ?? []);
@@ -411,6 +422,14 @@ export default function SubmitPage() {
                     Runs in <span className="font-medium">{pool.name}</span>
                   </p>
                 </div>
+
+                {/* Defaults to Render, so a submitter who never touches this
+                    control changes nothing about where their job lands. */}
+                <CoordinatorPicker
+                  value={coordinator}
+                  onChange={setCoordinator}
+                  disabled={status === "submitting"}
+                />
 
                 <p className="text-xs text-muted-foreground">
                   Jobs in this Workspace run without a container sandbox on
