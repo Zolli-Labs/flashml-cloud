@@ -158,16 +158,18 @@ EXTRA_DEPENDENCIES_PARAM = "extra_dependencies"
 #: exactly like ``CHECKPOINT_PARAM`` (2026-08-12, "fault tolerance was never
 #: on": cloud-only, no PyPI release, no four-site pin bump).
 #:
-#: **Known gap, verified against the pinned runtime (0.6.0) rather than
-#: assumed**, and the one difference from ``checkpoint``: ``CommandRecipe.
-#: expand`` builds each task payload from a fixed key list and forwards
-#: ``checkpoint`` but not this one, so the value stops at the JobSpec and
-#: does not yet reach ``task.payload``. It survives the JobSpec round-trip
-#: (asserted in tests) — it is the recipe's one-line forward that is
-#: missing, in the public repo, and it must land with the flashnode side
-#: that reads it. Until it does, the submitter's half of the contract is
-#: complete and correct and the hosts simply are not told. This is the same
-#: shape as ``_local_inputs``'s known gap, recorded rather than papered over.
+#: **The gap this comment used to describe is closed** (verified against the
+#: installed runtime, not assumed). Until 2026-08-14 ``CommandRecipe.expand``
+#: built each task payload from a fixed key list, forwarded ``checkpoint``
+#: but not this one, and the value stopped at the JobSpec — the submitter's
+#: half of the contract complete and correct while the hosts were not told.
+#: At the pin, 0.6.1, the recipe forwards it and flashnode's executor
+#: provisions the declared interpreter with uv, so the declaration reaches
+#: ``task.payload["python"]`` end to end. ``tests/test_compile.py`` gates
+#: that assertion on the pin, the way the ``gpuPerTask`` pair does: the
+#: guard for the OLD behaviour is the one that now skips, and it stays
+#: because the drop does not fail closed — a pin that went backwards would
+#: run every job on whatever interpreter the host happens to have.
 PYTHON_PARAM = "python"
 
 #: Curated image alias → the CPython ``major.minor`` its base image ships.
@@ -609,7 +611,7 @@ def _resources(config: FlashmlConfig) -> dict[str, Any]:
     """``flashml.yaml resources:`` → the upstream ``ResourcesSpec`` fields.
 
     **The GPU gap this docstring used to describe is closed** (verified
-    against the installed runtime, not assumed). At the current pin, 0.6.0:
+    against the installed runtime, not assumed). At the current pin, 0.6.1:
 
     - ``ResourcesSpec`` declares ``gpuPerTask: int = Field(ge=0, default=0)``,
       so ``compile_to_jobspec``'s ``JobSpec.model_validate(...)`` round-trip

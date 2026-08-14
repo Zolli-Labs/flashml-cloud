@@ -14,6 +14,7 @@ unsandboxed volunteer machine.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from dataclasses import replace
@@ -449,7 +450,7 @@ def test_a_nonsensical_cpu_count_is_refused(bad):
 # ``compile_to_jobspec`` returns ``JobSpec.model_validate(...).model_dump()``,
 # so its output carries only the fields the PINNED flashruntime declares.
 # ``ResourcesSpec.gpuPerTask`` landed in flashruntime 0.5.0 and the pin is
-# 0.6.0, so the round-trip keeps it today. It did NOT between 0.4.0 and the
+# 0.6.1, so the round-trip keeps it today. It did NOT between 0.4.0 and the
 # re-pin: pydantic's default ``extra="ignore"`` dropped the field silently —
 # no error, no warning, just a GPU job that compiled to a CPU spec.
 #
@@ -532,7 +533,7 @@ def test_a_gpu_request_survives_the_jobspec_round_trip():
     """The hop that was broken by the pin and would not have announced it.
 
     Live since the pin moved to a flashruntime that declares ``gpuPerTask``
-    (0.5.0; the pin is 0.6.0). It is the assertion that catches the field
+    (0.5.0; the pin is 0.6.1). It is the assertion that catches the field
     being dropped again — by a pin that goes backwards, or by a
     ``compile_to_jobspec`` that stops emitting it.
     """
@@ -1110,28 +1111,85 @@ def test_federated_rounds_also_declare_the_interpreter():
     assert _params(spec)["python"] == "3.11"
 
 
-def test_the_pinned_recipe_stops_the_interpreter_at_the_jobspec():
-    """KNOWN GAP, asserted rather than assumed — the one difference from
-    `checkpoint`.
+def _pin_forwards_python() -> bool:
+    """Does the PINNED ``CommandRecipe`` forward `python` into the payload?
 
-    `CommandRecipe.expand` builds each task payload from a fixed key list and
-    this key is not on it in flashruntime 0.6.0, so the value reaches the
-    JobSpec (test above) and stops there. Same shape as `local_inputs`'s gap:
-    the submitter's half of the contract is complete and correct, and the
-    hosts are simply not told yet. Closing it is a one-line forward in the
-    PUBLIC repo and must land with the flashnode side that reads the key,
-    then a release and a four-site pin bump.
-
-    WHEN THE PIN MOVES, THIS TEST FAILS ON PURPOSE. That is the signal the
-    gap closed: flip the second assertion to `== "3.11"` and delete this
-    paragraph."""
+    A source probe rather than a behavioural one, for the reason
+    `test_compile_datasets.py` records beside the same shape: expanding a
+    spec and skipping when the key is missing would skip for a *broken*
+    forward exactly as readily as for an absent one, which is the failure
+    the tests below exist to catch. Comment lines are stripped first —
+    `expand` discusses the interpreter at length, in prose that would
+    outlive the one-line forward being deleted.
+    """
     from flashruntime.recipes.command import CommandRecipe
 
+    code = "\n".join(
+        line
+        for line in inspect.getsource(CommandRecipe.expand).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    return '"python"' in code
+
+
+def test_the_pinned_recipe_carries_the_interpreter_into_the_task_payload():
+    """The hop the round-trip test above cannot see, through the REAL recipe.
+
+    This was the KNOWN GAP until 2026-08-14: `CommandRecipe.expand` builds
+    each task payload from a fixed key list and the key was not on it, so
+    the value reached the JobSpec and stopped there — the submitter's half
+    of the contract complete and correct, the hosts simply not told.
+    flashruntime 0.6.1 forwards it and flashnode's executor provisions the
+    declared interpreter with uv on the hosts that build a venv instead of
+    running an image, so what a submitter writes is now what a node is
+    actually told. Same shape as `local_inputs`'s gap, closed the same way:
+    a one-line forward in the PUBLIC repo, a release, a four-site pin bump.
+    """
+    from flashruntime.recipes.command import CommandRecipe
+
+    if not _pin_forwards_python():
+        pytest.skip(
+            "the pinned flashruntime's CommandRecipe does not forward "
+            "python, so the interpreter stops at the JobSpec. Fixed by "
+            "pinning a runtime that forwards it (0.6.1 or later) — all "
+            "four pin sites move together (see the repo CLAUDE.md's table)."
+        )
+    spec = compile_to_jobspec(
+        _config(image="sklearn", python=QUOTED_312), SKLEARN, CODE_URI, "demo"
+    )
+    tasks = CommandRecipe().expand("job-123", JobSpec.model_validate(spec))
+    payload = tasks[0].payload
+    # The submitter's declaration, not the curated default it overruled:
+    # precedence survives the whole path, not just the compiler.
+    assert CURATED_IMAGE_PYTHON[SKLEARN.reference] == "3.11"
+    assert payload["python"] == "3.12"
+    # Beside `dependencies`, never instead of it — the key is metadata about
+    # that install list and a host reads the two together.
+    assert "numpy==1.26.4" in payload["dependencies"]
+
+
+def test_a_pin_without_the_forward_drops_the_interpreter_silently():
+    """Documents WHY the test above would skip, so a pin that goes backwards
+    cannot be misread.
+
+    This one is the skip today — the pin forwards the key and
+    `test_the_pinned_recipe_carries_the_interpreter_into_the_task_payload`
+    has taken over. It stays because the drop does NOT fail closed: nothing
+    rejects the spec, the recipe ignores parameters it does not know, and
+    the job leases and runs — on whatever interpreter the host happens to
+    have. That is the shape that burned a healthy task's whole attempt
+    budget on 2026-08-13 (§6.1), and a pin that goes backwards must produce
+    a described, understood failure mode rather than a mystery.
+    """
+    from flashruntime.recipes.command import CommandRecipe
+
+    if _pin_forwards_python():
+        pytest.skip("pin now forwards python; the test above asserts it")
     spec = compile_to_jobspec(_config(image="sklearn"), SKLEARN, CODE_URI, "demo")
     tasks = CommandRecipe().expand("job-123", JobSpec.model_validate(spec))
     payload = tasks[0].payload
-    # The sibling key IS forwarded, so this is a gap in the forwarding list
-    # and not a spec the recipe rejected.
+    # The sibling key IS forwarded, so a missing `python` is a gap in the
+    # forwarding list and not a spec the recipe rejected.
     assert "numpy==1.26.4" in payload["dependencies"]
     assert "python" not in payload
 
