@@ -274,6 +274,31 @@ How verified: `apps/api/.venv/bin/pytest -q` — **3400 passed, 2 skipped, 3
   unproven budget to 1 and the spill correctly vanishes as
   `excluded: "unproven-cap"`, which is increment (2)'s cross-class cap
   observed through the authoring surface.
+  **Code-review fixes on the same branch, all four reproduced red first**
+  (worktree `.worktrees/routing-phase1`): (a) **concurrent refills
+  double-entitled a bid** — `refill_open_bids` read the remainder and the
+  held listings with no lock, so two walks over one bid both planned the same
+  listing and both granted it; now `marketplace.lock_bid` takes the row's
+  `for update` BEFORE any of that is read, each bid's plan+grant runs in its
+  own savepoint with a narrow `except IllegalTransition` (one bid's lost race
+  used to roll back every earlier bid's grants and report `"refilled": []`),
+  and migration **0033** adds the partial unique index
+  `matches (bid_id, listing_id) where state <> 'expired'` as the backstop.
+  Removing the lock makes the new two-connection test fail with a real
+  `UniqueViolation` on that index; removing either the savepoint or the
+  `except` fails the second test. (b) **`nearest_miss` was wrong under
+  `balanced`/`fastest`** — it latched the FIRST above-cap ask in rank order,
+  which is price order only under `cheapest`, so `fastest` reported 500 where
+  120 existed; it is a running minimum now. (c) `rank_score(..., "fastest")`
+  published a median for an ask `fastest_key` had demoted for having no finite
+  effective price — None now, matching what the row was ordered by.
+  (d) `test_schema.py` iterates `marketplace.OBJECTIVES` instead of a
+  hardcoded triple, so a fourth objective added without a migration turns a
+  silent fail-open unroute into a red test. Verified:
+  `apps/api/.venv/bin/pytest -q` — **3408 passed, 2 skipped, 3 deselected,
+  1 xfailed** in ~71s (3401 + 7 new), and `e2e/.venv/bin/pytest
+  e2e/test_priced_pool_routing.py -q` — **2 passed in 7.1s** against the
+  pinned `flashruntime==0.6.0`.
 Gotchas: **Migration 0032 must reach a database before the API that writes
   it.** `marketplace.create_bid` names the column unconditionally, so an API
   deployed first fails every priced submission's routing (fail-open, so jobs

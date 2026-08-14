@@ -797,18 +797,31 @@ def rank_score(
     ``rank_score`` and ``formula`` together can check the engine's arithmetic
     without reading this file.
 
-    None means two different true things depending on the objective, and both
-    are "no finite score", never "excluded": under ``cheapest``/``balanced``
-    the host has a 0.0 acceptance rate and no finite bid clears it; under
-    ``fastest`` nobody has timed it. Either way it ranks last among its peers
-    and stays in the book.
+    None always means "no finite score", never "excluded", and it is reached
+    two ways. A host with a 0.0 acceptance rate has no finite effective price
+    and no finite bid clears it — that answers None under ALL THREE
+    objectives, because all three sort it last on exactly that fact. Under
+    ``fastest`` a host nobody has timed answers None as well: it is ordered
+    after every machine somebody has timed, and there is no duration to
+    publish. Either way the row ranks last among its peers and stays in the
+    book.
     """
     price = effective_price(ask.ask_zc_per_hour, ask.acceptance_rate)
     name = _checked_objective(objective)
-    if name == "fastest":
-        return median_fraction(ask.median_seconds)
+    # THE CONTRACT: what is published here must be the value the row was
+    # actually ORDERED by. `_rank_key_for` puts an ask with no finite
+    # effective price LAST under every objective, `fastest` included
+    # (`fastest_key`'s leading `1 if price is None else 0`) — so under
+    # `fastest` such a row is ordered by its unclearability and not by the
+    # median it happens to carry. Returning that median would publish a
+    # number that decided nothing, and would rank the row FIRST to any buyer
+    # re-deriving the order from `rank_score` + `formula`. `price is None`
+    # is therefore checked BEFORE the objective branches, exactly as
+    # `balanced` has always checked it.
     if price is None:
         return None
+    if name == "fastest":
+        return median_fraction(ask.median_seconds)
     if name == "balanced":
         return price * quality_factor(ask.median_seconds, class_median)
     return price
@@ -1968,6 +1981,21 @@ def create_bid(
     check constraint; the default is the engine's own
     :data:`DEFAULT_RANK_OBJECTIVE`, which is what a caller that names nothing
     would have been matched under anyway.
+
+    **A JOB'S BIDS ARE NESTED, AND EXACTLY ONE CALLER MAKES THEM SO.**
+    ``routing.route_submitted_job`` is the only place in the product that
+    posts a job's bids, and it posts one per class of
+    ``routing.plan_pool_routing``'s walk: the first for the WHOLE job, each
+    later one for only the tasks its predecessors could not fill. So an
+    eight-task job that fills three in its first class posts ``tasks_wanted``
+    8 and then 5 — for the same eight tasks, not for thirteen. Stated here
+    because a reader arrives at this function first, and because
+    ``routing.refill_open_bids`` depends on it: it recovers a job's task
+    total as the ``max`` over ``bids_for_job``, which is right only while the
+    bids nest. A second caller that posted a job's bids as DISJOINT parts
+    would silently make that ``max`` an under-count of the job's own newcomer
+    allowance; it would need ``sum`` instead, and the two callers could not
+    then share one refill. Add one only with that line.
 
     A bid moves no credits. The balance is only committed when a host claims,
     which is why :func:`can_cover` exists as a check a caller may make and not

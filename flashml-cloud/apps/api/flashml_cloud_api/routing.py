@@ -933,6 +933,19 @@ def refill_open_bids(
             # the max across the job's bids IS the job's task total; max
             # rather than `siblings[0]` because it survives `bids_for_job`
             # ever returning another order.
+            #
+            # THE NESTING IS AN INVARIANT OF THE ONE WRITER, not of this
+            # module: `marketplace.create_bid` is called for a job in exactly
+            # one place — `route_submitted_job`'s walk over
+            # `plan_pool_routing`'s `class_plans` — which enters its first
+            # class with the whole job and each later class with the
+            # remainder. See `create_bid`'s docstring, which states the same
+            # invariant at the writing end, and
+            # test_routing_routes.py::test_a_cpu_small_job_spills_into_the_
+            # cpu_large_book, which pins descending task counts through the
+            # authoring surface. A SECOND caller posting a job's bids as
+            # disjoint parts would make `max` under-count the job's want and
+            # `sum` correct; add one and this line has to move with it.
             job_tasks = max(
                 (int(row["tasks_wanted"]) for row in siblings),
                 default=int(bid["tasks_wanted"]),

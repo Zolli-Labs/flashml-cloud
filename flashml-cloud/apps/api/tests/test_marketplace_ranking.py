@@ -239,7 +239,15 @@ def test_balanced_leaves_an_unclearable_ask_last_like_every_objective():
     ]
     for objective in mk.OBJECTIVES:
         assert _order(asks, objective)[-1] == "broken", objective
-    assert mk.rank_score(asks[0], objective="balanced") is None
+    # And the SCORE says so under every objective, not only the two whose
+    # arithmetic happens to divide by the missing number. `rank_score`
+    # publishes the value a row was ORDERED by (it rides beside `formula` in
+    # the routing explain), and `fastest_key` orders this row last on its
+    # unclearability — never on the 1.0s median it has. Publishing that
+    # median would publish a number that decided nothing, and would rank the
+    # row FIRST to anybody re-deriving the order from the published score.
+    for objective in mk.OBJECTIVES:
+        assert mk.rank_score(asks[0], objective=objective) is None, objective
 
 
 # ---------------------------------------------------------------------------

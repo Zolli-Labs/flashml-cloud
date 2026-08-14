@@ -9,6 +9,7 @@ import psycopg
 import pytest
 
 from flashml_cloud_api import db as dbmod
+from flashml_cloud_api import marketplace as mk
 
 # One test below asserts against a real, freshly-migrated database rather
 # than against the SQL text: a column list read out of `information_schema`
@@ -985,11 +986,36 @@ def test_a_bid_objective_is_constrained_to_the_three_the_engine_ranks_by(db):
     Same discipline as `bids.capability_class` one column up: a value nothing
     in the ranking engine can act on is refused by the table, not discovered
     when a response builder raises a KeyError over OBJECTIVE_FORMULAS.
+
+    **Iterated over `marketplace.OBJECTIVES`, never over a literal triple.**
+    0032's CHECK and that tuple are two copies of one register, and 0032's own
+    header names the constraint as a site that has to move with it. A
+    hardcoded list here would let a fourth objective be added in Python alone
+    and stay green: `create_bid` would accept it, the insert would hit this
+    CHECK, and — because the submit hook's routing block is fail-open — every
+    job asking for it would land UNROUTED with a warning line. Iterating the
+    real tuple turns that silent fail-open into a red test in this file.
     """
     owner = _objective_owner(db)
-    for good in ("cheapest", "balanced", "fastest"):
+    assert mk.OBJECTIVES, "the engine must rank by something"
+    for good in mk.OBJECTIVES:
         with db.transaction():
             assert _insert_bid_without_an_objective(db, owner, objective=good) == good
+
+
+def test_a_bid_objective_the_engine_does_not_have_is_refused_by_the_table(db):
+    """The other direction of the same drift: a CHECK widened past
+    `marketplace.OBJECTIVES` — or a caller reaching the table around
+    `_checked_objective` — must still be refused.
+
+    The name is derived from the tuple rather than written out, so it stays a
+    non-objective no matter what the register grows to.
+    """
+    owner = _objective_owner(db)
+    not_an_objective = "-and-".join(mk.OBJECTIVES)
+    assert not_an_objective not in mk.OBJECTIVES
     with pytest.raises(psycopg.errors.CheckViolation):
         with db.transaction():
-            _insert_bid_without_an_objective(db, owner, objective="cheapest-and-fastest")
+            _insert_bid_without_an_objective(
+                db, owner, objective=not_an_objective
+            )

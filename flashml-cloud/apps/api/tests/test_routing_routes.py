@@ -987,6 +987,17 @@ def test_a_cpu_small_job_spills_into_the_cpu_large_book(
     bids = sorted(_bids_for_job(db, job_id), key=lambda b: b["created_at"])
     assert [b["capability_class"] for b in bids] == ["cpu-small", "cpu-large"]
     assert [b["tasks_wanted"] for b in bids] == [2, 1]
+
+    # THE NESTING INVARIANT, stated as itself rather than left implicit in the
+    # literal above. `routing.refill_open_bids` recovers a job's task total as
+    # the MAX over its bids, which is right only because the bids are nested
+    # remainders (first = the whole job, each later one smaller) and not
+    # disjoint parts. `marketplace.create_bid`'s docstring names this walk as
+    # its only caller for exactly this reason; this is the surface that proves
+    # it, through a real submission rather than a hand-built plan.
+    wants = [b["tasks_wanted"] for b in bids]
+    assert max(wants) == routing_block["tasks_wanted"] == wants[0]
+    assert wants == sorted(wants, reverse=True)
     assert routing_block["bids"] == [
         {"capability_class": b["capability_class"], "bid_id": str(b["id"])}
         for b in bids
