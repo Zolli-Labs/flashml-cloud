@@ -86,6 +86,7 @@ from flashml_cloud_api import datasets as dsmod
 from flashml_cloud_api import db as dbmod
 from flashml_cloud_api import enrolment
 from flashml_cloud_api import fedavg as fedavgmod
+from flashml_cloud_api import geoip as geoipmod
 from flashml_cloud_api import job_share as jobsharemod
 from flashml_cloud_api import metrics as metricsmod
 from flashml_cloud_api import marketplace as marketplacemod
@@ -1694,6 +1695,24 @@ DEFAULT_EPHEMERAL_RECONCILE_S = 60.0
 #: live machines, which is why that module's windows all have safe defaults
 #: and this file passes none of them.
 DEFAULT_RENTED_RECONCILE_S = 300.0
+
+#: How often the GEO DETECTION sweep runs, and how many machines it may
+#: resolve per pass. Unlike every interval above it, this one races NOTHING —
+#: a machine with no location on the map costs no money and expires nothing —
+#: so it is the slowest loop in the process and the smallest budget.
+#:
+#: The budget is the number that matters: it multiplies `geoip.LOOKUP_TIMEOUT_S`
+#: x `geoip.LOOKUP_ATTEMPTS` into the time one sweep holds a database
+#: connection (50s at these defaults), and connections are the resource this
+#: deployment has actually run out of before. Raising it is a decision about
+#: the Postgres pooler, not about how fast the map fills.
+#:
+#: Overridable with FLASHML_GEOIP_SWEEP_S / FLASHML_GEOIP_BUDGET; <= 0 on the
+#: interval runs no loop at all. **NEITHER TURNS THE FEATURE ON** — that is
+#: FLASHML_GEOIP_PROVIDER, which defaults to `off`, and with it unset this loop
+#: is never even started.
+DEFAULT_GEOIP_SWEEP_S = 900.0
+DEFAULT_GEOIP_BUDGET = 5
 
 
 class EvaluationSpecError(ValueError):
@@ -3427,6 +3446,10 @@ def create_cloud_app(
     rented_reconcile_s = float(
         os.environ.get("FLASHML_RENTED_RECONCILE_S", DEFAULT_RENTED_RECONCILE_S)
     )
+    geoip_sweep_s = float(
+        os.environ.get("FLASHML_GEOIP_SWEEP_S", DEFAULT_GEOIP_SWEEP_S)
+    )
+    geoip_budget = int(os.environ.get("FLASHML_GEOIP_BUDGET", DEFAULT_GEOIP_BUDGET))
     # Empty in production, and see `capacity/registry.py` for why that is the
     # right answer rather than a gap: with no adapter the sweep reports what it
     # would destroy and destroys nothing, which is what an unconfigured
@@ -3536,6 +3559,62 @@ def create_cloud_app(
                 return
             await asyncio.sleep(ephemeral_reconcile_s)
 
+    async def _geoip_sweep_loop() -> None:
+        """Resolve a few undeclared machines' locations, on a timer, for ever.
+
+        ONLY STARTED WHEN A PROVIDER IS CONFIGURED (see `lifespan`), which
+        makes "off by default" true of startup as well as of the sweep itself:
+        an unconfigured deployment has no task, so it never wakes and never
+        opens a connection to decide it has nothing to do. That is the same
+        gate `_reconcile_loop` gets from `settings.fc_sandbox_configured`.
+
+        DELAYED FIRST PASS, following `_ephemeral_machine_loop` and NOT the
+        two reconcilers. Their startup edge exists because a redeploy is the
+        event that abandons a billing sandbox or rental, and the first sweep
+        after it is the only thing that stops the meter. Nothing here costs
+        money or expires: a machine with no location on the map is in exactly
+        the state it was in before this feature existed, and it will still be
+        there in fifteen minutes. Delaying also keeps merely starting the app
+        from opening Postgres before any request has arrived.
+
+        Every failure is swallowed and logged, as both sibling loops do. This
+        one calls a third party, so it is the loop MOST likely to raise — and
+        a raised sweep would kill the task and silently end detection for the
+        life of the process.
+        """
+        while True:
+            if geoip_sweep_s > 0:
+                await asyncio.sleep(geoip_sweep_s)
+            conn = None
+            try:
+                conn = await run_in_threadpool(app.state.connect)
+                # In a thread because `sweep` is blocking on both counts: it
+                # holds a psycopg connection AND makes a synchronous HTTP call
+                # per machine. On the event loop it would stall every request
+                # in the process for the length of a third party's timeout.
+                resolved = await run_in_threadpool(
+                    geoipmod.sweep, conn, budget=geoip_budget
+                )
+                if resolved:
+                    log.info(json.dumps({
+                        "text": "geo detection resolved machine locations",
+                        "machines": resolved,
+                    }))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one failed sweep must not end it
+                log.warning("geo detection sweep failed", exc_info=True)
+            finally:
+                if conn is not None:
+                    # `db.close_when_idle`, not `conn.close`: this `finally`
+                    # runs on cancellation too, and the `run_in_threadpool`
+                    # above is still executing when it does — for up to the
+                    # whole lookup budget, which makes this the loop where it
+                    # matters most. See that function.
+                    await run_in_threadpool(dbmod.close_when_idle, conn)
+            if geoip_sweep_s <= 0:
+                return
+
     async def _rented_capacity_loop() -> None:
         """Sweep rented GPUs at startup and then on a timer, for ever.
 
@@ -3632,6 +3711,15 @@ def create_cloud_app(
             task = asyncio.create_task(_reconcile_loop(), name="fc-sandbox-reconcile")
             tasks.append(task)
             _app.state.sandbox_reconciler = task
+        # Gated, like the sandbox loop and unlike the two money loops: with no
+        # FLASHML_GEOIP_PROVIDER there is nothing to ask and nobody to ask it,
+        # so an unconfigured deployment starts no task at all rather than one
+        # that wakes every fifteen minutes to decide it has nothing to do. The
+        # default is `off`, so this branch is not taken anywhere today.
+        if geoipmod.detection_enabled():
+            geo_task = asyncio.create_task(_geoip_sweep_loop(), name="geoip-sweep")
+            tasks.append(geo_task)
+            _app.state.geoip_sweeper = geo_task
         try:
             yield
         finally:
@@ -9414,6 +9502,13 @@ def create_cloud_app(
                                 if isinstance(parsed.get("capabilities"), dict)
                                 else None
                             ),
+                            # The address this registration arrived from, for
+                            # the background geo sweep to resolve later
+                            # (migration 0031). `client_ip` answers None for a
+                            # private, loopback or unparseable address, which
+                            # writes nothing — so every local and e2e run is
+                            # unchanged. No lookup happens on this path.
+                            last_seen_ip=geoipmod.client_ip(request),
                         )
                 except Exception:
                     log.warning(
@@ -9464,7 +9559,13 @@ def create_cloud_app(
         try:
             with contextlib.closing(app.state.connect()) as conn:
                 try:
-                    dbmod.touch_machine_last_seen(conn, machine.id)
+                    # `ip` rides the UPDATE that was already being issued —
+                    # one column, no new statement and no new hop. None for a
+                    # private, loopback or unparseable address, which writes
+                    # nothing. See `geoip` for why no lookup happens here.
+                    dbmod.touch_machine_last_seen(
+                        conn, machine.id, ip=geoipmod.client_ip(request)
+                    )
                 except Exception:
                     log.warning(
                         "could not record last_seen_at for machine %s", machine.id
@@ -9589,7 +9690,12 @@ def create_cloud_app(
         # because a display column could not be written.
         try:
             with contextlib.closing(app.state.connect()) as conn:
-                dbmod.touch_machine_last_seen(conn, machine.id)
+                # Same one-column addition as the node route above: the
+                # address rides the UPDATE that was already happening, and a
+                # private or unparseable one writes nothing.
+                dbmod.touch_machine_last_seen(
+                    conn, machine.id, ip=geoipmod.client_ip(request)
+                )
         except Exception:
             log.warning(
                 "could not record last_seen_at for machine %s", machine.id

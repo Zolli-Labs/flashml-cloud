@@ -813,8 +813,9 @@ def test_the_database_refuses_an_impossible_coordinate_even_without_the_api(db):
 
 
 def test_the_database_refuses_a_geo_source_it_has_never_heard_of(db):
-    """There is deliberately no value meaning "we worked it out from the
-    network"."""
+    """Since 0031 'detected' IS a legal value — this pins that the constraint
+    was widened to exactly three values, never removed: an arbitrary string
+    still bounces. test_geoip.py owns the 'detected' side."""
     owner = _new_user(db)
     machine_id = _machine(db, owner)
 
