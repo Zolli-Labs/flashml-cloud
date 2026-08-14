@@ -91,19 +91,6 @@ PRICE_BLOCK = "    price:\n      max_per_hour: 5.00\n"
 #: `test_marketplace_class_board.py` leaves cpu-large asks at 1000 and 2000),
 #: and a spill test that those could fill is not testing the spill.
 CHEAP_PRICE_BLOCK = "    price:\n      max_per_hour: 0.20\n"
-#: `price.objective` pinned to the engine's own default.
-#:
-#: The yaml default is `balanced` (flashml_yaml.DEFAULT_PRICE_OBJECTIVE), and
-#: most of this file exercises it. The two inspection tests below compare the
-#: submit response's book against `GET /jobs/{id}/routing`'s recomputed one
-#: BYTE FOR BYTE, and that route has no objective to recompute with — bids do
-#: not store one (v1) — so it re-ranks `cheapest`. Pinning the submit side to
-#: the same objective is what makes the two comparable; leaving it on
-#: `balanced` would compare two different questions and call the difference a
-#: bug the first time a machine in the cpu books has a measured median.
-CHEAPEST_PRICE_BLOCK = (
-    "    price:\n      max_per_hour: 5.00\n      objective: cheapest\n"
-)
 #: Two tasks, so a one-task class has a remainder to spill.
 SWEEP_BLOCK = "    sweep:\n      lr:\n        - 0.1\n        - 0.2\n"
 GPU_BLOCK = "    resources:\n      gpus: 1\n"
@@ -113,16 +100,8 @@ MALFORMED_RESOURCES_BLOCK = "    resources:\n      gpus: one\n"
 
 CLEAN_YAML = BASE_YAML
 PRICED_YAML = BASE_YAML + PRICE_BLOCK
-CHEAPEST_PRICED_YAML = BASE_YAML + CHEAPEST_PRICE_BLOCK
 GPU_PRICED_YAML = BASE_YAML + PRICE_BLOCK + GPU_BLOCK
 SPILL_PRICED_YAML = BASE_YAML + CHEAP_PRICE_BLOCK + SWEEP_BLOCK
-#: The spill repo, with the same objective pin and for the same reason.
-CHEAPEST_SPILL_PRICED_YAML = (
-    BASE_YAML
-    + CHEAP_PRICE_BLOCK.rstrip("\n")
-    + "\n      objective: cheapest\n"
-    + SWEEP_BLOCK
-)
 FASTEST_PRICED_YAML = (
     BASE_YAML + PRICE_BLOCK.rstrip("\n") + "\n      objective: fastest\n"
 )
@@ -130,12 +109,6 @@ MALFORMED_RESOURCES_PRICED_YAML = BASE_YAML + PRICE_BLOCK + MALFORMED_RESOURCES_
 
 CLEAN_REPO = {"flashml.yaml": CLEAN_YAML, "train.py": CLEAN_TRAIN_PY}
 PRICED_REPO = {"flashml.yaml": PRICED_YAML, "train.py": CLEAN_TRAIN_PY}
-CHEAPEST_PRICED_REPO = {
-    "flashml.yaml": CHEAPEST_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
-}
-CHEAPEST_SPILL_PRICED_REPO = {
-    "flashml.yaml": CHEAPEST_SPILL_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
-}
 FASTEST_PRICED_REPO = {
     "flashml.yaml": FASTEST_PRICED_YAML, "train.py": CLEAN_TRAIN_PY,
 }
@@ -1105,7 +1078,7 @@ def _get_routing(client, token: str, job_id: str):
 
 
 def test_routing_inspection_for_a_routed_job(make_client, db, _withdraw_after):
-    client = make_client(CHEAPEST_PRICED_REPO)
+    client = make_client(PRICED_REPO)
     host = _new_user(db)
     machine = _machine(db, host, capabilities=CPU_SMALL)
     listing = marketmod.create_listing(
@@ -1161,12 +1134,13 @@ def test_routing_inspection_for_a_routed_job(make_client, db, _withdraw_after):
         "accept", "objective", "formula", "tasks_wanted", "tasks_filled",
         "tasks_unfilled", "book", "nearest_miss",
     }
-    # The live re-explain has no stored objective to recompute with — a bid
-    # records its class, cap and task count, not what the submitter asked the
-    # book to be ranked by — so it says `cheapest` and means it. This job
-    # pinned `objective: cheapest` in its yaml precisely so the two sides
-    # are the same question; see CHEAPEST_PRICE_BLOCK.
-    assert live_book["objective"] == "cheapest"
+    # The re-explain reads the objective off the bid (migration 0032), so the
+    # two sides are the same question WITHOUT the yaml having to pin one. This
+    # repo names no objective at all and therefore gets flashml.yaml's own
+    # default; before the column existed this route re-ranked `cheapest`
+    # regardless, and the file had to pin `objective: cheapest` in the yaml to
+    # make the byte-for-byte comparison below mean anything.
+    assert live_book["objective"] == "balanced"
     assert live_book["objective"] == routing_block["objective"]
     assert live_book["formula"] == routing_block["formula"]
     # Re-derived from the bids that exist, so it names the classes actually
@@ -1187,7 +1161,7 @@ def test_routing_inspection_returns_every_bid_a_spilled_job_posted(
     the newest (the pre-spill behaviour) would hide the class that actually
     filled most of the job."""
     _forget_observations.append("cpu-large")
-    client = make_client(CHEAPEST_SPILL_PRICED_REPO)
+    client = make_client(SPILL_PRICED_REPO)
     host = _new_user(db)
 
     # Proven, for the same reason as the spill test above: the second class
@@ -1226,9 +1200,132 @@ def test_routing_inspection_returns_every_bid_a_spilled_job_posted(
     ] == [[str(small["id"])], [str(large["id"])]]
 
     # The live book walks the bids' own classes, in the order they were
-    # created — the same walk, re-run against the book as it stands now.
+    # created — the same walk, re-run against the book as it stands now, and
+    # under the objective the FIRST bid stored (0032). Both bids carry it:
+    # one walk planned them, and the spilled class's bid was never derived
+    # from the job's config at all, so the row is the only place it lives.
+    assert {b["objective"] for b in out["bids"]} == {"balanced"}
+    assert out["live_book"]["objective"] == "balanced"
     assert out["live_book"]["accept"] == ["cpu-small", "cpu-large"]
     assert out["live_book"]["book"] == body["routing"]["book"]
+
+
+def test_routing_inspection_re_explains_under_the_bids_stored_objective(
+    make_client, db, _withdraw_after
+):
+    """Migration 0032, end to end: the re-explain reads the objective off the
+    BID instead of falling back to ``cheapest``.
+
+    The two seeded machines disagree about which is best under which
+    objective — the fast one is DEARER — so an order is evidence of which
+    objective produced it rather than a coincidence two rankings share. Under
+    ``fastest`` the dear-but-quick machine leads the book; under the old
+    hardcoded ``cheapest`` it could not have.
+
+    The byte-for-byte comparison against the submit response is the same one
+    ``test_routing_inspection_for_a_routed_job`` makes, and it is only
+    meaningful now: before the column existed, the two sides answered
+    different questions and the file had to pin ``objective: cheapest`` in the
+    yaml to make them comparable at all.
+    """
+    client = make_client(FASTEST_PRICED_REPO)
+    host = _new_user(db)
+
+    slow_machine = _machine(db, host, capabilities=CPU_SMALL)
+    _resolve_attempts(db, slow_machine, seconds=90)
+    slow = marketmod.create_listing(
+        db, machine_id=slow_machine, owner_id=host, ask_zc_per_hour=100,
+    )
+    _withdraw_after.append((str(slow["id"]), host))
+
+    fast_machine = _machine(db, host, capabilities=CPU_SMALL)
+    _resolve_attempts(db, fast_machine, seconds=5)
+    fast = marketmod.create_listing(
+        db, machine_id=fast_machine, owner_id=host, ask_zc_per_hour=200,
+    )
+    _withdraw_after.append((str(fast["id"]), host))
+
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    job_id = body["job_id"]
+    routing_block = body["routing"]
+    assert routing_block["objective"] == "fastest"
+
+    bids = _bids_for_job(db, job_id)
+    assert len(bids) == 1
+    assert bids[0]["objective"] == "fastest"
+
+    resp = _get_routing(client, _jwt(alice), job_id)
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+
+    live_book = out["live_book"]
+    assert live_book["objective"] == "fastest"
+    assert live_book["formula"] == marketmod.OBJECTIVE_FORMULAS["fastest"]
+    # The bid row itself publishes what it was matched under, so a console
+    # reading this route never has to infer it from the ordering.
+    assert out["bids"][0]["objective"] == "fastest"
+
+    order = [row["listing_id"] for row in live_book["book"]]
+    assert order.index(str(fast["id"])) < order.index(str(slow["id"]))
+    # ...and it leads DESPITE being the more expensive ask, which is what
+    # makes the ordering evidence of `fastest` rather than of `cheapest`.
+    by_listing = {row["listing_id"]: row for row in live_book["book"]}
+    assert (
+        by_listing[str(fast["id"])]["ask_zc_per_hour"]
+        > by_listing[str(slow["id"])]["ask_zc_per_hour"]
+    )
+    assert by_listing[str(fast["id"])]["tasks_assigned"] == 1
+
+    # Nothing in the book moved between the two calls, so the recomputation
+    # must reproduce the submit response exactly — now for real, rather than
+    # because the yaml was pinned to the engine's fallback.
+    assert live_book["book"] == routing_block["book"]
+
+
+def test_routing_inspection_reads_a_pre_0032_bid_as_cheapest(make_client, db):
+    """A bid written before the objective column existed still re-explains,
+    and it re-explains ``cheapest``.
+
+    The row is inserted WITHOUT naming ``objective``, exactly as every writer
+    before migration 0032 wrote one, so it takes the column default. That
+    default is `marketplace.DEFAULT_RANK_OBJECTIVE` — what `match_bid` does
+    when nobody names anything, and therefore what those rows really were
+    matched under. Every bid in dev and prod is one of these, so this is the
+    path the route will actually take on the day it deploys.
+    """
+    client = make_client(CLEAN_REPO)
+    alice = _new_user(db)
+    r = _post(client, _jwt(alice))
+    assert r.status_code == 201, r.text
+    job_id = r.json()["job_id"]
+    assert _bids_for_job(db, job_id) == []
+
+    with db.cursor() as cur:
+        cur.execute(
+            "insert into public.bids"
+            " (job_id, owner_id, capability_class, max_zc_per_hour,"
+            "  tasks_wanted, est_task_seconds)"
+            " values (%s, %s::uuid, 'cpu-small', 5000, 1, 3600) returning id",
+            (job_id, alice),
+        )
+        bid_id = str(cur.fetchone()["id"])
+
+    try:
+        resp = _get_routing(client, _jwt(alice), job_id)
+        assert resp.status_code == 200, resp.text
+        out = resp.json()
+        assert out["bids"][0]["objective"] == "cheapest"
+        assert out["live_book"]["objective"] == "cheapest"
+        assert out["live_book"]["formula"] == marketmod.OBJECTIVE_FORMULAS["cheapest"]
+    finally:
+        # Through `cancel_bid`, not a raw update: an open bid left in the
+        # `cpu-small` book is live demand for the rest of the session, and
+        # `routing.refill_open_bids` walks exactly that book every time a
+        # listing appears in it.
+        marketmod.cancel_bid(db, bid_id=bid_id, owner_id=alice)
 
 
 def test_routing_inspection_for_an_unrouted_job(make_client, db):

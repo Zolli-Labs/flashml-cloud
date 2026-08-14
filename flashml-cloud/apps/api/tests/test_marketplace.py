@@ -1287,6 +1287,59 @@ def test_a_bid_must_estimate_how_long_a_task_takes(db):
         )
 
 
+def test_a_bid_remembers_the_objective_it_was_matched_under(db):
+    """Migration 0032. The order a book was walked in is an input to matching
+    exactly as the cap is, and until this column existed it was the one input
+    the row did not keep — so anything re-matching or re-explaining the bid
+    later had to guess.
+
+    Stored rather than re-derived from the job's config, because neither
+    reader can honestly re-derive it: the repo's flashml.yaml may have been
+    edited since submission, and a spilled class's bid was never derived from
+    that config at all (`routing.plan_pool_routing` asks each later class for
+    the remainder, not for the job).
+    """
+    buyer = make_user(db)
+    bid = mk.create_bid(
+        db, job_id="job-objective", owner_id=buyer,
+        capability_class_name="gpu-24gb", max_zc_per_hour=500,
+        tasks_wanted=1, est_task_seconds=3600, objective="fastest",
+    )
+    assert bid["objective"] == "fastest"
+
+
+def test_a_bid_that_names_no_objective_records_the_engine_default(db):
+    """`cheapest`, not flashml.yaml's `balanced`. A caller that names nothing
+    gets the order this module ranks in when nobody names anything, and the
+    row says so — the same reasoning the column default carries for every bid
+    written before 0032 (see the migration's header)."""
+    buyer = make_user(db)
+    bid = mk.create_bid(
+        db, job_id="job-objective-default", owner_id=buyer,
+        capability_class_name="gpu-24gb", max_zc_per_hour=500,
+        tasks_wanted=1, est_task_seconds=3600,
+    )
+    assert bid["objective"] == mk.DEFAULT_RANK_OBJECTIVE == "cheapest"
+
+
+def test_a_bid_cannot_be_posted_under_an_objective_the_engine_lacks(db):
+    """Refused at the Python boundary, with the three it could have been —
+    the same message `objective_formula` and `match_bid` give — rather than
+    as a bare CheckViolation from the table. The constraint in 0032 is the
+    backstop for anything that reaches the row another way, not the first
+    line of defence."""
+    buyer = make_user(db)
+    with pytest.raises(ValueError) as caught:
+        mk.create_bid(
+            db, job_id="job-objective-bogus", owner_id=buyer,
+            capability_class_name="gpu-24gb", max_zc_per_hour=500,
+            tasks_wanted=1, est_task_seconds=3600, objective="cheapest-ish",
+        )
+    assert "cheapest-ish" in str(caught.value)
+    for name in mk.OBJECTIVES:
+        assert name in str(caught.value)
+
+
 # ---------------------------------------------------------------------------
 # Price observations
 # ---------------------------------------------------------------------------

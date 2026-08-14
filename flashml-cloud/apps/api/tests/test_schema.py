@@ -919,3 +919,77 @@ def test_agent_principals_token_hash_allows_multiple_nulls(db):
             token_hash=None, token_prefix=None,
             revoked_at="2026-01-01T00:00:00Z",
         )
+
+
+# ---------------------------------------------------------------------------
+# 0032_bid_objective — the objective a bid was matched under, on the bid.
+# ---------------------------------------------------------------------------
+
+
+def _objective_owner(db) -> str:
+    """A profile a bid can reference. `bids.owner_id` cascades from
+    `public.profiles`, which cascades from `auth.users` (the local stub in
+    conftest.py stands in for Supabase's own schema)."""
+    owner = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute("insert into auth.users (id) values (%s::uuid)", (owner,))
+        cur.execute("insert into public.profiles (id) values (%s::uuid)", (owner,))
+    return owner
+
+
+def _insert_bid_without_an_objective(db, owner: str, objective=...) -> str:
+    """A bid written the way every writer BEFORE migration 0032 wrote one:
+    the column is not named at all, so the row takes the column default.
+
+    This is the only honest way to test the backfill. `marketplace.create_bid`
+    now always names the column, so going through it would test the Python
+    default and prove nothing about the rows already in the two deployed
+    databases.
+    """
+    columns = (
+        "job_id, owner_id, capability_class, max_zc_per_hour, tasks_wanted,"
+        " est_task_seconds"
+    )
+    values = "%s, %s::uuid, 'cpu-small', 100, 1, 3600"
+    params: list = [f"schema-obj-{uuid.uuid4().hex[:8]}", owner]
+    if objective is not ...:
+        columns += ", objective"
+        values += ", %s"
+        params.append(objective)
+    with db.cursor() as cur:
+        cur.execute(
+            f"insert into public.bids ({columns}) values ({values}) returning objective",
+            params,
+        )
+        return cur.fetchone()["objective"]
+
+
+def test_a_bid_written_before_0032_reads_as_cheapest(db):
+    """The backfill, checked against the applied schema rather than the SQL
+    text. Every bid in dev and prod predates this column, and the surfaces
+    that read it re-explain a book with it — so the default is not cosmetic,
+    it is a claim about how those matches were actually made.
+
+    `cheapest` is `marketplace.DEFAULT_RANK_OBJECTIVE`, which is what
+    `match_bid` does when nobody names an objective and therefore what every
+    one of those rows really was matched under. flashml.yaml's own default is
+    `balanced`; stamping THAT on the history would be a false claim published
+    as an explanation. See 0032's header.
+    """
+    assert _insert_bid_without_an_objective(db, _objective_owner(db)) == "cheapest"
+
+
+def test_a_bid_objective_is_constrained_to_the_three_the_engine_ranks_by(db):
+    """The database is the backstop for `marketplace._checked_objective`.
+
+    Same discipline as `bids.capability_class` one column up: a value nothing
+    in the ranking engine can act on is refused by the table, not discovered
+    when a response builder raises a KeyError over OBJECTIVE_FORMULAS.
+    """
+    owner = _objective_owner(db)
+    for good in ("cheapest", "balanced", "fastest"):
+        with db.transaction():
+            assert _insert_bid_without_an_objective(db, owner, objective=good) == good
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with db.transaction():
+            _insert_bid_without_an_objective(db, owner, objective="cheapest-and-fastest")

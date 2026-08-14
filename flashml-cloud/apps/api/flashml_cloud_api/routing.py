@@ -751,6 +751,14 @@ def route_submitted_job(
     evidence, which is the only thing that makes "we picked this one for you"
     a claim rather than an assertion.
 
+    **It is also written to every bid** (``marketplace.create_bid``'s
+    ``objective``, migration 0032), which is what makes the bid re-usable
+    after this call returns. A bid that recorded its class, its cap and its
+    task count but not its ordering could be re-matched only by a caller
+    willing to guess — and :func:`refill_open_bids`, walking the open book
+    when new supply appears, would then quietly buy a ``fastest`` job the
+    cheapest machine that cleared.
+
     ``config.resources``/``config.placement`` deciding the accepted classes
     here is the SECOND time they are read: the handler already ran
     :func:`job_accept_classes` at validation time, before the coordinator
@@ -809,6 +817,13 @@ def route_submitted_job(
                 max_zc_per_hour=price["max_zc_per_hour"],
                 tasks_wanted=entry["tasks_wanted"],
                 est_task_seconds=est_seconds,
+                # Recorded on the row, not merely obeyed here (migration
+                # 0032). Every class's bid carries the same objective
+                # because one walk planned them all; storing it per bid
+                # rather than per job is what lets `refill_open_bids` and
+                # the routing inspection route come back to a SINGLE bid
+                # later and rank the book the way this walk did.
+                objective=objective,
             )
             if entry["plan"].fills:
                 marketplace.grant_matches(

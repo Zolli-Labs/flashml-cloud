@@ -7904,17 +7904,26 @@ def create_cloud_app(
         was asked for everything), which is exactly what the original walk
         started from.
 
-        **The live book is re-ranked ``cheapest``, whatever the job asked
-        for.** A bid records the class, the cap and the task count — not the
-        objective the submitter chose — and this route reads bids, so the
-        objective is simply not recoverable here. Rather than guess it from
-        the job's config (which may have been edited in the repo since, and
-        which the SPILLED classes were never re-derived from anyway), the
-        recomputation names what it actually did: ``live_book["objective"]``
-        is ``"cheapest"`` and ``live_book["formula"]`` says what that means.
-        Storing the objective on the bid is a migration and is deliberately
-        not done for v1 — the honest label costs nothing and the wrong label
-        would cost a buyer's trust in the whole explain surface.
+        **The live book is re-ranked under the objective the BID stored**
+        (``bids[0]["objective"]``, migration 0032), so the recomputation
+        answers the question the submission asked rather than a different
+        one. Until that column existed this route had nothing to recompute
+        with and re-ranked ``cheapest`` whatever the job wanted — an honest
+        label on the wrong answer, which is why the column landed.
+
+        It is read off the FIRST bid, beside the cap and the task count
+        already taken from it, and for the same reason: that bid is the walk's
+        first-choice class, asked for the whole job, and is exactly what the
+        original walk started from. One walk plans every class of one
+        submission, so all of a job's bids carry the same objective by
+        construction — the column is per bid rather than per job because a
+        SINGLE bid is what ``routing.refill_open_bids`` later comes back to,
+        not because two bids of one job could disagree.
+
+        Deliberately not re-derived from the job's config: that config lives
+        in a git repo that may have been edited since submission, and the
+        SPILLED classes were never derived from it anyway (each later class
+        is asked for the remainder, not for the job).
 
         An unrouted job (no price block, so ``route_submitted_job`` never
         ran) is not an error — it answers ``{"bids": [], "live_book":
@@ -7952,6 +7961,7 @@ def create_cloud_app(
             workspace_machine_ids=routingmod.workspace_machine_ids_for(
                 db, row["owner_id"]
             ),
+            objective=str(bids[0]["objective"]),
         )
         live_book.pop("class_plans", None)
 

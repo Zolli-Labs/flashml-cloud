@@ -1128,6 +1128,11 @@ BID_COLUMNS: tuple[str, ...] = (
     "est_task_seconds",
     "deadline",
     "state",
+    # Migration 0032. Which of `OBJECTIVES` this bid asked the book to be
+    # ranked by — read back by every surface that RE-matches or RE-explains
+    # the bid (`routing.refill_open_bids`, `GET /jobs/{id}/routing`), neither
+    # of which can honestly re-derive it from the job's config.
+    "objective",
     "created_at",
     "updated_at",
 )
@@ -1940,6 +1945,7 @@ def create_bid(
     tasks_wanted: int,
     est_task_seconds: int,
     deadline: Any = None,
+    objective: str = DEFAULT_RANK_OBJECTIVE,
 ) -> dict[str, Any]:
     """Post a job's willingness to pay.
 
@@ -1948,6 +1954,21 @@ def create_bid(
     the buyer is choosing about somebody else's hardware. It is validated
     against the ladder here and by a check constraint in 0018.
 
+    ``objective`` is which of :data:`OBJECTIVES` the caller ranked the book by
+    when it planned this bid, RECORDED rather than merely obeyed (migration
+    0032). It is the one input to matching the row did not keep, and the two
+    surfaces that come back to a live bid later — :func:`routing.refill_open_bids`
+    when new supply appears, and the routing inspection route when a buyer
+    asks what their job is doing — both need it and neither can honestly
+    re-derive it: the job's ``flashml.yaml`` may have been edited since
+    submission, and a SPILLED class's bid was never derived from that config
+    at all (``routing.plan_pool_routing`` asks each later class for the
+    remainder, not for the job). It is validated here, with the three names it
+    could have been, so a caller fails at this boundary rather than at the
+    check constraint; the default is the engine's own
+    :data:`DEFAULT_RANK_OBJECTIVE`, which is what a caller that names nothing
+    would have been matched under anyway.
+
     A bid moves no credits. The balance is only committed when a host claims,
     which is why :func:`can_cover` exists as a check a caller may make and not
     as a gate this function imposes: refusing a bid on a balance would be a
@@ -1955,6 +1976,7 @@ def create_bid(
     """
     if capability_class_name not in CAPABILITY_CLASSES:
         raise ValueError(f"{capability_class_name!r} is not a capability class")
+    ranked_by = _checked_objective(objective)
     if int(max_zc_per_hour) < 0:
         raise ValueError("a bid may be zero (donated capacity only) but never negative")
     if int(tasks_wanted) <= 0:
@@ -1985,9 +2007,9 @@ def create_bid(
                 f"""
                 insert into public.bids
                     (job_id, owner_id, capability_class, max_zc_per_hour,
-                     tasks_wanted, est_task_seconds, deadline, state,
-                     created_at, updated_at)
-                values (%s, %s::uuid, %s, %s, %s, %s, %s, 'open',
+                     tasks_wanted, est_task_seconds, deadline, objective,
+                     state, created_at, updated_at)
+                values (%s, %s::uuid, %s, %s, %s, %s, %s, %s, 'open',
                         clock_timestamp(), clock_timestamp())
                 returning {_BID_SELECT}
                 """,
@@ -1999,6 +2021,7 @@ def create_bid(
                     int(tasks_wanted),
                     int(est_task_seconds),
                     deadline,
+                    ranked_by,
                 ),
             )
             row = cur.fetchone()
