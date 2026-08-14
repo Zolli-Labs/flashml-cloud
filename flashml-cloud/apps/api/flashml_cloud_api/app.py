@@ -4308,6 +4308,41 @@ def create_cloud_app(
             raise HTTPException(status_code=404, detail="unknown machine")
         return {"machine_id": machine_id, "location": "declared"}
 
+    @app.patch("/v1alpha1/machines/{machine_id}/official", tags=["browser"])
+    async def set_machine_official_route(
+        machine_id: str,
+        request: Request,
+        user_id: str = Depends(admitted_user),
+        db: psycopg.Connection = Depends(db_conn),
+    ):
+        """Mark one of your own machines as platform-operated anchor capacity.
+
+        Body: `{"official": true}` or `{"official": false}`.
+
+        This PUBLISHES the machine's name to every signed-in viewer — it is
+        the one documented exception to the provider anonymisation rule (see
+        `network._label` and migration 0030) — which is why it is a write
+        behind `admitted_user` and not a display preference.
+
+        Same 400/404 split as the location route above: a body that is not a
+        boolean is the caller's own input and they can fix it, while "that
+        machine is not yours" must read identically to "no such machine" so
+        ownership never confirms which ids exist.
+        """
+        payload = await _json_object(request)
+        official = payload.get("official")
+        try:
+            written = networkmod.set_machine_official(
+                db, machine_id, user_id, official
+            )
+        except networkmod.InvalidOfficial as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if not written:
+            raise HTTPException(status_code=404, detail="unknown machine")
+        # Echoing the value that was written, which the type check above has
+        # already established is a real boolean.
+        return {"machine_id": machine_id, "official": official}
+
     @app.post("/v1alpha1/device/approve", tags=["browser"])
     async def approve(
         request: Request,

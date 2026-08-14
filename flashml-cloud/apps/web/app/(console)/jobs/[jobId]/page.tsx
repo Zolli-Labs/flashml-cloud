@@ -15,12 +15,15 @@ import { CheckpointsCard } from "@/components/jobs/CheckpointsCard";
 import { RoutingCard } from "@/components/jobs/RoutingCard";
 import { TradeoffCard } from "@/components/jobs/TradeoffCard";
 import { LedgerView } from "@/components/jobs/LedgerView";
+import { TasksTable } from "@/components/jobs/TasksTable";
 import { Disclosure } from "@/components/jobs/Disclosure";
 import { useWorkspaceHint } from "@/components/shell/WorkspaceHint";
 import {
+  deriveAttemptCoverage,
   deriveAttempts,
   deriveProgress,
   deriveStallReason,
+  type AttemptCoverage,
 } from "@/lib/job-activity";
 import {
   summariseJobArtifacts,
@@ -378,6 +381,15 @@ export default function JobDetailPage({
     () => summariseCheckpoints({ tasks, reads: checkpoints, attempts }),
     [tasks, checkpoints, attempts]
   );
+  // Which source the Placement view may quote an attempt total from. The
+  // ledger normally answers; when every lease event it carries names no
+  // machine, `deriveAttempts` drops them all and this falls back to the
+  // coordinator's own tally rather than letting the view go silent about
+  // attempts while the task table beside it shows 3/4.
+  const coverage = useMemo(
+    () => deriveAttemptCoverage(tasks, attempts),
+    [tasks, attempts]
+  );
   const routingPanel = useMemo(
     () => summariseRouting(routingRead),
     [routingRead]
@@ -537,7 +549,10 @@ export default function JobDetailPage({
           <PlacementView
             job={job}
             tasks={tasks}
+            events={events}
             attempts={attempts}
+            coverage={coverage}
+            checkpoints={checkpointPanel}
             now={now}
             routing={routingPanel}
             onRetryRouting={retryRouting}
@@ -719,7 +734,10 @@ function NoMetrics() {
 function PlacementView({
   job,
   tasks,
+  events,
   attempts,
+  coverage,
+  checkpoints,
   now,
   routing,
   onRetryRouting,
@@ -728,7 +746,14 @@ function PlacementView({
 }: {
   job: JobRecord;
   tasks: JobTask[];
+  /** The raw ledger, for the per-task history an expanded row draws. Not the
+   * reconstructed `attempts`: that walk is keyed by machine and drops every
+   * event carrying no `node_id`, which is exactly the TASK_CREATED /
+   * TASK_REQUEUED pair that explains the gaps between one task's attempts. */
+  events: JobEvent[];
   attempts: ReturnType<typeof deriveAttempts>;
+  coverage: AttemptCoverage;
+  checkpoints: CheckpointPanel;
   now: number;
   routing: RoutingPanel;
   onRetryRouting: () => void;
@@ -799,69 +824,48 @@ function PlacementView({
         </>
       )}
 
-      {tasks.length > 0 && (
-        <section className="overflow-hidden rounded-lg border border-border bg-surface">
-          <div className="border-b border-border px-4 py-2.5">
-            <h2 className="text-sm font-semibold">Tasks</h2>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[520px] text-left">
-              <thead>
-                <tr className="border-b border-border">
-                  {["Task", "State", "Attempts", "Machine", "Lease ends"].map(
-                    (h) => (
-                      <th key={h} className="label-caps px-4 py-2 font-medium">
-                        {h}
-                      </th>
-                    )
-                  )}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {tasks.map((t, i) => (
-                  <tr key={`${t.round ?? ""}-${t.task_id}-${i}`}>
-                    <td className="px-4 py-2.5 font-mono text-xs">
-                      {t.round !== undefined && (
-                        <span className="text-muted-foreground">
-                          r{t.round}/
-                        </span>
-                      )}
-                      {t.task_id}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs">{t.state}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs tabular-nums">
-                      {t.attempts}/{t.max_attempts}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">
-                      {t.node_id ?? "—"}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">
-                      {t.deadline
-                        ? new Date(t.deadline).toLocaleTimeString()
-                        : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
+      {/* Rows open. The table moved to its own component when it gained the
+          per-task detail panel: that needs state and a derivation, and a
+          `page.tsx` may export only a default component plus route config. */}
+      <TasksTable
+        tasks={tasks}
+        events={events}
+        checkpoints={checkpoints}
+        coverage={coverage}
+      />
     </div>
   );
 }
 
+/** The submitted spec, guarded block by block.
+ *
+ * Every read here was a bare dereference — `s.spec.image.repository`,
+ * `s.spec.isolation.tier` — against a type that promised they were there.
+ * `JobRecord`'s own doc says why that promise is worthless: the API sends two
+ * shapes, a type cannot constrain a server, and declaring a field required
+ * only moves the failure from a build error to a `TypeError` during render,
+ * which takes the page down rather than the card. So each value is optional-
+ * chained and each absence prints an em dash — the same "—" the tables on
+ * this page use for a value the API did not supply. */
 function SpecCard({ job }: { job: JobRecord }) {
   const s = job.spec;
   if (!s) return null;
+  const image = s.spec?.image;
+  const workers = s.spec?.resources;
+  // Both halves or neither: "ghcr.io/…:—" reads as a tag literally named "—",
+  // and "—:2026.08.2" is worse. A half-known image is an unknown image.
+  const imageLabel =
+    image?.repository && image.tag ? `${image.repository}:${image.tag}` : "—";
+  const workerLabel =
+    workers?.minimumWorkers !== undefined &&
+    workers.maximumWorkers !== undefined
+      ? `${workers.minimumWorkers}–${workers.maximumWorkers}`
+      : "—";
   const rows: [string, string][] = [
-    ["image", `${s.spec.image.repository}:${s.spec.image.tag}`],
-    ["workload", s.spec.workload.type],
-    [
-      "workers",
-      `${s.spec.resources.minimumWorkers}–${s.spec.resources.maximumWorkers}`,
-    ],
-    ["isolation", s.spec.isolation.tier],
+    ["image", imageLabel],
+    ["workload", s.spec?.workload?.type ?? "—"],
+    ["workers", workerLabel],
+    ["isolation", s.spec?.isolation?.tier ?? "—"],
   ];
   return (
     <section className="rounded-lg border border-border bg-surface p-4">

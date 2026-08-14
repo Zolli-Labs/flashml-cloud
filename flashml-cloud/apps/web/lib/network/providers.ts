@@ -373,6 +373,42 @@ export function badgeClass(badge: ProviderBadge): string {
 }
 
 // ---------------------------------------------------------------------------
+// the "Official" chip
+// ---------------------------------------------------------------------------
+
+export interface OfficialChip {
+  label: string;
+}
+
+/** The "Official" chip's data, or `null` when this is not a machine Zolli
+ * Labs itself operates.
+ *
+ * NOT A TRUST TIER. `badge` (above) states what a machine PROVES about
+ * itself — sandboxed, trusted, modules-only — and says nothing about who
+ * owns it. `official` states who OWNS it, and says nothing about what it can
+ * be trusted to run: an official machine can carry any badge. The two answer
+ * different questions, so this renders as its own chip rather than folding
+ * into `badgeLabel`/`badgeClass`, which would conflate "who runs this" with
+ * "what can this be trusted to do".
+ *
+ * `p.official` UNDEFINED READS AS `false`, on purpose — the API may deploy
+ * this field after the console does (see `Provider.official` in `./api.ts`),
+ * and a provider from a response that predates it must render as an
+ * ordinary listing, not crash or half-render. */
+export function officialChip(p: Pick<Provider, "official">): OfficialChip | null {
+  return p.official ? { label: "Official" } : null;
+}
+
+/** Classes for the chip, in the border/10-bg/text idiom this page already
+ * uses for `TrustBadge`'s amber "trusted" tier and the table's orange
+ * "yours" tag — but in the green this design system spends on "verified
+ * good" (`--evergreen`, the same token behind `TONE_CLASS.good`), which
+ * neither of those two claims. Built from a theme token rather than a
+ * hard-coded hex, so — unlike `--warning-foreground` — it resolves through
+ * `.marketing-dark`'s remap with no second dark-register map needed. */
+export const OFFICIAL_CHIP_CLASS = "border-evergreen/30 bg-evergreen/10 text-evergreen";
+
+// ---------------------------------------------------------------------------
 // the capacity donuts
 // ---------------------------------------------------------------------------
 
@@ -623,8 +659,10 @@ export const DEFAULT_TABLE_QUERY: TableQuery = {
 };
 
 /** Free text over the fields a person would actually type: the label, the
- * place, and the GPU models. Not the id — an opaque id is not something
- * anybody searches by, and matching it makes a stray paste look like a hit. */
+ * place, the GPU models, and — because it is a real word a reader might type
+ * to find Zolli Labs' own machines — "official" for a provider the chip is
+ * shown on. Not the id — an opaque id is not something anybody searches by,
+ * and matching it makes a stray paste look like a hit. */
 export function matchesSearch(p: Provider, search: string): boolean {
   const q = search.trim().toLowerCase();
   if (!q) return true;
@@ -636,6 +674,7 @@ export function matchesSearch(p: Provider, search: string): boolean {
     ...p.specs.gpus.map((g) => g.name),
     p.specs.os,
     p.specs.architecture,
+    officialChip(p) ? "official" : null,
   ]
     .filter((s): s is string => typeof s === "string")
     .join(" ")

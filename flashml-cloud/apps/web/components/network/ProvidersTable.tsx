@@ -21,6 +21,7 @@ import {
 } from "@/lib/network/providers";
 import { GpuChips } from "./GpuChips";
 import { MeterGlyph } from "./MeterGlyph";
+import { OfficialChip } from "./OfficialChip";
 import { TrustBadge } from "./TrustBadge";
 
 /**
@@ -221,6 +222,7 @@ function Row({
           <span className="min-w-0 truncate font-mono hover:underline">
             {p.label}
           </span>
+          <OfficialChip provider={p} />
           {/* The one thing a host is scanning this table for. A word, not a
               colour: "mine" has to survive a greyscale print and a reader who
               does not know the legend. */}

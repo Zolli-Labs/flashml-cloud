@@ -6,6 +6,7 @@ import postcss from "postcss";
 import tailwindcss from "@tailwindcss/postcss";
 import { expect, it } from "vitest";
 
+import { OfficialChip } from "@/components/network/OfficialChip";
 import { ProviderDetailView } from "@/components/network/ProviderDetailView";
 import { TrustBadge } from "@/components/network/TrustBadge";
 import { PageHeader } from "@/components/shell/PageHeader";
@@ -26,10 +27,15 @@ import type {
  * TWO PROVIDERS, because the page has two shapes and only one of them is the
  * happy one. The first is an owned anchor with a full history — the mini-map,
  * the donut row, thirty days of leases, a day of hours, and the owner-only
- * block with its node id, its credits and the location form. The second is
- * somebody else's machine that has never stated where it is and has three
- * resolved attempts to its name: no map, no owner block, "no data yet" where
- * a percentage would go, and a success column that refuses.
+ * block with its node id, its credits and the location form. It is also one
+ * of Zolli Labs' own anchors (`official: true`), so it is the fixture that
+ * exercises the "Official" chip beside the trust badge and the "Operator"
+ * row in General info — its `label` is already the real machine name, which
+ * is what `official: true` means for every viewer, not just this owner. The
+ * second is somebody else's machine that has never stated where it is and
+ * has three resolved attempts to its name: no map, no owner block, "no data
+ * yet" where a percentage would go, a success column that refuses, and no
+ * "Official" chip.
  *
  * It renders `ProviderDetailView` — the same component the page renders —
  * rather than re-assembling the layout here. A harness that builds its own
@@ -81,6 +87,7 @@ function uptimeHours(down: number[]): UptimeHour[] {
 const OWNED: ProviderDetail = {
   id: "prov_anchor_eu",
   label: "zolli_anchor_gpu_a5000_eu",
+  official: true,
   own: true,
   online: true,
   last_seen_at: new Date(Date.now() - 14_000).toISOString(),
@@ -184,7 +191,12 @@ function Screen({
         titleTone="identifier"
         back={{ href: "/market/providers", label: "Providers" }}
         meta={`${provider.leases.total} leases all time`}
-        actions={<TrustBadge badge={provider.badge} />}
+        actions={
+          <div className="flex items-center gap-2">
+            <OfficialChip provider={provider} />
+            <TrustBadge badge={provider.badge} />
+          </div>
+        }
       />
       <div className="mt-6">
         <ProviderDetailView
@@ -264,6 +276,14 @@ it("shows a visitor none of it", () => {
   expect(out).not.toContain("Node id");
   expect(out).not.toContain("Set location");
   expect(out).not.toContain("Credits earned");
+});
+
+it("marks the anchor Zolli Labs operates, and only that one", () => {
+  const anchorOut = owned();
+  const strangerOut = stranger();
+  expect(anchorOut).toContain("Official");
+  expect(anchorOut).toContain("Zolli Labs (official)");
+  expect(strangerOut).not.toContain("Official");
 });
 
 it("draws 24 uptime bars for 24 observed hours, and 5 for 5", () => {

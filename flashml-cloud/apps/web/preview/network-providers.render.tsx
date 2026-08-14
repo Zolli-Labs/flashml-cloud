@@ -11,7 +11,7 @@ import { ProvidersTable } from "@/components/network/ProvidersTable";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { PageShell } from "@/components/shell/PageShell";
 import type { NetworkProviders, Provider } from "@/lib/network/api";
-import { mapMarkers } from "@/lib/network/providers";
+import { mapMarkers, matchesSearch } from "@/lib/network/providers";
 
 /**
  * `/market/providers`, rendered so it can be LOOKED AT without a session.
@@ -35,7 +35,11 @@ import { mapMarkers } from "@/lib/network/providers";
  * cases that are easy to get wrong rather than to look tidy: a provider with
  * no location, a provider with three resolved attempts, an offline provider,
  * a machine nobody has observed yet, an AMD box, a CPU-only box, and three
- * owned anchors on three continents.
+ * owned anchors on three continents — one of which (`prov_anchor_eu`, the
+ * same id `provider-detail.render.tsx`'s owned fixture uses) is also marked
+ * `official: true`, so the "Official" chip has a row to render next to in
+ * this table and the other two anchors show what an owned-but-not-official
+ * row looks like beside it.
  */
 const webRoot = process.cwd();
 const outDir = process.env.PREVIEW_OUT ?? path.join(webRoot, ".preview");
@@ -45,6 +49,7 @@ const GIB = 1024 ** 3;
 function provider(p: {
   id: string;
   label: string;
+  official?: boolean;
   own?: boolean;
   online?: boolean;
   city?: string | null;
@@ -71,6 +76,7 @@ function provider(p: {
   return {
     id: p.id,
     label: p.label,
+    official: p.official ?? false,
     own: p.own ?? false,
     online: p.online ?? true,
     last_seen_at: (p.online ?? true)
@@ -141,6 +147,7 @@ const PROVIDERS: Provider[] = [
   provider({
     id: "prov_anchor_eu",
     label: "zolli_anchor_gpu_a5000_eu",
+    official: true,
     own: true,
     city: "Frankfurt",
     region: "Hessen",
@@ -507,6 +514,19 @@ it("draws three donuts, not four, while storage is unreported", () => {
   expect(out).toContain("Memory");
   expect(out).not.toContain("Storage");
   expect(out).toContain("sm:grid-cols-3");
+});
+
+it("marks the one official anchor, and only that one", () => {
+  const out = markup();
+  expect(out).toContain("Official");
+  const official = PROVIDERS.filter((p) => p.official);
+  expect(official.map((p) => p.id)).toEqual(["prov_anchor_eu"]);
+  expect(matchesSearch(official[0], "official")).toBe(true);
+  expect(
+    PROVIDERS.filter((p) => !p.official).some((p) =>
+      matchesSearch(p, "official")
+    )
+  ).toBe(false);
 });
 
 it("draws one arc per placed provider, all to the coordinator", () => {
