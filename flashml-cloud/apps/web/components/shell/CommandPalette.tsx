@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
 import {
   ChartLineUp,
   Compass,
@@ -12,8 +13,10 @@ import {
   House,
   ListChecks,
   MagnifyingGlass,
+  Moon,
   RocketLaunch,
   BookOpen,
+  Sun,
   UserCircle,
   type Icon,
 } from "@phosphor-icons/react";
@@ -32,11 +35,20 @@ import {
 // populate a menu nobody opened is the kind of cost that shows up as a slow
 // console rather than as a feature.
 
+/**
+ * `href` and `action` are alternatives, not both-required: a nav item goes
+ * somewhere, a theme item just does something and closes. Neither field is
+ * optional in the sense of "may be missing accidentally" — `go()` below
+ * treats an item with no `href` as one that must have an `action`, so a new
+ * item that forgets both silently does nothing rather than throwing, which
+ * is a gap worth knowing about if a third kind of item shows up later.
+ */
 interface Item {
   id: string;
   label: string;
   hint?: string;
-  href: string;
+  href?: string;
+  action?: () => void;
   icon: Icon;
   group: string;
 }
@@ -74,6 +86,7 @@ function matches(haystack: string, needle: string): boolean {
 
 export function CommandPalette() {
   const router = useRouter();
+  const { setTheme } = useTheme();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -131,6 +144,38 @@ export function CommandPalette() {
     return () => clearTimeout(t);
   }, [open]);
 
+  // Built from `setTheme` rather than listed as a module-level constant next
+  // to `STATIC`, because each entry's `action` closes over the setter from
+  // THIS render's `useTheme()` call — a module-level array would close over
+  // whatever `setTheme` existed when the module first evaluated, before any
+  // provider was mounted.
+  const themeItems = useMemo<Item[]>(
+    () => [
+      {
+        id: "theme-light",
+        label: "Theme: light",
+        icon: Sun,
+        group: "Theme",
+        action: () => setTheme("light"),
+      },
+      {
+        id: "theme-dark",
+        label: "Theme: dark",
+        icon: Moon,
+        group: "Theme",
+        action: () => setTheme("dark"),
+      },
+      {
+        id: "theme-system",
+        label: "Theme: system",
+        icon: Desktop,
+        group: "Theme",
+        action: () => setTheme("system"),
+      },
+    ],
+    [setTheme]
+  );
+
   const items = useMemo(() => {
     const dynamic: Item[] = [
       ...jobs.map((j) => ({
@@ -150,10 +195,10 @@ export function CommandPalette() {
         group: "Machines",
       })),
     ];
-    return [...STATIC, ...dynamic].filter(
+    return [...STATIC, ...themeItems, ...dynamic].filter(
       (it) => matches(it.label, query) || matches(it.hint ?? "", query)
     );
-  }, [jobs, machines, query]);
+  }, [jobs, machines, query, themeItems]);
 
   // Clamp rather than reset: retyping should not throw the cursor back to
   // the top on every keystroke.
@@ -162,7 +207,11 @@ export function CommandPalette() {
   function go(item: Item | undefined) {
     if (!item) return;
     setOpen(false);
-    router.push(item.href);
+    if (item.action) {
+      item.action();
+      return;
+    }
+    if (item.href) router.push(item.href);
   }
 
   if (!open) return null;

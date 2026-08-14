@@ -22,6 +22,7 @@ import { FleetPill } from "@/components/shell/FleetPill";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { Shortcuts } from "@/components/shell/Shortcuts";
 import { StorageWarningBanner } from "@/components/shell/StorageWarningBanner";
+import { ThemeSwitcher } from "@/components/shell/ThemeSwitcher";
 import { WorkspaceHintProvider } from "@/components/shell/WorkspaceHint";
 import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { Wordmark } from "@/components/brand/Mark";
@@ -342,7 +343,15 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <div className="flex min-h-dvh">
+    // `console-theme` is the marker `body:has(.console-theme)` in
+    // globals.css looks for — see that block for why the dark tokens live on
+    // `body` rather than on this element directly (the Toaster and Base UI's
+    // popups portal past it). This root wraps every screen this component
+    // renders, including the three access-gate states below (loading /
+    // onboarding / pending / declined), so those follow the theme too rather
+    // than staying stuck light while the console around a first-time visitor
+    // goes dark.
+    <div className="console-theme flex min-h-dvh">
       <CommandPalette />
       <Shortcuts />
       {/* `sticky top-0 self-start h-dvh`: the rail is pinned to the viewport
@@ -385,6 +394,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           </div>
           <div className="flex items-center gap-3">
             <FleetPill />
+            <ThemeSwitcher />
             <UserMenu />
           </div>
         </header>
