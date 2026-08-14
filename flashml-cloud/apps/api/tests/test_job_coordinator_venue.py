@@ -22,11 +22,13 @@ Four properties, and they are what every test here is an instance of:
   3. **A venue this deployment cannot address is refused at the edge**, with a
      4xx that says which problem it is, and never by quietly running the job
      somewhere else and reporting the venue that was asked for.
-  4. **An idle coordinator sees no claim traffic.** FC's whole value is a
-     measured duty cycle. A fleet polling it every few seconds while it holds
-     no work would inflate its invocation count until that number said
-     nothing — so a claim reaches a non-default venue only while that venue
-     has a non-terminal job.
+  4. **An idle coordinator sees no traffic at all** — no claim, and no
+     heartbeat. FC's whole value is a measured duty cycle. A fleet polling it
+     every few seconds while it holds no work would inflate its invocation
+     count until that number said nothing — so nothing this API sends on its
+     own initiative reaches a non-default venue unless that venue has a
+     non-terminal job. Heartbeats are the sharper edge of this: a claim stops
+     when a machine is busy, a heartbeat never stops at all.
 
 The coordinator here is one fake transport serving TWO hosts, which is what
 makes the host assertion meaningful: a request that went to the wrong venue
@@ -118,6 +120,13 @@ class TwoVenueTransport(httpx.AsyncBaseTransport):
         #: Venues whose `claim` answers 403 with a detail of the test's
         #: choosing — for the refusals that registering would NOT fix.
         self.refuse_claim_with: dict[str, str] = {}
+        #: Venues whose `heartbeat` answers 404 with a detail of the test's
+        #: choosing — a 404 that is NOT a registry miss (a mistyped path, a
+        #: coordinator behind a proxy that answers its own 404s).
+        self.refuse_heartbeat_with: dict[str, str] = {}
+        #: Venues that are simply not answering: every request to them raises
+        #: at the socket, the way a cold, wedged or deleted FC function does.
+        self.dead: set[str] = set()
         self._prefix = uuid.uuid4().hex[:10]
         self._next_id = 1
 
@@ -148,6 +157,11 @@ class TwoVenueTransport(httpx.AsyncBaseTransport):
         await request.aread()
         self.requests.append(request)
         venue = self._venue_of(request)
+        if venue in self.dead:
+            # Recorded first, deliberately: "FC was asked and did not answer"
+            # is a different fact from "FC was never asked", and the mirror
+            # tests are about which of the two happened.
+            raise httpx.ConnectError("connection refused", request=request)
         jobs = self._jobs[venue]
         artifacts = self.artifacts[venue]
         method, path = request.method, request.url.path
@@ -185,6 +199,28 @@ class TwoVenueTransport(httpx.AsyncBaseTransport):
             return httpx.Response(
                 200, json={"node_id": reg.get("node_id"), "status": "registered"}
             )
+
+        if (
+            method == "POST"
+            and path.startswith("/v1alpha1/nodes/")
+            and path.endswith("/heartbeat")
+        ):
+            detail = self.refuse_heartbeat_with.get(venue)
+            if detail is not None:
+                return httpx.Response(404, json={"detail": detail})
+            node = path.split("/")[-2]
+            if (
+                venue in self.requires_registration
+                and node not in self.registered[venue]
+            ):
+                # Verbatim from `service/modea.py`, which answers a heartbeat
+                # from an unknown node 404 where a claim answers 403. Same
+                # registry, same repair, different status — a paraphrase here
+                # would test nothing.
+                return httpx.Response(
+                    404, json={"detail": f"unknown node {node} — register first"}
+                )
+            return httpx.Response(200, json={"status": "ok"})
 
         if method == "POST" and path == "/v1alpha1/leases/claim":
             detail = self.refuse_claim_with.get(venue)
@@ -355,6 +391,18 @@ def _enrol(db, owner_id: str) -> tuple[str, str]:
     token = enrolment.redeem_device_code(db, started["device_code"])
     assert token is not None
     return str(machine_id), token
+
+
+def _node_id_of(db, machine_id: str) -> str:
+    """The node_id the token resolves to — the only one that can appear in an
+    outbound path, since every agent route replaces what the agent said."""
+    with db.cursor() as cur:
+        cur.execute(
+            "select node_id from public.machines where id = %s", (machine_id,)
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return row["node_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -1226,6 +1274,405 @@ def test_a_403_that_registering_would_not_fix_does_not_trigger_a_registration(
 
     assert transport.paths_on("fc") == ["/v1alpha1/leases/claim"]
     assert transport.paths_on("render") == ["/v1alpha1/leases/claim"]
+
+
+# ---------------------------------------------------------------------------
+# 7b. mirrored heartbeats: registration alone does not keep a node alive
+#
+# A COORDINATOR TRACKS LIVENESS BY HEARTBEAT, and registering only sets the
+# clock once. `ModeAState` stamps `last_heartbeat` on register and on every
+# heartbeat, and `node_view` reports a node quiet for longer than
+# FLASHML_NODE_OFFLINE_SECONDS as `online: false`, after which placement stops
+# considering it.
+#
+# MEASURED, not theorised. Minutes after both dev machines were lazily
+# registered on the live FC coordinator with the right pools and capability
+# booleans, FC reported them `online=False` with a heartbeat age of ~336s,
+# while this API's own `machines.last_seen_at` said each had been seen seconds
+# ago. `register_node` and `node_heartbeat` both forward to the DEFAULT venue
+# and nowhere else, because an agent holds one base URL — this API — and has
+# no idea venues exist.
+#
+# So the heartbeat is mirrored, and the properties below are what keeps that
+# from being a bad idea, in priority order: an IDLE non-default venue receives
+# nothing at all (the duty-cycle measurement is the whole point of the second
+# venue, and heartbeats never stop the way claims do); the default venue's
+# heartbeat is exactly the one call it has always been and its answer is the
+# only one the agent ever sees; a 404 from a non-default venue costs one
+# registration and one retry, built by the SAME helper the claim path uses;
+# and no failure of any of it — refusal, timeout, a venue that has stopped
+# answering entirely — reaches the agent.
+# ---------------------------------------------------------------------------
+
+
+def _heartbeat(client, token: str, **body):
+    """Heartbeat the ordinary way — the agent's own route, which knows about
+    one coordinator and never says which."""
+    payload: dict = {"schema_version": "v1alpha1", "node_id": "whatever"}
+    payload.update(body)
+    return client.post(
+        "/v1alpha1/nodes/whatever/heartbeat",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _heartbeats_sent_to(transport: TwoVenueTransport, venue: str) -> list[dict]:
+    return [
+        json.loads(r.content)
+        for r in transport.requests
+        if transport._venue_of(r) == venue
+        and r.url.path.endswith("/heartbeat")
+        and r.url.path.startswith("/v1alpha1/nodes/")
+    ]
+
+
+def _hb_path(node_id: str) -> str:
+    return f"/v1alpha1/nodes/{node_id}/heartbeat"
+
+
+def test_a_heartbeat_never_reaches_fc_while_fc_has_no_work(
+    make_client, db, transport
+):
+    """THE MOST IMPORTANT TEST IN THIS SECTION. A heartbeat, unlike a claim,
+    never stops: a machine deep in a training run keeps sending them. So a
+    mirror that ignored the work rule would not merely inflate FC's invocation
+    count, it would pin it at the fleet's heartbeat rate for ever and destroy
+    the one measurement the second venue exists to produce.
+
+    Three heartbeats while only the default venue has a job: three requests,
+    all of them to the default, and FC's request list empty — not short."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner))  # a render job, and only a render job
+    transport.reset()
+
+    for _ in range(3):
+        r = _heartbeat(client, machine_token)
+        assert r.status_code == 200, r.text
+
+    assert transport.venues_hit == ["render", "render", "render"]
+    assert transport.paths_on("fc") == []
+
+
+def test_a_heartbeat_stops_reaching_fc_the_moment_its_job_is_finished(
+    make_client, db, transport
+):
+    """"Has work" means a NON-TERMINAL job, on the heartbeat path exactly as
+    on the claim path. A venue whose only job succeeded is idle again, and an
+    idle venue is one nobody heartbeats — otherwise the traffic that follows a
+    demo job would never end."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    job_id = _submit(client, _jwt(owner), coordinator="fc").json()["job_id"]
+    _heartbeat(client, machine_token)
+    assert transport.paths_on("fc"), "precondition: fc was being heartbeated"
+
+    dbmod.set_job_status(db, job_id, "SUCCEEDED", finished=True)
+    transport.reset()
+
+    _heartbeat(client, machine_token)
+
+    assert transport.venues_hit == ["render"]
+
+
+def test_a_heartbeat_is_never_mirrored_to_a_venue_this_deployment_cannot_address(
+    make_client, db, transport
+):
+    """A job row can name a venue this process has no URL for. `forward`
+    would refuse it, and the refusal would be raised inside an agent's
+    heartbeat — so the venue is filtered out before anything is dispatched,
+    by the same `venue_configured` check the claim path uses."""
+    fc_client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(fc_client, _jwt(owner), coordinator="fc")
+
+    render_only = make_client(fc=False)
+    transport.reset()
+
+    r = _heartbeat(render_only, machine_token)
+
+    assert r.status_code == 200, r.text
+    assert transport.venues_hit == ["render"]
+
+
+def test_the_default_venues_heartbeat_is_still_exactly_one_call(
+    make_client, db, transport
+):
+    """THE PROPERTY THAT MUST NOT BREAK. Every machine in the fleet heartbeats
+    the default venue every few seconds, for ever. Mirroring must cost that
+    path nothing — not a second hop, not a different body, not a new way to
+    fail — so the assertion is on the exact request list."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")  # fc IS holding work
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"status": "ok"}
+    # One call to the default, and it is the FIRST one: its answer is what
+    # the agent gets, and it is computed before anything else happens.
+    assert transport.paths_on("render") == [_hb_path(_node_id_of(db, machine_id))]
+    assert transport.venues_hit[0] == "render"
+
+
+def test_a_heartbeat_is_mirrored_to_fc_while_an_fc_job_is_running(
+    make_client, db, transport
+):
+    """The other half. Without this, a machine registers on FC, goes stale
+    five minutes later and is never a live candidate there again — which
+    looks exactly like having no capacity."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    node_id = _node_id_of(db, machine_id)
+    assert transport.venues_hit == ["render", "fc"]
+    assert transport.paths_on("fc") == [_hb_path(node_id)]
+
+
+def test_the_mirrored_heartbeat_is_byte_for_byte_the_default_one(
+    make_client, db, transport
+):
+    """Same body, same identity, same server-stamped pools. Pool membership
+    is the seventh placement gate and a heartbeat REPLACES it wholesale on the
+    coordinator's side (`NodeHeartbeat.pools`), so a mirror that dropped the
+    stamp would quietly empty the node's pools on FC and leave it registered,
+    online, and refused every pool-scoped task."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    pool = dbmod.create_pool(db, name=f"anchors-{uuid.uuid4().hex[:8]}",
+                             owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.reset()
+
+    # The agent forges a pool it does not belong to, on both copies.
+    _heartbeat(client, machine_token, pools=["forged-pool"])
+
+    default = _heartbeats_sent_to(transport, "render")
+    mirrored = _heartbeats_sent_to(transport, "fc")
+    assert len(default) == 1 and len(mirrored) == 1
+    assert mirrored[0] == default[0]
+    # Not vacuously equal: the machine really is in a pool and both say so.
+    assert mirrored[0]["pools"] == [str(pool["id"])]
+    assert "forged-pool" not in json.dumps(mirrored[0])
+
+
+def test_a_pools_lookup_failure_mirrors_nothing_rather_than_an_empty_stamp(
+    make_client, db, transport, monkeypatch
+):
+    """The default venue fails CLOSED — it is sent an empty pool list, and
+    corrected by the next successful heartbeat seconds later. The MIRROR must
+    not do that: a heartbeat replaces the node's pools wholesale on the
+    coordinator's side, so an empty stamp would unbind the machine from every
+    pool on FC, and FC might not be heartbeated again for a while. So a
+    failure here mirrors nothing at all."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    pool = dbmod.create_pool(db, name=f"anchors-{uuid.uuid4().hex[:8]}",
+                             owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+
+    def raiser(*_a, **_kw):
+        raise RuntimeError("simulated pool lookup failure")
+
+    monkeypatch.setattr(dbmod, "pool_ids_for_machine", raiser)
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    assert _heartbeats_sent_to(transport, "render")[0]["pools"] == []
+    assert transport.paths_on("fc") == []
+
+
+def test_a_404_from_fc_registers_the_machine_once_and_retries_once(
+    make_client, db, transport
+):
+    """FC's node registry is process memory and its instances are rebuilt on
+    a 36h ceiling or any config change, so a heartbeat from a node it has
+    forgotten is a NORMAL state, not an error. It answers
+    `404 unknown node … — register first` — a different status from the
+    claim's 403, from the same registry — and the repair is the same one:
+    register, retry, once each. Never a loop."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.requires_registration = {"fc"}
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    node_id = _node_id_of(db, machine_id)
+    assert transport.paths_on("fc") == [
+        _hb_path(node_id),
+        "/v1alpha1/nodes/register",
+        _hb_path(node_id),
+    ]
+    assert transport.paths_on("render") == [_hb_path(node_id)]
+
+
+def test_the_mirrors_registration_is_the_claim_paths_registration(
+    make_client, db, transport
+):
+    """One body-builder, not two. The registration a forgotten node gets from
+    the heartbeat mirror must be the one it would have got from the claim —
+    same pools, same capability booleans, same identity — because two
+    implementations is exactly how a venue comes to hold a stale idea of what
+    a machine can do. Asserted as EQUALITY against a real claim-path
+    registration rather than against a literal, so the test fails if either
+    side ever grows a field the other does not."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    pool = dbmod.create_pool(db, name=f"anchors-{uuid.uuid4().hex[:8]}",
+                             owner_id=owner)
+    dbmod.bind_machine_pool(db, machine_id=machine_id, pool_id=str(pool["id"]))
+    _register(client, machine_token, sandbox_capable=True, module_capable=True,
+              capabilities={"cpu_cores": 8, "os": "linux"})
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.requires_registration = {"fc"}
+    transport.register_is_amnesiac = {"fc"}  # so both repairs still fire
+
+    transport.reset()
+    _claim(client, machine_token)
+    from_claim = _registration_sent_to(transport, "fc")
+
+    transport.reset()
+    _heartbeat(client, machine_token)
+    from_heartbeat = _registration_sent_to(transport, "fc")
+
+    assert len(from_claim) == 1 and len(from_heartbeat) == 1
+    assert from_heartbeat[0] == from_claim[0]
+    # Not vacuously equal: it carries the facts the placement gates read.
+    assert from_heartbeat[0]["capabilities"]["pools"] == [str(pool["id"])]
+    assert from_heartbeat[0]["sandbox_capable"] is True
+    assert from_heartbeat[0]["module_capable"] is True
+
+
+def test_a_second_404_after_the_registration_does_not_loop(
+    make_client, db, transport
+):
+    """A venue rebuilt between the registration and the retry answers 404
+    again. One more call, then nothing: the next heartbeat is seconds away
+    and will try once more, which is a retry ladder that costs nothing."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.requires_registration = {"fc"}
+    transport.register_is_amnesiac = {"fc"}
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    node_id = _node_id_of(db, machine_id)
+    assert transport.paths_on("fc") == [
+        _hb_path(node_id),
+        "/v1alpha1/nodes/register",
+        _hb_path(node_id),
+    ]
+
+
+def test_a_404_that_registering_would_not_fix_does_not_trigger_a_registration(
+    make_client, db, transport
+):
+    """404 is also what a mistyped path and a proxy in front of a stopped
+    function answer, and registering fixes neither — it just spends a hop on
+    a venue whose invocations are the measurement. So the trigger is the
+    coordinator's WORDS, not its status."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.refuse_heartbeat_with = {"fc": "Not Found"}
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    assert transport.paths_on("fc") == [_hb_path(_node_id_of(db, machine_id))]
+
+
+def test_a_dead_fc_changes_nothing_the_agent_sees(make_client, db, transport):
+    """THE PROPERTY THE AGENT DEPENDS ON. A second venue that is refusing
+    connections outright — cold, wedged, deleted, misconfigured — must be
+    completely invisible to flashnode: same status, same body, and the
+    default venue still asked exactly once. `machines.last_seen_at`, which
+    `capacity/reconcile` destroys rented GPUs by reading, is written before
+    any of this and must survive it."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.dead = {"fc"}
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"status": "ok"}
+    assert transport.paths_on("render") == [_hb_path(_node_id_of(db, machine_id))]
+    with db.cursor() as cur:
+        cur.execute(
+            "select last_seen_at from public.machines where id = %s", (machine_id,)
+        )
+        assert cur.fetchone()["last_seen_at"] is not None
+
+
+def test_an_fc_that_refuses_the_registration_costs_the_agent_nothing(
+    make_client, db, transport
+):
+    """A refused registration is swallowed into "this venue did not answer" —
+    no retry against it, and the agent's heartbeat is untouched."""
+    client = make_client()
+    owner = _new_user(db)
+    machine_id, machine_token = _enrol(db, owner)
+    _quiesce_non_default_jobs(db)
+    _submit(client, _jwt(owner), coordinator="fc")
+    transport.requires_registration = {"fc"}
+    transport.register_status = {"fc": 500}
+    transport.reset()
+
+    r = _heartbeat(client, machine_token)
+
+    assert r.status_code == 200, r.text
+    node_id = _node_id_of(db, machine_id)
+    assert transport.paths_on("fc") == [
+        _hb_path(node_id),
+        "/v1alpha1/nodes/register",
+    ]
+    assert transport.paths_on("render") == [_hb_path(node_id)]
 
 
 # ---------------------------------------------------------------------------

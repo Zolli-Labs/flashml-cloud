@@ -68,6 +68,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from psycopg.rows import dict_row
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.formparsers import MultiPartException
@@ -1672,16 +1673,25 @@ def _scrub_identity(
     return json.dumps(parsed).encode(), "application/json"
 
 
-#: What a coordinator says when it is refusing a claim from a node it has
-#: never been told about — `service/modea.py`'s
-#: ``403 "unregistered node — register first"``. Matched on the WORDS rather
-#: than on the bare status because 403 is also what a wrong join code and a
-#: cross-node heartbeat answer, and neither of those is fixed by registering.
+#: What a coordinator says when it is refusing a node it has never been told
+#: about — `service/modea.py`'s ``403 "unregistered node — register first"``
+#: on a claim and ``404 "unknown node <id> — register first"`` on a heartbeat.
+#: Matched on the WORDS rather than on the bare status because 403 is also
+#: what a wrong join code and a cross-node heartbeat answer, and 404 is what
+#: any mistyped path answers; none of those is fixed by registering.
 _UNREGISTERED_NODE_MARKERS = ("unregistered node", "register first")
 
 
+def _says_register_first(body: bytes) -> bool:
+    """Whether a refusal's *words* are the coordinator's "I do not know this
+    node". Shared by the claim's 403 and the heartbeat's 404 so the two paths
+    cannot drift apart on what counts as a registry miss."""
+    text = body.decode("utf-8", "replace").lower()
+    return any(marker in text for marker in _UNREGISTERED_NODE_MARKERS)
+
+
 def _is_unregistered_node(status_code: int, body: bytes) -> bool:
-    """Whether this refusal means "I have never heard of this node".
+    """Whether this refusal of a CLAIM means "I have never heard of this node".
 
     Narrow on purpose. A false positive here spends one registration and one
     retry on a venue that was refusing for some other reason; a false negative
@@ -1689,10 +1699,19 @@ def _is_unregistered_node(status_code: int, body: bytes) -> bool:
     survivable, which is why the cheap, specific test wins: the status alone
     would be neither.
     """
-    if status_code != 403:
-        return False
-    text = body.decode("utf-8", "replace").lower()
-    return any(marker in text for marker in _UNREGISTERED_NODE_MARKERS)
+    return status_code == 403 and _says_register_first(body)
+
+
+def _is_unknown_node(status_code: int, body: bytes) -> bool:
+    """The same fact, as a HEARTBEAT is refused it.
+
+    A separate status, from the same registry: `modea.py`'s heartbeat looks
+    the node up in ``state.nodes`` and raises ``404 "unknown node {id} —
+    register first"`` when it is not there, where the claim raises 403. Same
+    cause, same repair, different number — so matching 403 alone would leave
+    the mirrored heartbeat unable to heal the exact gap it exists to close.
+    """
+    return status_code == 404 and _says_register_first(body)
 
 
 # ---------------------------------------------------------------------------
@@ -4334,7 +4353,7 @@ def create_cloud_app(
             log.warning("could not resolve the venue for machine %s", machine.id)
             return DEFAULT_COORDINATOR_VENUE
 
-    def _claimable_venues() -> list[str]:
+    def _claimable_venues(conn: psycopg.Connection | None = None) -> list[str]:
         """The venues a claim should be offered to, in order.
 
         **THE DEFAULT IS ALWAYS IN THE LIST, AND ALWAYS LAST.** Unconditional
@@ -4359,13 +4378,23 @@ def create_cloud_app(
 
         A failure answers the default alone: the fleet keeps working exactly as
         it did before this function existed, which is the safe direction.
+
+        ``conn`` lets a caller that ALREADY has a connection open ask on it
+        rather than opening a second one. The heartbeat route is why: it runs
+        for every machine every few seconds and already opens exactly one
+        connection, and doubling that fleet-wide is how this database ran out
+        of client slots before (the pooler incident of 2026-08-13). The claim
+        route passes nothing and behaves exactly as it did.
         """
+        terminal = [s.value for s in JobState if s.terminal]
         try:
-            with contextlib.closing(app.state.connect()) as conn:
-                extra = dbmod.active_job_venues(
-                    conn,
-                    terminal_states=[s.value for s in JobState if s.terminal],
-                )
+            if conn is not None:
+                extra = dbmod.active_job_venues(conn, terminal_states=terminal)
+            else:
+                with contextlib.closing(app.state.connect()) as owned:
+                    extra = dbmod.active_job_venues(
+                        owned, terminal_states=terminal
+                    )
         except Exception:  # noqa: BLE001 - a claim must never fail on this
             log.warning("could not resolve the venues with active work")
             extra = []
@@ -4401,11 +4430,12 @@ def create_cloud_app(
     # hand is correct until the next rebuild and then silently is not, which is
     # the same failure with a longer fuse.
     #
-    # So it is done here, on the claim that discovers the gap, and nowhere
-    # else. Not on a timer and not mirrored off the node heartbeat: FC is
-    # measured on invocations, and background chatter would corrupt the number
-    # this whole feature exists to produce. No FC work, no FC traffic — the
-    # rule `_claimable_venues` already enforces — and this rides inside it.
+    # So it is done lazily, by whichever hop discovers the gap — the claim's
+    # 403 and the mirrored heartbeat's 404 — and never on a timer and never
+    # unconditionally. FC is measured on invocations, and background chatter
+    # from an idle fleet would corrupt the number this whole feature exists to
+    # produce. Both callers ride inside the one rule that prevents that: no FC
+    # work, no FC traffic, enforced by `_claimable_venues`.
 
     def _lazy_registration_body(machine: Machine) -> bytes:
         """The registration this API states on `machine`'s behalf.
@@ -4469,10 +4499,11 @@ def create_cloud_app(
         """Register `machine` with `venue`. True iff the venue accepted it.
 
         EVERY failure is False, never an exception. This runs inside an
-        agent's claim, and a coordinator having a bad day — refusing the
-        registration, timing out, not being configured at all — must come back
-        to that agent as "this venue did not answer 200" and nothing else. The
-        claim loop then does what it already does with any non-200: moves on.
+        agent's claim, and inside the heartbeat mirror, and a coordinator
+        having a bad day — refusing the registration, timing out, not being
+        configured at all — must come back to its caller as "this venue did
+        not answer 200" and nothing else. Both callers then do what they
+        already do with any non-200: move on.
         """
         try:
             response = await coordinator.forward(
@@ -4496,10 +4527,110 @@ def create_cloud_app(
         # The line anybody debugging the demo looks for first. Venue and
         # machine id, and nothing else — no token, no body.
         log.info(
-            "registered machine %s with venue %s on its first claim there",
+            "registered machine %s with venue %s, which had not heard of it",
             machine.id, venue,
         )
         return True
+
+    # -- mirroring the heartbeat: registration alone does not keep a node ----
+    #
+    # A COORDINATOR TRACKS LIVENESS ITSELF, AND IT DOES IT BY HEARTBEAT.
+    # `ModeAState` stamps `last_heartbeat` on register and on every heartbeat,
+    # and `node_view` reports a node with no heartbeat for
+    # `FLASHML_NODE_OFFLINE_SECONDS` as `online: false` — after which placement
+    # stops considering it. Nothing about that is fixed by having registered:
+    # registration sets the clock once and then it runs out.
+    #
+    # MEASURED, not theorised. Minutes after both dev machines were registered
+    # on FC with the right pools and capability booleans, FC reported them
+    # `online=False` with a heartbeat age of ~336s while this API's own
+    # `machines.last_seen_at` said they had been seen seconds ago. A node that
+    # goes stale five minutes after it registers is a node the second venue
+    # will never lease to, which looks exactly like having no capacity — the
+    # same dead end lazy registration was built to remove, one gate along.
+    #
+    # `register_node` and `node_heartbeat` both forward to the DEFAULT venue
+    # and only ever that one, because an agent holds one base URL (this API)
+    # and has no idea venues exist. So the heartbeat is mirrored here, on the
+    # API's own initiative, under EXACTLY the rule the claim path already
+    # obeys: `_claimable_venues`. An idle FC receives nothing at all — its
+    # invocation count is the measurement this feature exists to produce, and
+    # a fleet heartbeating an idle coordinator every few seconds would destroy
+    # it more thoroughly than claims ever could, since a heartbeat, unlike a
+    # claim, never stops.
+    #
+    # STRICTLY ADDITIVE, and invisible from the agent's side. The default
+    # venue is forwarded to first, exactly as before, and ITS answer is the
+    # one returned; the mirror runs afterwards as a background task, so a dead
+    # or cold FC cannot delay flashnode, cannot change its status, and cannot
+    # fail its heartbeat. `machines.last_seen_at` — which `capacity/reconcile`
+    # destroys rented GPUs by reading — is written before any of this and is
+    # untouched by it.
+
+    #: A bound on the whole mirror, registration and retry included. A
+    #: keepalive that arrives later than the next heartbeat has no value, and
+    #: `CoordinatorClient`'s own 60s timeout is far too long to leave a task
+    #: per machine per heartbeat parked on a venue that has stopped answering.
+    _HEARTBEAT_MIRROR_TIMEOUT_S = 25.0
+
+    async def _mirror_heartbeat(
+        request: Request,
+        machine: Machine,
+        pools: list[str],
+        venues: list[str],
+    ) -> None:
+        """Repeat this heartbeat to `venues`. Best-effort, and silent.
+
+        Called only with NON-DEFAULT venues that hold a non-terminal job right
+        now — the caller applies that rule, and it is the only thing standing
+        between a Function Compute app being measured and a fleet-sized
+        keepalive stream. Nothing here may raise: it runs after the agent's
+        response has been sent, so an exception would reach nobody who could
+        act on it and would only be noise in the log.
+
+        The 404 repair reuses `_register_machine_with_venue` — the claim
+        path's own helper, and therefore `_lazy_registration_body`, the pool
+        stamp and the capability booleans with it. A second implementation
+        here is exactly how the two venues would come to hold different ideas
+        of what this machine can do.
+        """
+        path = f"/v1alpha1/nodes/{machine.node_id}/heartbeat"
+        for venue in venues:
+            try:
+                response = await proxy(
+                    request, machine, path, force_node_id=True,
+                    pools=pools, pools_where="top", venue=venue,
+                )
+                # ONE registration and ONE retry, like the claim. A venue
+                # rebuilt between the two answers 404 again and is simply left
+                # alone until the next heartbeat, which is seconds away.
+                if _is_unknown_node(response.status_code, response.body):
+                    if await _register_machine_with_venue(machine, venue):
+                        await proxy(
+                            request, machine, path, force_node_id=True,
+                            pools=pools, pools_where="top", venue=venue,
+                        )
+            except Exception:  # noqa: BLE001 - a mirror may never surface
+                log.warning(
+                    "could not mirror the heartbeat of machine %s to venue %s",
+                    machine.id, venue,
+                )
+
+    async def _mirror_heartbeat_bounded(
+        request: Request,
+        machine: Machine,
+        pools: list[str],
+        venues: list[str],
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                _mirror_heartbeat(request, machine, pools, venues),
+                timeout=_HEARTBEAT_MIRROR_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - including the timeout itself
+            log.warning(
+                "heartbeat mirror for machine %s did not finish", machine.id
+            )
 
     # -- health -------------------------------------------------------------
 
@@ -10589,6 +10720,24 @@ def create_cloud_app(
         # its own try/except, separate from `touch_machine_last_seen`'s: a
         # best-effort liveness write must never fail the pools stamp CLOSED —
         # only a genuine membership-lookup failure does that, below.
+        #
+        # So does the mirror question — WHICH non-default venues, if any, are
+        # holding work this instant. It is asked on the connection already
+        # open rather than on one of its own: this route runs for every
+        # machine every few seconds, and a second connection per heartbeat is
+        # how this database ran out of client slots before. It is asked LAST,
+        # after the pools resolve, so it cannot be the reason the pool stamp
+        # fails closed, and `_claimable_venues` swallows its own failures into
+        # "the default only" — which here means an empty mirror list.
+        #
+        # That order has a second consequence worth keeping: a pools lookup
+        # that fails leaves this list empty and mirrors NOTHING. It must. A
+        # heartbeat REPLACES the node's pools wholesale on the coordinator's
+        # side, so mirroring the fail-closed empty stamp would unbind the
+        # machine from every pool on the far venue — the default venue's copy
+        # is corrected by the next successful heartbeat, but the far venue
+        # might not be heartbeated again for a while.
+        mirror_venues: list[str] = []
         try:
             with contextlib.closing(app.state.connect()) as conn:
                 try:
@@ -10604,6 +10753,10 @@ def create_cloud_app(
                         "could not record last_seen_at for machine %s", machine.id
                     )
                 pools = dbmod.pool_ids_for_machine(conn, machine.id)
+                mirror_venues = [
+                    v for v in _claimable_venues(conn)
+                    if v != DEFAULT_COORDINATOR_VENUE
+                ]
         except Exception:
             # Fail CLOSED: a node we cannot vouch for serves no pool this
             # cycle. Never skip the stamp — skipping would forward whatever
@@ -10611,7 +10764,7 @@ def create_cloud_app(
             log.warning("could not resolve pools for machine %s", machine.id)
             pools = []
 
-        return await proxy(
+        response = await proxy(
             request,
             machine,
             f"/v1alpha1/nodes/{machine.node_id}/heartbeat",
@@ -10619,6 +10772,19 @@ def create_cloud_app(
             pools=pools,
             pools_where="top",
         )
+        # THE DEFAULT'S ANSWER IS THE AGENT'S ANSWER, always, and it is
+        # already computed by the time anything below runs. The mirror is a
+        # background task on that same response: it starts after the body has
+        # been sent, so a cold or dead second venue costs the agent nothing —
+        # not a millisecond, not a status code, not a failure mode. And it is
+        # attached ONLY when a non-default venue is holding work, so a fleet
+        # with no FC job in flight emits byte-identical traffic to yesterday's.
+        # See `_mirror_heartbeat` for why registering is not enough on its own.
+        if mirror_venues:
+            response.background = BackgroundTask(
+                _mirror_heartbeat_bounded, request, machine, pools, mirror_venues
+            )
+        return response
 
     @app.post("/v1alpha1/leases/claim", tags=["agent"])
     async def claim(request: Request, machine: Machine = Depends(current_machine)):
